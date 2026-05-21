@@ -15,24 +15,23 @@ import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isCtrlPressed
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -42,9 +41,17 @@ import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.theme.editorTabStyle
 
+/** How long to wait for the typing to settle before writing the buffer to disk. */
+private const val AUTOSAVE_DEBOUNCE_MS = 400L
+
 @OptIn(ExperimentalJewelApi::class)
 @Composable
-fun TabbedViewerPanel(tabsState: TabsState, repo: GitRepo?, editStore: FileEditStore) {
+fun TabbedViewerPanel(
+    tabsState: TabsState,
+    repo: GitRepo?,
+    editStore: FileEditStore,
+    onFileSaved: () -> Unit = {},
+) {
     val selected = tabsState.selectedTab
 
     if (tabsState.tabs.isEmpty()) {
@@ -65,6 +72,7 @@ fun TabbedViewerPanel(tabsState: TabsState, repo: GitRepo?, editStore: FileEditS
             onClick = { tabsState.select(tab.id) },
             onClose = {
                 editStore.close(tab.id)
+                if (tab is Tab.LauncherOutput) tab.run.stop()
                 tabsState.close(tab.id)
             },
         )
@@ -74,8 +82,9 @@ fun TabbedViewerPanel(tabsState: TabsState, repo: GitRepo?, editStore: FileEditS
         TabStrip(tabs = tabData, style = JewelTheme.editorTabStyle)
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = selected) {
-                is Tab.FileView -> FileEditView(current, editStore)
+                is Tab.FileView -> FileEditView(current, editStore, onFileSaved)
                 is Tab.Diff -> if (repo != null) DiffView(repo, current)
+                is Tab.LauncherOutput -> LauncherOutputView(current)
                 null -> {}
             }
         }
@@ -90,18 +99,35 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
         if (edit != null && edit.isModified) "*$base" else base
     }
     is Tab.Diff -> tab.title
+    is Tab.LauncherOutput -> tab.title
 }
 
+@OptIn(FlowPreview::class)
 @Composable
-private fun FileEditView(tab: Tab.FileView, store: FileEditStore) {
+private fun FileEditView(tab: Tab.FileView, store: FileEditStore, onSaved: () -> Unit) {
     val edit = remember(tab.id) { store.edit(tab) }
-    val scope = rememberCoroutineScope()
     val focusRequester = remember(tab.id) { FocusRequester() }
     val scrollState = rememberScrollState()
+    val savedCallback by rememberUpdatedState(onSaved)
 
     LaunchedEffect(tab.id) {
-        // Take focus when the tab activates so Ctrl+S goes to this editor
+        // Take focus when the tab activates
         runCatching { focusRequester.requestFocus() }
+    }
+
+    // Autosave: debounce edits, write to disk on a background thread, then notify the rest of
+    // the app (commit panel) that on-disk state may have changed.
+    LaunchedEffect(edit) {
+        snapshotFlow { edit.state.text.toString() }
+            .drop(1) // skip the initial value already in sync with disk
+            .debounce(AUTOSAVE_DEBOUNCE_MS)
+            .distinctUntilChanged()
+            .collect { text ->
+                if (text != edit.savedText) {
+                    withContext(Dispatchers.IO) { edit.save() }
+                    savedCallback()
+                }
+            }
     }
 
     val fg = androidx.compose.ui.graphics.Color(0xFFA9B7C6)
@@ -110,15 +136,7 @@ private fun FileEditView(tab: Tab.FileView, store: FileEditStore) {
         modifier = Modifier
             .fillMaxSize()
             .background(JewelTheme.globalColors.panelBackground)
-            .padding(12.dp)
-            .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown && event.isCtrlPressed && event.key == Key.S) {
-                    scope.launch { withContext(Dispatchers.IO) { edit.save() } }
-                    true
-                } else {
-                    false
-                }
-            },
+            .padding(12.dp),
     ) {
         BasicTextField(
             state = edit.state,

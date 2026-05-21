@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.iondrive.nop.git.FileChange
+import io.iondrive.nop.launchers.LauncherRun
 import java.io.File
 
 sealed class Tab {
@@ -19,6 +20,14 @@ sealed class Tab {
     data class Diff(val change: FileChange, val repoRoot: File) : Tab() {
         override val id: String get() = "diff:${change.path}"
         override val title: String get() = File(change.path).name
+    }
+
+    /** A live launcher invocation — output streams here while the process runs. */
+    class LauncherOutput(val run: LauncherRun) : Tab() {
+        override val id: String = "launcher:${run.launcher.name}:${System.nanoTime()}"
+        override val title: String get() = "▶ ${run.launcher.name}"
+        override fun equals(other: Any?): Boolean = other is LauncherOutput && other.id == id
+        override fun hashCode(): Int = id.hashCode()
     }
 }
 

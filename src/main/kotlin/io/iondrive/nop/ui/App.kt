@@ -15,6 +15,9 @@ import androidx.compose.ui.Modifier
 import io.iondrive.nop.git.GitRepo
 import io.iondrive.nop.git.GitStatus
 import io.iondrive.nop.git.StashEntry
+import io.iondrive.nop.launchers.Launcher
+import io.iondrive.nop.launchers.LauncherRun
+import io.iondrive.nop.launchers.LauncherStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -70,9 +73,20 @@ fun App(projectPath: Path, onChangeProject: () -> Unit = {}) {
         }
     }
 
-    LaunchedEffect(repo) { reloadStatus() }
-
     val rootPath = repo?.rootDir ?: projectPath
+    val launcherStore = remember(rootPath) { LauncherStore(rootPath) }
+    var launchers by remember(rootPath) { mutableStateOf<List<Launcher>>(emptyList()) }
+    LaunchedEffect(launcherStore) {
+        launchers = withContext(Dispatchers.IO) { launcherStore.load() }
+    }
+    fun persistLaunchers(next: List<Launcher>) {
+        launchers = next
+        scope.launch { withContext(Dispatchers.IO) { launcherStore.save(next) } }
+        // The launchers file is itself version controlled — show it as a change immediately.
+        refresh()
+    }
+
+    LaunchedEffect(repo) { reloadStatus() }
 
     Box(
         modifier = Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground),
@@ -85,11 +99,30 @@ fun App(projectPath: Path, onChangeProject: () -> Unit = {}) {
                     refreshKey = fsRefreshKey,
                     onFileClick = { tabsState.open(Tab.FileView(it)) },
                     onChangeProject = onChangeProject,
+                    headerExtras = {
+                        LauncherButton(
+                            launchers = launchers,
+                            onRun = { launcher ->
+                                val run = LauncherRun(launcher, rootPath.toFile())
+                                tabsState.open(Tab.LauncherOutput(run))
+                                run.start()
+                            },
+                            onAdd = { persistLaunchers(launchers + it) },
+                            onDelete = { persistLaunchers(launchers - it) },
+                        )
+                    },
                 )
             },
             second = {
                 VerticalSplitLayout(
-                    first = { TabbedViewerPanel(tabsState, repo, editStore) },
+                    first = {
+                        TabbedViewerPanel(
+                            tabsState = tabsState,
+                            repo = repo,
+                            editStore = editStore,
+                            onFileSaved = ::refresh,
+                        )
+                    },
                     second = {
                         CommitPanel(
                             status = status,
