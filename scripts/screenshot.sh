@@ -54,7 +54,9 @@ sleep 0.4
 ts=$(date +%Y%m%d-%H%M%S)
 out="$SHOT_DIR/$ts.png"
 DISPLAY="$DISPLAY_SPEC" import -window "$wid" "$out"
-ln -sf "$(basename "$out")" "$SHOT_DIR/$LATEST_LINK"
+# GitHub's markdown image renderer doesn't follow symlinks (it serves the link
+# target text as the blob), so copy the file instead of linking it.
+cp -f "$out" "$SHOT_DIR/$LATEST_LINK"
 echo "wrote $out"
 
 # Insert / replace a screenshot block in the README so the latest capture shows up
