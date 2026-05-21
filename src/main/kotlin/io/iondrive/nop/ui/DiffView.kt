@@ -29,7 +29,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -42,8 +41,6 @@ import io.iondrive.nop.diff.DiffResult
 import io.iondrive.nop.diff.DiffRow
 import io.iondrive.nop.diff.InlineSpan
 import io.iondrive.nop.diff.RowKind
-import io.iondrive.nop.diff.SyntaxHighlighter
-import io.iondrive.nop.diff.TokenSpan
 import io.iondrive.nop.git.ChangeKind
 import io.iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
@@ -83,7 +80,7 @@ fun DiffView(repo: GitRepo, tab: Tab.Diff) {
                 }
                 o to n
             }
-            result = withContext(Dispatchers.Default) { DiffComputer.compute(old, new, tab.change.path) }
+            result = withContext(Dispatchers.Default) { DiffComputer.compute(old, new) }
             loading = false
         } catch (t: Throwable) {
             error = t.message ?: t::class.simpleName
@@ -163,7 +160,6 @@ private fun DiffRowView(row: DiffRow) {
         DiffHalf(
             text = row.oldLine,
             spans = row.oldSpans,
-            tokens = row.oldTokens,
             lineNumber = row.oldLineNumber,
             background = oldBg,
             inlineHighlight = INLINE_WORD_BG_OLD,
@@ -173,7 +169,6 @@ private fun DiffRowView(row: DiffRow) {
         DiffHalf(
             text = row.newLine,
             spans = row.newSpans,
-            tokens = row.newTokens,
             lineNumber = row.newLineNumber,
             background = newBg,
             inlineHighlight = INLINE_WORD_BG,
@@ -186,7 +181,6 @@ private fun DiffRowView(row: DiffRow) {
 private fun DiffHalf(
     text: String?,
     spans: List<InlineSpan>,
-    tokens: List<TokenSpan>,
     lineNumber: Int?,
     background: Color,
     inlineHighlight: Color,
@@ -205,7 +199,7 @@ private fun DiffHalf(
             modifier = Modifier.padding(horizontal = 6.dp),
         )
         Text(
-            text = annotateLine(text ?: "", spans, tokens, inlineHighlight),
+            text = annotateLine(text ?: "", spans, inlineHighlight),
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp,
             softWrap = false,
@@ -214,45 +208,22 @@ private fun DiffHalf(
     }
 }
 
-private fun annotateLine(
-    text: String,
-    inlineSpans: List<InlineSpan>,
-    tokens: List<TokenSpan>,
-    highlightColor: Color,
-): AnnotatedString {
-    if (text.isEmpty()) return AnnotatedString("")
-    if (inlineSpans.isEmpty() && tokens.isEmpty()) return AnnotatedString(text)
-
-    val n = text.length
-    val fg = IntArray(n) { SyntaxHighlighter.DEFAULT_FG.toArgb() }
-    val bg = IntArray(n) { 0 } // 0 == transparent — use Color.Transparent later
-
-    for (t in tokens) {
-        val start = t.startChar.coerceIn(0, n)
-        val end = t.endCharExclusive.coerceIn(0, n)
-        if (end <= start) continue
-        val color = SyntaxHighlighter.colorFor(t.tokenType).toArgb()
-        for (i in start until end) fg[i] = color
-    }
-    for (s in inlineSpans) {
-        if (!s.changed) continue
-        val start = s.startChar.coerceIn(0, n)
-        val end = s.endCharExclusive.coerceIn(0, n)
-        val color = highlightColor.toArgb()
-        for (i in start until end) bg[i] = color
-    }
-
+private fun annotateLine(text: String, spans: List<InlineSpan>, highlightColor: Color): AnnotatedString {
+    if (spans.isEmpty()) return AnnotatedString(text)
     return buildAnnotatedString {
-        var i = 0
-        while (i < n) {
-            var j = i + 1
-            while (j < n && fg[j] == fg[i] && bg[j] == bg[i]) j++
-            val style = SpanStyle(
-                color = Color(fg[i]),
-                background = if (bg[i] == 0) Color.Unspecified else Color(bg[i]),
-            )
-            withStyle(style) { append(text, i, j) }
-            i = j
+        for (s in spans) {
+            // Defensive: clamp into the line. A malformed span (e.g. start > end after clamping,
+            // or a negative start from a stray close sentinel) used to throw StringIndexOOB and
+            // tear down the whole row during scroll.
+            val start = s.startChar.coerceIn(0, text.length)
+            val end = s.endCharExclusive.coerceIn(start, text.length)
+            if (end == start) continue
+            val piece = text.substring(start, end)
+            if (s.changed) {
+                withStyle(SpanStyle(background = highlightColor)) { append(piece) }
+            } else {
+                append(piece)
+            }
         }
     }
 }

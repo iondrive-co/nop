@@ -30,7 +30,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.iondrive.nop.diff.SyntaxHighlighter
 import io.iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -105,7 +104,7 @@ private fun FileEditView(tab: Tab.FileView, store: FileEditStore) {
         runCatching { focusRequester.requestFocus() }
     }
 
-    val fg = SyntaxHighlighter.DEFAULT_FG
+    val fg = androidx.compose.ui.graphics.Color(0xFFA9B7C6)
 
     Box(
         modifier = Modifier

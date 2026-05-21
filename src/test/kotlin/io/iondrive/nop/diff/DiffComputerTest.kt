@@ -77,4 +77,39 @@ class DiffComputerTest {
         val r = DiffComputer.compute("a\nb", "a\nb\nc")
         assertNotNull(r.rows.find { it.newLine == "c" })
     }
+
+    @Test
+    fun `every span is in range for the line it annotates`() {
+        // A bigger, jagged diff — exercises CHANGE / INSERT / DELETE / EQUAL with inline word
+        // edits. Regression for the StringIndexOOB seen while scrolling: every emitted span
+        // must satisfy 0 <= startChar <= endCharExclusive <= line.length.
+        val old = buildString {
+            for (i in 0 until 60) appendLine("fun line$i(x: Int): Int { return x * $i }")
+        }
+        val new = buildString {
+            for (i in 0 until 60) {
+                when (i) {
+                    7, 23, 41 -> appendLine("fun line$i(x: Int): Int { return /* tweaked */ x * $i }")
+                    13 -> { /* delete */ }
+                    else -> appendLine("fun line$i(x: Int): Int { return x * $i }")
+                }
+            }
+            appendLine("// extra trailing line")
+        }
+        val r = DiffComputer.compute(old, new)
+        for (row in r.rows) {
+            row.oldLine?.let { line ->
+                for (s in row.oldSpans) {
+                    assertTrue(s.startChar in 0..line.length, "old span start ${s.startChar} for '$line'")
+                    assertTrue(s.endCharExclusive in s.startChar..line.length, "old span end ${s.endCharExclusive} for '$line'")
+                }
+            }
+            row.newLine?.let { line ->
+                for (s in row.newSpans) {
+                    assertTrue(s.startChar in 0..line.length, "new span start ${s.startChar} for '$line'")
+                    assertTrue(s.endCharExclusive in s.startChar..line.length, "new span end ${s.endCharExclusive} for '$line'")
+                }
+            }
+        }
+    }
 }

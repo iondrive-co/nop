@@ -25,8 +25,6 @@ data class DiffRow(
     val newSpans: List<InlineSpan>,
     val oldLineNumber: Int?,
     val newLineNumber: Int?,
-    val oldTokens: List<TokenSpan> = emptyList(),
-    val newTokens: List<TokenSpan> = emptyList(),
 )
 
 data class DiffResult(
