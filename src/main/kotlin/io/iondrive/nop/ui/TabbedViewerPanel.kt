@@ -84,6 +84,7 @@ fun TabbedViewerPanel(
             when (val current = selected) {
                 is Tab.FileView -> FileEditView(current, editStore, onFileSaved)
                 is Tab.Diff -> if (repo != null) DiffView(repo, current)
+                is Tab.History -> if (repo != null) HistoryView(repo, current)
                 is Tab.LauncherOutput -> LauncherOutputView(current)
                 null -> {}
             }
@@ -99,6 +100,7 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
         if (edit != null && edit.isModified) "*$base" else base
     }
     is Tab.Diff -> tab.title
+    is Tab.History -> tab.title
     is Tab.LauncherOutput -> tab.title
 }
 
@@ -110,10 +112,9 @@ private fun FileEditView(tab: Tab.FileView, store: FileEditStore, onSaved: () ->
     val scrollState = rememberScrollState()
     val savedCallback by rememberUpdatedState(onSaved)
 
-    LaunchedEffect(tab.id) {
-        // Take focus when the tab activates
-        runCatching { focusRequester.requestFocus() }
-    }
+    // We intentionally do NOT requestFocus() on tab activation. Keeping focus on the tree means
+    // tree-bound shortcuts (Delete to remove the file, H to view history) keep working after the
+    // user clicks a file. Click into the editor body to start typing.
 
     // Autosave: debounce edits, write to disk on a background thread, then notify the rest of
     // the app (commit panel) that on-disk state may have changed.

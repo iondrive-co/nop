@@ -44,7 +44,7 @@ compose.desktop {
         }.get().metadata.installationPath.asFile.absolutePath
 
         nativeDistributions {
-            targetFormats(TargetFormat.AppImage, TargetFormat.Deb)
+            targetFormats(TargetFormat.AppImage, TargetFormat.Deb, TargetFormat.Dmg, TargetFormat.Msi)
             packageName = "nop"
             packageVersion = "0.1.0"
             description = "Desktop editor and change reviewer"
@@ -54,6 +54,16 @@ compose.desktop {
                 menuGroup = "Development"
                 appCategory = "Development"
                 shortcut = true
+            }
+            // jpackage's macOS/Windows installers reject MAJOR=0, so use 1.0.0 there until
+            // we bump packageVersion past 0.x. The Linux .deb keeps the project-level value.
+            macOS {
+                packageVersion = "1.0.0"
+                dmgPackageVersion = "1.0.0"
+            }
+            windows {
+                packageVersion = "1.0.0"
+                msiPackageVersion = "1.0.0"
             }
         }
     }

@@ -25,6 +25,7 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.HorizontalSplitLayout
 import org.jetbrains.jewel.ui.component.VerticalSplitLayout
 import org.jetbrains.jewel.ui.component.rememberSplitLayoutState
+import java.io.File
 import java.nio.file.Path
 
 @Composable
@@ -38,6 +39,8 @@ fun App(projectPath: Path, onChangeProject: () -> Unit = {}) {
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
     var stashInFlight by remember(projectPath) { mutableStateOf(false) }
     var refreshing by remember(projectPath) { mutableStateOf(false) }
+    // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
+    var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -88,6 +91,34 @@ fun App(projectPath: Path, onChangeProject: () -> Unit = {}) {
 
     LaunchedEffect(repo) { reloadStatus() }
 
+    // Close any open tabs that point at the given file or anything under it (when it's a dir).
+    // Saves the user from typing into a buffer whose underlying file just got removed.
+    fun closeTabsUnder(target: File) {
+        val targetPath = target.absolutePath
+        val toClose = tabsState.tabs.filter { tab ->
+            val tabFile: File? = when (tab) {
+                is Tab.FileView -> tab.file
+                is Tab.Diff -> File(tab.repoRoot, tab.change.path)
+                is Tab.History -> tab.file
+                is Tab.LauncherOutput -> null
+            }
+            val p = tabFile?.absolutePath ?: return@filter false
+            p == targetPath || p.startsWith("$targetPath${File.separator}")
+        }
+        for (tab in toClose) {
+            editStore.close(tab.id)
+            tabsState.close(tab.id)
+        }
+    }
+
+    fun performDelete(target: File) {
+        scope.launch {
+            withContext(Dispatchers.IO) { target.deleteRecursively() }
+            closeTabsUnder(target)
+            reloadStatus()
+        }
+    }
+
     Box(
         modifier = Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground),
     ) {
@@ -99,6 +130,10 @@ fun App(projectPath: Path, onChangeProject: () -> Unit = {}) {
                     refreshKey = fsRefreshKey,
                     onFileClick = { tabsState.open(Tab.FileView(it)) },
                     onChangeProject = onChangeProject,
+                    onDeleteRequest = { pendingDelete = it },
+                    onHistoryRequest = { file ->
+                        if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
+                    },
                     headerExtras = {
                         LauncherButton(
                             launchers = launchers,
@@ -204,5 +239,16 @@ fun App(projectPath: Path, onChangeProject: () -> Unit = {}) {
             state = rememberSplitLayoutState(0.22f),
             modifier = Modifier.fillMaxSize(),
         )
+
+        pendingDelete?.let { target ->
+            ConfirmDeleteDialog(
+                target = target,
+                onConfirm = {
+                    performDelete(target)
+                    pendingDelete = null
+                },
+                onCancel = { pendingDelete = null },
+            )
+        }
     }
 }

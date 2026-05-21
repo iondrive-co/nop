@@ -22,6 +22,12 @@ sealed class Tab {
         override val title: String get() = File(change.path).name
     }
 
+    /** Git log restricted to [file] (which may be a directory). */
+    data class History(val file: File, val repoRoot: File) : Tab() {
+        override val id: String get() = "history:${file.absolutePath}"
+        override val title: String get() = "⎇ ${file.name}"
+    }
+
     /** A live launcher invocation — output streams here while the process runs. */
     class LauncherOutput(val run: LauncherRun) : Tab() {
         override val id: String = "launcher:${run.launcher.name}:${System.nanoTime()}"

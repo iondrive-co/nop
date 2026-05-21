@@ -21,6 +21,17 @@ data class StashEntry(
     val message: String,
 )
 
+/** A single commit entry returned by [GitRepo.history]. */
+data class CommitInfo(
+    val sha: String,
+    val author: String,
+    /** Author commit time in epoch seconds. */
+    val whenEpochSeconds: Long,
+    val shortMessage: String,
+) {
+    val shortSha: String get() = sha.take(7)
+}
+
 data class GitStatus(
     val branch: String?,
     val changes: List<FileChange>,

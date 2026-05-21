@@ -91,6 +91,23 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         return null
     }
 
+    /**
+     * Commits touching [relPath], newest first. Pass null/empty to log the whole repo.
+     * Capped at [limit] entries to keep the UI snappy on long-lived files.
+     */
+    fun history(relPath: String?, limit: Int = 200): List<CommitInfo> {
+        val cmd = git.log().setMaxCount(limit)
+        if (!relPath.isNullOrEmpty()) cmd.addPath(relPath)
+        return cmd.call().map { c ->
+            CommitInfo(
+                sha = c.name,
+                author = c.authorIdent?.name ?: "(unknown)",
+                whenEpochSeconds = c.commitTime.toLong(),
+                shortMessage = c.shortMessage ?: "",
+            )
+        }
+    }
+
     /** File content from the working tree, or null if the file is absent. */
     fun readWorkingTreeContent(relPath: String): String? {
         val file = File(rootDir.toFile(), relPath)

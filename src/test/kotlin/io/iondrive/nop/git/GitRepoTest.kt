@@ -145,6 +145,31 @@ class GitRepoTest {
     }
 
     @Test
+    fun `history returns commits touching the requested path only`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a1\n")
+        (tmp / "b.txt").writeText("b1\n")
+        runShell(tmp, "git add -A && git commit -q -m 'init both'")
+
+        (tmp / "a.txt").writeText("a2\n")
+        runShell(tmp, "git add a.txt && git commit -q -m 'tweak a'")
+
+        (tmp / "b.txt").writeText("b2\n")
+        runShell(tmp, "git add b.txt && git commit -q -m 'tweak b'")
+
+        val repo = GitRepo.discover(tmp)!!
+        val aLog = repo.history("a.txt")
+        val all = repo.history(null)
+        repo.close()
+
+        assertEquals(listOf("tweak a", "init both"), aLog.map { it.shortMessage },
+            "a.txt history should only include commits that touch a.txt")
+        assertEquals(listOf("tweak b", "tweak a", "init both"), all.map { it.shortMessage },
+            "no-path history should include every commit")
+        assertEquals(7, aLog[0].shortSha.length, "shortSha is the first 7 chars of the SHA")
+    }
+
+    @Test
     fun `clean repo reports no changes`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         (tmp / "a.txt").writeText("a\n")

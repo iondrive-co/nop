@@ -12,6 +12,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import io.iondrive.nop.git.GitStatus
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -27,9 +32,10 @@ import org.jetbrains.jewel.ui.icon.PathIconKey
 import java.io.File
 import java.nio.file.Path
 
-// "Open" icon from the bundled IntelliJ Platform icons jar — used as the change-project button.
+// Icons from the bundled IntelliJ Platform icons jar.
 // Jewel automatically picks the _dark variant when running under the dark theme.
 private val OpenFolderIconKey = PathIconKey("expui/general/open.svg", ProjectTreePanelClass::class.java)
+private val HistoryIconKey = PathIconKey("expui/general/history.svg", ProjectTreePanelClass::class.java)
 
 private object ProjectTreePanelClass
 
@@ -70,6 +76,8 @@ fun ProjectTreePanel(
     refreshKey: Int = 0,
     onFileClick: (File) -> Unit,
     onChangeProject: () -> Unit = {},
+    onDeleteRequest: (File) -> Unit = {},
+    onHistoryRequest: (File) -> Unit = {},
     headerExtras: @Composable () -> Unit = {},
 ) {
     val tree = remember(projectPath, refreshKey) { projectPath.asFilteredTree() }
@@ -78,6 +86,13 @@ fun ProjectTreePanel(
 
     LaunchedEffect(rootId) {
         treeState.openNodes(listOf(rootId))
+    }
+
+    fun selectedFile(): File? {
+        // Selection keys are the absolute paths we used as element IDs in asFilteredTree.
+        val key = treeState.selectedKeys.firstOrNull() as? String ?: return null
+        if (key == rootId) return null
+        return File(key).takeIf { it.exists() }
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
@@ -94,6 +109,17 @@ fun ProjectTreePanel(
                     modifier = Modifier.size(16.dp),
                 )
             }
+            val historyTarget = selectedFile()
+            IconButton(
+                onClick = { historyTarget?.let(onHistoryRequest) },
+                enabled = historyTarget != null,
+            ) {
+                Icon(
+                    key = HistoryIconKey,
+                    contentDescription = "Show history for selected entry",
+                    modifier = Modifier.size(16.dp),
+                )
+            }
             // Push headerExtras (the launcher ▶) to the far right
             androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
             headerExtras()
@@ -101,7 +127,14 @@ fun ProjectTreePanel(
         LazyTree(
             tree = tree,
             treeState = treeState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.Delete -> selectedFile()?.let { onDeleteRequest(it); true } ?: false
+                    Key.H -> selectedFile()?.let { onHistoryRequest(it); true } ?: false
+                    else -> false
+                }
+            },
             onElementClick = { element ->
                 val file = element.data
                 if (file.isFile) onFileClick(file)
