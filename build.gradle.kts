@@ -43,6 +43,9 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.AppImage, TargetFormat.Deb, TargetFormat.Dmg, TargetFormat.Msi)
+            // JGit's WindowCache publishes a JMX MBean on first use, so the jlinked runtime
+            // must include java.management or opening any repo throws NoClassDefFoundError.
+            modules("java.management")
             packageName = "nop"
             packageVersion = "0.1.0"
             description = "Desktop editor and change reviewer"

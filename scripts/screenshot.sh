@@ -31,6 +31,26 @@ if [ -z "$wid" ]; then
     exit 2
 fi
 
+# Set the stage: open a diff so the README shot shows nop's main feature instead
+# of the empty launcher-output tab the screenshot button itself just activated.
+# We synthesize a click on the first row of the bottom commit panel, computed
+# from the current window geometry (the layout uses a 0.55 vertical split with
+# the commit panel below, and a 0.22 horizontal split with the file tree on the
+# left — see App.kt's rememberSplitLayoutState calls).
+eval "$(DISPLAY="$DISPLAY_SPEC" xdotool getwindowgeometry --shell "$wid")"
+DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$wid"
+# Inside the commit panel, the first change row sits a few lines below the
+# panel header + message box. ~69% down and ~30% across reliably hits the
+# first row at default split ratios; if the user has dragged the splitters
+# this may need adjusting.
+click_x=$((X + WIDTH * 30 / 100))
+click_y=$((Y + HEIGHT * 69 / 100))
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$click_x" "$click_y" click 1
+# Park the cursor off the visible area so the pointer doesn't end up in the shot.
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$X" "$Y"
+# Give Compose a frame to render the freshly-opened Diff tab.
+sleep 0.4
+
 ts=$(date +%Y%m%d-%H%M%S)
 out="$SHOT_DIR/$ts.png"
 DISPLAY="$DISPLAY_SPEC" import -window "$wid" "$out"

@@ -39,7 +39,16 @@ import org.jetbrains.jewel.ui.component.SimpleTabContent
 import org.jetbrains.jewel.ui.component.TabData
 import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.styling.TabIcons
+import org.jetbrains.jewel.ui.component.styling.TabStyle
+import org.jetbrains.jewel.ui.icon.PathIconKey
 import org.jetbrains.jewel.ui.theme.editorTabStyle
+
+// Jewel's TabStrip pulls its close glyph from the IntelliJ Platform icons jar
+// (which we don't depend on), so editor-tab close buttons render as magenta
+// missing-icon placeholders. Bundle a local SVG and override the style.
+private object TabIconsClass
+private val TabCloseIconKey = PathIconKey("icons/close-small.svg", TabIconsClass::class.java)
 
 /** How long to wait for the typing to settle before writing the buffer to disk. */
 private const val AUTOSAVE_DEBOUNCE_MS = 400L
@@ -78,8 +87,19 @@ fun TabbedViewerPanel(
         )
     }
 
+    val baseTabStyle = JewelTheme.editorTabStyle
+    val tabStyle = remember(baseTabStyle) {
+        TabStyle(
+            colors = baseTabStyle.colors,
+            metrics = baseTabStyle.metrics,
+            icons = TabIcons(close = TabCloseIconKey),
+            contentAlpha = baseTabStyle.contentAlpha,
+            scrollbarStyle = baseTabStyle.scrollbarStyle,
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        TabStrip(tabs = tabData, style = JewelTheme.editorTabStyle)
+        TabStrip(tabs = tabData, style = tabStyle)
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = selected) {
                 is Tab.FileView -> FileEditView(current, editStore, onFileSaved)
