@@ -218,6 +218,8 @@ private fun ApplicationScope.ProjectWindow(
     // Ctrl+Shift+F focuses the bottom "Find in files" tab — same window-level wiring as the
     // double-shift detector so it works from any focused child.
     var findInFilesTrigger by remember { mutableStateOf(0) }
+    // Ctrl+F opens the in-file search bar above the currently-focused file viewer.
+    var findInFileTrigger by remember { mutableStateOf(0) }
 
     Window(
         state = windowState,
@@ -240,6 +242,12 @@ private fun ApplicationScope.ProjectWindow(
                 findInFilesTrigger += 1
                 return@Window true
             }
+            if (event.type == KeyEventType.KeyDown &&
+                event.isCtrlPressed && !event.isShiftPressed && event.key == Key.F
+            ) {
+                findInFileTrigger += 1
+                return@Window true
+            }
             // Never consume — the underlying field/tree still needs to see the key.
             false
         },
@@ -260,6 +268,7 @@ private fun ApplicationScope.ProjectWindow(
                 onToggleTheme = onToggleTheme,
                 fileSearchTrigger = fileSearchTrigger,
                 findInFilesTrigger = findInFilesTrigger,
+                findInFileTrigger = findInFileTrigger,
             )
         }
     }

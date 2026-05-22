@@ -179,6 +179,38 @@ class SettingsTest {
     }
 
     @Test
+    fun `commit message height returns null when nothing saved`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        assertNull(Settings.loadCommitMessageHeight(project))
+    }
+
+    @Test
+    fun `commit message height round-trips per project`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        Settings.saveCommitMessageHeight(a, 142.5f)
+        Settings.saveCommitMessageHeight(b, 200.0f)
+        assertEquals(142.5f, Settings.loadCommitMessageHeight(a))
+        assertEquals(200.0f, Settings.loadCommitMessageHeight(b))
+    }
+
+    @Test
+    fun `commit message height rejects out-of-range values`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val heightFile = Settings.projectDataDir(project).resolve("commit-height")
+        Files.createDirectories(heightFile.parent)
+        Files.writeString(heightFile, "-50")
+        assertNull(Settings.loadCommitMessageHeight(project), "negative height should be rejected")
+        Files.writeString(heightFile, "9001")
+        assertNull(Settings.loadCommitMessageHeight(project), "absurdly large height should be rejected")
+        Files.writeString(heightFile, "garbage")
+        assertNull(Settings.loadCommitMessageHeight(project), "non-numeric should be rejected")
+    }
+
+    @Test
     fun `saving recent projects does not clobber open projects or window geometry`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }

@@ -1,10 +1,16 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,15 +24,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.StashEntry
+import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
+import java.awt.Cursor
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -41,6 +54,8 @@ fun CommitPanel(
     onPopStash: (StashEntry) -> Unit,
     onDropStash: (StashEntry) -> Unit,
     commitInFlight: Boolean,
+    messageHeight: Dp,
+    onMessageHeightChange: (Dp) -> Unit,
     stashInFlight: Boolean = false,
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
@@ -48,6 +63,7 @@ fun CommitPanel(
     val messageState = remember { TextFieldState() }
     val inRepo = status.branch != null
     val anyChanges = !status.isClean
+    val density = LocalDensity.current
 
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         val header = when {
@@ -68,14 +84,14 @@ fun CommitPanel(
 
         if (inRepo && anyChanges) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                modifier = Modifier.fillMaxWidth().height(messageHeight),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextArea(
                     state = messageState,
                     placeholder = { Text("Commit message / stash description") },
-                    modifier = Modifier.weight(1f).height(64.dp),
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     DefaultButton(
@@ -103,6 +119,15 @@ fun CommitPanel(
                     }
                 }
             }
+            // Drag handle that resizes the commit-message row above. Coerced so it can't
+            // shrink past usable text or grow past the surrounding pane.
+            MessageResizeHandle(
+                onDelta = { dy ->
+                    val deltaDp = with(density) { dy.toDp() }
+                    val next = (messageHeight + deltaDp).coerceIn(MIN_MESSAGE_HEIGHT, MAX_MESSAGE_HEIGHT)
+                    if (next != messageHeight) onMessageHeightChange(next)
+                },
+            )
         }
 
         if (stashes.isNotEmpty()) {
@@ -131,6 +156,30 @@ fun CommitPanel(
 
 private fun TextFieldState.clearText() {
     edit { replace(0, length, "") }
+}
+
+internal val MIN_MESSAGE_HEIGHT = 40.dp
+internal val MAX_MESSAGE_HEIGHT = 600.dp
+internal val DEFAULT_MESSAGE_HEIGHT = 64.dp
+
+@Composable
+private fun MessageResizeHandle(onDelta: (Float) -> Unit) {
+    val color = if (JewelTheme.isDark) Color(0xFF2B2D30) else Color(0xFFD3D5DB)
+    // 4dp-thick draggable bar with an N-resize cursor, matching the SplitPane dividers so
+    // the affordance reads as "drag me to resize" without needing an explicit grip icon.
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(4.dp)
+            .padding(vertical = 0.dp)
+            .background(color)
+            .pointerHoverIcon(PointerIcon(Cursor(Cursor.N_RESIZE_CURSOR)))
+            .draggable(
+                state = rememberDraggableState(onDelta = onDelta),
+                orientation = Orientation.Vertical,
+                startDragImmediately = true,
+            )
+    )
 }
 
 @Composable

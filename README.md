@@ -18,14 +18,15 @@ Windows.
 
 ## Shortcuts
 
-Select a file or directory in the project tree, then:
-- `Delete` — remove it from disk (asks for confirmation first)
-- `H` — open a tab showing its git history
-
-Ctrl click on an element in a file to jump to source.
+- Select a file or directory in the project tree, then:
+	- `Delete` — remove it from disk (asks for confirmation first)
+	- `H` — open a tab showing its git history
+- Ctrl click on an element in a file to jump to source.
+- Ctrl F to search within the current file
+- Ctrl shift F to search for text
+- Shift-Shift to search for file
 
 <!-- screenshot -->
 ![Diff view](docs/screenshots/latest-diff.png)
 ![README preview](docs/screenshots/latest-preview.png)
-*Captured 2026-05-22 19:04:07 — light & dark mode toggled via the header button*
 <!-- screenshot -->

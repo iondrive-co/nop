@@ -17,6 +17,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Settings
 import iondrive.nop.git.GitRepo
@@ -52,6 +53,7 @@ fun App(
     onToggleTheme: () -> Unit = {},
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
+    findInFileTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -179,6 +181,23 @@ fun App(
         }
     }
 
+    // Commit-message text-area height, persisted per-project. Long commit messages need more
+    // room than the default; we save what the user dragged it to so reopening the project
+    // restores the same shape.
+    var commitMessageHeight by remember(rootPath) {
+        val saved = Settings.loadCommitMessageHeight(rootPath)
+        mutableStateOf<Dp>(saved?.dp ?: DEFAULT_MESSAGE_HEIGHT)
+    }
+    LaunchedEffect(rootPath) {
+        snapshotFlow { commitMessageHeight }
+            .drop(1)
+            .debounce(500)
+            .distinctUntilChanged()
+            .collectLatest { h ->
+                withContext(Dispatchers.IO) { Settings.saveCommitMessageHeight(rootPath, h.value) }
+            }
+    }
+
     // Tab-strip persistence: restore on project open, then debounce-save on every change. Saved
     // alongside the symbol/file indexes under the project's data dir. Restore happens before
     // we subscribe to changes, and we drop the first emission so the restore itself doesn't
@@ -300,6 +319,7 @@ fun App(
                                 onJump = { file, line ->
                                     tabsState.openAt(Tab.FileView(file), line)
                                 },
+                                findInFileTrigger = findInFileTrigger,
                             )
                         },
                         second = {
@@ -376,6 +396,8 @@ fun App(
                                             }
                                         },
                                         commitInFlight = commitInFlight,
+                                        messageHeight = commitMessageHeight,
+                                        onMessageHeightChange = { commitMessageHeight = it },
                                         stashInFlight = stashInFlight,
                                         refreshing = refreshing,
                                         onRefresh = ::refresh,

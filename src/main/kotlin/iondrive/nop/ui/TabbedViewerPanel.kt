@@ -2,29 +2,43 @@ package iondrive.nop.ui
 
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed
@@ -79,6 +93,7 @@ fun TabbedViewerPanel(
     onFileSaved: () -> Unit = {},
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget? = { _, _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
+    findInFileTrigger: Int = 0,
 ) {
     val selected = tabsState.selectedTab
 
@@ -124,7 +139,7 @@ fun TabbedViewerPanel(
                 is Tab.FileView -> {
                     val pendingLine = tabsState.pendingJumpLine(current.id)
                     if (current.file.extension.equals("md", ignoreCase = true)) {
-                        MarkdownEditWithPreview(current, editStore, onFileSaved)
+                        MarkdownEditWithPreview(current, editStore, onFileSaved, findInFileTrigger)
                     } else {
                         FileEditView(
                             tab = current,
@@ -134,6 +149,7 @@ fun TabbedViewerPanel(
                             onJump = onJump,
                             pendingLine = pendingLine,
                             onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
+                            findInFileTrigger = findInFileTrigger,
                         )
                     }
                 }
@@ -175,6 +191,7 @@ private fun FileEditView(
     onJump: (File, Int) -> Unit = { _, _ -> },
     pendingLine: Int? = null,
     onPendingLineConsumed: () -> Unit = {},
+    findInFileTrigger: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
@@ -184,6 +201,54 @@ private fun FileEditView(
     val resolveCallback by rememberUpdatedState(onResolveAt)
     val jumpCallback by rememberUpdatedState(onJump)
     val pendingConsumedCallback by rememberUpdatedState(onPendingLineConsumed)
+
+    // In-file search state. Per-tab so two open tabs each remember their own query and the bar
+    // stays open in whichever tab the user opened it. Matches are recomputed whenever the text
+    // or query changes; currentMatch is the active hit that's highlighted and scrolled into view.
+    var searchOpen by remember(tab.id) { mutableStateOf(false) }
+    val searchState = rememberTextFieldState()
+    var currentMatch by remember(tab.id) { mutableStateOf(0) }
+    val searchFocusRequester = remember(tab.id) { FocusRequester() }
+    // Snapshot the trigger as of this tab's first composition. We only open the bar on a
+    // strictly later value — otherwise switching to a tab inherits whatever Ctrl+F count the
+    // sibling tab racked up and the bar pops open unexpectedly.
+    val triggerBaseline = remember(tab.id) { findInFileTrigger }
+    LaunchedEffect(findInFileTrigger) {
+        if (findInFileTrigger > triggerBaseline) {
+            searchOpen = true
+            // Wait for a frame so the FindBar's BasicTextField is composed + laid out and its
+            // FocusRequester modifier is attached. requestFocus() throws if called before the
+            // requester is part of the focus tree; without the wait, keypresses keep hitting
+            // whatever had focus before Ctrl+F (notably the project tree's "H" shortcut).
+            withFrameNanos { }
+            runCatching { searchFocusRequester.requestFocus() }
+            // Select the existing query so re-pressing Ctrl+F lets the user immediately type a
+            // new one without manually clearing the field first.
+            val len = searchState.text.length
+            if (len > 0) searchState.edit { selection = TextRange(0, len) }
+        }
+    }
+
+    // Compute match ranges off the (file text, query) pair. Case-insensitive substring; empty
+    // query — or the bar being closed — collapses to no matches so the highlight goes away.
+    val matches by remember(tab.id) {
+        derivedStateOf {
+            val q = searchState.text.toString()
+            if (!searchOpen || q.isEmpty()) emptyList()
+            else findAllMatches(edit.state.text.toString(), q)
+        }
+    }
+    // Keep currentMatch in range as matches change (typing narrows the result set).
+    LaunchedEffect(matches.size) {
+        if (currentMatch >= matches.size) currentMatch = 0
+    }
+    // Whenever the active match changes, drop the cursor at its start so BasicTextField's
+    // built-in scrollTo-cursor behaviour brings it into view. The actual highlight is painted
+    // by the outputTransformation below.
+    LaunchedEffect(currentMatch, matches) {
+        val m = matches.getOrNull(currentMatch) ?: return@LaunchedEffect
+        edit.state.edit { selection = TextRange(m.first) }
+    }
 
     // We intentionally do NOT requestFocus() on tab activation. Keeping focus on the tree means
     // tree-bound shortcuts (Delete to remove the file, H to view history) keep working after the
@@ -213,13 +278,21 @@ private fun FileEditView(
     // index resolves the word to a jump target. Drawn as an underline so the user knows the
     // click will hand them off to another file. Inclusive on both ends (matches JumpResolver).
     var hoverUnderline by remember(tab.id) { mutableStateOf<IntRange?>(null) }
-    val transformation = remember(tokenize, palette, hoverUnderline) {
+    val matchHighlight = if (isDark) Color(0xFF5A4A20) else Color(0xFFFFF38C)
+    val activeMatchHighlight = if (isDark) Color(0xFF8A6D1A) else Color(0xFFFFB74D)
+    val transformation = remember(tokenize, palette, hoverUnderline, matches, currentMatch, matchHighlight, activeMatchHighlight) {
         OutputTransformation {
             val text = asCharSequence().toString()
             tokenize?.let { applyTokens(this, it(text), palette) }
             val range = hoverUnderline
             if (range != null && range.first in 0 until length && range.last in 0 until length) {
                 addStyle(SpanStyle(textDecoration = TextDecoration.Underline), range.first, range.last + 1)
+            }
+            matches.forEachIndexed { idx, m ->
+                if (m.first in 0..length && m.last + 1 in 0..length) {
+                    val bg = if (idx == currentMatch) activeMatchHighlight else matchHighlight
+                    addStyle(SpanStyle(background = bg), m.first, m.last + 1)
+                }
             }
         }
     }
@@ -243,10 +316,21 @@ private fun FileEditView(
         pendingConsumedCallback()
     }
 
+    Column(modifier = modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
+        if (searchOpen) {
+            FindBar(
+                state = searchState,
+                focusRequester = searchFocusRequester,
+                matchCount = matches.size,
+                currentIndex = currentMatch,
+                onNext = { if (matches.isNotEmpty()) currentMatch = (currentMatch + 1) % matches.size },
+                onPrev = { if (matches.isNotEmpty()) currentMatch = (currentMatch - 1 + matches.size) % matches.size },
+                onClose = { searchOpen = false },
+            )
+        }
     Box(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
-            .background(JewelTheme.globalColors.panelBackground)
             .padding(12.dp),
     ) {
         BasicTextField(
@@ -317,6 +401,7 @@ private fun FileEditView(
                 .fillMaxHeight(),
         )
     }
+    }
 }
 
 /** Markdown tab layout: editor on the left, live-rendered preview on the right. */
@@ -325,13 +410,14 @@ private fun MarkdownEditWithPreview(
     tab: Tab.FileView,
     store: FileEditStore,
     onSaved: () -> Unit,
+    findInFileTrigger: Int = 0,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
     val previewText by remember(edit) {
         derivedStateOf { edit.state.text.toString() }
     }
     HorizontalSplitLayout(
-        first = { FileEditView(tab, store, onSaved) },
+        first = { FileEditView(tab, store, onSaved, findInFileTrigger = findInFileTrigger) },
         second = {
             MarkdownPreview(
                 text = previewText,
@@ -341,4 +427,122 @@ private fun MarkdownEditWithPreview(
         state = rememberSplitLayoutState(0.5f),
         modifier = Modifier.fillMaxSize(),
     )
+}
+
+/**
+ * Finds all non-overlapping occurrences of [query] in [text], case-insensitive. Returns each
+ * match as a closed-open IntRange (start inclusive, end inclusive of the last matched char).
+ * Falls back to empty for empty queries — callers should also skip when empty.
+ */
+internal fun findAllMatches(text: String, query: String): List<IntRange> {
+    if (query.isEmpty()) return emptyList()
+    val out = mutableListOf<IntRange>()
+    var i = 0
+    while (true) {
+        val hit = text.indexOf(query, startIndex = i, ignoreCase = true)
+        if (hit < 0) break
+        out += hit..(hit + query.length - 1)
+        i = hit + query.length
+        // Bail at a high cap so a degenerate single-char query in a megabyte file can't run away.
+        if (out.size >= 5000) break
+    }
+    return out
+}
+
+/**
+ * Slim search bar pinned above the file content. Enter / Shift+Enter cycle through matches;
+ * Esc closes the bar and clears the highlight. The count chip reads "n of m" so the user can
+ * see both their position and how many total matches exist for the current query.
+ */
+@Composable
+private fun FindBar(
+    state: TextFieldState,
+    focusRequester: FocusRequester,
+    matchCount: Int,
+    currentIndex: Int,
+    onNext: () -> Unit,
+    onPrev: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val isDark = JewelTheme.isDark
+    val barBg = if (isDark) Color(0xFF2B2D30) else Color(0xFFEDEEF2)
+    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF1F2329)
+    val mutedFg = if (isDark) Color(0xFF7A8290) else Color(0xFF6B7280)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(barBg)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.Escape -> { onClose(); true }
+                    Key.Enter, Key.NumPadEnter -> {
+                        if (event.isShiftPressed) onPrev() else onNext()
+                        true
+                    }
+                    else -> false
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        BasicTextField(
+            state = state,
+            modifier = Modifier.weight(1f).focusRequester(focusRequester),
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = fg),
+            cursorBrush = SolidColor(fg),
+            lineLimits = TextFieldLineLimits.SingleLine,
+        )
+        val countText = when {
+            state.text.isEmpty() -> ""
+            matchCount == 0 -> "no matches"
+            else -> "${currentIndex + 1} of $matchCount"
+        }
+        if (countText.isNotEmpty()) {
+            Text(countText, color = mutedFg, style = TextStyle(fontSize = 12.sp))
+        }
+        Text(
+            "▲",
+            color = if (matchCount > 0) fg else mutedFg,
+            modifier = Modifier
+                .padding(horizontal = 2.dp)
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val e = awaitPointerEvent()
+                            if (e.type == PointerEventType.Press) onPrev()
+                        }
+                    }
+                },
+        )
+        Text(
+            "▼",
+            color = if (matchCount > 0) fg else mutedFg,
+            modifier = Modifier
+                .padding(horizontal = 2.dp)
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val e = awaitPointerEvent()
+                            if (e.type == PointerEventType.Press) onNext()
+                        }
+                    }
+                },
+        )
+        Text(
+            "×",
+            color = mutedFg,
+            modifier = Modifier
+                .padding(horizontal = 4.dp)
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val e = awaitPointerEvent()
+                            if (e.type == PointerEventType.Press) onClose()
+                        }
+                    }
+                },
+        )
+    }
 }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,11 +61,16 @@ fun LauncherOutputView(tab: Tab.LauncherOutput) {
         }
         Box(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 4.dp)) {
             val fg = androidx.compose.ui.graphics.Color(0xFFA9B7C6)
-            Text(
-                text = output,
-                modifier = Modifier.fillMaxSize().padding(end = 12.dp).verticalScroll(scrollState),
-                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = fg),
-            )
+            // Wrap in SelectionContainer so the user can drag-select script output and copy
+            // it with Ctrl+C — critical for grabbing stack traces or error messages out of
+            // the panel without having to mirror them through a file.
+            SelectionContainer(modifier = Modifier.fillMaxSize().padding(end = 12.dp)) {
+                Text(
+                    text = output,
+                    modifier = Modifier.fillMaxSize().verticalScroll(scrollState),
+                    style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = fg),
+                )
+            }
             VerticalScrollbar(
                 adapter = rememberScrollbarAdapter(scrollState),
                 style = NopScrollbarStyle,

@@ -183,6 +183,25 @@ object Settings {
     }
 
     /**
+     * Height of the commit-message text area in dp, persisted per-project. Returns null when
+     * the user hasn't dragged the handle yet so the caller can fall back to a sensible default.
+     */
+    fun loadCommitMessageHeight(projectPath: Path): Float? {
+        val f = projectDataDir(projectPath).resolve("commit-height")
+        if (!Files.isRegularFile(f)) return null
+        return runCatching { Files.readString(f).trim().toFloat() }.getOrNull()
+            ?.takeIf { it in 24f..2000f }
+    }
+
+    fun saveCommitMessageHeight(projectPath: Path, heightDp: Float) {
+        val f = projectDataDir(projectPath).resolve("commit-height")
+        runCatching {
+            Files.createDirectories(f.parent)
+            Files.writeString(f, heightDp.toString())
+        }
+    }
+
+    /**
      * Per-project scratch directory under the nop config root. Used for derived data we don't
      * want to spray into the project itself — currently just the symbol index. Two projects
      * with the same final path segment (e.g. two `frontend/` checkouts) get separate dirs
