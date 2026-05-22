@@ -1,6 +1,7 @@
 package iondrive.nop
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -8,6 +9,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
@@ -16,7 +21,9 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.ui.App
+import iondrive.nop.ui.DoubleShiftDetector
 import iondrive.nop.ui.projectTint
 import iondrive.nop.ui.projectWindowIcon
 import kotlinx.coroutines.FlowPreview
@@ -29,19 +36,37 @@ import org.jetbrains.jewel.intui.standalone.theme.darkThemeDefinition
 import org.jetbrains.jewel.intui.standalone.theme.default
 import org.jetbrains.jewel.intui.standalone.theme.lightThemeDefinition
 import org.jetbrains.jewel.ui.ComponentStyling
+import java.awt.Frame
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import javax.swing.JFileChooser
+import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
 
 @OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
+    val argPaths = args.map { Paths.get(it).toAbsolutePath().normalize() }
+        .filter { Files.isDirectory(it) }
+
+    // If another nop is already running, hand the requested paths off to it (or just ask it
+    // to come to the foreground when no paths were supplied) and exit. The primary will dedupe
+    // already-open projects and focus their windows, so the user gets one window per project.
+    if (SingleInstance.tryForward(argPaths, Settings.configRoot)) {
+        exitProcess(0)
+    }
+
     val initial = resolveInitialProjects(args)
     if (initial.isEmpty()) exitProcess(0)
 
     application {
+        // Tracks the ComposeWindow currently rendering each project, keyed by absolute path. The
+        // openProject() callback below reads this to bring an existing window to the foreground
+        // instead of trying (and silently failing) to add a duplicate entry to openProjects.
+        // Mutated only from the EDT, so a plain HashMap is fine.
+        val windowRegistry = remember { mutableMapOf<Path, androidx.compose.ui.awt.ComposeWindow>() }
+
         // One entry per open window. Adding a path opens a new window; removing one closes it.
         // When the list empties we exit. Using a state list so Compose recomposes on changes.
         val openProjects = remember { mutableStateListOf<Path>().apply { addAll(initial) } }
@@ -55,11 +80,45 @@ fun main(args: Array<String>) {
             recentProjects = Settings.loadRecentProjects()
         }
 
+        fun focusExistingWindow(path: Path): Boolean {
+            val existing = windowRegistry[path] ?: return false
+            // De-iconify if the user had it minimised, otherwise toFront() doesn't make it
+            // visible.
+            if ((existing.extendedState and Frame.ICONIFIED) != 0) {
+                existing.extendedState = existing.extendedState and Frame.ICONIFIED.inv()
+            }
+            existing.toFront()
+            existing.requestFocus()
+            return true
+        }
+
         fun openProject(path: Path) {
             val norm = path.toAbsolutePath().normalize()
-            if (norm !in openProjects) openProjects.add(norm)
+            if (!focusExistingWindow(norm) && norm !in openProjects) {
+                openProjects.add(norm)
+            }
             Settings.addRecentProject(norm)
             recentProjects = Settings.loadRecentProjects()
+        }
+
+        // Start the IPC server so subsequent `nop /some/path` invocations can forward to us.
+        // Closed via DisposableEffect's onDispose when the app shuts down.
+        DisposableEffect(Unit) {
+            val handle = SingleInstance.bind(
+                configRoot = Settings.configRoot,
+                onOpen = { path ->
+                    SwingUtilities.invokeLater { openProject(path) }
+                },
+                onFocus = {
+                    SwingUtilities.invokeLater {
+                        // No specific project requested — surface whichever window is on top of
+                        // the registry (insertion-ordered HashMap gives us the most recently
+                        // added project, which is good enough as a "raise nop" signal).
+                        windowRegistry.keys.lastOrNull()?.let { focusExistingWindow(it) }
+                    }
+                },
+            )
+            onDispose { handle?.close() }
         }
 
         LaunchedEffect(Unit) {
@@ -89,6 +148,8 @@ fun main(args: Array<String>) {
                     openProjects.remove(projectPath)
                     if (openProjects.isEmpty()) exitApplication()
                 },
+                onRegister = { w -> windowRegistry[projectPath] = w },
+                onUnregister = { windowRegistry.remove(projectPath) },
             )
         }
     }
@@ -105,6 +166,8 @@ private fun ApplicationScope.ProjectWindow(
     onPickNew: () -> Unit,
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
+    onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
+    onUnregister: () -> Unit = {},
 ) {
     // The first window restores the persisted geometry; additional windows let the OS pick
     // a fresh position so they don't all stack on top of each other.
@@ -146,12 +209,32 @@ private fun ApplicationScope.ProjectWindow(
         projectWindowIcon(projectTint(projectPath, isDark = darkMode))
     }
 
+    // Two-tap-Shift triggers a project-wide file search. Tracked at window level via
+    // onPreviewKeyEvent so it fires regardless of which child (tree, editor, …) has focus.
+    val shiftDetector = remember { DoubleShiftDetector() }
+    var fileSearchTrigger by remember { mutableStateOf(0) }
+
     Window(
         state = windowState,
         onCloseRequest = onCloseWindow,
         title = projectPath.fileName.toString(),
         icon = windowIcon,
+        onPreviewKeyEvent = { event ->
+            val isShift = event.key == Key.ShiftLeft || event.key == Key.ShiftRight
+            val fired = when (event.type) {
+                KeyEventType.KeyDown -> shiftDetector.onKeyDown(isShift)
+                KeyEventType.KeyUp -> shiftDetector.onKeyUp(isShift)
+                else -> false
+            }
+            if (fired) fileSearchTrigger += 1
+            // Never consume — the underlying field/tree still needs to see the key.
+            false
+        },
     ) {
+        DisposableEffect(Unit) {
+            onRegister(window)
+            onDispose { onUnregister() }
+        }
         IntUiTheme(
             theme = if (darkMode) JewelTheme.darkThemeDefinition() else JewelTheme.lightThemeDefinition(),
             styling = ComponentStyling.default(),
@@ -162,6 +245,7 @@ private fun ApplicationScope.ProjectWindow(
                 onPickRecent = onPickRecent,
                 onPickNew = onPickNew,
                 onToggleTheme = onToggleTheme,
+                fileSearchTrigger = fileSearchTrigger,
             )
         }
     }

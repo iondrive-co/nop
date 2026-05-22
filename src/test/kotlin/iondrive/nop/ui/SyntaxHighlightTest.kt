@@ -112,6 +112,81 @@ class SyntaxHighlightTest {
     }
 
     @Test
+    fun `ansible extension picks ansible tokenizer`() {
+        assertNotNull(tokenizerForExtension("yml"))
+        assertNotNull(tokenizerForExtension("yaml"))
+        assertNotNull(tokenizerForExtension("j2"))
+    }
+
+    @Test
+    fun `ansible lexer highlights keys comments and jinja`() {
+        val src = """
+            ---
+            # Install nginx
+            - name: ensure nginx is running
+              hosts: web
+              become: true
+              tasks:
+                - name: install
+                  apt:
+                    name: nginx
+                    state: present
+                  when: ansible_os_family == "Debian"
+                - name: render config
+                  template:
+                    src: nginx.conf.j2
+                    dest: "/etc/nginx/nginx.conf"
+                  vars:
+                    port: 8080
+                  notify: restart nginx
+        """.trimIndent()
+        val tokens = tokenizeAnsible(src)
+        assertTrue(tokens.containsExact(src, "# Install nginx", TokenKind.COMMENT))
+        assertTrue(tokens.containsExact(src, "name", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "hosts", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "become", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "tasks", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "apt", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "template", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "when", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "true", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "8080", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "\"Debian\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `ansible lexer highlights jinja blocks`() {
+        val src = """
+            - debug:
+                msg: hello {{ user.name }} on {% if prod %}prod{% endif %}
+        """.trimIndent()
+        val tokens = tokenizeAnsible(src)
+        assertTrue(tokens.any { it.kind == TokenKind.EMPHASIS && src.substring(it.start, it.endExclusive).startsWith("{{") })
+        assertTrue(tokens.any { it.kind == TokenKind.EMPHASIS && src.substring(it.start, it.endExclusive).startsWith("{%") })
+    }
+
+    @Test
+    fun `ansible lexer leaves user-defined keys unhighlighted`() {
+        val src = """
+            my_custom_var: hello
+            another_one: world
+        """.trimIndent()
+        val tokens = tokenizeAnsible(src)
+        // Neither key is a known Ansible directive, so neither becomes a KEYWORD.
+        assertTrue(tokens.none { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "my_custom_var" })
+        assertTrue(tokens.none { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "another_one" })
+    }
+
+    @Test
+    fun `ansible keyword inside a string is not tokenized`() {
+        val src = """msg: "tasks are great""""
+        val tokens = tokenizeAnsible(src)
+        // The string subsumes the "tasks" inside it.
+        val tasksAsKeyword = tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "tasks" }
+        assertNull(tasksAsKeyword)
+    }
+
+    @Test
     fun `every token range is within text bounds and non-empty`() {
         val src = """
             // top

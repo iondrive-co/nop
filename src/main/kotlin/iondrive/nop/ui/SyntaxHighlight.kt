@@ -65,6 +65,8 @@ fun tokenizerForExtension(ext: String?): ((String) -> List<Token>)? = when (ext?
     "md", "markdown" -> ::tokenizeMarkdown
     "js", "mjs", "cjs", "ts", "tsx", "jsx" -> ::tokenizeJsTs
     "sh", "bash", "zsh" -> ::tokenizeShell
+    "yml", "yaml" -> ::tokenizeAnsible
+    "j2", "jinja", "jinja2" -> ::tokenizeAnsible
     else -> null
 }
 
@@ -226,6 +228,81 @@ fun tokenizeJsTs(text: String): List<Token> {
         val w = it.value
         if (w in JSTS_KEYWORDS) add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
     }
+    return out.sortedBy { it.start }
+}
+
+// ---------- Ansible / YAML ----------
+
+// Module + directive names that show up at the start of a task. Highlighting these gives the
+// "what does this play do" scan; the list isn't exhaustive but covers the modules that crop
+// up across most playbooks. Project-shaped vocabulary (custom modules, roles) is intentionally
+// left unhighlighted so the file stays readable.
+private val ANSIBLE_KEYWORDS = setOf(
+    // Play / task directives
+    "name", "hosts", "tasks", "handlers", "vars", "vars_files", "vars_prompt", "roles",
+    "pre_tasks", "post_tasks", "tags", "when", "register", "become", "become_user",
+    "become_method", "delegate_to", "delegate_facts", "run_once", "no_log", "ignore_errors",
+    "changed_when", "failed_when", "until", "retries", "delay", "loop", "with_items",
+    "with_dict", "with_fileglob", "with_lines", "with_subelements", "with_together",
+    "notify", "listen", "block", "rescue", "always", "any_errors_fatal", "max_fail_percentage",
+    "serial", "strategy", "gather_facts", "environment", "check_mode", "diff", "remote_user",
+    // Common modules
+    "command", "shell", "raw", "script", "copy", "template", "file", "lineinfile", "blockinfile",
+    "stat", "fetch", "synchronize", "unarchive", "git", "uri", "get_url", "package",
+    "apt", "apt_repository", "apt_key", "yum", "yum_repository", "dnf", "pip",
+    "service", "systemd", "user", "group", "mount", "cron", "find", "replace",
+    "set_fact", "debug", "fail", "assert", "wait_for", "wait_for_connection",
+    "include", "include_tasks", "import_tasks", "include_role", "import_role",
+    "include_playbook", "import_playbook", "include_vars",
+    "meta", "pause", "ping", "setup",
+    // Authentication / connection
+    "connection", "port", "ansible_host", "ansible_user", "ansible_port",
+)
+
+private val YAML_LINE_COMMENT = Regex("""(?m)#[^\n]*""")
+private val YAML_DOUBLE_STRING = Regex(""""(?:\\.|[^"\\\n])*"""")
+private val YAML_SINGLE_STRING = Regex("""'(?:''|[^'\n])*'""")
+// Jinja2 substitution / statement / comment forms. Highlighted as a unit so module args like
+// `path: "{{ var }}"` show the templated portion distinctly from the surrounding string.
+private val JINJA_BLOCK = Regex("""\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}""")
+// "key:" at line start, optionally after indentation and/or a list dash. The colon must be
+// followed by whitespace or end-of-line so bare colons inside values (URLs, etc.) don't form
+// keys. Indentation and dash live in non-capturing groups; group 1 is just the key name.
+private val YAML_KEY = Regex("""(?m)^\s*(?:-\s+)?([A-Za-z_][\w.-]*)(?=\s*:(?:\s|$))""")
+private val YAML_NUMBER = Regex("""(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w.])""")
+private val YAML_LITERAL_WORD = Regex("""(?<![\w])(?:true|false|yes|no|on|off|null|True|False|Yes|No|TRUE|FALSE|YES|NO|ON|OFF|NULL|Null|~)(?![\w])""")
+
+fun tokenizeAnsible(text: String): List<Token> {
+    val out = ArrayList<Token>()
+    val taken = BooleanArray(text.length)
+    fun overlap(start: Int, end: Int): Boolean {
+        for (i in start until end) if (taken[i]) return true
+        return false
+    }
+    fun add(start: Int, end: Int, kind: TokenKind) {
+        if (start >= end || overlap(start, end)) return
+        for (i in start until end) taken[i] = true
+        out += Token(start, end, kind)
+    }
+    // Order matters: comments and strings first, then Jinja inside what's left (so a `{{`
+    // inside a comment is part of the comment, but a `{{ var }}` in a double-quoted value
+    // would normally be swallowed by the string — we accept that to keep the lexer simple.
+    YAML_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
+    YAML_DOUBLE_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    YAML_SINGLE_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    JINJA_BLOCK.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.EMPHASIS) }
+
+    // Highlight the key portion when it names a known Ansible directive/module; the rest of the
+    // line is rendered as plain text so user-defined vars stay neutral.
+    YAML_KEY.findAll(text).forEach { m ->
+        val keyGroup = m.groups[1] ?: return@forEach
+        val name = keyGroup.value
+        if (name in ANSIBLE_KEYWORDS) {
+            add(keyGroup.range.first, keyGroup.range.last + 1, TokenKind.KEYWORD)
+        }
+    }
+    YAML_LITERAL_WORD.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
+    YAML_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     return out.sortedBy { it.start }
 }
 

@@ -21,6 +21,7 @@ import iondrive.nop.Settings
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.StashEntry
+import iondrive.nop.index.FileIndex
 import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.SymbolIndex
@@ -47,6 +48,7 @@ fun App(
     onPickRecent: (Path) -> Unit = {},
     onPickNew: () -> Unit = {},
     onToggleTheme: () -> Unit = {},
+    fileSearchTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -59,6 +61,9 @@ fun App(
     var refreshing by remember(projectPath) { mutableStateOf(false) }
     // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
     var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
+    // Whether the file-search popup is currently shown. Bumped open by the double-shift trigger
+    // passed in from Main; user closes it by Esc, click-outside, or picking a file.
+    var fileSearchOpen by remember(projectPath) { mutableStateOf(false) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -112,13 +117,22 @@ fun App(
     // then swap in the fresh version (and persist it) once the walk finishes. The index lives
     // under ~/.config/nop/projects/<slug>/ so the project tree stays free of derived files.
     var symbolIndex by remember(rootPath) { mutableStateOf(SymbolIndex()) }
+    var fileIndex by remember(rootPath) { mutableStateOf(FileIndex()) }
     LaunchedEffect(rootPath) {
         val indexFile = Settings.projectDataDir(rootPath).resolve("index.tsv")
-        val cached = withContext(Dispatchers.IO) { SymbolIndex.load(indexFile) }
-        if (cached.size > 0) symbolIndex = cached
-        val fresh = withContext(Dispatchers.IO) { Indexer.build(rootPath) }
-        symbolIndex = fresh
-        withContext(Dispatchers.IO) { SymbolIndex.save(indexFile, fresh) }
+        val filesIndexFile = Settings.projectDataDir(rootPath).resolve("files.txt")
+        val cachedSymbols = withContext(Dispatchers.IO) { SymbolIndex.load(indexFile) }
+        if (cachedSymbols.size > 0) symbolIndex = cachedSymbols
+        val cachedFiles = withContext(Dispatchers.IO) { FileIndex.load(filesIndexFile) }
+        if (cachedFiles.files.isNotEmpty()) fileIndex = cachedFiles
+        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath) }
+        symbolIndex = freshSymbols
+        val freshFiles = withContext(Dispatchers.IO) { FileIndex.build(rootPath) }
+        fileIndex = freshFiles
+        withContext(Dispatchers.IO) {
+            SymbolIndex.save(indexFile, freshSymbols)
+            FileIndex.save(filesIndexFile, freshFiles)
+        }
     }
     val launcherStore = remember(rootPath) { LauncherStore(rootPath) }
     var stored by remember(rootPath) { mutableStateOf<List<Launcher>>(emptyList()) }
@@ -142,6 +156,12 @@ fun App(
     }
 
     LaunchedEffect(repo) { reloadStatus() }
+
+    // Open the search popup whenever Main bumps the trigger (double-Shift). Skip the initial 0
+    // so the dialog doesn't pop on first composition.
+    LaunchedEffect(fileSearchTrigger) {
+        if (fileSearchTrigger > 0) fileSearchOpen = true
+    }
 
     // Close any open tabs that point at the given file or anything under it (when it's a dir).
     // Saves the user from typing into a buffer whose underlying file just got removed.
@@ -340,6 +360,18 @@ fun App(
                     pendingDelete = null
                 },
                 onCancel = { pendingDelete = null },
+            )
+        }
+
+        if (fileSearchOpen) {
+            FileSearchDialog(
+                files = fileIndex.files,
+                onPick = { relPath ->
+                    fileSearchOpen = false
+                    val absolute = File(rootPath.toFile(), relPath)
+                    if (absolute.isFile) tabsState.open(Tab.FileView(absolute))
+                },
+                onDismiss = { fileSearchOpen = false },
             )
         }
     }
