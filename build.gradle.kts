@@ -81,6 +81,12 @@ compose.desktop {
             windows {
                 packageVersion = "1.0.0"
                 msiPackageVersion = "1.0.0"
+                menuGroup = "nop"
+                shortcut = true
+                // Stable UUID lets future MSIs upgrade this install in place instead of
+                // appearing as a separate "nop" entry in Add/Remove Programs. Generated once
+                // with `uuidgen` — never change it for an existing product line.
+                upgradeUuid = "5a7e1f2b-9c4d-4a3e-8b1f-2d6c4b1a9e07"
             }
         }
     }
