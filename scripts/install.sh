@@ -3,7 +3,7 @@
 #
 # Linux: runs `./gradlew createDistributable installDesktopEntry`, which builds the
 # distributable under build/compose/binaries/main/app/nop and writes a .desktop file
-# at ~/.local/share/applications/io.iondrive.nop.desktop. After this completes, "nop"
+# at ~/.local/share/applications/iondrive.nop.desktop. After this completes, "nop"
 # should show up in the application menu under Development. Re-running rebuilds in
 # place — the menu entry keeps pointing at the same binary path.
 #

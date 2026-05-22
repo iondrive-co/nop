@@ -23,6 +23,6 @@ Select a file or directory in the tree, then:
 - `H` — open a tab showing its git history
 
 <!-- screenshot -->
-![nop screenshot](docs/screenshots/latest.png)
-*Captured 2026-05-22 01:39:21*
+![Diff view](docs/screenshots/latest-diff.png)
+![README preview](docs/screenshots/latest-preview.png)
 <!-- screenshot -->

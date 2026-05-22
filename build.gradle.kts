@@ -24,6 +24,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
     // Used only via the JsonElement API to parse package.json — no compiler plugin needed.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.commonmark:commonmark:0.24.0")
+    implementation("org.commonmark:commonmark-ext-gfm-tables:0.24.0")
+    implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.24.0")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
@@ -36,7 +39,7 @@ tasks.test {
 
 compose.desktop {
     application {
-        mainClass = "io.iondrive.nop.MainKt"
+        mainClass = "iondrive.nop.MainKt"
         javaHome = javaToolchains.launcherFor {
             languageVersion = JavaLanguageVersion.of(21)
         }.get().metadata.installationPath.asFile.absolutePath
@@ -76,12 +79,12 @@ compose.desktop {
 // Inputs/outputs are declared so `./gradlew --continuous installDesktopEntry` re-runs on edits.
 tasks.register("installDesktopEntry") {
     group = "distribution"
-    description = "Write ~/.local/share/applications/io.iondrive.nop.desktop pointing at the local distributable"
+    description = "Write ~/.local/share/applications/iondrive.nop.desktop pointing at the local distributable"
     dependsOn("createDistributable")
 
     val distDir = layout.buildDirectory.dir("compose/binaries/main/app/nop")
     val home = System.getProperty("user.home")
-    val desktopFile = file("$home/.local/share/applications/io.iondrive.nop.desktop")
+    val desktopFile = file("$home/.local/share/applications/iondrive.nop.desktop")
 
     inputs.dir(distDir)
     outputs.file(desktopFile)
