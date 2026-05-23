@@ -31,8 +31,10 @@ class LauncherRun(val launcher: Launcher, val workingDir: File) {
         output = ""
         exitCode = null
 
-        // Use a shell so the user can write pipes / chained commands naturally.
-        val pb = ProcessBuilder("sh", "-c", launcher.command)
+        // Use a shell so the user can write pipes / chained commands naturally. On Windows that
+        // also lets us find PATH-resolved `.cmd`/`.bat` shims (npm, pnpm, yarn) which a bare
+        // ProcessBuilder won't pick up.
+        val pb = ProcessBuilder(shellInvocation(launcher.command))
             .directory(workingDir)
             .redirectErrorStream(true)
         val proc = try {
@@ -75,3 +77,10 @@ class LauncherRun(val launcher: Launcher, val workingDir: File) {
         }
     }
 }
+
+private val isWindows: Boolean =
+    System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")
+
+private fun shellInvocation(command: String): List<String> =
+    if (isWindows) listOf("cmd.exe", "/c", command) else listOf("sh", "-c", command)
+
