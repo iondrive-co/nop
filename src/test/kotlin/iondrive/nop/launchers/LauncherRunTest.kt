@@ -56,6 +56,19 @@ class LauncherRunTest {
         assertNotEquals(0, run.exitCode)
     }
 
+    @Test
+    fun `ANSI color escapes are stripped from output`(@TempDir tmp: Path) {
+        // printf interprets backslash escapes so we get a real ESC byte (\033) in stdout —
+        // exactly what tools like vite/chalk emit when they think they're talking to a tty.
+        val run = LauncherRun(Launcher("ansi", """printf '\033[32mGREEN\033[0m\n'"""), tmp.toFile())
+        run.start()
+        waitForExit(run)
+
+        assertEquals(0, run.exitCode)
+        assertTrue("GREEN" in run.output) { "expected payload preserved, got: ${run.output}" }
+        assertTrue(Char(0x1B) !in run.output) { "expected ESC stripped, got bytes: ${run.output.map { it.code }}" }
+    }
+
     private fun waitForExit(run: LauncherRun, timeoutMs: Long = 5_000) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (run.exitCode == null && System.currentTimeMillis() < deadline) {

@@ -72,7 +72,7 @@ class LauncherRun(val launcher: Launcher, val workingDir: File) {
 
     private fun append(text: String) {
         synchronized(outputBuilder) {
-            outputBuilder.append(text)
+            outputBuilder.append(stripAnsi(text))
             output = outputBuilder.toString()
         }
     }
@@ -84,3 +84,15 @@ private val isWindows: Boolean =
 private fun shellInvocation(command: String): List<String> =
     if (isWindows) listOf("cmd.exe", "/c", command) else listOf("sh", "-c", command)
 
+// Vite, npm, and friends emit ANSI colour/cursor sequences even when stdout is a pipe.
+// Compose's Text renders the raw ESC byte as a visible `<symbol-for-escape>` glyph, so strip
+// the sequences before they reach the buffer. Covers CSI (colours/cursor), OSC (terminal
+// title), and the short Fe escapes — enough for the tools that actually show up in launcher
+// output. ESC and BEL are built at runtime via Char(...) so the source stays plain ASCII.
+private val ansiRegex = run {
+    val esc = Char(0x1B)
+    val bel = Char(0x07)
+    Regex("$esc(?:\\[[0-?]*[ -/]*[@-~]|\\][^$bel]*$bel|[@-_])")
+}
+
+private fun stripAnsi(text: String): String = ansiRegex.replace(text, "")
