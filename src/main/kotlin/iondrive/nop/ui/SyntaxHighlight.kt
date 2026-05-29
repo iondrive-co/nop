@@ -61,6 +61,7 @@ data class HighlightPalette(
 /** Pick a tokenizer from a file extension. `null` means "no highlighting — render plain". */
 fun tokenizerForExtension(ext: String?): ((String) -> List<Token>)? = when (ext?.lowercase()) {
     "kt", "kts" -> ::tokenizeKotlin
+    "go" -> ::tokenizeGo
     "json" -> ::tokenizeJson
     "md", "markdown" -> ::tokenizeMarkdown
     "js", "mjs", "cjs", "ts", "tsx", "jsx" -> ::tokenizeJsTs
@@ -339,6 +340,66 @@ fun tokenizeShell(text: String): List<Token> {
     IDENT.findAll(text).forEach {
         val w = it.value
         if (w in SHELL_KEYWORDS) add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+    }
+    return out.sortedBy { it.start }
+}
+
+// ---------- Go ----------
+
+// The 25 reserved words, plus the predeclared types and builtin functions. Like the JS/TS
+// lexer (which colours `boolean`/`number`/etc.), folding the predeclared vocabulary into the
+// keyword set gives the at-a-glance "what's a type, what's a call" read without a full parser.
+private val GO_KEYWORDS = setOf(
+    // Reserved words
+    "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
+    "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
+    "return", "select", "struct", "switch", "type", "var",
+    // Predeclared types
+    "bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8",
+    "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64",
+    "uintptr", "any", "comparable",
+    // Builtin functions
+    "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make",
+    "max", "min", "new", "panic", "print", "println", "real", "recover",
+)
+
+// Predeclared constants. Coloured as literals (like JSON's true/false/null) rather than keywords.
+private val GO_LITERAL = Regex("""\b(?:true|false|nil|iota)\b""")
+// Raw string literals are backtick-delimited, span lines, and contain no escapes — a backslash
+// is just a backslash, so (unlike the JS template regex) we match everything up to the next `.
+private val GO_RAW_STRING = Regex("""`[^`]*`""")
+// A rune literal holds a single character or escape. The reluctant body stops at the first
+// closing quote so `'a' + 'b'` is two runes, while `'\n'` and `'ÿ'` stay whole.
+private val GO_RUNE = Regex("""'(?:\\[^\n]|[^'\\\n])*?'""")
+// Hex (incl. p-exponent hex floats), binary, octal (0o), and decimal/float forms, each with an
+// optional imaginary `i` suffix and `_` digit separators.
+private val GO_NUMBER = Regex(
+    """\b(?:0[xX][0-9a-fA-F_]+(?:\.[0-9a-fA-F_]*)?(?:[pP][+-]?\d+)?|0[bB][01_]+|0[oO][0-7_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)i?\b""",
+)
+
+fun tokenizeGo(text: String): List<Token> {
+    val out = ArrayList<Token>()
+    val taken = BooleanArray(text.length)
+    fun overlap(start: Int, end: Int): Boolean {
+        for (i in start until end) if (taken[i]) return true
+        return false
+    }
+    fun add(start: Int, end: Int, kind: TokenKind) {
+        if (start >= end || overlap(start, end)) return
+        for (i in start until end) taken[i] = true
+        out += Token(start, end, kind)
+    }
+    // Comments and strings first — they swallow keywords/numbers inside.
+    KOTLIN_BLOCK_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
+    KOTLIN_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
+    GO_RAW_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    KOTLIN_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    GO_RUNE.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    GO_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
+    GO_LITERAL.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
+    IDENT.findAll(text).forEach {
+        val w = it.value
+        if (w in GO_KEYWORDS) add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
     }
     return out.sortedBy { it.start }
 }

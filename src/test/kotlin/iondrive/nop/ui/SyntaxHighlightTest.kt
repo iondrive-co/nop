@@ -187,6 +187,63 @@ class SyntaxHighlightTest {
     }
 
     @Test
+    fun `go extension picks go tokenizer`() {
+        assertNotNull(tokenizerForExtension("go"))
+        assertNotNull(tokenizerForExtension("GO"))
+    }
+
+    @Test
+    fun `go lexer highlights keywords types strings numbers and comments`() {
+        val src = """
+            // pkg
+            package main
+
+            import "fmt"
+
+            func add(a int, b int) int {
+                s := "sum"
+                return a + b // 0x2A
+            }
+        """.trimIndent()
+        val tokens = tokenizeGo(src)
+        assertTrue(tokens.containsExact(src, "// pkg", TokenKind.COMMENT))
+        assertTrue(tokens.containsExact(src, "package", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "import", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "func", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "return", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "int", TokenKind.KEYWORD), "predeclared type int is a keyword")
+        assertTrue(tokens.containsExact(src, "\"fmt\"", TokenKind.STRING))
+        assertTrue(tokens.containsExact(src, "\"sum\"", TokenKind.STRING))
+        // The hex constant appears only inside the trailing comment, so it must NOT be a number.
+        assertNull(tokens.find { it.kind == TokenKind.NUMBER && src.substring(it.start, it.endExclusive) == "0x2A" })
+    }
+
+    @Test
+    fun `go lexer highlights raw strings runes literals and numeric forms`() {
+        val src = "var r = `raw \\n stays` ; c := 'x' ; n := 0xFF + 0b1010 + 3.14 + 1_000 ; ok := nil"
+        val tokens = tokenizeGo(src)
+        assertTrue(tokens.containsExact(src, "`raw \\n stays`", TokenKind.STRING), "backtick raw string is one STRING")
+        assertTrue(tokens.containsExact(src, "'x'", TokenKind.STRING), "rune literal is a STRING")
+        assertTrue(tokens.containsExact(src, "0xFF", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "0b1010", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "3.14", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "1_000", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "nil", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "var", TokenKind.KEYWORD))
+    }
+
+    @Test
+    fun `go keyword inside string is not tokenized`() {
+        val src = "s := \"func is a keyword\""
+        val tokens = tokenizeGo(src)
+        assertNull(
+            tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "func" },
+            "string-internal 'func' should not be highlighted as keyword",
+        )
+        assertTrue(tokens.containsExact(src, "\"func is a keyword\"", TokenKind.STRING))
+    }
+
+    @Test
     fun `every token range is within text bounds and non-empty`() {
         val src = """
             // top
