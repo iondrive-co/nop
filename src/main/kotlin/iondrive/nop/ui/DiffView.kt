@@ -147,6 +147,14 @@ fun DiffView(
                 }
             }
             headText = head
+            // The working side renders the shared edit buffer, which is cached for the whole session
+            // and reused across tab close/reopen. If the file changed on disk since the buffer was last
+            // loaded (external editor, branch switch, agent), reload it so reopening the diff doesn't
+            // show a stale snapshot. A modified buffer is left alone — unsaved in-app edits win.
+            if (edit != null) {
+                val diskText = withContext(Dispatchers.IO) { edit.diskTextIfDivergedAndClean() }
+                if (diskText != null && !edit.isModified) edit.adoptDiskText(diskText)
+            }
             val workingNow = when (tab.change.kind) {
                 ChangeKind.REMOVED, ChangeKind.MISSING -> ""
                 else -> edit?.state?.text?.toString() ?: ""

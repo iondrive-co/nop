@@ -95,8 +95,28 @@ fun App(
             .collectLatest { (h, v) -> Settings.saveSplitRatios(h, v) }
     }
 
+    // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
+    // disk once and then cached for the whole session, so a file changed outside nop (another editor,
+    // a branch switch, a pull, an agent) would otherwise render frozen until restart — refresh and
+    // reopening the tab both reuse the same buffer. Only buffers with no unsaved in-app edits are
+    // reloaded; a dirty buffer's pending work always wins until it's saved. Disk reads run off the UI
+    // thread; the buffer writes run on it.
+    suspend fun reconcileEdits() {
+        val openEdits = editStore.snapshot()
+        if (openEdits.isEmpty()) return
+        val updates = withContext(Dispatchers.IO) {
+            openEdits.mapNotNull { edit -> edit.diskTextIfDivergedAndClean()?.let { edit to it } }
+        }
+        for ((edit, diskText) in updates) {
+            // Re-check on the UI thread: the user may have started typing in the gap between the disk
+            // read and here, in which case their unsaved edits take precedence over the disk copy.
+            if (!edit.isModified) edit.adoptDiskText(diskText)
+        }
+    }
+
     suspend fun reloadStatus() {
         if (repo != null) {
+            reconcileEdits()
             val fresh = withContext(Dispatchers.IO) { repo.loadStatus() }
             val freshStashes = withContext(Dispatchers.IO) {
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
@@ -129,6 +149,9 @@ fun App(
     // also stands down while a commit/stash/manual-refresh is in flight so it can't clobber them.
     suspend fun pollStatus() {
         if (repo == null || commitInFlight || stashInFlight || refreshing) return
+        // Reconcile before the git-state check below: an external edit to an already-modified file
+        // leaves its git status unchanged, so the early return there would otherwise skip the reload.
+        reconcileEdits()
         val fresh = withContext(Dispatchers.IO) { runCatching { repo.loadStatus() }.getOrNull() } ?: return
         val freshStashes = withContext(Dispatchers.IO) { runCatching { repo.stashList() }.getOrDefault(stashes) }
         if (fresh == status && freshStashes == stashes) return
