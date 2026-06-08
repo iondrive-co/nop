@@ -1,6 +1,7 @@
 package iondrive.nop.git
 
 import org.eclipse.jgit.api.Git
+import org.eclipse.jgit.api.ResetCommand
 import org.eclipse.jgit.diff.DiffEntry
 import org.eclipse.jgit.diff.DiffFormatter
 import org.eclipse.jgit.lib.Repository
@@ -33,6 +34,35 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         val commit = git.commit().setMessage(message).call()
         return commit.name
     }
+
+    /**
+     * Soft-resets the current branch back one commit (`git reset --soft HEAD~1`). The last commit
+     * is removed from the branch tip, but its changes stay staged in the index and working tree, so
+     * they reappear as pending changes ready to be amended and re-committed. Returns false (and does
+     * nothing) when HEAD has no parent — a single root commit or an unborn branch can't go back a
+     * revision.
+     */
+    fun softResetHead(): Boolean {
+        val parent = repository.resolve("HEAD~1") ?: return false
+        git.reset().setMode(ResetCommand.ResetType.SOFT).setRef(parent.name).call()
+        return true
+    }
+
+    /** True when HEAD has a parent commit, i.e. [softResetHead] can move back a revision. */
+    fun canSoftResetHead(): Boolean = repository.resolve("HEAD~1") != null
+
+    /**
+     * The most recent commit messages (full bodies, trimmed), newest first and de-duplicated, for
+     * offering as reusable commit messages. Walks at most [limit] commits. Returns empty for an
+     * unborn branch with no commits yet.
+     */
+    fun recentCommitMessages(limit: Int = 20): List<String> =
+        runCatching {
+            git.log().setMaxCount(limit).call()
+                .map { it.fullMessage.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+        }.getOrDefault(emptyList())
 
     /**
      * Stash all uncommitted changes (including untracked) to the shelf.

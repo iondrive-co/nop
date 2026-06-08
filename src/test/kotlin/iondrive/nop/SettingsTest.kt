@@ -211,6 +211,27 @@ class SettingsTest {
     }
 
     @Test
+    fun `recent commit messages return empty when nothing saved`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        assertTrue(Settings.loadRecentCommitMessages(project).isEmpty())
+    }
+
+    @Test
+    fun `recent commit messages round-trip per project preserving order and multi-line bodies`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        // Messages with embedded spaces and newlines must survive the NUL-delimited round-trip intact.
+        val messagesA = listOf("Fix the bug", "Add feature\n\nWith a longer body line", "Tweak things")
+        Settings.saveRecentCommitMessages(a, messagesA)
+        Settings.saveRecentCommitMessages(b, listOf("Other project message"))
+
+        assertEquals(messagesA, Settings.loadRecentCommitMessages(a))
+        assertEquals(listOf("Other project message"), Settings.loadRecentCommitMessages(b))
+    }
+
+    @Test
     fun `saving recent projects does not clobber open projects or window geometry`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }

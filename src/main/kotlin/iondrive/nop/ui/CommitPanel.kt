@@ -2,6 +2,7 @@ package iondrive.nop.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
@@ -16,32 +17,45 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.StashEntry
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
+import org.jetbrains.jewel.ui.component.Tooltip
 import java.awt.Cursor
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalJewelApi::class)
 @Composable
 fun CommitPanel(
     status: GitStatus,
@@ -59,6 +73,10 @@ fun CommitPanel(
     stashInFlight: Boolean = false,
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    messageHistory: List<String> = emptyList(),
+    canSoftReset: Boolean = false,
+    resetInFlight: Boolean = false,
+    onSoftReset: () -> Unit = {},
 ) {
     val messageState = remember { TextFieldState() }
     val inRepo = status.branch != null
@@ -77,12 +95,29 @@ fun CommitPanel(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(header, modifier = Modifier.weight(1f))
+            if (inRepo) {
+                Tooltip(tooltip = { Text("Undo the last commit, keeping its changes (git reset --soft HEAD~1)") }) {
+                    OutlinedButton(
+                        onClick = onSoftReset,
+                        enabled = canSoftReset && !resetInFlight && !commitInFlight,
+                    ) {
+                        Text(if (resetInFlight) "Resetting…" else "Soft reset")
+                    }
+                }
+            }
             OutlinedButton(onClick = onRefresh, enabled = !refreshing) {
                 Text(if (refreshing) "Refreshing…" else "Refresh")
             }
         }
 
         if (inRepo && anyChanges) {
+            if (messageHistory.isNotEmpty()) {
+                RecentMessagesDropdown(
+                    messages = messageHistory,
+                    onPick = { messageState.setText(it) },
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().height(messageHeight),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -158,6 +193,10 @@ private fun TextFieldState.clearText() {
     edit { replace(0, length, "") }
 }
 
+private fun TextFieldState.setText(text: String) {
+    edit { replace(0, length, text) }
+}
+
 internal val MIN_MESSAGE_HEIGHT = 40.dp
 internal val MAX_MESSAGE_HEIGHT = 600.dp
 internal val DEFAULT_MESSAGE_HEIGHT = 64.dp
@@ -180,6 +219,72 @@ private fun MessageResizeHandle(onDelta: (Float) -> Unit) {
                 startDragImmediately = true,
             )
     )
+}
+
+/**
+ * "Recent messages ▾" button that opens a popup of previously used commit messages. Picking one
+ * fills the message field via [onPick]. Each row shows the message's first non-blank line, trimmed
+ * to one line so multi-line bodies stay scannable.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecentMessagesDropdown(
+    messages: List<String>,
+    onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        OutlinedButton(onClick = { expanded = !expanded }) {
+            Text("Recent messages ▾")
+        }
+        if (expanded) {
+            Popup(
+                onDismissRequest = { expanded = false },
+                offset = IntOffset(0, 32),
+                properties = PopupProperties(focusable = true),
+            ) {
+                val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
+                val bg = JewelTheme.globalColors.panelBackground
+                Column(
+                    modifier = Modifier
+                        .width(460.dp)
+                        .heightIn(max = 280.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(bg)
+                        .border(1.dp, border, RoundedCornerShape(6.dp))
+                        .padding(vertical = 4.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    for (msg in messages) {
+                        MessageRow(
+                            message = msg,
+                            onClick = {
+                                expanded = false
+                                onPick(msg)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageRow(message: String, onClick: () -> Unit) {
+    val firstLine = message.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: message
+    // Truncate so a long subject line can't blow out the popup width or wrap onto two lines.
+    val label = if (firstLine.length > 80) firstLine.take(79) + "…" else firstLine
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(label)
+    }
 }
 
 @Composable

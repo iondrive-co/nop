@@ -202,6 +202,29 @@ object Settings {
     }
 
     /**
+     * Recently used commit messages for this project, newest first, for the reuse dropdown.
+     * Persisted NUL-separated rather than line-delimited so multi-line messages survive a
+     * round-trip intact.
+     */
+    fun loadRecentCommitMessages(projectPath: Path): List<String> {
+        val f = projectDataDir(projectPath).resolve("commit-messages")
+        if (!Files.isRegularFile(f)) return emptyList()
+        return runCatching { Files.readString(f) }.getOrNull()
+            ?.split('\u0000')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+    }
+
+    fun saveRecentCommitMessages(projectPath: Path, messages: List<String>) {
+        val f = projectDataDir(projectPath).resolve("commit-messages")
+        runCatching {
+            Files.createDirectories(f.parent)
+            Files.writeString(f, messages.joinToString("\u0000"))
+        }
+    }
+
+    /**
      * Per-project scratch directory under the nop config root. Used for derived data we don't
      * want to spray into the project itself — currently just the symbol index. Two projects
      * with the same final path segment (e.g. two `frontend/` checkouts) get separate dirs

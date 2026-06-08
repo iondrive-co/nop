@@ -49,6 +49,9 @@ import java.nio.file.Path
 // switches, or external git commands show up without hitting Refresh.
 private const val GIT_POLL_INTERVAL_MS = 3_000L
 
+// How many recent commit messages to remember per project for the reuse dropdown.
+private const val COMMIT_MESSAGE_HISTORY_CAP = 20
+
 @OptIn(FlowPreview::class)
 @Composable
 fun App(
@@ -70,6 +73,9 @@ fun App(
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
     var stashInFlight by remember(projectPath) { mutableStateOf(false) }
     var refreshing by remember(projectPath) { mutableStateOf(false) }
+    // Whether HEAD has a parent to soft-reset back onto, and whether a soft reset is in flight.
+    var canSoftReset by remember(projectPath) { mutableStateOf(false) }
+    var resetInFlight by remember(projectPath) { mutableStateOf(false) }
     // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
     var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
     // Whether the file-search popup is currently shown. Bumped open by the double-shift trigger
@@ -123,6 +129,9 @@ fun App(
             }
             status = fresh
             stashes = freshStashes
+            canSoftReset = withContext(Dispatchers.IO) {
+                runCatching { repo.canSoftResetHead() }.getOrDefault(false)
+            }
             // Default-select every change after a reload
             selectedPaths = fresh.changes.map { it.path }.toSet()
             // A status reload usually means files appeared / disappeared too (commit, stash, pop)
@@ -264,6 +273,22 @@ fun App(
             .collectLatest { h ->
                 withContext(Dispatchers.IO) { Settings.saveCommitMessageHeight(rootPath, h.value) }
             }
+    }
+
+    // Recently used commit messages, offered in a reuse dropdown above the message field. Loaded
+    // from disk, then merged with the repo's git log on open so the dropdown is useful immediately
+    // and picks up commits made outside nop. Persisting our own copy (rather than reading git log
+    // live) means a message survives a soft reset of the very commit you might want to reuse.
+    var recentMessages by remember(rootPath) { mutableStateOf(Settings.loadRecentCommitMessages(rootPath)) }
+    LaunchedEffect(rootPath, repo) {
+        if (repo != null) {
+            val log = withContext(Dispatchers.IO) { repo.recentCommitMessages() }
+            val merged = (recentMessages + log).distinct().take(COMMIT_MESSAGE_HISTORY_CAP)
+            if (merged != recentMessages) {
+                recentMessages = merged
+                withContext(Dispatchers.IO) { Settings.saveRecentCommitMessages(rootPath, merged) }
+            }
+        }
     }
 
     // Tab-strip persistence: restore on project open, then debounce-save on every change. Saved
@@ -429,6 +454,13 @@ fun App(
                                                             withContext(Dispatchers.IO) {
                                                                 repo.stageAndCommit(message, included)
                                                             }
+                                                            // Remember the message for reuse, newest first.
+                                                            val nextMessages = (listOf(message) + recentMessages)
+                                                                .distinct().take(COMMIT_MESSAGE_HISTORY_CAP)
+                                                            recentMessages = nextMessages
+                                                            withContext(Dispatchers.IO) {
+                                                                Settings.saveRecentCommitMessages(rootPath, nextMessages)
+                                                            }
                                                             reloadStatus()
                                                         }
                                                     } finally {
@@ -484,6 +516,24 @@ fun App(
                                         stashInFlight = stashInFlight,
                                         refreshing = refreshing,
                                         onRefresh = ::refresh,
+                                        messageHistory = recentMessages,
+                                        canSoftReset = canSoftReset,
+                                        resetInFlight = resetInFlight,
+                                        onSoftReset = {
+                                            if (repo != null && !resetInFlight && !commitInFlight) {
+                                                scope.launch {
+                                                    resetInFlight = true
+                                                    try {
+                                                        val ok = withContext(Dispatchers.IO) {
+                                                            runCatching { repo.softResetHead() }.getOrDefault(false)
+                                                        }
+                                                        if (ok) reloadStatus()
+                                                    } finally {
+                                                        resetInFlight = false
+                                                    }
+                                                }
+                                            }
+                                        },
                                     )
                                 },
                                 search = {
