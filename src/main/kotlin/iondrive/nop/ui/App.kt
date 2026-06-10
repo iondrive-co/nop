@@ -275,10 +275,11 @@ fun App(
             }
     }
 
-    // Recently used commit messages, offered in a reuse dropdown above the message field. Loaded
-    // from disk, then merged with the repo's git log on open so the dropdown is useful immediately
-    // and picks up commits made outside nop. Persisting our own copy (rather than reading git log
-    // live) means a message survives a soft reset of the very commit you might want to reuse.
+    // Recently used commit (and stash) messages, offered in a reuse dropdown above the message
+    // field. Loaded from disk, then merged with the repo's git log on open so the dropdown is
+    // useful immediately and picks up commits made outside nop. Persisting our own copy (rather
+    // than reading git log live) means a message survives a soft reset of the very commit you
+    // might want to reuse, and outlives the stash it described once that stash is popped.
     var recentMessages by remember(rootPath) { mutableStateOf(Settings.loadRecentCommitMessages(rootPath)) }
     LaunchedEffect(rootPath, repo) {
         if (repo != null) {
@@ -289,6 +290,13 @@ fun App(
                 withContext(Dispatchers.IO) { Settings.saveRecentCommitMessages(rootPath, merged) }
             }
         }
+    }
+    // Record a just-used message (from a commit or a stash) at the top of the reuse list, deduped.
+    suspend fun rememberMessage(message: String) {
+        if (message.isBlank()) return
+        val next = (listOf(message) + recentMessages).distinct().take(COMMIT_MESSAGE_HISTORY_CAP)
+        recentMessages = next
+        withContext(Dispatchers.IO) { Settings.saveRecentCommitMessages(rootPath, next) }
     }
 
     // Tab-strip persistence: restore on project open, then debounce-save on every change. Saved
@@ -454,13 +462,7 @@ fun App(
                                                             withContext(Dispatchers.IO) {
                                                                 repo.stageAndCommit(message, included)
                                                             }
-                                                            // Remember the message for reuse, newest first.
-                                                            val nextMessages = (listOf(message) + recentMessages)
-                                                                .distinct().take(COMMIT_MESSAGE_HISTORY_CAP)
-                                                            recentMessages = nextMessages
-                                                            withContext(Dispatchers.IO) {
-                                                                Settings.saveRecentCommitMessages(rootPath, nextMessages)
-                                                            }
+                                                            rememberMessage(message)
                                                             reloadStatus()
                                                         }
                                                     } finally {
@@ -477,6 +479,7 @@ fun App(
                                                         withContext(Dispatchers.IO) {
                                                             repo.stashCreate(message.ifBlank { null })
                                                         }
+                                                        rememberMessage(message)
                                                         reloadStatus()
                                                     } finally {
                                                         stashInFlight = false
@@ -516,7 +519,14 @@ fun App(
                                         stashInFlight = stashInFlight,
                                         refreshing = refreshing,
                                         onRefresh = ::refresh,
-                                        messageHistory = recentMessages,
+                                        // Reuse list = remembered commit/stash messages plus the
+                                        // descriptions of stashes currently on the shelf (so externally
+                                        // created or pre-existing stashes show up too). "(no message)"
+                                        // is GitRepo.stashList's placeholder for an empty stash desc.
+                                        messageHistory = (recentMessages + stashes.map { it.message })
+                                            .filter { it.isNotBlank() && it != "(no message)" }
+                                            .distinct()
+                                            .take(COMMIT_MESSAGE_HISTORY_CAP),
                                         canSoftReset = canSoftReset,
                                         resetInFlight = resetInFlight,
                                         onSoftReset = {
