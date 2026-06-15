@@ -92,6 +92,21 @@ class TabsState {
         }
     }
 
+    /**
+     * Closes every tab except [keepId], which becomes the selected tab. Returns the removed tabs so
+     * the caller can run per-tab cleanup (flush edits, stop launcher processes). No-op returning an
+     * empty list if [keepId] isn't currently open.
+     */
+    fun closeOthers(keepId: String): List<Tab> {
+        val keep = _tabs.firstOrNull { it.id == keepId } ?: return emptyList()
+        val removed = _tabs.filter { it.id != keepId }
+        _tabs.clear()
+        _tabs.add(keep)
+        removed.forEach { pendingJumpLines.remove(it.id) }
+        selectedId = keep.id
+        return removed
+    }
+
     fun select(id: String) {
         if (_tabs.any { it.id == id }) selectedId = id
     }

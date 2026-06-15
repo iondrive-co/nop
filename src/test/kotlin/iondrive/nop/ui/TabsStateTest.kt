@@ -57,6 +57,48 @@ class TabsStateTest {
     }
 
     @Test
+    fun `closeOthers keeps only the given tab and selects it`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        val c = fileTab("/x/c.txt")
+        s.open(a); s.open(b); s.open(c)
+
+        val removed = s.closeOthers(b.id)
+
+        assertEquals(listOf(b), s.tabs)
+        assertEquals(b.id, s.selectedId)
+        assertEquals(listOf(a, c), removed)
+    }
+
+    @Test
+    fun `closeOthers on a single tab is a no-op`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+
+        val removed = s.closeOthers(a.id)
+
+        assertEquals(listOf(a), s.tabs)
+        assertEquals(a.id, s.selectedId)
+        assertEquals(emptyList<Tab>(), removed)
+    }
+
+    @Test
+    fun `closeOthers with an unknown id leaves tabs untouched`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        s.open(a); s.open(b)
+
+        val removed = s.closeOthers("nope")
+
+        assertEquals(listOf(a, b), s.tabs)
+        assertEquals(b.id, s.selectedId)
+        assertEquals(emptyList<Tab>(), removed)
+    }
+
+    @Test
     fun `select changes selection only if id exists`() {
         val s = TabsState()
         val a = fileTab("/x/a.txt")

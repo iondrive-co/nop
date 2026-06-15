@@ -1,5 +1,7 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -107,15 +109,36 @@ fun TabbedViewerPanel(
         return
     }
 
+    // Closing a tab also flushes its edit buffer and stops any launcher process behind it. Shared
+    // by the close button (onClose) and the "Close Other Tabs" context-menu action so both paths
+    // tear a tab down the same way.
+    fun cleanUp(tab: Tab) {
+        editStore.close(tab.id)
+        if (tab is Tab.LauncherOutput) tab.run.stop()
+    }
+
     val tabData = tabsState.tabs.map { tab ->
         val label = labelFor(tab, editStore)
         TabData.Editor(
             selected = tab.id == tabsState.selectedId,
-            content = { state -> SimpleTabContent(label = label, state = state) },
+            content = { state ->
+                ContextMenuArea(
+                    items = {
+                        if (tabsState.tabs.size > 1) {
+                            listOf(ContextMenuItem("Close Other Tabs") {
+                                tabsState.closeOthers(tab.id).forEach(::cleanUp)
+                            })
+                        } else {
+                            emptyList()
+                        }
+                    },
+                ) {
+                    SimpleTabContent(label = label, state = state)
+                }
+            },
             onClick = { tabsState.select(tab.id) },
             onClose = {
-                editStore.close(tab.id)
-                if (tab is Tab.LauncherOutput) tab.run.stop()
+                cleanUp(tab)
                 tabsState.close(tab.id)
             },
         )
