@@ -180,24 +180,39 @@ fun App(
     // under ~/.config/nop/projects/<slug>/ so the project tree stays free of derived files.
     var symbolIndex by remember(rootPath) { mutableStateOf(SymbolIndex()) }
     var fileIndex by remember(rootPath) { mutableStateOf(FileIndex()) }
-    LaunchedEffect(rootPath) {
+    // Seed the on-disk cache into memory only once per project; later re-runs (driven by
+    // fsRefreshKey) already hold the index and shouldn't re-read a cache that can be large.
+    var indexCacheSeeded by remember(rootPath) { mutableStateOf(false) }
+    // Re-key on fsRefreshKey so files added/removed while nop stays open show up in the
+    // double-shift search and jump-to-source. fsRefreshKey bumps on manual Refresh and whenever
+    // the git poll sees the working tree change (e.g. a new untracked file) — exactly the moments
+    // the index can go out of date. The staleness probe below gates the actual rebuild, so an
+    // unchanged tree pays only a stat-only walk per refresh, not a full re-read of every file.
+    LaunchedEffect(rootPath, fsRefreshKey) {
         val indexFile = Settings.projectDataDir(rootPath).resolve("index.tsv")
         val filesIndexFile = Settings.projectDataDir(rootPath).resolve("files.txt")
-        val cachedSymbols = withContext(Dispatchers.IO) { SymbolIndex.load(indexFile) }
-        if (cachedSymbols.size > 0) symbolIndex = cachedSymbols
-        val cachedFiles = withContext(Dispatchers.IO) { FileIndex.load(filesIndexFile) }
-        if (cachedFiles.files.isNotEmpty()) fileIndex = cachedFiles
+        if (!indexCacheSeeded) {
+            val cachedSymbols = withContext(Dispatchers.IO) { SymbolIndex.load(indexFile) }
+            if (cachedSymbols.size > 0) symbolIndex = cachedSymbols
+            val cachedFiles = withContext(Dispatchers.IO) { FileIndex.load(filesIndexFile) }
+            if (cachedFiles.files.isNotEmpty()) fileIndex = cachedFiles
+            // Set only after the load completes: if a refresh cancels this effect mid-seed, the
+            // relaunch should re-seed rather than skip with a half-loaded index.
+            indexCacheSeeded = true
+        }
 
         // Skip the full rebuild (walk + read + regex every file) when the on-disk cache is still
         // fresh — i.e. nothing under the project changed since the cache was written. The
         // freshness probe is a stat-only walk, far cheaper than a rebuild, so a project that
-        // hasn't changed since last open pays almost nothing on startup.
-        val cacheReady = cachedSymbols.size > 0 && cachedFiles.files.isNotEmpty()
+        // hasn't changed since the last index pays almost nothing per refresh. Gated on the file
+        // index alone (not symbols): files.txt and index.tsv are written together, so a populated
+        // file cache implies the symbol cache is as current as the project allows.
+        val cacheReady = fileIndex.files.isNotEmpty()
         val cacheStamp = withContext(Dispatchers.IO) {
             runCatching { Files.getLastModifiedTime(filesIndexFile).toMillis() }.getOrDefault(0L)
         }
         val cacheFresh = cacheReady && cacheStamp > 0L && withContext(Dispatchers.IO) {
-            !Indexer.isStale(rootPath, cacheStamp, cachedFiles.files.size)
+            !Indexer.isStale(rootPath, cacheStamp, fileIndex.files.size)
         }
         if (cacheFresh) return@LaunchedEffect
 

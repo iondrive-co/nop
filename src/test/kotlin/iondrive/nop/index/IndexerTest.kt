@@ -182,6 +182,16 @@ class IndexerTest {
         assertTrue(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
     }
 
+    @Test fun `isStale is true when a new file appears after the cache`(@TempDir tmp: Path) {
+        // The double-shift bug: a file added while nop stays open (fresh mtime, grown count) must
+        // read as stale so the next refresh rebuilds the file index and the file becomes findable.
+        val existing = tmp.resolve("src/a.ts"); existing.parent.createDirectories(); existing.writeText("export const a = 1\n")
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        val added = tmp.resolve("src/text.ts"); added.writeText("export const t = 2\n")
+        added.toFile().setLastModified(future)
+        assertTrue(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
+    }
+
     @Test fun `isStale ignores churn inside ignored dirs`(@TempDir tmp: Path) {
         tmp.resolve("a.kt").writeText("x\n")
         val junk = tmp.resolve("node_modules/pkg/index.js")
