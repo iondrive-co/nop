@@ -1,6 +1,8 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -121,6 +123,9 @@ fun ProjectTreePanel(
     status: GitStatus,
     refreshKey: Int = 0,
     revealFile: File? = null,
+    // Like revealFile, but driven by the app rather than the active tab: set to a just-created
+    // directory/package so the tree expands its ancestors, selects it, and scrolls it into view.
+    revealRequest: File? = null,
     recentProjects: List<Path> = emptyList(),
     onFileClick: (File) -> Unit,
     onPickRecent: (Path) -> Unit = {},
@@ -128,6 +133,12 @@ fun ProjectTreePanel(
     onDeleteRequest: (File) -> Unit = {},
     onHistoryRequest: (File) -> Unit = {},
     onOpenInSystem: (File) -> Unit = ::openInSystem,
+    // Context-menu actions. The File passed is whatever the user right-clicked; the app decides
+    // where to create relative to it (inside a directory, alongside a file).
+    onNewFile: (File) -> Unit = {},
+    onNewDirectory: (File) -> Unit = {},
+    onNewPackage: (File) -> Unit = {},
+    onCopyFile: (File) -> Unit = {},
     headerExtras: @Composable () -> Unit = {},
 ) {
     val tree = remember(projectPath, refreshKey) { projectPath.asFilteredTree() }
@@ -138,32 +149,32 @@ fun ProjectTreePanel(
         treeState.openNodes(listOf(rootId))
     }
 
-    // When the active tab changes, expand ancestors and select the matching node so the tree
-    // mirrors the currently-viewed file. If the selected row is offscreen (typical after a
-    // Ctrl-click jump into a deeply nested role), also scroll it into view.
-    LaunchedEffect(revealFile, projectPath) {
-        val f = revealFile ?: return@LaunchedEffect
+    // Expand ancestors and select [target] so the tree mirrors it, scrolling it into view when
+    // it's offscreen (typical after a Ctrl-click jump into a deeply nested role, or after
+    // creating a directory under a collapsed folder). Shared by the active-tab reveal and the
+    // app-driven revealRequest below.
+    suspend fun revealInTree(target: File) {
         val rootFile = projectPath.toFile().absoluteFile
-        val target = f.absoluteFile
-        if (target.path != rootFile.path &&
-            !target.path.startsWith(rootFile.path + File.separator)) {
-            return@LaunchedEffect
+        val abs = target.absoluteFile
+        if (abs.path != rootFile.path &&
+            !abs.path.startsWith(rootFile.path + File.separator)) {
+            return
         }
         val ancestors = mutableListOf<String>()
-        var cur: File? = target.parentFile
+        var cur: File? = abs.parentFile
         while (cur != null) {
             ancestors += cur.absolutePath
             if (cur.absolutePath == rootFile.absolutePath) break
             cur = cur.parentFile
         }
         treeState.openNodes(ancestors)
-        treeState.selectedKeys = setOf(target.absolutePath)
+        treeState.selectedKeys = setOf(abs.absolutePath)
 
         // Walk the same filtered tree the UI renders to find the row index of the target.
         // The LazyTree's internal node list isn't part of its public API, so we rebuild the
         // flattened order from the filesystem + the set of open node IDs.
         val openIds = treeState.openNodes.filterIsInstance<String>().toSet() + rootFile.absolutePath
-        val targetIndex = flattenedRowIndexOf(rootFile, target.absolutePath, openIds)
+        val targetIndex = flattenedRowIndexOf(rootFile, abs.absolutePath, openIds)
         if (targetIndex >= 0) {
             // Yield one frame so the LazyList re-measures with the newly-opened ancestors —
             // otherwise visibleItemsInfo still reflects the pre-expansion layout and we'd
@@ -179,6 +190,18 @@ fun ProjectTreePanel(
                 lazyList.animateScrollToItem(targetIndex)
             }
         }
+    }
+
+    // When the active tab changes, mirror its file in the tree.
+    LaunchedEffect(revealFile, projectPath) {
+        revealFile?.let { revealInTree(it) }
+    }
+    // When the app reveals a freshly-created directory/package. Keyed on revealRequest alone (not
+    // refreshKey): the app bumps refreshKey and sets revealRequest in the same batch, so the tree
+    // has already rescanned by the time this effect body runs. Keying on refreshKey too would
+    // re-yank the selection back here on every later refresh (git poll, file save).
+    LaunchedEffect(revealRequest, projectPath) {
+        revealRequest?.let { revealInTree(it) }
     }
 
     fun selectedFile(): File? {
@@ -267,7 +290,16 @@ fun ProjectTreePanel(
                 else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
             }
             val color = kind?.let(ChangeColors::forKind)
-            if (color != null) Text(file.name, color = color) else Text(file.name)
+            ContextMenuArea(items = {
+                buildList {
+                    add(ContextMenuItem("New File…") { onNewFile(file) })
+                    add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
+                    add(ContextMenuItem("New Package…") { onNewPackage(file) })
+                    if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                }
+            }) {
+                if (color != null) Text(file.name, color = color) else Text(file.name)
+            }
         }
     }
 }

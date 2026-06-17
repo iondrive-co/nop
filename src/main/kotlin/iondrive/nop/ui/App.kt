@@ -52,6 +52,15 @@ private const val GIT_POLL_INTERVAL_MS = 3_000L
 // How many recent commit messages to remember per project for the reuse dropdown.
 private const val COMMIT_MESSAGE_HISTORY_CAP = 20
 
+// A pending project-tree creation/copy dialog. NewX carry the parent directory the entry will be
+// created in; CopyFile carries the source file being duplicated.
+private sealed interface TreeEntryDialog {
+    data class NewFile(val parentDir: File) : TreeEntryDialog
+    data class NewDirectory(val parentDir: File) : TreeEntryDialog
+    data class NewPackage(val parentDir: File) : TreeEntryDialog
+    data class CopyFile(val source: File) : TreeEntryDialog
+}
+
 @OptIn(FlowPreview::class)
 @Composable
 fun App(
@@ -78,6 +87,11 @@ fun App(
     var resetInFlight by remember(projectPath) { mutableStateOf(false) }
     // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
     var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
+    // The pending new-file/directory/package/copy dialog, or null when none is open.
+    var pendingEntry by remember(projectPath) { mutableStateOf<TreeEntryDialog?>(null) }
+    // A just-created directory/package to expand and scroll to in the tree (new files reveal
+    // themselves by opening as a tab instead).
+    var treeReveal by remember(projectPath) { mutableStateOf<File?>(null) }
     // Whether the file-search popup is currently shown. Bumped open by the double-shift trigger
     // passed in from Main; user closes it by Esc, click-outside, or picking a file.
     var fileSearchOpen by remember(projectPath) { mutableStateOf(false) }
@@ -362,6 +376,22 @@ fun App(
         }
     }
 
+    // After a tree mutation (new file/dir/package, copy): rescan the tree from disk immediately
+    // and reload git status so the new entry shows up with the right colour. fsRefreshKey is
+    // bumped directly (not only via reloadStatus) so the tree still refreshes in a non-git dir.
+    fun afterTreeMutation() {
+        fsRefreshKey += 1
+        refresh()
+    }
+
+    // Where a tree action targeting [target] should create its entry, shown to the user in the
+    // dialog as a path relative to the project root ("" → the root itself).
+    fun relativeLabel(dir: File): String = runCatching {
+        rootPath.toAbsolutePath().normalize()
+            .relativize(dir.toPath().toAbsolutePath().normalize())
+            .toString().replace(File.separatorChar, '/')
+    }.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") } ?: "."
+
     // Sync the active tab's underlying file back into the tree so the sidebar always shows
     // which file the user is currently looking at.
     val revealFile: File? = when (val t = tabsState.selectedTab) {
@@ -391,11 +421,16 @@ fun App(
                         status = status,
                         refreshKey = fsRefreshKey,
                         revealFile = revealFile,
+                        revealRequest = treeReveal,
                         recentProjects = recentProjects,
                         onFileClick = { tabsState.open(Tab.FileView(it)) },
                         onPickRecent = onPickRecent,
                         onPickNew = onPickNew,
                         onDeleteRequest = { pendingDelete = it },
+                        onNewFile = { pendingEntry = TreeEntryDialog.NewFile(FileOperations.parentDirFor(it)) },
+                        onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },
+                        onNewPackage = { pendingEntry = TreeEntryDialog.NewPackage(FileOperations.parentDirFor(it)) },
+                        onCopyFile = { pendingEntry = TreeEntryDialog.CopyFile(it) },
                         onHistoryRequest = { file ->
                             if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
                         },
@@ -594,6 +629,76 @@ fun App(
                 },
                 onCancel = { pendingDelete = null },
             )
+        }
+
+        when (val entry = pendingEntry) {
+            is TreeEntryDialog.NewFile -> NewEntryDialog(
+                title = "New File",
+                description = "Create a file in ${relativeLabel(entry.parentDir)} — use / to nest in subfolders",
+                onSubmit = { name ->
+                    runCatching { FileOperations.createFile(entry.parentDir, name) }.fold(
+                        onSuccess = { created ->
+                            pendingEntry = null
+                            afterTreeMutation()
+                            tabsState.open(Tab.FileView(created))
+                            null
+                        },
+                        onFailure = { it.message ?: "Could not create file" },
+                    )
+                },
+                onCancel = { pendingEntry = null },
+            )
+            is TreeEntryDialog.NewDirectory -> NewEntryDialog(
+                title = "New Directory",
+                description = "Create a directory in ${relativeLabel(entry.parentDir)} — use / to nest",
+                onSubmit = { name ->
+                    runCatching { FileOperations.createDirectory(entry.parentDir, name) }.fold(
+                        onSuccess = { created ->
+                            pendingEntry = null
+                            afterTreeMutation()
+                            treeReveal = created
+                            null
+                        },
+                        onFailure = { it.message ?: "Could not create directory" },
+                    )
+                },
+                onCancel = { pendingEntry = null },
+            )
+            is TreeEntryDialog.NewPackage -> NewEntryDialog(
+                title = "New Package",
+                description = "Create a package in ${relativeLabel(entry.parentDir)} — dots become folders (com.example.app)",
+                onSubmit = { name ->
+                    runCatching { FileOperations.createPackage(entry.parentDir, name) }.fold(
+                        onSuccess = { created ->
+                            pendingEntry = null
+                            afterTreeMutation()
+                            treeReveal = created
+                            null
+                        },
+                        onFailure = { it.message ?: "Could not create package" },
+                    )
+                },
+                onCancel = { pendingEntry = null },
+            )
+            is TreeEntryDialog.CopyFile -> NewEntryDialog(
+                title = "Copy File",
+                description = "Copy \"${entry.source.name}\" to a new name in ${relativeLabel(entry.source.parentFile)}",
+                initialText = entry.source.name,
+                confirmLabel = "Copy",
+                onSubmit = { name ->
+                    runCatching { FileOperations.copyFile(entry.source, name) }.fold(
+                        onSuccess = { created ->
+                            pendingEntry = null
+                            afterTreeMutation()
+                            tabsState.open(Tab.FileView(created))
+                            null
+                        },
+                        onFailure = { it.message ?: "Could not copy file" },
+                    )
+                },
+                onCancel = { pendingEntry = null },
+            )
+            null -> {}
         }
 
         if (fileSearchOpen) {
