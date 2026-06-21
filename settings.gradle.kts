@@ -22,3 +22,7 @@ dependencyResolutionManagement {
         maven("https://cache-redirector.jetbrains.com/intellij-dependencies")
     }
 }
+
+// Standalone client-side diff viewer that transpiles nop's pure diff/highlight logic to JS.
+// Independent of the desktop app build — see web-diff/README.md.
+include("web-diff")

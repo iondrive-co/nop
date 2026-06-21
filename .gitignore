@@ -3,6 +3,11 @@
 /.kotlin/
 /build/
 
+# web-diff Kotlin/JS module: build output + the JS toolchain dependency-lock cache.
+# (Commit kotlin-js-store/ instead if you want pinned, reproducible webpack/node versions.)
+/web-diff/build/
+/kotlin-js-store/
+
 # IDE / editor scratch
 .idea/
 *.iml

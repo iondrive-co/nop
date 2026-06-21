@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>nop-diff — standalone diff viewer</title>
+  <style>
+    :root { --page-bg:#fff; --page-fg:#1f2329; --muted:#57606a; }
+    @media (prefers-color-scheme: dark) { :root { --page-bg:#16181d; --page-fg:#c9d1d9; --muted:#8b949e; } }
+    body { margin:0; padding:24px; background:var(--page-bg); color:var(--page-fg);
+           font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .wrap { max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.sub { color: var(--muted); margin: 0 0 16px; font-size: 13px; }
+    .controls { margin-bottom: 16px; display:flex; gap:8px; align-items:center; font-size:13px; }
+    button { font: inherit; padding: 4px 10px; border-radius: 6px; border:1px solid var(--muted);
+             background: transparent; color: inherit; cursor: pointer; }
+    button.active { border-color:#2f81f7; color:#2f81f7; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>nop-diff</h1>
+    <p class="sub">Standalone, client-side diff viewer — nop's diff &amp; syntax-highlight core transpiled to JS. No server.</p>
+
+    <div class="controls">
+      <span>Theme:</span>
+      <button data-theme="auto" class="active">auto</button>
+      <button data-theme="light">light</button>
+      <button data-theme="dark">dark</button>
+    </div>
+
+    <!-- A real `git diff`, held as inert text so there's nothing to escape and no fetch/CORS to worry about. -->
+    <script type="text/plain" id="sample">
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..9b47140
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,5 @@
++# demo
++
++A tiny **server** with TLS support.
++
++See `src/Server.kt`.
+diff --git a/config.json b/config.json
+index 5799aa7..2f8ef47 100644
+--- a/config.json
++++ b/config.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "demo",
+-  "version": "1.0.0",
+-  "retries": 3,
+-  "verbose": false
++  "version": "2.0.0",
++  "retries": 5,
++  "verbose": true
+ }
+diff --git a/src/Server.kt b/src/Server.kt
+index d11e608..b021f3f 100644
+--- a/src/Server.kt
++++ b/src/Server.kt
+@@ -1,14 +1,16 @@
+ package app
+
+ import java.io.File
++import java.time.Duration
+
+-class Server(private val root: File) {
+-    private val port = 8080
++class Server(private val root: File, private val tls: Boolean = false) {
++    private val port = if (tls) 8443 else 8080
+
+-    fun start(): Boolean {
++    fun start(timeout: Duration = Duration.ofSeconds(30)): Boolean {
+         val cfg = loadConfig()
+-        println("listening on $port")
+-        return cfg.isValid()
++        // Bind lazily so a failed config never opens the socket.
++        log.info("listening on $port (tls=$tls)")
++        return cfg.isValid() && bind(timeout)
+     }
+
+     fun stop() {
+</script>
+
+    <nop-diff id="view" theme="auto"></nop-diff>
+  </div>
+
+  <script src="./nop-diff.js"></script>
+  <script>
+    (function () {
+      var view = document.getElementById('view');
+      // Strip the single leading newline the <script> block starts with.
+      view.diff = document.getElementById('sample').textContent.replace(/^\n/, '');
+
+      var buttons = document.querySelectorAll('.controls button');
+      buttons.forEach(function (b) {
+        b.addEventListener('click', function () {
+          view.setAttribute('theme', b.getAttribute('data-theme'));
+          buttons.forEach(function (x) { x.classList.remove('active'); });
+          b.classList.add('active');
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
