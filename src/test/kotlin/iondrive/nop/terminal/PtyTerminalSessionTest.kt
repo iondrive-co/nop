@@ -6,11 +6,13 @@ import com.pty4j.PtyProcessBuilder
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.junit.jupiter.api.condition.DisabledOnOs
 import org.junit.jupiter.api.condition.OS
 import java.io.File
+import java.net.ServerSocket
 import java.time.Duration
 
 /**
@@ -118,4 +120,38 @@ class PtyTerminalSessionTest {
             }
             assertFalse(alive, "child process $childPid survived destroyForcibly — group was not killed")
         }
+
+    /**
+     * Re-running a launcher that binds a port (a dev server) must free the port before the new run
+     * starts, or the relaunch dies with "address already in use". TerminalSession.restart() does
+     * this by killing the old tree and *waiting* for it to exit before relaunching; here we mirror
+     * that kill→wait→rebind and assert the second bind succeeds. (python3 just gives us a trivial
+     * port-binding process; skipped if it isn't on PATH.)
+     */
+    @Test
+    fun `re-running a port-bound server rebinds the same port`() =
+        assertTimeoutPreemptively(Duration.ofSeconds(20)) {
+            assumeTrue(commandExists("python3"), "python3 not on PATH")
+            val port = freePort()
+            val cmd = "python3 -m http.server $port"
+
+            val first = PtyTtyConnector(ptyProcess("sh", "-c", cmd))
+            assertTrue("Serving HTTP" in first.readUntil("Serving HTTP"), "first server never bound")
+
+            // The fix: fully tear down (and wait) before relaunching.
+            first.getProcess().destroyForcibly()
+            first.waitFor()
+
+            val second = PtyTtyConnector(ptyProcess("sh", "-c", cmd))
+            val out = second.readUntil("Serving HTTP")
+            second.getProcess().destroyForcibly()
+            second.waitFor()
+            assertTrue("Serving HTTP" in out, "relaunch failed to rebind port $port; output was: $out")
+        }
+
+    private fun commandExists(cmd: String): Boolean =
+        System.getenv("PATH").orEmpty().split(File.pathSeparator).any { File(it, cmd).canExecute() }
+
+    /** A momentarily-free TCP port. Racy in theory, fine for a single local test process. */
+    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 }

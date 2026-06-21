@@ -10,6 +10,8 @@ import iondrive.nop.launchers.Launcher
 import java.awt.Color
 import java.awt.Container
 import java.io.File
+import java.util.concurrent.TimeUnit
+import javax.swing.SwingUtilities
 import kotlin.concurrent.thread
 
 /**
@@ -38,6 +40,9 @@ class TerminalSession private constructor(
     private var settings: NopTerminalSettings? = null
     private var process: PtyProcess? = null
 
+    @Volatile
+    private var restarting = false
+
     /**
      * Builds the widget + starts the PTY on first call, returning the same widget thereafter (so
      * the host can re-attach it to its card without respawning). Must run on the AWT EDT.
@@ -65,17 +70,46 @@ class TerminalSession private constructor(
         }
     }
 
-    /** Kills the current process and starts a fresh one on the same widget (the Re-run button). */
+    /**
+     * Kills the current process tree and starts a fresh one on the same widget (the Re-run button).
+     *
+     * The kill + relaunch happen on a background thread because we must *wait* for the old tree to
+     * fully exit before launching the new run — otherwise a server's listening socket may still be
+     * held and the fresh run dies with "address already in use". A naive kill-then-immediately-start
+     * (which is what this used to do) races on exactly that.
+     */
     fun restart() {
         val w = widget ?: return
-        killProcess()
+        if (restarting) return
+        restarting = true
+        val old = process
+        process = null
+        running = true // show Stop (not Re-run) during the brief teardown, and block a double Re-run
         w.stop()
-        attach(w, startProcess())
+        thread(isDaemon = true, name = "terminal-restart") {
+            old?.let { p ->
+                val descendants = killTree(p)
+                runCatching { p.waitFor() }
+                descendants.forEach { runCatching { it.onExit().get(5, TimeUnit.SECONDS) } }
+            }
+            SwingUtilities.invokeLater {
+                restarting = false
+                if (widget === w) {
+                    runCatching { attach(w, startProcess()) }.onFailure { running = false }
+                }
+            }
+        }
     }
 
-    /** Kills the process but leaves the widget so its final output stays readable (the Stop button). */
+    /**
+     * Kills the process but leaves the widget so its final output stays readable (the Stop button).
+     * Deliberately keeps the `process` reference: if the user hits Re-run next, [restart] waits for
+     * this tree to fully exit (freeing any listening ports) before relaunching, so a Stop→Re-run
+     * doesn't race the same way a bare relaunch would.
+     */
     fun stop() {
-        killProcess()
+        process?.let { killTree(it) }
+        running = false
     }
 
     /** Kills the process tree, detaches the widget from its host card, and disposes it. Idempotent. */
@@ -116,13 +150,32 @@ class TerminalSession private constructor(
     }
 
     private fun killProcess() {
-        // pty4j's destroyForcibly() sends SIGKILL via killpg(), so the whole process group dies —
-        // the shell *and* the command it spawned (gradle, npm, sleep, …). We must NOT use
-        // Process.descendants() here the way a plain ProcessBuilder process would: pty4j processes
-        // don't implement toHandle(), so descendants() throws "toHandle() not supported".
-        process?.destroyForcibly()
+        process?.let { killTree(it) }
         process = null
         running = false
+    }
+
+    /**
+     * SIGKILLs the whole process tree behind [p] and returns handles to its descendants (so a
+     * caller that needs the port freed — see [restart] — can wait for them to exit).
+     *
+     * Two mechanisms, because neither alone is enough:
+     *  - `destroyForcibly()` on the pty4j process does `killpg(SIGKILL)`, taking down the shell and
+     *    everything still in its process group (gradle, npm, …). We must NOT use Process.descendants()
+     *    the way a plain ProcessBuilder process would — pty4j processes don't implement toHandle(),
+     *    so descendants() throws "toHandle() not supported".
+     *  - `ProcessHandle.of(pid)` *does* work (it's independent of pty4j), so we also walk the OS
+     *    subtree and kill descendants that left the shell's process group (e.g. a dev server that
+     *    forks workers). A process that fully daemonizes (setsid + reparent to init) escapes both —
+     *    nothing short of its own pid can reach it, which is inherent to detached processes.
+     */
+    private fun killTree(p: PtyProcess): List<ProcessHandle> {
+        val descendants = runCatching {
+            ProcessHandle.of(p.pid()).map { it.descendants().toList() }.orElse(emptyList())
+        }.getOrDefault(emptyList())
+        p.destroyForcibly()
+        descendants.forEach { runCatching { it.destroyForcibly() } }
+        return descendants
     }
 
     companion object {
