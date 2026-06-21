@@ -28,9 +28,9 @@ import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.SymbolIndex
 import iondrive.nop.launchers.Launcher
-import iondrive.nop.launchers.LauncherRun
 import iondrive.nop.launchers.LauncherStore
 import iondrive.nop.launchers.discoverLaunchers
+import iondrive.nop.terminal.TerminalSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
@@ -357,7 +357,7 @@ fun App(
                 is Tab.Diff -> File(tab.repoRoot, tab.change.path)
                 is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
                 is Tab.History -> tab.file
-                is Tab.LauncherOutput -> null
+                is Tab.Terminal -> null
             }
             val p = tabFile?.absolutePath ?: return@filter false
             p == targetPath || p.startsWith("$targetPath${File.separator}")
@@ -399,7 +399,7 @@ fun App(
         is Tab.Diff -> File(t.repoRoot, t.change.path)
         is Tab.CommitDiff -> File(t.repoRoot, t.file.path)
         is Tab.History -> t.file
-        is Tab.LauncherOutput, null -> null
+        is Tab.Terminal, null -> null
     }
 
     val tintColor = projectTint(rootPath, JewelTheme.isDark)
@@ -439,9 +439,10 @@ fun App(
                                 launchers = launchers,
                                 readOnlyNames = readOnlyNames,
                                 onRun = { launcher ->
-                                    val run = LauncherRun(launcher, rootPath.toFile())
-                                    tabsState.open(Tab.LauncherOutput(run))
-                                    run.start()
+                                    tabsState.open(Tab.Terminal(TerminalSession.forLauncher(launcher, rootPath.toFile())))
+                                },
+                                onNewTerminal = {
+                                    tabsState.open(Tab.Terminal(TerminalSession.shell(rootPath.toFile())))
                                 },
                                 onAdd = { persistLaunchers(stored + it) },
                                 onDelete = { persistLaunchers(stored - it) },

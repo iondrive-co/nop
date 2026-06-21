@@ -2,6 +2,7 @@ package iondrive.nop.ui
 
 import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.FileChange
+import iondrive.nop.terminal.TerminalSession
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -34,14 +35,16 @@ class TabsPersistenceTest {
     }
 
     @Test
-    fun `save drops Diff and LauncherOutput tabs`(@TempDir tmp: Path) {
+    fun `save drops Diff and Terminal tabs`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
         val keep = tmp.resolve("keep.kt").toFile().apply { writeText("") }
 
+        // TerminalSession is lazy — constructing one starts no PTY, so this is safe headless.
         val tabs = listOf<Tab>(
             Tab.FileView(keep),
             Tab.Diff(FileChange("foo.kt", ChangeKind.MODIFIED), repo),
+            Tab.Terminal(TerminalSession.shell(repo)),
         )
         TabsPersistence.save(target, tabs, selectedId = null)
 

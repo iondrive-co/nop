@@ -63,7 +63,9 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
+import java.awt.CardLayout
 import java.io.File
+import javax.swing.JPanel
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.HorizontalSplitLayout
@@ -114,7 +116,7 @@ fun TabbedViewerPanel(
     // tear a tab down the same way.
     fun cleanUp(tab: Tab) {
         editStore.close(tab.id)
-        if (tab is Tab.LauncherOutput) tab.run.stop()
+        if (tab is Tab.Terminal) tab.session.dispose()
     }
 
     val tabData = tabsState.tabs.map { tab ->
@@ -155,6 +157,11 @@ fun TabbedViewerPanel(
         )
     }
 
+    // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
+    // SwingPanel-per-tab can't work). Remembered here so it — and the live PTYs inside it —
+    // outlive switches to non-terminal tabs.
+    val terminalCards = remember { JPanel(CardLayout()) }
+
     Column(modifier = Modifier.fillMaxSize()) {
         TabStrip(tabs = tabData, style = tabStyle)
         Box(modifier = Modifier.fillMaxSize()) {
@@ -186,7 +193,7 @@ fun TabbedViewerPanel(
                 )
                 is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState)
                 is Tab.CommitDiff -> if (repo != null) CommitDiffView(repo, current)
-                is Tab.LauncherOutput -> LauncherOutputView(current)
+                is Tab.Terminal -> TerminalView(current, terminalCards)
                 null -> {}
             }
         }
@@ -203,7 +210,7 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
     is Tab.Diff -> tab.title
     is Tab.CommitDiff -> tab.title
     is Tab.History -> tab.title
-    is Tab.LauncherOutput -> tab.title
+    is Tab.Terminal -> tab.title
 }
 
 @OptIn(FlowPreview::class)

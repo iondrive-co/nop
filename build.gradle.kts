@@ -34,6 +34,16 @@ dependencies {
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.24.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.24.0")
 
+    // Real terminal for launcher runs: pty4j allocates a pseudo-terminal (so child processes see
+    // a TTY and password prompts / full-screen apps work), JediTerm is the Swing VT100 widget that
+    // renders it — the same stack IntelliJ's embedded terminal uses. jediterm-* resolve from the
+    // intellij-dependencies repo declared in settings.gradle.kts; slf4j-nop silences jediterm-ui's
+    // "no SLF4J provider" warning. pty4j reuses the JNA dependency already declared above.
+    implementation("org.jetbrains.pty4j:pty4j:0.13.12")
+    implementation("org.jetbrains.jediterm:jediterm-core:3.72")
+    implementation("org.jetbrains.jediterm:jediterm-ui:3.72")
+    implementation("org.slf4j:slf4j-nop:2.0.9")
+
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.13.4")

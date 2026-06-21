@@ -45,6 +45,7 @@ import org.jetbrains.jewel.ui.component.TextField
 fun LauncherButton(
     launchers: List<Launcher>,
     onRun: (Launcher) -> Unit,
+    onNewTerminal: () -> Unit,
     onAdd: (Launcher) -> Unit,
     onDelete: (Launcher) -> Unit,
     readOnlyNames: Set<String> = emptySet(),
@@ -71,6 +72,10 @@ fun LauncherButton(
                     onRun = { launcher ->
                         expanded = false
                         onRun(launcher)
+                    },
+                    onNewTerminal = {
+                        expanded = false
+                        onNewTerminal()
                     },
                     onAddRequest = {
                         expanded = false
@@ -99,6 +104,7 @@ private fun LauncherMenu(
     launchers: List<Launcher>,
     readOnlyNames: Set<String>,
     onRun: (Launcher) -> Unit,
+    onNewTerminal: () -> Unit,
     onAddRequest: () -> Unit,
     onDelete: (Launcher) -> Unit,
 ) {
@@ -124,6 +130,10 @@ private fun LauncherMenu(
                     onDelete = { onDelete(launcher) },
                 )
             }
+        }
+        Spacer(Modifier.height(4.dp))
+        OutlinedButton(onClick = onNewTerminal, modifier = Modifier.fillMaxWidth()) {
+            Text("New Terminal")
         }
         Spacer(Modifier.height(4.dp))
         DefaultButton(onClick = onAddRequest, modifier = Modifier.fillMaxWidth()) {

@@ -7,7 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.FileChange
-import iondrive.nop.launchers.LauncherRun
+import iondrive.nop.terminal.TerminalSession
 import java.io.File
 
 sealed class Tab {
@@ -37,11 +37,14 @@ sealed class Tab {
         override val title: String get() = "$shortSha ${File(file.path).name}"
     }
 
-    /** A live launcher invocation — output streams here while the process runs. */
-    class LauncherOutput(val run: LauncherRun) : Tab() {
-        override val id: String = "launcher:${run.launcher.name}:${System.nanoTime()}"
-        override val title: String get() = "▶ ${run.launcher.name}"
-        override fun equals(other: Any?): Boolean = other is LauncherOutput && other.id == id
+    /**
+     * A live PTY-backed terminal — a launcher run or a plain shell. Each invocation is its own
+     * tab (the nanoTime suffix keeps re-runs distinct), so it never collapses onto an existing one.
+     */
+    class Terminal(val session: TerminalSession) : Tab() {
+        override val id: String = "terminal:${session.title}:${System.nanoTime()}"
+        override val title: String get() = session.title
+        override fun equals(other: Any?): Boolean = other is Terminal && other.id == id
         override fun hashCode(): Int = id.hashCode()
     }
 }

@@ -12,7 +12,7 @@ import java.nio.file.Path
  *   * [Tab.History]  — same; the repo root is implicit (we're inside a single project)
  *
  * Diff tabs depend on the live [iondrive.nop.git.FileChange] blob which is recomputed each
- * launch, and LauncherOutput tabs wrap a running process — neither can be meaningfully restored,
+ * launch, and Terminal tabs wrap a running PTY process — neither can be meaningfully restored,
  * so both are dropped at save time.
  *
  * Stored as TSV under the project's data dir: `kind<TAB>path<TAB>selected?`. One tab per line;
@@ -29,7 +29,7 @@ object TabsPersistence {
             val (kind, file) = when (tab) {
                 is Tab.FileView -> KIND_FILE to tab.file
                 is Tab.History -> KIND_HISTORY to tab.file
-                is Tab.Diff, is Tab.CommitDiff, is Tab.LauncherOutput -> return@mapNotNull null
+                is Tab.Diff, is Tab.CommitDiff, is Tab.Terminal -> return@mapNotNull null
             }
             val selected = tab.id == selectedId
             "$kind\t${file.absolutePath}\t${if (selected) "1" else "0"}"
