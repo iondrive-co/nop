@@ -52,6 +52,34 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     fun canSoftResetHead(): Boolean = repository.resolve("HEAD~1") != null
 
     /**
+     * Discards local changes to a single file, restoring it to its last committed state — the
+     * per-file counterpart to a rollback:
+     *  - a modified, deleted, or conflicted tracked file is reset to its HEAD content, overwriting
+     *    both the staged index entry and the working-tree copy (`git checkout HEAD -- path`);
+     *  - a newly added file (staged but not yet committed) is unstaged and removed from disk;
+     *  - an untracked file is simply deleted.
+     * Destructive: any uncommitted edits to the file are lost and cannot be recovered.
+     */
+    fun revertFile(change: FileChange) {
+        when (change.kind) {
+            ChangeKind.UNTRACKED ->
+                File(rootDir.toFile(), change.path).delete()
+            ChangeKind.ADDED -> {
+                // Unstage the addition (rm --cached mirrors how stageAndCommit unstages and works
+                // even on an unborn branch with no HEAD), then delete the working-tree file.
+                runCatching { git.rm().setCached(true).addFilepattern(change.path).call() }
+                File(rootDir.toFile(), change.path).delete()
+            }
+            ChangeKind.MODIFIED, ChangeKind.REMOVED, ChangeKind.MISSING, ChangeKind.CONFLICT -> {
+                // Reset the index entry back to HEAD (this also clears any conflict stages), then
+                // write HEAD's content into the working tree, recreating a deleted file if needed.
+                git.reset().setRef("HEAD").addPath(change.path).call()
+                git.checkout().addPath(change.path).call()
+            }
+        }
+    }
+
+    /**
      * The most recent commit messages (full bodies, trimmed), newest first and de-duplicated, for
      * offering as reusable commit messages. Walks at most [limit] commits. Returns empty for an
      * unborn branch with no commits yet.

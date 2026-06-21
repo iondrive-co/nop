@@ -266,6 +266,110 @@ class GitRepoTest {
         repo.close()
     }
 
+    @Test
+    fun `revertFile restores a modified file to its HEAD content`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "a.txt").writeText("v2-local-edit\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertEquals(ChangeKind.MODIFIED, repo.loadStatus().byPath["a.txt"], "modified before revert")
+
+        repo.revertFile(FileChange("a.txt", ChangeKind.MODIFIED))
+
+        assertEquals("v1\n", (tmp / "a.txt").toFile().readText(), "working tree restored to HEAD")
+        assertTrue(repo.loadStatus().isClean, "clean after revert")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFile also discards a staged modification`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        // Modified and staged, then modified again in the working tree.
+        (tmp / "a.txt").writeText("staged\n")
+        runShell(tmp, "git add a.txt")
+        (tmp / "a.txt").writeText("staged-plus-more\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        repo.revertFile(FileChange("a.txt", ChangeKind.MODIFIED))
+
+        assertEquals("v1\n", (tmp / "a.txt").toFile().readText(), "both staged and working changes discarded")
+        assertTrue(repo.loadStatus().isClean, "index and working tree both clean after revert")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFile deletes a staged new file`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "added.txt").writeText("new\n")
+        runShell(tmp, "git add added.txt")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertEquals(ChangeKind.ADDED, repo.loadStatus().byPath["added.txt"], "added before revert")
+
+        repo.revertFile(FileChange("added.txt", ChangeKind.ADDED))
+
+        assertTrue(!(tmp / "added.txt").toFile().exists(), "new file deleted from disk")
+        assertTrue(repo.loadStatus().isClean, "clean after revert — nothing left staged")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFile deletes an untracked file`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "junk.txt").writeText("scratch\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertEquals(ChangeKind.UNTRACKED, repo.loadStatus().byPath["junk.txt"], "untracked before revert")
+
+        repo.revertFile(FileChange("junk.txt", ChangeKind.UNTRACKED))
+
+        assertTrue(!(tmp / "junk.txt").toFile().exists(), "untracked file deleted")
+        assertTrue(repo.loadStatus().isClean, "clean after revert")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFile restores a file staged for removal`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "gone.txt").writeText("keep me\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        runShell(tmp, "git rm -q gone.txt")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertEquals(ChangeKind.REMOVED, repo.loadStatus().byPath["gone.txt"], "staged for removal before revert")
+
+        repo.revertFile(FileChange("gone.txt", ChangeKind.REMOVED))
+
+        assertEquals("keep me\n", (tmp / "gone.txt").toFile().readText(), "file restored from HEAD")
+        assertTrue(repo.loadStatus().isClean, "clean after revert")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFile restores a file deleted from the working tree`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "gone.txt").writeText("keep me\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "gone.txt").toFile().delete() // deleted but not staged -> MISSING
+
+        val repo = GitRepo.discover(tmp)!!
+        assertEquals(ChangeKind.MISSING, repo.loadStatus().byPath["gone.txt"], "missing before revert")
+
+        repo.revertFile(FileChange("gone.txt", ChangeKind.MISSING))
+
+        assertEquals("keep me\n", (tmp / "gone.txt").toFile().readText(), "file restored from HEAD")
+        assertTrue(repo.loadStatus().isClean, "clean after revert")
+        repo.close()
+    }
+
     private operator fun Path.div(name: String): Path = resolve(name)
 
     private fun runShell(cwd: Path, cmd: String) {

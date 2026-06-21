@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Settings
+import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.StashEntry
@@ -85,6 +86,10 @@ fun App(
     // Whether HEAD has a parent to soft-reset back onto, and whether a soft reset is in flight.
     var canSoftReset by remember(projectPath) { mutableStateOf(false) }
     var resetInFlight by remember(projectPath) { mutableStateOf(false) }
+    // Whether a per-file revert is running; stands the poll down so it can't load a half-state.
+    var revertInFlight by remember(projectPath) { mutableStateOf(false) }
+    // The change pending a "Revert file?" confirmation, or null when no dialog is open.
+    var pendingRevert by remember(projectPath) { mutableStateOf<FileChange?>(null) }
     // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
     var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
     // The pending new-file/directory/package/copy dialog, or null when none is open.
@@ -171,7 +176,7 @@ fun App(
     // touches no state (so no recomposition, no tree re-walk) when git state is unchanged. It
     // also stands down while a commit/stash/manual-refresh is in flight so it can't clobber them.
     suspend fun pollStatus() {
-        if (repo == null || commitInFlight || stashInFlight || refreshing) return
+        if (repo == null || commitInFlight || stashInFlight || refreshing || revertInFlight) return
         // Reconcile before the git-state check below: an external edit to an already-modified file
         // leaves its git status unchanged, so the early return there would otherwise skip the reload.
         reconcileEdits()
@@ -376,6 +381,34 @@ fun App(
         }
     }
 
+    // Discard a single file's local changes, restoring it to its last committed state (or deleting
+    // it when it's a brand-new file). The on-disk content just changed, so any open editor buffer
+    // for it must drop its in-app edits — otherwise a later save would re-introduce the very changes
+    // the user reverted. A file that no longer exists has its tabs closed outright.
+    fun performRevert(change: FileChange) {
+        if (repo == null || revertInFlight) return
+        scope.launch {
+            revertInFlight = true
+            try {
+                withContext(Dispatchers.IO) { runCatching { repo.revertFile(change) } }
+                val reverted = File(repo.rootDir.toFile(), change.path)
+                if (reverted.isFile) {
+                    val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
+                    if (disk != null) {
+                        editStore.snapshot()
+                            .filter { it.file.absolutePath == reverted.absolutePath }
+                            .forEach { it.adoptDiskText(disk) }
+                    }
+                } else {
+                    closeTabsUnder(reverted)
+                }
+                reloadStatus()
+            } finally {
+                revertInFlight = false
+            }
+        }
+    }
+
     // After a tree mutation (new file/dir/package, copy): rescan the tree from disk immediately
     // and reload git status so the new entry shows up with the right colour. fsRefreshKey is
     // bumped directly (not only via reloadStatus) so the tree still refreshes in a non-git dir.
@@ -493,6 +526,7 @@ fun App(
                                                 tabsState.open(Tab.Diff(change, repo.rootDir.toFile()))
                                             }
                                         },
+                                        onRevert = { change -> pendingRevert = change },
                                         onCommit = { message, included ->
                                             if (repo != null && !commitInFlight) {
                                                 scope.launch {
@@ -629,6 +663,17 @@ fun App(
                     pendingDelete = null
                 },
                 onCancel = { pendingDelete = null },
+            )
+        }
+
+        pendingRevert?.let { change ->
+            ConfirmRevertDialog(
+                change = change,
+                onConfirm = {
+                    performRevert(change)
+                    pendingRevert = null
+                },
+                onCancel = { pendingRevert = null },
             )
         }
 

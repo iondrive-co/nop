@@ -1,5 +1,7 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -63,6 +65,7 @@ fun CommitPanel(
     selectedPaths: Set<String>,
     onToggle: (String) -> Unit,
     onChangeClick: (FileChange) -> Unit,
+    onRevert: (FileChange) -> Unit,
     onCommit: (message: String, included: List<FileChange>) -> Unit,
     onStash: (message: String) -> Unit,
     onPopStash: (StashEntry) -> Unit,
@@ -183,6 +186,7 @@ fun CommitPanel(
                     checked = change.path in selectedPaths,
                     onToggle = { onToggle(change.path) },
                     onPathClick = { onChangeClick(change) },
+                    onRevert = { onRevert(change) },
                 )
             }
         }
@@ -287,24 +291,31 @@ private fun MessageRow(message: String, onClick: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChangeRow(
     change: FileChange,
     checked: Boolean,
     onToggle: () -> Unit,
     onPathClick: () -> Unit,
+    onRevert: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        CheckboxRow(checked = checked, onCheckedChange = { onToggle() }) {}
-        Text(ChangeColors.prefixFor(change.kind), color = ChangeColors.forKind(change.kind))
-        Text(
-            change.path,
-            modifier = Modifier.weight(1f).clickable { onPathClick() },
-        )
+    // Right-click a changed file to revert it — mirrors the project tree's context menu rather than
+    // putting a button on every row, which would clutter a long change list. The ellipsis signals
+    // that a confirmation dialog follows (revert is destructive).
+    ContextMenuArea(items = { listOf(ContextMenuItem("Revert…") { onRevert() }) }) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CheckboxRow(checked = checked, onCheckedChange = { onToggle() }) {}
+            Text(ChangeColors.prefixFor(change.kind), color = ChangeColors.forKind(change.kind))
+            Text(
+                change.path,
+                modifier = Modifier.weight(1f).clickable { onPathClick() },
+            )
+        }
     }
 }
 
