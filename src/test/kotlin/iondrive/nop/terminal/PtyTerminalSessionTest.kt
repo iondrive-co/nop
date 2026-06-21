@@ -122,6 +122,32 @@ class PtyTerminalSessionTest {
         }
 
     /**
+     * The Stop button no longer hard-kills: TerminalSession.stop() writes the TTY interrupt
+     * character (ETX, 0x03) so the line discipline raises SIGINT on the foreground process group —
+     * exactly what pressing Ctrl-C does. This guards that contract: the child traps SIGINT and exits
+     * 42, so seeing exit 42 proves it got a clean SIGINT. A SIGKILL (the old behaviour) would skip
+     * the trap entirely, so the test would never see 42.
+     */
+    @Test
+    fun `the interrupt char delivers SIGINT so the child can exit cleanly`() =
+        assertTimeoutPreemptively(Duration.ofSeconds(10)) {
+            val proc = ptyProcess(
+                "sh", "-c",
+                "trap 'echo INTERRUPTED; exit 42' INT; echo READY; while :; do sleep 0.1; done",
+            )
+            val connector = PtyTtyConnector(proc)
+            connector.readUntil("READY")
+
+            // Exactly what stop() does: write Ctrl-C to the PTY.
+            proc.outputStream.write(3)
+            proc.outputStream.flush()
+
+            val output = connector.drainToEof()
+            assertEquals(42, proc.waitFor(), "child should exit via its SIGINT trap, not be killed; output: $output")
+            assertTrue("INTERRUPTED" in output, "the SIGINT trap should have run; output: $output")
+        }
+
+    /**
      * Re-running a launcher that binds a port (a dev server) must free the port before the new run
      * starts, or the relaunch dies with "address already in use". TerminalSession.restart() does
      * this by killing the old tree and *waiting* for it to exit before relaunching; here we mirror

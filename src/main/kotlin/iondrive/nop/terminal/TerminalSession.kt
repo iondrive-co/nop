@@ -102,14 +102,23 @@ class TerminalSession private constructor(
     }
 
     /**
-     * Kills the process but leaves the widget so its final output stays readable (the Stop button).
-     * Deliberately keeps the `process` reference: if the user hits Re-run next, [restart] waits for
-     * this tree to fully exit (freeing any listening ports) before relaunching, so a Stop→Re-run
-     * doesn't race the same way a bare relaunch would.
+     * Interrupts the current run exactly as pressing Ctrl-C in the terminal would: writes the TTY
+     * interrupt character (ETX, 0x03) to the PTY, so the kernel's line discipline raises SIGINT on
+     * the foreground process group. Unlike the hard [killTree] used by [dispose]/[restart], this
+     * lets the program shut down gracefully — flush output, remove pid files, stop child servers —
+     * and, like a real Ctrl-C, leaves a process that deliberately ignores SIGINT still running.
+     *
+     * We deliberately don't flip `running` or drop the `process` reference here: the child exits
+     * asynchronously (if at all), so the watcher thread from [startProcess] flips `running` false
+     * when it actually dies, and keeping the reference lets a following Re-run still wait on it.
      */
     fun stop() {
-        process?.let { killTree(it) }
-        running = false
+        val proc = process ?: return
+        runCatching {
+            val out = proc.outputStream
+            out.write(CTRL_C)
+            out.flush()
+        }
     }
 
     /** Kills the process tree, detaches the widget from its host card, and disposes it. Idempotent. */
@@ -181,6 +190,9 @@ class TerminalSession private constructor(
     companion object {
         private const val INITIAL_COLUMNS = 80
         private const val INITIAL_ROWS = 24
+
+        /** The TTY interrupt character (ETX) — what a terminal sends on Ctrl-C. See [stop]. */
+        private const val CTRL_C = 3
 
         private val isWindows: Boolean =
             System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")
