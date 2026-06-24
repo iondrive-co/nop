@@ -1,13 +1,10 @@
 package iondrive.nop.ui
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,13 +12,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,21 +31,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.isCtrlPressed
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,22 +55,11 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
 import java.io.File
-import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 
-// Background tints — muted dark-theme palette
-private val INSERT_BG = Color(0x33629755) // green
-private val DELETE_BG = Color(0x33B35E5E) // red
-private val CHANGE_BG = Color(0x33547B9D) // blue
-private val EMPTY_BG = Color(0x14FFFFFF)  // subtle gray (filler for missing side)
-private val INLINE_WORD_BG = Color(0x66629755)
-private val INLINE_WORD_BG_OLD = Color(0x66B35E5E)
-private val GUTTER_FG = Color(0xFF808080)
-
-// Saturated marker colours for the scrollbar lane — must read at a glance on the dark panel.
-private val INSERT_MARK = Color(0xFF7DBE6E)
-private val DELETE_MARK = Color(0xFFD96B6B)
-private val CHANGE_MARK = Color(0xFF6FA8DC)
+// Diff colours, the read-only half, gutter, change-marker lane and text selection rules live in
+// DiffRendering.kt and are shared with the history diff (CommitDiffView). Only the bits unique to
+// the editable working-tree diff — conflict/hunk action affordances — are declared here.
 private val CONFLICT_MARK = ChangeColors.CONFLICT
 
 // Hunk/conflict action affordances. The chip sits over the centre divider, IntelliJ-style.
@@ -336,6 +313,10 @@ private fun DiffRowsList(
     val firstRowToHunk = remember(hunks) { hunks.indices.associateBy { hunks[it].first } }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // One SelectionContainer over the whole list so a drag spans rows — the user can select a
+        // multi-line deleted block on the old (left) side and copy it back. Gutters, the right
+        // column and action chips opt out via DisableSelection so the copy is clean left-side text.
+        SelectionContainer {
         androidx.compose.foundation.lazy.LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W),
@@ -367,6 +348,7 @@ private fun DiffRowsList(
                 )
             }
         }
+        }
         ChangeMarkerLane(result.rows.map { it.kind }, listState)
     }
 }
@@ -381,6 +363,7 @@ private fun MergeRowsList(
 ) {
     val listState = rememberLazyListState()
     Box(modifier = Modifier.fillMaxSize()) {
+        SelectionContainer {
         androidx.compose.foundation.lazy.LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W),
@@ -400,52 +383,10 @@ private fun MergeRowsList(
                 }
             }
         }
+        }
         val kinds = rows.map { if (it is MergeRow.Control) RowKind.CHANGE else (it as MergeRow.Line).row.kind }
         // Conflict control rows mark a region; tint their lane slot with the conflict colour.
         ChangeMarkerLane(kinds, listState) { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null }
-    }
-}
-
-@Composable
-private fun androidx.compose.foundation.layout.BoxScope.ChangeMarkerLane(
-    kinds: List<RowKind>,
-    listState: androidx.compose.foundation.lazy.LazyListState,
-    overrideColor: (Int) -> Color? = { null },
-) {
-    // Marker lane sits just to the left of the scrollbar, so the markers stay readable even while
-    // the user is dragging the (translucent) scrollbar thumb across them.
-    Row(
-        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Canvas(Modifier.width(MARKER_LANE_W).fillMaxHeight()) {
-            drawChangeMarkers(kinds, overrideColor)
-        }
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(listState),
-            style = NopScrollbarStyle,
-            modifier = Modifier.width(SCROLLBAR_W).fillMaxHeight(),
-        )
-    }
-}
-
-private val MARKER_LANE_W = 4.dp
-private val SCROLLBAR_W = 10.dp
-
-private fun DrawScope.drawChangeMarkers(kinds: List<RowKind>, overrideColor: (Int) -> Color?) {
-    val n = kinds.size
-    if (n == 0) return
-    val markerH = (size.height / n).coerceAtLeast(3f)
-    val w = size.width
-    kinds.forEachIndexed { idx, kind ->
-        val color = overrideColor(idx) ?: when (kind) {
-            RowKind.EQUAL -> return@forEachIndexed
-            RowKind.INSERT -> INSERT_MARK
-            RowKind.DELETE -> DELETE_MARK
-            RowKind.CHANGE -> CHANGE_MARK
-        }
-        val y = (idx.toFloat() / n) * size.height
-        drawRect(color = color, topLeft = Offset(0f, y), size = Size(w, markerH))
     }
 }
 
@@ -488,18 +429,22 @@ private fun ActionChip(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    BasicText(
-        text = label,
-        style = TextStyle(
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            color = if (enabled) textColor() else GUTTER_FG,
-        ),
-        modifier = modifier
-            .background(background, CHIP_SHAPE)
-            .let { if (enabled) it.clickable(onClick = onClick) else it }
-            .padding(horizontal = 6.dp, vertical = 1.dp),
-    )
+    // Chip labels live inside the list-wide SelectionContainer; exclude them so they're never
+    // swept into a text selection.
+    DisableSelection {
+        BasicText(
+            text = label,
+            style = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = if (enabled) textColor() else GUTTER_FG,
+            ),
+            modifier = modifier
+                .background(background, CHIP_SHAPE)
+                .let { if (enabled) it.clickable(onClick = onClick) else it }
+                .padding(horizontal = 6.dp, vertical = 1.dp),
+        )
+    }
 }
 
 @Composable
@@ -536,6 +481,7 @@ private fun MergeLineRow(
             onResolveAt = onResolveAt,
             onJump = onJump,
             modifier = Modifier.weight(1f),
+            selectable = false,
         )
     }
 }
@@ -597,6 +543,7 @@ private fun DiffRowView(
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                     modifier = Modifier.weight(1f),
+                    selectable = false,
                 )
             }
         }
@@ -610,47 +557,6 @@ private fun DiffRowView(
                 onClick = revertHunk,
             )
         }
-    }
-}
-
-@Composable
-private fun ReadOnlyDiffHalf(
-    text: String?,
-    spans: List<InlineSpan>,
-    lineNumber: Int?,
-    background: Color,
-    inlineHighlight: Color,
-    currentFile: File,
-    onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
-    onJump: (File, Int) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val displayText = text ?: ""
-    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    Row(
-        modifier = modifier.fillMaxSize().background(background),
-        verticalAlignment = Alignment.Top,
-    ) {
-        GutterCell(lineNumber)
-        BasicText(
-            text = annotateLine(displayText, spans, inlineHighlight),
-            style = TextStyle(
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                color = textColor(),
-            ),
-            softWrap = false,
-            onTextLayout = { layout = it },
-            modifier = Modifier
-                .padding(end = 4.dp)
-                .ctrlClickJump(
-                    layoutProvider = { layout },
-                    textProvider = { displayText },
-                    currentFile = currentFile,
-                    onResolveAt = onResolveAt,
-                    onJump = onJump,
-                ),
-        )
     }
 }
 
@@ -715,6 +621,9 @@ private fun EditableDiffHalf(
         verticalAlignment = Alignment.Top,
     ) {
         GutterCell(lineNumber)
+        // The editable side keeps its own field selection/copy; DisableSelection stops the
+        // list-wide SelectionContainer from also trying to select it.
+        DisableSelection {
         BasicTextField(
             state = state,
             modifier = Modifier
@@ -742,6 +651,7 @@ private fun EditableDiffHalf(
                 if (r != null) layout = r
             },
         )
+        }
     }
 }
 
@@ -789,83 +699,3 @@ internal fun revertHunk(rows: List<DiffRow>, hunk: IntRange, trailingNewline: Bo
     return out.joinToString("\n") + if (trailingNewline) "\n" else ""
 }
 
-/**
- * Ctrl-click on a word inside this widget calls [onResolveAt]; on a hit, [onJump] is invoked
- * with the resolved file/line. The event is consumed on the Initial pass so the host's text
- * field (when one exists) doesn't move the caret in response to the same click.
- */
-private fun Modifier.ctrlClickJump(
-    layoutProvider: () -> TextLayoutResult?,
-    textProvider: () -> String,
-    currentFile: File,
-    onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
-    onJump: (File, Int) -> Unit,
-): Modifier = this.pointerInput(currentFile) {
-    awaitPointerEventScope {
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            if (event.type != PointerEventType.Press) continue
-            if (!event.keyboardModifiers.isCtrlPressed) continue
-            val change = event.changes.firstOrNull() ?: continue
-            val tl = layoutProvider() ?: continue
-            val text = textProvider()
-            val offset = tl.getOffsetForPosition(change.position)
-            val target = onResolveAt(currentFile, text, offset)
-            if (target != null) {
-                change.consume()
-                onJump(target.file, target.line)
-            }
-        }
-    }
-}
-
-@Composable
-private fun GutterCell(lineNumber: Int?) {
-    BasicText(
-        text = lineNumber?.toString()?.padStart(5) ?: "     ",
-        style = TextStyle(
-            color = GUTTER_FG,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-        ),
-        softWrap = false,
-        modifier = Modifier.padding(horizontal = 6.dp),
-    )
-}
-
-@Composable
-private fun textColor(): Color =
-    if (JewelTheme.isDark) Color(0xFFA9B7C6) else Color(0xFF1F2329)
-
-private fun annotateLine(
-    text: String,
-    spans: List<InlineSpan>,
-    highlightColor: Color,
-): AnnotatedString {
-    if (spans.isEmpty()) return AnnotatedString(text)
-    return buildAnnotatedString {
-        for (s in spans) {
-            // Defensive: clamp into the line. A malformed span (e.g. start > end after clamping,
-            // or a negative start from a stray close sentinel) used to throw StringIndexOOB and
-            // tear down the whole row during scroll.
-            val start = s.startChar.coerceIn(0, text.length)
-            val end = s.endCharExclusive.coerceIn(start, text.length)
-            if (end == start) continue
-            val piece = text.substring(start, end)
-            if (s.changed) {
-                withStyle(SpanStyle(background = highlightColor)) { append(piece) }
-            } else {
-                append(piece)
-            }
-        }
-    }
-}
-
-private fun backgroundsFor(row: DiffRow): Pair<Color, Color> = when (row.kind) {
-    RowKind.EQUAL -> Color.Transparent to Color.Transparent
-    RowKind.CHANGE -> CHANGE_BG to CHANGE_BG
-    RowKind.INSERT -> EMPTY_BG to INSERT_BG
-    RowKind.DELETE -> DELETE_BG to EMPTY_BG
-}
-
-private val IntrinsicMinHeightLine = 18.dp
