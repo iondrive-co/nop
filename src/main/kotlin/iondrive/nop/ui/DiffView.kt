@@ -29,12 +29,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -211,11 +220,28 @@ fun DiffView(
                     if (next != current) it.state.edit { replace(0, length, next) }
                 }
             }
+            // Structural edits (Enter to split a line, Backspace/Delete to merge lines) the per-line
+            // SingleLine fields can't express on their own. We rewrite the whole buffer and recompute
+            // the diff synchronously so the new row exists this frame for focus to land on; the
+            // debounced re-diff/autosave effects then pick the write up as usual. Returns the caret
+            // landing spot (1-based line, char column) so the caller can move focus there.
+            val onStructuralEdit: ((Int, Int, Int, StructuralEdit) -> Pair<Int, Int>?)? = edit?.let {
+                { line, startCol, endCol, op ->
+                    val current = it.state.text.toString()
+                    val res = applyStructuralEdit(current, line, startCol, endCol, op)
+                    if (res != null && res.first != current) {
+                        it.state.edit { replace(0, length, res.first) }
+                        content = computeContent(headText, res.first)
+                        res.second
+                    } else null
+                }
+            }
             DiffRowsList(
                 result = result,
                 edit = edit,
                 currentFile = workingFile,
                 onRevertHunk = onRevertHunk,
+                onStructuralEdit = onStructuralEdit,
                 onResolveAt = onResolveAt,
                 onJump = onJump,
             )
@@ -297,6 +323,7 @@ private fun DiffRowsList(
     edit: FileEdit?,
     currentFile: File,
     onRevertHunk: ((IntRange) -> Unit)?,
+    onStructuralEdit: ((Int, Int, Int, StructuralEdit) -> Pair<Int, Int>?)?,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
 ) {
@@ -304,6 +331,19 @@ private fun DiffRowsList(
     // Per-line editable state, keyed by 1-based new-side line number. Hoisted here so scrolling
     // (which disposes off-screen LazyColumn slots) doesn't lose focus or in-flight edits.
     val rowStates = remember { mutableStateMapOf<Int, TextFieldState>() }
+    // Where to move the caret after a structural edit reshapes the line numbering. The target row
+    // claims it (matching on line number), focuses itself and clears it. Survives re-diff so the
+    // landing row can be one that only exists after the buffer was rewritten.
+    var pendingFocus by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    val requestStructural: ((Int, Int, Int, StructuralEdit) -> Boolean)? = onStructuralEdit?.let { fn ->
+        { line, startCol, endCol, op ->
+            val focus = fn(line, startCol, endCol, op)
+            if (focus != null) {
+                pendingFocus = focus
+                true
+            } else false
+        }
+    }
     // The hunk each row belongs to (-1 = none) and the first row of each hunk, so we can hang a
     // single revert chip off a hunk's top line.
     val hunks = remember(result) { hunkRanges(result.rows) }
@@ -343,6 +383,9 @@ private fun DiffRowsList(
                     revertHunk = if (hunkId != null && onRevertHunk != null) {
                         { onRevertHunk(hunks[hunkId]) }
                     } else null,
+                    onStructuralEdit = requestStructural,
+                    pendingFocus = pendingFocus,
+                    onFocusConsumed = { pendingFocus = null },
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                 )
@@ -493,6 +536,9 @@ private fun DiffRowView(
     rowStates: androidx.compose.runtime.snapshots.SnapshotStateMap<Int, TextFieldState>,
     currentFile: File,
     revertHunk: (() -> Unit)?,
+    onStructuralEdit: ((Int, Int, Int, StructuralEdit) -> Boolean)?,
+    pendingFocus: Pair<Int, Int>?,
+    onFocusConsumed: () -> Unit,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
 ) {
@@ -528,6 +574,9 @@ private fun DiffRowView(
                     background = newBg,
                     inlineHighlight = INLINE_WORD_BG,
                     currentFile = currentFile,
+                    onStructuralEdit = onStructuralEdit,
+                    pendingFocus = pendingFocus,
+                    onFocusConsumed = onFocusConsumed,
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                     modifier = Modifier.weight(1f),
@@ -571,11 +620,28 @@ private fun EditableDiffHalf(
     background: Color,
     inlineHighlight: Color,
     currentFile: File,
+    onStructuralEdit: ((Int, Int, Int, StructuralEdit) -> Boolean)?,
+    pendingFocus: Pair<Int, Int>?,
+    onFocusConsumed: () -> Unit,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state = rowStates.getOrPut(lineNumber) { TextFieldState(initialText) }
+    val focusRequester = remember { FocusRequester() }
+
+    // A structural edit (above) rewrote the buffer and asked the caret to land on this line. Wait a
+    // frame so the rebuilt row is laid out and its FocusRequester is attached, then grab focus and
+    // place the cursor at the requested column. coerceIn guards against the reconcile effect not yet
+    // having seeded this freshly-shifted cell with its new text.
+    LaunchedEffect(pendingFocus) {
+        if (pendingFocus?.first != lineNumber) return@LaunchedEffect
+        withFrameNanos { }
+        runCatching { focusRequester.requestFocus() }
+        val col = pendingFocus.second.coerceIn(0, state.text.length)
+        state.edit { selection = TextRange(col) }
+        onFocusConsumed()
+    }
 
     // If the underlying buffer changed line N from outside (e.g. another diff cell wrote, or a
     // shared Tab.FileView edited), reflect that here. Comparing first avoids the snapshot loop
@@ -629,6 +695,31 @@ private fun EditableDiffHalf(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(end = 4.dp)
+                .focusRequester(focusRequester)
+                // Turn the per-line fields into a real editor: Enter splits this line at the caret,
+                // Backspace at column 0 merges it into the line above, Delete at line end pulls the
+                // next line up. Each rewrites the whole buffer via onStructuralEdit and consumes the
+                // key so SingleLine never sees it. Everything else falls through to normal editing.
+                .onPreviewKeyEvent { event ->
+                    val structural = onStructuralEdit
+                    if (structural == null || event.type != KeyEventType.KeyDown) {
+                        return@onPreviewKeyEvent false
+                    }
+                    val sel = state.selection
+                    when (event.key) {
+                        Key.Enter, Key.NumPadEnter ->
+                            structural(lineNumber, sel.min, sel.max, StructuralEdit.SPLIT)
+                        Key.Backspace ->
+                            if (sel.collapsed && sel.min == 0) {
+                                structural(lineNumber, 0, 0, StructuralEdit.MERGE_PREV)
+                            } else false
+                        Key.Delete ->
+                            if (sel.collapsed && sel.min == state.text.length) {
+                                structural(lineNumber, 0, 0, StructuralEdit.MERGE_NEXT)
+                            } else false
+                        else -> false
+                    }
+                }
                 .ctrlClickJump(
                     layoutProvider = { layout },
                     textProvider = { state.text.toString() },
@@ -667,6 +758,60 @@ internal fun replaceLine(full: String, lineNumber: Int, newLine: String): String
     if (lines[idx] == newLine) return full
     lines[idx] = newLine
     return lines.joinToString("\n")
+}
+
+/** A line-structure edit the per-line diff fields can't make on their own. */
+internal enum class StructuralEdit { SPLIT, MERGE_PREV, MERGE_NEXT }
+
+/**
+ * Apply a structural edit to [full] and report where the caret should land. Lines are 1-based; a
+ * file is `split('\n')`, so a trailing newline shows up as a final empty element and round-trips.
+ *
+ *  - [StructuralEdit.SPLIT] breaks line [line] into two, dropping any text selected between
+ *    [startCol] and [endCol] (collapsed caret ⇒ a plain split). The caret lands at the start of the
+ *    new lower line.
+ *  - [StructuralEdit.MERGE_PREV] joins line [line] onto the end of the line above; the caret lands
+ *    at the seam. No-op on line 1.
+ *  - [StructuralEdit.MERGE_NEXT] pulls the line below onto the end of line [line]; the caret stays
+ *    at the seam. No-op on the last line.
+ *
+ * Returns the rewritten text paired with the (1-based line, char column) caret target, or null when
+ * the edit can't apply. Pure, for unit-testing the keystroke → buffer plumbing.
+ */
+internal fun applyStructuralEdit(
+    full: String,
+    line: Int,
+    startCol: Int,
+    endCol: Int,
+    op: StructuralEdit,
+): Pair<String, Pair<Int, Int>>? {
+    val lines = full.split('\n').toMutableList()
+    val idx = line - 1
+    if (idx !in lines.indices) return null
+    return when (op) {
+        StructuralEdit.SPLIT -> {
+            val s = lines[idx]
+            val a = startCol.coerceIn(0, s.length)
+            val b = endCol.coerceIn(a, s.length)
+            lines[idx] = s.substring(0, a)
+            lines.add(idx + 1, s.substring(b))
+            lines.joinToString("\n") to (line + 1 to 0)
+        }
+        StructuralEdit.MERGE_PREV -> {
+            if (idx == 0) return null
+            val joinCol = lines[idx - 1].length
+            lines[idx - 1] = lines[idx - 1] + lines[idx]
+            lines.removeAt(idx)
+            lines.joinToString("\n") to (line - 1 to joinCol)
+        }
+        StructuralEdit.MERGE_NEXT -> {
+            if (idx + 1 !in lines.indices) return null
+            val joinCol = lines[idx].length
+            lines[idx] = lines[idx] + lines[idx + 1]
+            lines.removeAt(idx + 1)
+            lines.joinToString("\n") to (line to joinCol)
+        }
+    }
 }
 
 /** Index ranges of maximal runs of non-EQUAL rows — one per visible hunk. */

@@ -110,6 +110,66 @@ class DiffViewTest {
     }
 
     @Test
+    fun `applyStructuralEdit splits a line at the caret`() {
+        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 2, 2, 2, StructuralEdit.SPLIT)!!
+        assertEquals("alpha\nbe\nta\ngamma", text)
+        assertEquals(3 to 0, focus)
+    }
+
+    @Test
+    fun `applyStructuralEdit split drops the selected range`() {
+        // Caret had "cd" selected in "abcdef"; Enter replaces the selection with the line break.
+        val (text, focus) = applyStructuralEdit("abcdef", 1, 2, 4, StructuralEdit.SPLIT)!!
+        assertEquals("ab\nef", text)
+        assertEquals(2 to 0, focus)
+    }
+
+    @Test
+    fun `applyStructuralEdit split at end of line opens a blank line below`() {
+        val (text, focus) = applyStructuralEdit("alpha\nbeta", 1, 5, 5, StructuralEdit.SPLIT)!!
+        assertEquals("alpha\n\nbeta", text)
+        assertEquals(2 to 0, focus)
+    }
+
+    @Test
+    fun `applyStructuralEdit merges a line into the one above`() {
+        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 2, 0, 0, StructuralEdit.MERGE_PREV)!!
+        assertEquals("alphabeta\ngamma", text)
+        assertEquals(1 to 5, focus)
+    }
+
+    @Test
+    fun `applyStructuralEdit merge-prev is a no-op on the first line`() {
+        assertEquals(null, applyStructuralEdit("alpha\nbeta", 1, 0, 0, StructuralEdit.MERGE_PREV))
+    }
+
+    @Test
+    fun `applyStructuralEdit pulls the next line up`() {
+        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 1, 0, 0, StructuralEdit.MERGE_NEXT)!!
+        assertEquals("alphabeta\ngamma", text)
+        assertEquals(1 to 5, focus)
+    }
+
+    @Test
+    fun `applyStructuralEdit merge-next on the last real line drops the trailing newline`() {
+        // "a\nb\n" splits to [a, b, ""]; Delete at the end of "b" joins the empty trailer onto it.
+        val (text, focus) = applyStructuralEdit("a\nb\n", 2, 0, 0, StructuralEdit.MERGE_NEXT)!!
+        assertEquals("a\nb", text)
+        assertEquals(2 to 1, focus)
+    }
+
+    @Test
+    fun `applyStructuralEdit merge-next is a no-op past the end`() {
+        assertEquals(null, applyStructuralEdit("alpha\nbeta", 2, 0, 0, StructuralEdit.MERGE_NEXT))
+    }
+
+    @Test
+    fun `applyStructuralEdit ignores out-of-range lines`() {
+        assertEquals(null, applyStructuralEdit("alpha", 0, 0, 0, StructuralEdit.SPLIT))
+        assertEquals(null, applyStructuralEdit("alpha", 9, 0, 0, StructuralEdit.SPLIT))
+    }
+
+    @Test
     fun `revertHunk touches only the targeted hunk`() {
         // Two changed hunks; reverting the first leaves the second's working content intact.
         val rows = listOf(

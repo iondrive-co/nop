@@ -274,13 +274,6 @@ private fun FileEditView(
     LaunchedEffect(matches.size) {
         if (currentMatch >= matches.size) currentMatch = 0
     }
-    // Whenever the active match changes, drop the cursor at its start so BasicTextField's
-    // built-in scrollTo-cursor behaviour brings it into view. The actual highlight is painted
-    // by the outputTransformation below.
-    LaunchedEffect(currentMatch, matches) {
-        val m = matches.getOrNull(currentMatch) ?: return@LaunchedEffect
-        edit.state.edit { selection = TextRange(m.first) }
-    }
 
     // We intentionally do NOT requestFocus() on tab activation. Keeping focus on the tree means
     // tree-bound shortcuts (Delete to remove the file, H to view history) keep working after the
@@ -340,6 +333,28 @@ private fun FileEditView(
     // We keep the text layout around so Ctrl-click can map mouse coordinates to text offsets,
     // and so an inbound jump request can scroll a target line to the top of the viewport.
     var layout by remember(tab.id) { mutableStateOf<TextLayoutResult?>(null) }
+
+    // Whenever the active match changes, drop the cursor at its start *and* scroll it into view.
+    // The find bar holds focus while searching, so the editor's BasicTextField is unfocused and
+    // its built-in scroll-to-cursor never fires — we have to move the viewport ourselves, the way
+    // an inbound jump does. Only scroll when the match sits outside the viewport so stepping
+    // between two on-screen matches doesn't jolt the page. The highlight itself is painted by the
+    // outputTransformation above.
+    LaunchedEffect(currentMatch, matches, layout) {
+        val m = matches.getOrNull(currentMatch) ?: return@LaunchedEffect
+        edit.state.edit { selection = TextRange(m.first) }
+        val tl = layout ?: return@LaunchedEffect
+        val line = tl.getLineForOffset(m.first.coerceIn(0, tl.layoutInput.text.length))
+        val lineTop = tl.getLineTop(line)
+        val lineBottom = tl.getLineBottom(line)
+        val viewTop = scrollState.value
+        val viewport = scrollState.viewportSize
+        if (viewport > 0 && (lineTop < viewTop || lineBottom > viewTop + viewport)) {
+            val lineHeight = (lineBottom - lineTop).coerceAtLeast(1f)
+            val target = (lineTop - lineHeight * 3).toInt().coerceIn(0, scrollState.maxValue)
+            scrollState.scrollTo(target)
+        }
+    }
 
     // Inbound jump: once the layout for this tab exists, scroll the requested line to ~3 lines
     // below the top so the user can see context around the landing site. Also drop the cursor
