@@ -107,6 +107,7 @@ fun DiffView(
     onFileSaved: () -> Unit = {},
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget? = { _, _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
+    onTopLine: (Int) -> Unit = {},
 ) {
     val workingFile = remember(tab.id) { File(tab.repoRoot, tab.change.path) }
     // Resolve a per-file FileEdit via FileEditStore — same instance an open Tab.FileView would
@@ -246,6 +247,7 @@ fun DiffView(
                 onStructuralEdit = onStructuralEdit,
                 onResolveAt = onResolveAt,
                 onJump = onJump,
+                onTopLine = onTopLine,
             )
         }
     }
@@ -328,8 +330,19 @@ private fun DiffRowsList(
     onStructuralEdit: ((Int, Int, Int, StructuralEdit) -> Pair<Int, Int>?)?,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
+    onTopLine: (Int) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
+
+    // Report the working-file line at the top of the viewport so a "jump to source" (F4) lands the
+    // file on what's on screen. rememberUpdatedState keeps the rows current without restarting the
+    // flow on every re-diff.
+    val rowsForTopLine by rememberUpdatedState(result.rows)
+    LaunchedEffect(listState, onTopLine) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .collect { idx -> onTopLine(newSideLineAt(rowsForTopLine, idx)) }
+    }
     // Per-line editable state, keyed by 1-based new-side line number. Hoisted here so scrolling
     // (which disposes off-screen LazyColumn slots) doesn't lose focus or in-flight edits.
     val rowStates = remember { mutableStateMapOf<Int, TextFieldState>() }
@@ -814,6 +827,20 @@ internal fun applyStructuralEdit(
             lines.joinToString("\n") to (line to joinCol)
         }
     }
+}
+
+/**
+ * Working-file (new-side) line number for the row at [index]. Deletion rows carry no new-side
+ * number, so we scan forward to the next row that has one (then backward as a fallback). Returns 1
+ * for an empty diff or when nothing has a new side. Used to map the diff's top-of-viewport row to a
+ * file line for "jump to source". Public for unit-testing.
+ */
+internal fun newSideLineAt(rows: List<DiffRow>, index: Int): Int {
+    if (rows.isEmpty()) return 1
+    val start = index.coerceIn(0, rows.lastIndex)
+    for (i in start until rows.size) rows[i].newLineNumber?.let { return it }
+    for (i in start downTo 0) rows[i].newLineNumber?.let { return it }
+    return 1
 }
 
 /** Index ranges of maximal runs of non-EQUAL rows — one per visible hunk. */

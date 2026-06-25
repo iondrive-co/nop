@@ -97,6 +97,7 @@ fun TabbedViewerPanel(
     onFileSaved: () -> Unit = {},
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget? = { _, _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
+    onDiffTopLine: (Int) -> Unit = {},
     findInFileTrigger: Int = 0,
 ) {
     val selected = tabsState.selectedTab
@@ -190,6 +191,7 @@ fun TabbedViewerPanel(
                     onFileSaved = onFileSaved,
                     onResolveAt = onResolveAt,
                     onJump = onJump,
+                    onTopLine = onDiffTopLine,
                 )
                 is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState)
                 is Tab.CommitDiff -> if (repo != null) CommitDiffView(repo, current)

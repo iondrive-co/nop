@@ -182,4 +182,36 @@ class DiffViewTest {
         assertEquals("a\nb\nc\nD\ne\n", revertHunk(rows, 1..1, trailingNewline = true))
         assertEquals("a\nB\nc\nd\ne\n", revertHunk(rows, 3..3, trailingNewline = true))
     }
+
+    @Test
+    fun `newSideLineAt returns the row's new-side line`() {
+        val rows = listOf(equal("a", 1), change("b", "B", 2, 2), equal("c", 3))
+        assertEquals(1, newSideLineAt(rows, 0))
+        assertEquals(2, newSideLineAt(rows, 1))
+        assertEquals(3, newSideLineAt(rows, 2))
+    }
+
+    @Test
+    fun `newSideLineAt skips deletions to the next new-side line`() {
+        // A deleted block has no new-side number; the file line is the next surviving line.
+        val rows = listOf(equal("a", 1), delete("b", 2), delete("c", 3), equal("d", 2))
+        assertEquals(2, newSideLineAt(rows, 1))
+        assertEquals(2, newSideLineAt(rows, 2))
+    }
+
+    @Test
+    fun `newSideLineAt falls back to the previous new-side line at a trailing deletion`() {
+        // Deletions at the end have nothing after them; scan backward to the last real line.
+        val rows = listOf(equal("a", 1), equal("b", 2), delete("c", 3))
+        assertEquals(2, newSideLineAt(rows, 2))
+    }
+
+    @Test
+    fun `newSideLineAt is safe for empty and out-of-range input`() {
+        assertEquals(1, newSideLineAt(emptyList(), 0))
+        assertEquals(1, newSideLineAt(emptyList(), 5))
+        val rows = listOf(equal("a", 1), equal("b", 2))
+        assertEquals(2, newSideLineAt(rows, 99))
+        assertEquals(1, newSideLineAt(rows, -3))
+    }
 }

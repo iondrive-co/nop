@@ -73,6 +73,7 @@ fun App(
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
     findInFileTrigger: Int = 0,
+    jumpToSourceTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -104,6 +105,21 @@ fun App(
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
     val tabsState = remember(projectPath) { TabsState() }
+    // The working-file line currently at the top of the open diff's viewport, so F4 ("jump to
+    // source") can land the file on the change the user is looking at. The diff view keeps this
+    // updated as it scrolls; reset on tab switch so a different diff doesn't inherit a stale line.
+    var diffTopLine by remember(projectPath) { mutableStateOf(1) }
+    LaunchedEffect(tabsState.selectedId) { diffTopLine = 1 }
+
+    // F4 from a working-tree diff opens the real file behind it, at the line in view. Ignored for
+    // any other tab, and for diffs whose working file is gone (removed/missing). The trigger starts
+    // at 0; skip that initial value so composition doesn't open a file on its own.
+    LaunchedEffect(jumpToSourceTrigger) {
+        if (jumpToSourceTrigger == 0) return@LaunchedEffect
+        val diff = tabsState.selectedTab as? Tab.Diff ?: return@LaunchedEffect
+        val file = File(diff.repoRoot, diff.change.path)
+        if (file.isFile) tabsState.openAt(Tab.FileView(file), diffTopLine)
+    }
     val editStore = remember(projectPath) { FileEditStore() }
     val scope = rememberCoroutineScope()
 
@@ -506,6 +522,7 @@ fun App(
                                 onJump = { file, line ->
                                     tabsState.openAt(Tab.FileView(file), line)
                                 },
+                                onDiffTopLine = { diffTopLine = it },
                                 findInFileTrigger = findInFileTrigger,
                             )
                         },

@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
@@ -220,6 +221,8 @@ private fun ApplicationScope.ProjectWindow(
     var findInFilesTrigger by remember { mutableStateOf(0) }
     // Ctrl+F opens the in-file search bar above the currently-focused file viewer.
     var findInFileTrigger by remember { mutableStateOf(0) }
+    // F4 ("jump to source", IntelliJ-style) opens the real working file behind the active diff.
+    var jumpToSourceTrigger by remember { mutableStateOf(0) }
 
     Window(
         state = windowState,
@@ -248,6 +251,14 @@ private fun ApplicationScope.ProjectWindow(
                 findInFileTrigger += 1
                 return@Window true
             }
+            // Plain F4 jumps from the active diff to its working file. Exclude Alt so Alt+F4
+            // (close window) keeps working.
+            if (event.type == KeyEventType.KeyDown && event.key == Key.F4 &&
+                !event.isAltPressed && !event.isCtrlPressed && !event.isShiftPressed
+            ) {
+                jumpToSourceTrigger += 1
+                return@Window true
+            }
             // Never consume — the underlying field/tree still needs to see the key.
             false
         },
@@ -269,6 +280,7 @@ private fun ApplicationScope.ProjectWindow(
                 fileSearchTrigger = fileSearchTrigger,
                 findInFilesTrigger = findInFilesTrigger,
                 findInFileTrigger = findInFileTrigger,
+                jumpToSourceTrigger = jumpToSourceTrigger,
             )
         }
     }
