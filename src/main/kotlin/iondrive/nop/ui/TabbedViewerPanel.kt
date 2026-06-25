@@ -55,6 +55,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import iondrive.nop.git.CommitFile
+import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
@@ -101,6 +103,7 @@ fun TabbedViewerPanel(
     onJump: (File, Int) -> Unit = { _, _ -> },
     onDiffTopLine: (Int) -> Unit = {},
     findInFileTrigger: Int = 0,
+    blameEnabled: Boolean = false,
 ) {
     val selected = tabsState.selectedTab
 
@@ -183,6 +186,23 @@ fun TabbedViewerPanel(
                             pendingLine = pendingLine,
                             onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
                             findInFileTrigger = findInFileTrigger,
+                            repo = repo,
+                            blameEnabled = blameEnabled,
+                            // A blame line resolves to the commit that last touched it; open that
+                            // commit's diff for this file so the user can read the change in full.
+                            onOpenBlameCommit = { sha ->
+                                val rel = repo?.let { repoRelativePath(it, current.file) }
+                                if (repo != null && rel != null) {
+                                    tabsState.open(
+                                        Tab.CommitDiff(
+                                            sha = sha,
+                                            shortSha = sha.take(7),
+                                            file = CommitFile(rel, CommitFileChange.MODIFIED),
+                                            repoRoot = repo.rootDir.toFile(),
+                                        ),
+                                    )
+                                }
+                            },
                         )
                     }
                 }
@@ -228,6 +248,9 @@ private fun FileEditView(
     pendingLine: Int? = null,
     onPendingLineConsumed: () -> Unit = {},
     findInFileTrigger: Int = 0,
+    repo: GitRepo? = null,
+    blameEnabled: Boolean = false,
+    onOpenBlameCommit: (sha: String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
@@ -340,6 +363,22 @@ private fun FileEditView(
     // and so an inbound jump request can scroll a target line to the top of the viewport.
     var layout by remember(tab.id) { mutableStateOf<TextLayoutResult?>(null) }
 
+    // Per-line git blame for the gutter, lazily computed only while the annotate column is on.
+    // null means "loading"; an empty list means "no blame available" (untracked, binary, no repo).
+    // Recomputed when the gutter is turned on and after each save (savedText advances) so a fresh
+    // commit or a reverted edit re-attributes the affected lines.
+    var blame by remember(tab.id) { mutableStateOf<List<iondrive.nop.git.BlameLine>?>(null) }
+    LaunchedEffect(tab.id, blameEnabled, repo, edit.savedText) {
+        if (!blameEnabled || repo == null) {
+            blame = null
+            return@LaunchedEffect
+        }
+        blame = null
+        val rel = repoRelativePath(repo, tab.file)
+        blame = if (rel == null) emptyList()
+        else withContext(Dispatchers.IO) { repo.blame(rel) } ?: emptyList()
+    }
+
     // Moving the caret/viewport to a match is driven *only* by explicit search actions — a query
     // change (below) and Next/Prev — never by a reactive effect keyed on the document or its layout.
     // That's the whole point: an effect that re-asserted the caret whenever the text or layout
@@ -414,8 +453,23 @@ private fun FileEditView(
                 onClose = { searchOpen = false },
             )
         }
+    Row(modifier = Modifier.fillMaxSize()) {
+        // IntelliJ-style annotate column, kept to the left of the text and aligned to it by sharing
+        // the editor's scrollState + layout. The top padding mirrors the text Box's so line 0 of the
+        // gutter sits level with line 0 of the file.
+        if (blameEnabled && repo != null) {
+            BlameGutter(
+                blame = blame,
+                layout = layout,
+                scrollState = scrollState,
+                text = edit.state.text.toString(),
+                onLineClick = { line -> line.sha?.let(onOpenBlameCommit) },
+                modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
+            )
+        }
     Box(
         modifier = Modifier
+            .weight(1f)
             .fillMaxSize()
             .padding(12.dp),
     ) {
@@ -488,7 +542,15 @@ private fun FileEditView(
         )
     }
     }
+    }
 }
+
+/** Repo-relative, forward-slashed path for [file], or null if it falls outside [repo]. */
+internal fun repoRelativePath(repo: GitRepo, file: File): String? = runCatching {
+    repo.rootDir.toAbsolutePath().normalize()
+        .relativize(file.toPath().toAbsolutePath().normalize())
+        .toString().replace(File.separatorChar, '/')
+}.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") }
 
 /** Markdown tab layout: editor on the left, live-rendered preview on the right. */
 @Composable

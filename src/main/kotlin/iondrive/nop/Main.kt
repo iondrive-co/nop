@@ -120,6 +120,11 @@ fun main(args: Array<String>) {
                         windowRegistry.keys.lastOrNull()?.let { focusExistingWindow(it) }
                     }
                 },
+                onQuit = {
+                    // A newer build is taking over the single-instance slot — step aside so the
+                    // fresh code runs instead of this stale process lingering in the background.
+                    SwingUtilities.invokeLater { exitApplication() }
+                },
             )
             onDispose { handle?.close() }
         }

@@ -208,6 +208,34 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         }
     }
 
+    /**
+     * Per-line git blame for [relPath], following renames. Each entry attributes one line of the
+     * *current working-tree* file to the commit that last touched it, so the result lines up with
+     * what the editor shows: lines whose content matches HEAD carry that commit's sha/author/date,
+     * while lines edited locally but not yet committed come back with a null sha (see [BlameLine]).
+     * Returns null when the path can't be blamed — absent from history, binary, or an unborn branch.
+     */
+    fun blame(relPath: String): List<BlameLine>? = runCatching {
+        val result = git.blame()
+            .setFilePath(relPath)
+            // Ignore whitespace-only churn so reflows/reindents don't reassign a line to the commit
+            // that merely re-spaced it — matches what `git blame -w` and IntelliJ's annotate show.
+            .setTextComparator(org.eclipse.jgit.diff.RawTextComparator.WS_IGNORE_ALL)
+            .setFollowFileRenames(true)
+            .call() ?: return null
+        val lineCount = result.resultContents.size()
+        (0 until lineCount).map { i ->
+            val commit = result.getSourceCommit(i)
+            val author = result.getSourceAuthor(i)
+            BlameLine(
+                sha = commit?.name,
+                author = author?.name ?: commit?.authorIdent?.name ?: "",
+                whenEpochSeconds = commit?.commitTime?.toLong() ?: 0L,
+                summary = commit?.shortMessage ?: "Uncommitted changes",
+            )
+        }
+    }.getOrNull()
+
     /** File content from the working tree, or null if the file is absent. */
     fun readWorkingTreeContent(relPath: String): String? {
         val file = File(rootDir.toFile(), relPath)

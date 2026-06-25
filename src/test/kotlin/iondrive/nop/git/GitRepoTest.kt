@@ -170,6 +170,61 @@ class GitRepoTest {
     }
 
     @Test
+    fun `blame attributes each line to the commit that last touched it`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name Alice")
+        (tmp / "f.txt").writeText("one\ntwo\nthree\n")
+        runShell(tmp, "git add -A && git commit -q -m 'first three lines'")
+
+        // Change only the middle line in a second commit (by a different author).
+        (tmp / "f.txt").writeText("one\nTWO-changed\nthree\n")
+        runShell(tmp, "git config user.name Bob && git add -A && git commit -q -m 'rewrite line two'")
+
+        val repo = GitRepo.discover(tmp)!!
+        val blame = repo.blame("f.txt")
+        repo.close()
+
+        assertNotNull(blame)
+        assertEquals(3, blame!!.size, "one blame entry per line")
+        assertEquals("first three lines", blame[0].summary, "line 1 still from the first commit")
+        assertEquals("Alice", blame[0].author)
+        assertEquals("rewrite line two", blame[1].summary, "line 2 reattributed to the second commit")
+        assertEquals("Bob", blame[1].author)
+        assertEquals("first three lines", blame[2].summary, "line 3 untouched since the first commit")
+        blame.forEach { assertTrue(it.committed, "all lines are committed: ${it.summary}") }
+    }
+
+    @Test
+    fun `blame marks uncommitted working-tree edits with a null sha`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "f.txt").writeText("alpha\nbeta\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // Edit a line without committing — blame should attribute it to the working tree.
+        (tmp / "f.txt").writeText("alpha\nbeta-edited-locally\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val blame = repo.blame("f.txt")
+        repo.close()
+
+        assertNotNull(blame)
+        assertEquals(2, blame!!.size)
+        assertTrue(blame[0].committed, "untouched line stays attributed to its commit")
+        assertNull(blame[1].sha, "locally edited line has no commit yet")
+        assertEquals(false, blame[1].committed)
+    }
+
+    @Test
+    fun `blame returns null for a path with no history`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertNull(repo.blame("never-existed.txt"), "no blame for an unknown path")
+        repo.close()
+    }
+
+    @Test
     fun `clean repo reports no changes`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         (tmp / "a.txt").writeText("a\n")

@@ -52,7 +52,7 @@ object Indexer {
             val dir = stack.removeLast()
             val children = dir.listFiles() ?: continue
             for (f in children) {
-                if (f.name in IGNORED_DIR_NAMES || f.isHidden) continue
+                if (f.name in IGNORED_DIR_NAMES) continue
                 if (f.isDirectory) {
                     if (f.lastModified() > since) return true
                     stack.addLast(f)
@@ -69,7 +69,7 @@ object Indexer {
     private fun walk(root: File, dir: File, out: MutableList<IndexEntry>) {
         val files = dir.listFiles() ?: return
         for (f in files) {
-            if (f.name in IGNORED_DIR_NAMES || f.isHidden) continue
+            if (f.name in IGNORED_DIR_NAMES) continue
             if (f.isDirectory) {
                 indexDirectory(root, f, out)
                 walk(root, f, out)

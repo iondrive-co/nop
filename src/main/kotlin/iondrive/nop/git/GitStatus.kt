@@ -48,3 +48,19 @@ data class GitStatus(
 enum class CommitFileChange { ADDED, DELETED, MODIFIED, RENAMED, COPIED }
 
 data class CommitFile(val path: String, val changeType: CommitFileChange)
+
+/**
+ * Blame attribution for a single line of a file, as returned by [GitRepo.blame]. [sha] is null for
+ * lines that differ from HEAD — i.e. uncommitted local edits — for which [author]/[summary] describe
+ * the working tree rather than any commit.
+ */
+data class BlameLine(
+    val sha: String?,
+    val author: String,
+    /** Commit time in epoch seconds (0 for uncommitted lines). */
+    val whenEpochSeconds: Long,
+    val summary: String,
+) {
+    val shortSha: String? get() = sha?.take(7)
+    val committed: Boolean get() = sha != null
+}

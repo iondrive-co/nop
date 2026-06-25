@@ -71,7 +71,9 @@ private fun Path.asFilteredTree(): Tree<File> = buildTree {
 private fun ChildrenGeneratorScope<File>.addChildren(dir: File) {
     val files = dir.listFiles() ?: return
     files
-        .filter { it.name !in IGNORED_DIR_NAMES && !it.isHidden }
+        // Dotfiles (.claude, .github, .gitignore, …) are shown; only the curated build/VCS
+        // directories in IGNORED_DIR_NAMES are pruned, so the tree mirrors what's on disk.
+        .filter { it.name !in IGNORED_DIR_NAMES }
         .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
         .forEach { file ->
             if (file.isFile) {
@@ -83,7 +85,7 @@ private fun ChildrenGeneratorScope<File>.addChildren(dir: File) {
 }
 
 private fun visibleChildren(dir: File): List<File> = (dir.listFiles() ?: emptyArray())
-    .filter { it.name !in IGNORED_DIR_NAMES && !it.isHidden }
+    .filter { it.name !in IGNORED_DIR_NAMES }
     .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
 
 /**
@@ -132,6 +134,8 @@ fun ProjectTreePanel(
     onPickNew: () -> Unit = {},
     onDeleteRequest: (File) -> Unit = {},
     onHistoryRequest: (File) -> Unit = {},
+    blameEnabled: Boolean = false,
+    onToggleBlame: () -> Unit = {},
     onOpenInSystem: (File) -> Unit = ::openInSystem,
     // Context-menu actions. The File passed is whatever the user right-clicked; the app decides
     // where to create relative to it (inside a directory, alongside a file).
@@ -261,6 +265,17 @@ fun ProjectTreePanel(
                     Canvas(Modifier.size(16.dp)) { drawHistoryIcon(tint) }
                 }
             }
+            Tooltip(tooltip = {
+                Text(if (blameEnabled) "Hide git blame annotations (B)" else "Annotate open file with git blame (B)")
+            }) {
+                // Highlight the icon while the annotate column is showing so the toggle reads as on.
+                val blameTint = if (blameEnabled) {
+                    if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)
+                } else tint
+                IconButton(onClick = onToggleBlame) {
+                    Canvas(Modifier.size(16.dp)) { drawBlameIcon(blameTint) }
+                }
+            }
             // Push headerExtras (the launcher ▶) to the far right
             androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
             headerExtras()
@@ -274,6 +289,7 @@ fun ProjectTreePanel(
                 when (event.key) {
                     Key.Delete -> selectedFile()?.let { onDeleteRequest(it); true } ?: false
                     Key.H -> { onHistoryRequest(historyTarget()); true }
+                    Key.B -> { onToggleBlame(); true }
                     else -> false
                 }
             },
@@ -409,6 +425,30 @@ private fun DrawScope.drawExternalOpenIcon(tint: Color) {
         color = tint,
         style = stroke,
     )
+}
+
+// "Annotate" — a left margin rule with three text rows beside it, evoking per-line blame
+// annotations pinned to the gutter.
+private fun DrawScope.drawBlameIcon(tint: Color) {
+    // Gutter rule down the left.
+    drawLine(
+        color = tint,
+        start = Offset(3.5f, 2.5f),
+        end = Offset(3.5f, 13.5f),
+        strokeWidth = 1.3f,
+        cap = StrokeCap.Round,
+    )
+    // Three annotation rows of varying length beside the rule.
+    val rows = listOf(4.5f to 12.5f, 7.5f to 11f, 10.5f to 13f)
+    for ((y, x2) in rows) {
+        drawLine(
+            color = tint,
+            start = Offset(6f, y),
+            end = Offset(x2, y),
+            strokeWidth = 1.3f,
+            cap = StrokeCap.Round,
+        )
+    }
 }
 
 private fun DrawScope.drawHistoryIcon(tint: Color) {

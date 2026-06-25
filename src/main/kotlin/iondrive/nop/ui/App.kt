@@ -101,6 +101,9 @@ fun App(
     // Whether the file-search popup is currently shown. Bumped open by the double-shift trigger
     // passed in from Main; user closes it by Esc, click-outside, or picking a file.
     var fileSearchOpen by remember(projectPath) { mutableStateOf(false) }
+    // Whether the editor shows the git-blame annotate column. A global toggle (applies to whichever
+    // file tab is active), driven by the gutter button in the project-tree header.
+    var blameEnabled by remember(projectPath) { mutableStateOf(false) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -483,6 +486,8 @@ fun App(
                         onHistoryRequest = { file ->
                             if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
                         },
+                        blameEnabled = blameEnabled,
+                        onToggleBlame = { blameEnabled = !blameEnabled },
                         headerExtras = {
                             LauncherButton(
                                 launchers = launchers,
@@ -524,6 +529,7 @@ fun App(
                                 },
                                 onDiffTopLine = { diffTopLine = it },
                                 findInFileTrigger = findInFileTrigger,
+                                blameEnabled = blameEnabled,
                             )
                         },
                         second = {

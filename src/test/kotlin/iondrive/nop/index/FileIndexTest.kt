@@ -1,7 +1,6 @@
 package iondrive.nop.index
 
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -35,12 +34,27 @@ class FileIndexTest {
     }
 
     @Test
-    fun `build skips hidden files`(@TempDir tmp: Path) {
+    fun `build includes dotfiles and files under dot-directories`(@TempDir tmp: Path) {
         Files.writeString(tmp.resolve("visible.txt"), "")
         Files.writeString(tmp.resolve(".hidden"), "")
+        Files.createDirectories(tmp.resolve(".claude"))
+        Files.writeString(tmp.resolve(".claude/settings.json"), "")
+
         val idx = FileIndex.build(tmp)
-        assertFalse(".hidden" in idx.files)
         assertTrue("visible.txt" in idx.files)
+        // Dotfiles and dot-directories are searchable now (only IGNORED_DIR_NAMES are pruned).
+        assertTrue(".hidden" in idx.files)
+        assertTrue(".claude/settings.json" in idx.files)
+    }
+
+    @Test
+    fun `build still skips ignored dot-directories like git`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve(".git"))
+        Files.writeString(tmp.resolve(".git/config"), "")
+        Files.writeString(tmp.resolve("kept.txt"), "")
+
+        val idx = FileIndex.build(tmp)
+        assertEquals(listOf("kept.txt"), idx.files)
     }
 
     @Test

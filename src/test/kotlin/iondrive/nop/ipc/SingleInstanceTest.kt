@@ -71,6 +71,49 @@ class SingleInstanceTest {
     }
 
     @Test
+    fun `tryForward takes over instead of forwarding when the running build differs`(@TempDir tmp: Path) {
+        val quitAsked = CountDownLatch(1)
+        val opened = LinkedBlockingQueue<Path>()
+        val handle = SingleInstance.bind(
+            configRoot = tmp,
+            onOpen = { opened.add(it) },
+            onFocus = {},
+            onQuit = { quitAsked.countDown() },
+        ) ?: error("bind failed")
+        try {
+            // Rewrite the sidecar so it advertises a build this binary will never produce (an older
+            // running instance) and a dead pid (so the takeover doesn't wait on a live process).
+            val sidecar = tmp.resolve("nop/instance")
+            val real = Files.readString(sidecar).lines()
+            val port = real.first { it.startsWith("port=") }.removePrefix("port=")
+            val token = real.first { it.startsWith("token=") }.removePrefix("token=")
+            Files.writeString(sidecar, "port=$port\ntoken=$token\npid=99999\nbuild=OTHER-BUILD\n")
+
+            val forwarded = SingleInstance.tryForward(listOf(Paths.get("/x")), tmp)
+
+            assertFalse(forwarded, "a different build must NOT forward — the caller becomes the new primary")
+            assertTrue(quitAsked.await(2, TimeUnit.SECONDS), "the stale primary should be asked to QUIT")
+            assertTrue(opened.isEmpty(), "takeover must not deliver OPEN to the old primary")
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun `tryForward forwards normally when the running build matches`(@TempDir tmp: Path) {
+        // bind() and tryForward() run in the same process, so they share an identical build stamp —
+        // the everyday "relaunch the same binary" case must still forward (focus the existing window).
+        val received = LinkedBlockingQueue<Path>()
+        val handle = SingleInstance.bind(tmp, onOpen = { received.add(it) }, onFocus = {}) ?: error("bind failed")
+        try {
+            assertTrue(SingleInstance.tryForward(listOf(Paths.get("/home/u/proj")), tmp))
+            assertEquals(Paths.get("/home/u/proj"), received.poll(2, TimeUnit.SECONDS))
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
     fun `closing the handle removes the sidecar`(@TempDir tmp: Path) {
         val handle = SingleInstance.bind(tmp, onOpen = {}, onFocus = {}) ?: error("bind failed")
         val sidecar = tmp.resolve("nop/instance")

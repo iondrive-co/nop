@@ -29,7 +29,9 @@ class FileIndex(val files: List<String> = emptyList()) {
         private fun walk(root: File, dir: File, out: MutableList<String>) {
             val children = dir.listFiles() ?: return
             for (f in children) {
-                if (f.name in IGNORED_DIR_NAMES || f.isHidden) continue
+                // Dotfiles and dot-directories (.claude, .github, …) are indexed; only the curated
+                // build/VCS names in IGNORED_DIR_NAMES are pruned, mirroring the project tree.
+                if (f.name in IGNORED_DIR_NAMES) continue
                 if (f.isDirectory) {
                     walk(root, f, out)
                 } else if (f.isFile) {
