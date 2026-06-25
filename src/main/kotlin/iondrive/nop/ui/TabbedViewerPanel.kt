@@ -288,8 +288,10 @@ private fun FileEditView(
             .distinctUntilChanged()
             .collect { text ->
                 if (text != edit.savedText) {
-                    withContext(Dispatchers.IO) { edit.save() }
-                    savedCallback()
+                    // save() is a compare-and-swap: if the file changed under us (git checkout/pull,
+                    // an agent), it refuses to overwrite and the background poll reconciles instead.
+                    // Only refresh git status when we actually wrote.
+                    if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
                 }
             }
     }

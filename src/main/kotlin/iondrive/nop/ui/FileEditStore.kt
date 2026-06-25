@@ -7,6 +7,23 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.File
 
+/** Outcome of a [FileEdit.save]. */
+sealed interface SaveResult {
+    /** The buffer was written to disk and the baseline advanced. */
+    data object Saved : SaveResult
+
+    /** The buffer already matched what was on disk; nothing was written, baseline advanced. */
+    data object AlreadyOnDisk : SaveResult
+
+    /**
+     * The file on disk diverged from our last-synced baseline since we loaded it — a git
+     * checkout/pull, another editor, or an agent wrote it — so the buffer was NOT written, to
+     * avoid silently reverting that external change. [diskText] is the current on-disk content
+     * (null if the file is now unreadable) so the caller can reconcile.
+     */
+    data class ExternalChange(val diskText: String?) : SaveResult
+}
+
 /** Per-file editor state cached across tab switches. */
 class FileEdit(initialText: String, val file: File) {
     val state: TextFieldState = TextFieldState(initialText)
@@ -16,10 +33,29 @@ class FileEdit(initialText: String, val file: File) {
     val isModified: Boolean
         get() = state.text.toString() != savedText
 
-    fun save() {
+    /**
+     * Persist the buffer to disk as a compare-and-swap against [savedText]. The autosave timer
+     * fires this without the user asking, so it must never clobber a file that changed underneath
+     * us: we only overwrite when the bytes on disk are still the version we last loaded or saved.
+     *  - Buffer already equals disk → advance the baseline, write nothing (kills the phantom
+     *    stat-only rewrite that just bumps mtime and confuses `git status`).
+     *  - Disk still matches our baseline (or the file doesn't exist yet) → write the buffer.
+     *  - Disk diverged from our baseline → an external writer won; leave both the file and the
+     *    buffer alone and report it, so the caller can reconcile instead of reverting the file.
+     */
+    fun save(): SaveResult {
         val text = state.text.toString()
+        val disk = runCatching { file.readText() }.getOrNull()
+        if (text == disk) {
+            savedText = text
+            return SaveResult.AlreadyOnDisk
+        }
+        if (disk != null && disk != savedText) {
+            return SaveResult.ExternalChange(disk)
+        }
         file.writeText(text)
         savedText = text
+        return SaveResult.Saved
     }
 
     /**

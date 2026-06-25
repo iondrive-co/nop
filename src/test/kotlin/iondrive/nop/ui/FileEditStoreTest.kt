@@ -41,6 +41,71 @@ class FileEditStoreTest {
     }
 
     @Test
+    fun `save reports Saved and persists when disk still matches the baseline`(@TempDir tmp: Path) {
+        val f = tmp.resolve("note.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        edit.state.edit { replace(0, length, "v2\n") }
+        val result = edit.save()
+
+        assertEquals(SaveResult.Saved, result)
+        assertEquals("v2\n", f.readText())
+        assertFalse(edit.isModified)
+    }
+
+    @Test
+    fun `save refuses to overwrite a file that diverged under us (the revert bug)`(@TempDir tmp: Path) {
+        val f = tmp.resolve("deploy.sh").also { it.writeText("committed\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "committed\n"
+
+        // The buffer drifts so it counts as "modified" (e.g. a stale diff-view writeback echo) —
+        // this is exactly the state in which the old autosave would clobber the file.
+        edit.state.edit { replace(0, length, "stale-buffer\n") }
+        assertTrue(edit.isModified)
+
+        // A git checkout/pull in a terminal rewrites the file to a different version.
+        f.writeText("from-git\n")
+
+        val result = edit.save()
+
+        assertEquals(SaveResult.ExternalChange("from-git\n"), result)
+        assertEquals("from-git\n", f.readText(), "the external change must survive — no silent revert")
+        // save() is non-destructive to the buffer too; reconciliation (not save) adopts disk.
+        assertEquals("stale-buffer\n", edit.state.text.toString())
+        assertTrue(edit.isModified)
+    }
+
+    @Test
+    fun `save advances the baseline without rewriting when the buffer already matches disk`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "v1\n"
+
+        // The file changes on disk and the buffer independently catches up to the same content, so
+        // the buffer is "modified" relative to its (now stale) baseline yet identical to disk.
+        f.writeText("v2\n")
+        edit.state.edit { replace(0, length, "v2\n") }
+        assertTrue(edit.isModified, "baseline is stale, so the buffer reads as modified")
+
+        val result = edit.save()
+
+        assertEquals(SaveResult.AlreadyOnDisk, result, "no phantom rewrite when bytes already match")
+        assertEquals("v2\n", f.readText())
+        assertFalse(edit.isModified, "baseline advanced to the on-disk content")
+    }
+
+    @Test
+    fun `save creates a brand-new file that does not yet exist on disk`(@TempDir tmp: Path) {
+        val f = tmp.resolve("new.txt").toFile() // never written
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        edit.state.edit { replace(0, length, "hello\n") }
+        val result = edit.save()
+
+        assertEquals(SaveResult.Saved, result)
+        assertEquals("hello\n", f.readText())
+    }
+
+    @Test
     fun `close evicts so re-opening rereads from disk`(@TempDir tmp: Path) {
         val f = tmp.resolve("x.txt").also { it.writeText("one\n") }.toFile()
         val store = FileEditStore()
