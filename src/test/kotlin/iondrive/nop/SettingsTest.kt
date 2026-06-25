@@ -232,6 +232,33 @@ class SettingsTest {
     }
 
     @Test
+    fun `active project returns null when nothing saved`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        assertNull(Settings.loadActiveProject())
+    }
+
+    @Test
+    fun `active project round-trips and clears`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val proj = tmp.resolve("project").also { Files.createDirectories(it) }
+        Settings.saveActiveProject(proj)
+        assertEquals(proj.toAbsolutePath().normalize(), Settings.loadActiveProject())
+
+        // Saving null clears the key so the next launch falls back to the first tab.
+        Settings.saveActiveProject(null)
+        assertNull(Settings.loadActiveProject())
+    }
+
+    @Test
+    fun `saving the active project does not clobber the open list`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val proj = tmp.resolve("project").also { Files.createDirectories(it) }
+        Settings.saveOpenProjects(listOf(proj))
+        Settings.saveActiveProject(proj)
+        assertEquals(listOf(proj.toAbsolutePath().normalize()), Settings.loadOpenProjects())
+    }
+
+    @Test
     fun `saving recent projects does not clobber open projects or window geometry`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }

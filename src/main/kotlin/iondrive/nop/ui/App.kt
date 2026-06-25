@@ -66,9 +66,6 @@ private sealed interface TreeEntryDialog {
 @Composable
 fun App(
     projectPath: Path,
-    recentProjects: List<Path> = emptyList(),
-    onPickRecent: (Path) -> Unit = {},
-    onPickNew: () -> Unit = {},
     onToggleTheme: () -> Unit = {},
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
@@ -474,10 +471,7 @@ fun App(
                         refreshKey = fsRefreshKey,
                         revealFile = revealFile,
                         revealRequest = treeReveal,
-                        recentProjects = recentProjects,
                         onFileClick = { tabsState.open(Tab.FileView(it)) },
-                        onPickRecent = onPickRecent,
-                        onPickNew = onPickNew,
                         onDeleteRequest = { pendingDelete = it },
                         onNewFile = { pendingEntry = TreeEntryDialog.NewFile(FileOperations.parentDirFor(it)) },
                         onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },

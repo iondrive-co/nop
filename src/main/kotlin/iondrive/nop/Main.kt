@@ -1,5 +1,9 @@
 package iondrive.nop
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -9,6 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -27,6 +32,8 @@ import androidx.compose.ui.window.rememberWindowState
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
+import iondrive.nop.ui.EmptyProjectState
+import iondrive.nop.ui.ProjectRail
 import iondrive.nop.ui.projectTint
 import iondrive.nop.ui.projectWindowIcon
 import kotlinx.coroutines.FlowPreview
@@ -64,44 +71,61 @@ fun main(args: Array<String>) {
     if (initial.isEmpty()) exitProcess(0)
 
     application {
-        // Tracks the ComposeWindow currently rendering each project, keyed by absolute path. The
-        // openProject() callback below reads this to bring an existing window to the foreground
-        // instead of trying (and silently failing) to add a duplicate entry to openProjects.
-        // Mutated only from the EDT, so a plain HashMap is fine.
-        val windowRegistry = remember { mutableMapOf<Path, androidx.compose.ui.awt.ComposeWindow>() }
-
-        // One entry per open window. Adding a path opens a new window; removing one closes it.
-        // When the list empties we exit. Using a state list so Compose recomposes on changes.
-        val openProjects = remember { mutableStateListOf<Path>().apply { addAll(initial) } }
-        var darkMode by remember { mutableStateOf(Settings.loadDarkMode()) }
-        var recentProjects by remember { mutableStateOf(Settings.loadRecentProjects()) }
-
-        // Seed the recents list with whatever we just opened, so the dropdown is populated on a
-        // brand-new install too. Reversed so the very first entry ends up at the top.
-        LaunchedEffect(Unit) {
-            for (p in initial.reversed()) Settings.addRecentProject(p)
-            recentProjects = Settings.loadRecentProjects()
-        }
-
-        fun focusExistingWindow(path: Path): Boolean {
-            val existing = windowRegistry[path] ?: return false
-            // De-iconify if the user had it minimised, otherwise toFront() doesn't make it
-            // visible.
-            if ((existing.extendedState and Frame.ICONIFIED) != 0) {
-                existing.extendedState = existing.extendedState and Frame.ICONIFIED.inv()
+        // The persistent project tab list shown in the left rail. Every project that has been
+        // opened stays here — switching tabs only changes which one is active; the little "x"
+        // removes one for good. Saved on every change (including empty) so the same tabs return
+        // on the next launch.
+        val projects = remember { mutableStateListOf<Path>().apply { addAll(initial) } }
+        // Most-recently-used projects, newest first, backing the "+" tab's dropdown. Seeded from
+        // disk unioned with whatever's open now, so even a first run (before this list was tracked)
+        // offers the current projects once they're closed.
+        val recentProjects = remember {
+            mutableStateListOf<Path>().apply {
+                addAll((initial + Settings.loadRecentProjects()).map { it.toAbsolutePath().normalize() }.distinct())
             }
-            existing.toFront()
-            existing.requestFocus()
-            return true
+        }
+        var darkMode by remember { mutableStateOf(Settings.loadDarkMode()) }
+        // The active tab — the project the workspace is currently showing. Restored from disk when
+        // it's still one of the open tabs, otherwise the first tab. Null only once every tab is
+        // closed, which surfaces the empty state.
+        var activeProject by remember {
+            mutableStateOf(ProjectTabs.initialActive(projects, Settings.loadActiveProject()))
+        }
+        // The live window, captured so the IPC "focus" signal can raise it.
+        val windowRef = remember { mutableStateOf<androidx.compose.ui.awt.ComposeWindow?>(null) }
+
+        fun bumpRecent(path: Path) {
+            val norm = path.toAbsolutePath().normalize()
+            recentProjects.remove(norm)
+            recentProjects.add(0, norm)
         }
 
         fun openProject(path: Path) {
             val norm = path.toAbsolutePath().normalize()
-            if (!focusExistingWindow(norm) && norm !in openProjects) {
-                openProjects.add(norm)
+            if (norm !in projects) projects.add(norm)
+            activeProject = norm
+            bumpRecent(norm)
+        }
+
+        fun closeProject(path: Path) {
+            val norm = path.toAbsolutePath().normalize()
+            val idx = projects.indexOf(norm)
+            if (idx < 0) return
+            // Compute the next active tab from the pre-removal list, then drop the tab.
+            val next = ProjectTabs.activeAfterClose(projects.toList(), norm, activeProject)
+            projects.removeAt(idx)
+            activeProject = next
+            // Keep the just-closed project at the top of recents so it's one click to reopen.
+            bumpRecent(norm)
+        }
+
+        fun raiseWindow() {
+            val w = windowRef.value ?: return
+            if ((w.extendedState and Frame.ICONIFIED) != 0) {
+                w.extendedState = w.extendedState and Frame.ICONIFIED.inv()
             }
-            Settings.addRecentProject(norm)
-            recentProjects = Settings.loadRecentProjects()
+            w.toFront()
+            w.requestFocus()
         }
 
         // Start the IPC server so subsequent `nop /some/path` invocations can forward to us.
@@ -110,16 +134,12 @@ fun main(args: Array<String>) {
             val handle = SingleInstance.bind(
                 configRoot = Settings.configRoot,
                 onOpen = { path ->
-                    SwingUtilities.invokeLater { openProject(path) }
-                },
-                onFocus = {
                     SwingUtilities.invokeLater {
-                        // No specific project requested — surface whichever window is on top of
-                        // the registry (insertion-ordered HashMap gives us the most recently
-                        // added project, which is good enough as a "raise nop" signal).
-                        windowRegistry.keys.lastOrNull()?.let { focusExistingWindow(it) }
+                        openProject(path)
+                        raiseWindow()
                     }
                 },
+                onFocus = { SwingUtilities.invokeLater { raiseWindow() } },
                 onQuit = {
                     // A newer build is taking over the single-instance slot — step aside so the
                     // fresh code runs instead of this stale process lingering in the background.
@@ -129,92 +149,89 @@ fun main(args: Array<String>) {
             onDispose { handle?.close() }
         }
 
+        // Persist the tab list and active tab on every change. Empty is saved too: the only way
+        // the list empties is the user closing every tab, and that choice should survive a restart.
         LaunchedEffect(Unit) {
-            // Never persist an empty list: when the user closes the last window we want the
-            // *previous* state to survive on disk so the next launch reopens it instead of
-            // dropping back to a fresh picker. The list naturally going to zero means the app
-            // is about to exit — leaving the previous content in place is the desired behaviour.
-            snapshotFlow { openProjects.toList() }
+            snapshotFlow { projects.toList() }
                 .distinctUntilChanged()
-                .collectLatest { if (it.isNotEmpty()) Settings.saveOpenProjects(it) }
+                .collectLatest { Settings.saveOpenProjects(it) }
+        }
+        LaunchedEffect(Unit) {
+            snapshotFlow { activeProject }
+                .distinctUntilChanged()
+                .collectLatest { Settings.saveActiveProject(it) }
+        }
+        LaunchedEffect(Unit) {
+            snapshotFlow { recentProjects.toList() }
+                .distinctUntilChanged()
+                .collectLatest { Settings.saveRecentProjects(it) }
         }
         LaunchedEffect(darkMode) { Settings.saveDarkMode(darkMode) }
 
-        val snapshot = openProjects.toList()
-        snapshot.forEachIndexed { index, projectPath ->
-            ProjectWindow(
-                projectPath = projectPath,
-                isFirstWindow = index == 0,
-                darkMode = darkMode,
-                recentProjects = recentProjects,
-                onPickRecent = ::openProject,
-                onPickNew = {
-                    pickProjectDir(initial = projectPath.toFile())?.let(::openProject)
-                },
-                onToggleTheme = { darkMode = !darkMode },
-                onCloseWindow = {
-                    openProjects.remove(projectPath)
-                    if (openProjects.isEmpty()) exitApplication()
-                },
-                onRegister = { w -> windowRegistry[projectPath] = w },
-                onUnregister = { windowRegistry.remove(projectPath) },
-            )
-        }
+        WorkspaceWindow(
+            projects = projects.toList(),
+            activeProject = activeProject,
+            recentProjects = recentProjects.toList(),
+            darkMode = darkMode,
+            onSelectProject = { activeProject = it },
+            onCloseProject = ::closeProject,
+            onOpenRecent = ::openProject,
+            onOpenOther = { pickProjectDir(initial = activeProject?.toFile())?.let(::openProject) },
+            onToggleTheme = { darkMode = !darkMode },
+            onCloseWindow = ::exitApplication,
+            onRegister = { w -> windowRef.value = w },
+            onUnregister = { windowRef.value = null },
+        )
     }
 }
 
 @OptIn(FlowPreview::class)
 @Composable
-private fun ApplicationScope.ProjectWindow(
-    projectPath: Path,
-    isFirstWindow: Boolean,
-    darkMode: Boolean,
+private fun ApplicationScope.WorkspaceWindow(
+    projects: List<Path>,
+    activeProject: Path?,
     recentProjects: List<Path>,
-    onPickRecent: (Path) -> Unit,
-    onPickNew: () -> Unit,
+    darkMode: Boolean,
+    onSelectProject: (Path) -> Unit,
+    onCloseProject: (Path) -> Unit,
+    onOpenRecent: (Path) -> Unit,
+    onOpenOther: () -> Unit,
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
     onUnregister: () -> Unit = {},
 ) {
-    // The first window restores the persisted geometry; additional windows let the OS pick
-    // a fresh position so they don't all stack on top of each other.
     val saved = Settings.loadWindowGeometry()
     val windowState = rememberWindowState(
         size = DpSize(
             width = saved?.width?.dp ?: 1000.dp,
             height = saved?.height?.dp ?: 700.dp,
         ),
-        position = if (isFirstWindow && saved?.x != null && saved.y != null) {
+        position = if (saved?.x != null && saved.y != null) {
             WindowPosition(saved.x.dp, saved.y.dp)
         } else {
             WindowPosition.PlatformDefault
         },
     )
 
-    // Only the first window writes back geometry — otherwise every newly-opened additional
-    // window would race to overwrite the saved position with its own.
-    if (isFirstWindow) {
-        LaunchedEffect(windowState) {
-            snapshotFlow {
-                WindowGeometry(
-                    width = windowState.size.width.value.toInt().coerceAtLeast(200),
-                    height = windowState.size.height.value.toInt().coerceAtLeast(200),
-                    x = windowState.position.x.takeIf { it.isSpecified }?.value?.toInt(),
-                    y = windowState.position.y.takeIf { it.isSpecified }?.value?.toInt(),
-                )
-            }
-                .debounce(500)
-                .distinctUntilChanged()
-                .collectLatest { Settings.saveWindowGeometry(it) }
+    LaunchedEffect(windowState) {
+        snapshotFlow {
+            WindowGeometry(
+                width = windowState.size.width.value.toInt().coerceAtLeast(200),
+                height = windowState.size.height.value.toInt().coerceAtLeast(200),
+                x = windowState.position.x.takeIf { it.isSpecified }?.value?.toInt(),
+                y = windowState.position.y.takeIf { it.isSpecified }?.value?.toInt(),
+            )
         }
+            .debounce(500)
+            .distinctUntilChanged()
+            .collectLatest { Settings.saveWindowGeometry(it) }
     }
 
-    // Per-window icon tinted from the project path — gives each project a recognisable colour in
-    // the taskbar/dock instead of every nop window looking identical. The tint matches the in-app
-    // identity strip, and is recomputed on theme flip so the icon stays legible.
-    val windowIcon = remember(projectPath, darkMode) {
-        projectWindowIcon(projectTint(projectPath, isDark = darkMode))
+    // Window icon tinted from the active project's path — gives the taskbar/dock entry a colour
+    // that tracks whichever project is in front. Recomputed on theme flip so it stays legible.
+    val windowIcon = remember(activeProject, darkMode) {
+        activeProject?.let { projectWindowIcon(projectTint(it, isDark = darkMode)) }
     }
 
     // Two-tap-Shift triggers a project-wide file search. Tracked at window level via
@@ -232,9 +249,9 @@ private fun ApplicationScope.ProjectWindow(
     Window(
         state = windowState,
         onCloseRequest = onCloseWindow,
-        // Title carries both the app and the project so taskbars are scannable across many
-        // open windows. scripts/screenshot.sh greps for "nop — " to find a running instance.
-        title = "nop — ${projectPath.fileName}",
+        // Title carries both the app and the active project. scripts/screenshot.sh greps for
+        // "nop — " to find a running instance.
+        title = "nop — ${activeProject?.fileName ?: "no project"}",
         icon = windowIcon,
         onPreviewKeyEvent = { event ->
             val isShift = event.key == Key.ShiftLeft || event.key == Key.ShiftRight
@@ -276,17 +293,37 @@ private fun ApplicationScope.ProjectWindow(
             theme = if (darkMode) JewelTheme.darkThemeDefinition() else JewelTheme.lightThemeDefinition(),
             styling = ComponentStyling.default(),
         ) {
-            App(
-                projectPath = projectPath,
-                recentProjects = recentProjects,
-                onPickRecent = onPickRecent,
-                onPickNew = onPickNew,
-                onToggleTheme = onToggleTheme,
-                fileSearchTrigger = fileSearchTrigger,
-                findInFilesTrigger = findInFilesTrigger,
-                findInFileTrigger = findInFileTrigger,
-                jumpToSourceTrigger = jumpToSourceTrigger,
-            )
+            Row(modifier = Modifier.fillMaxSize()) {
+                ProjectRail(
+                    projects = projects,
+                    activeProject = activeProject,
+                    recentProjects = recentProjects,
+                    onSelect = onSelectProject,
+                    onClose = onCloseProject,
+                    onOpenRecent = onOpenRecent,
+                    onOpenOther = onOpenOther,
+                    isDark = darkMode,
+                )
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    if (activeProject != null) {
+                        // Key the workspace on the active project: each App owns per-project state
+                        // (git repo, tabs, indexes) behind remember(projectPath), so re-keying on a
+                        // tab switch tears the old project's state down and builds the new one's.
+                        androidx.compose.runtime.key(activeProject) {
+                            App(
+                                projectPath = activeProject,
+                                onToggleTheme = onToggleTheme,
+                                fileSearchTrigger = fileSearchTrigger,
+                                findInFilesTrigger = findInFilesTrigger,
+                                findInFileTrigger = findInFileTrigger,
+                                jumpToSourceTrigger = jumpToSourceTrigger,
+                            )
+                        }
+                    } else {
+                        EmptyProjectState(onAdd = onOpenOther)
+                    }
+                }
+            }
         }
     }
 }

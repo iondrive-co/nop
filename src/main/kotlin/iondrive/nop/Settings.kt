@@ -129,6 +129,21 @@ object Settings {
 
     private const val RECENT_PROJECTS_CAP = 10
 
+    /**
+     * The project tab that was active when nop last ran, so reopening restores the same view.
+     * Null when nothing was saved or no project was active.
+     */
+    fun loadActiveProject(): Path? {
+        val v = load()["active"]?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching { Paths.get(v) }.getOrNull()
+    }
+
+    fun saveActiveProject(path: Path?) {
+        val map = load()
+        if (path == null) map.remove("active") else map["active"] = path.toAbsolutePath().normalize().toString()
+        save(map)
+    }
+
     fun loadWindowGeometry(): WindowGeometry? {
         val map = load()
         val w = map["window.width"]?.toIntOrNull() ?: return null

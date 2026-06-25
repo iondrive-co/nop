@@ -128,10 +128,7 @@ fun ProjectTreePanel(
     // Like revealFile, but driven by the app rather than the active tab: set to a just-created
     // directory/package so the tree expands its ancestors, selects it, and scrolls it into view.
     revealRequest: File? = null,
-    recentProjects: List<Path> = emptyList(),
     onFileClick: (File) -> Unit,
-    onPickRecent: (Path) -> Unit = {},
-    onPickNew: () -> Unit = {},
     onDeleteRequest: (File) -> Unit = {},
     onHistoryRequest: (File) -> Unit = {},
     blameEnabled: Boolean = false,
@@ -246,13 +243,6 @@ fun ProjectTreePanel(
             val isDark = JewelTheme.isDark
             val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
             Text("Project")
-            RecentProjectsDropdown(
-                recentProjects = recentProjects,
-                currentProject = projectPath,
-                onPickRecent = onPickRecent,
-                onPickNew = onPickNew,
-                tint = tint,
-            )
             Tooltip(tooltip = {
                 Text("Open selected with the system default app")
             }) {
@@ -357,39 +347,6 @@ private fun openDirectoryViaFileManager1(dir: File): Boolean {
         // auto-starts Thunar/Nautilus/etc. to handle it.
         ProcessBuilder(cmd).redirectErrorStream(true).start().waitFor() == 0
     }.getOrDefault(false)
-}
-
-internal fun DrawScope.drawOpenFolderIcon(tint: Color) {
-    val stroke = Stroke(width = 1.3f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-
-    drawPath(
-        path = ComposePath().apply {
-            moveTo(1.5f, 4.5f)
-            lineTo(5.95f, 4.5f)
-            lineTo(7.08f, 5.62f)
-            lineTo(13f, 5.62f)
-            lineTo(13.5f, 6.12f)
-            lineTo(13.5f, 6.9f)
-            lineTo(2.5f, 6.9f)
-            close()
-        },
-        color = tint,
-        style = stroke,
-    )
-
-    drawPath(
-        path = ComposePath().apply {
-            moveTo(1.5f, 6.5f)
-            lineTo(14.5f, 6.5f)
-            lineTo(13.45f, 11.74f)
-            cubicTo(13.31f, 12.44f, 12.7f, 12.95f, 11.98f, 12.95f)
-            lineTo(3.38f, 12.95f)
-            cubicTo(2.66f, 12.95f, 2.04f, 12.44f, 1.91f, 11.73f)
-            close()
-        },
-        color = tint,
-        style = stroke,
-    )
 }
 
 // "Open externally" — a rounded box with an arrow leaving the top-right corner. Conveys
