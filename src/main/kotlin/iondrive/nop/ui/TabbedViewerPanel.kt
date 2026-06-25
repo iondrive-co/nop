@@ -25,6 +25,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -59,6 +60,7 @@ import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
@@ -338,16 +340,21 @@ private fun FileEditView(
     // and so an inbound jump request can scroll a target line to the top of the viewport.
     var layout by remember(tab.id) { mutableStateOf<TextLayoutResult?>(null) }
 
-    // Whenever the active match changes, drop the cursor at its start *and* scroll it into view.
-    // The find bar holds focus while searching, so the editor's BasicTextField is unfocused and
-    // its built-in scroll-to-cursor never fires — we have to move the viewport ourselves, the way
-    // an inbound jump does. Only scroll when the match sits outside the viewport so stepping
-    // between two on-screen matches doesn't jolt the page. The highlight itself is painted by the
-    // outputTransformation above.
-    LaunchedEffect(currentMatch, matches, layout) {
-        val m = matches.getOrNull(currentMatch) ?: return@LaunchedEffect
+    // Moving the caret/viewport to a match is driven *only* by explicit search actions — a query
+    // change (below) and Next/Prev — never by a reactive effect keyed on the document or its layout.
+    // That's the whole point: an effect that re-asserted the caret whenever the text or layout
+    // changed would yank the cursor back onto a match every time the user typed somewhere else.
+    // Keeping match-navigation imperative makes that entire class of cursor-stealing bug impossible
+    // by construction. The highlights still track the text reactively via the transformation above.
+    val searchScope = rememberCoroutineScope()
+    suspend fun jumpToMatch(index: Int) {
+        val m = matches.getOrNull(index) ?: return
+        // The find field holds focus while searching, so the editor is unfocused and its built-in
+        // scroll-to-cursor won't fire — set the selection (for when focus returns) and scroll the
+        // viewport ourselves, the way an inbound jump does. Only scroll when the match is off-screen
+        // so stepping between two on-screen matches doesn't jolt the page.
         edit.state.edit { selection = TextRange(m.first) }
-        val tl = layout ?: return@LaunchedEffect
+        val tl = layout ?: return
         val line = tl.getLineForOffset(m.first.coerceIn(0, tl.layoutInput.text.length))
         val lineTop = tl.getLineTop(line)
         val lineBottom = tl.getLineBottom(line)
@@ -358,6 +365,14 @@ private fun FileEditView(
             val target = (lineTop - lineHeight * 3).toInt().coerceIn(0, scrollState.maxValue)
             scrollState.scrollTo(target)
         }
+    }
+
+    // Re-aim at the first match when the *query* (or the bar's open state) changes — keyed on the
+    // query string alone, so editing the document never retriggers it.
+    LaunchedEffect(searchOpen, searchState.text.toString()) {
+        if (!searchOpen) return@LaunchedEffect
+        currentMatch = 0
+        jumpToMatch(0)
     }
 
     // Inbound jump: once the layout for this tab exists, scroll the requested line to ~3 lines
@@ -382,8 +397,20 @@ private fun FileEditView(
                 focusRequester = searchFocusRequester,
                 matchCount = matches.size,
                 currentIndex = currentMatch,
-                onNext = { if (matches.isNotEmpty()) currentMatch = (currentMatch + 1) % matches.size },
-                onPrev = { if (matches.isNotEmpty()) currentMatch = (currentMatch - 1 + matches.size) % matches.size },
+                onNext = {
+                    if (matches.isNotEmpty()) {
+                        val next = (currentMatch + 1) % matches.size
+                        currentMatch = next
+                        searchScope.launch { jumpToMatch(next) }
+                    }
+                },
+                onPrev = {
+                    if (matches.isNotEmpty()) {
+                        val prev = (currentMatch - 1 + matches.size) % matches.size
+                        currentMatch = prev
+                        searchScope.launch { jumpToMatch(prev) }
+                    }
+                },
                 onClose = { searchOpen = false },
             )
         }
