@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
@@ -179,10 +180,13 @@ fun DiffView(
                 .debounce(DIFF_DEBOUNCE_MS)
                 .distinctUntilChanged()
                 .collect { text ->
-                    if (text != edit.savedText) {
-                        // save() is a compare-and-swap: if the file changed under us (git
-                        // checkout/pull, an agent), it refuses to overwrite and the background poll
-                        // reconciles instead. Only refresh git status when we actually wrote.
+                    // Only persist buffer changes the user actually made (hasUserEdit). The diff
+                    // view rewrites the shared buffer programmatically — re-seeding per-line cells
+                    // after a re-diff, adopting an externally-changed file — and none of that must
+                    // reach disk, or nop would revert a checkout/pull/merge it didn't make. save()
+                    // is also a compare-and-swap as a second line of defence; refresh git status
+                    // only on a real write.
+                    if (edit.hasUserEdit && text != edit.savedText) {
                         if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
                     }
                 }
@@ -196,7 +200,10 @@ fun DiffView(
         { regionId, choice ->
             val current = it.state.text.toString()
             val next = ConflictParser.resolve(ConflictParser.parse(current), regionId, choice)
-            if (next != current) it.state.edit { replace(0, length, next) }
+            if (next != current) {
+                it.markUserEdit()
+                it.state.edit { replace(0, length, next) }
+            }
         }
     }
 
@@ -224,7 +231,10 @@ fun DiffView(
                 { hunk ->
                     val current = it.state.text.toString()
                     val next = revertHunk(result.rows, hunk, current.endsWith("\n"))
-                    if (next != current) it.state.edit { replace(0, length, next) }
+                    if (next != current) {
+                        it.markUserEdit()
+                        it.state.edit { replace(0, length, next) }
+                    }
                 }
             }
             // Structural edits (Enter to split a line, Backspace/Delete to merge lines) the per-line
@@ -237,6 +247,7 @@ fun DiffView(
                     val current = it.state.text.toString()
                     val res = applyStructuralEdit(current, line, startCol, endCol, op)
                     if (res != null && res.first != current) {
+                        it.markUserEdit()
                         it.state.edit { replace(0, length, res.first) }
                         content = computeContent(headText, res.first)
                         res.second
@@ -590,6 +601,7 @@ private fun DiffRowView(
                     initialText = row.newLine!!,
                     spans = row.newSpans,
                     fullState = edit.state,
+                    onUserEdit = edit::markUserEdit,
                     rowStates = rowStates,
                     background = newBg,
                     inlineHighlight = INLINE_WORD_BG,
@@ -636,6 +648,7 @@ private fun EditableDiffHalf(
     initialText: String,
     spans: List<InlineSpan>,
     fullState: TextFieldState,
+    onUserEdit: () -> Unit,
     rowStates: androidx.compose.runtime.snapshots.SnapshotStateMap<Int, TextFieldState>,
     background: Color,
     inlineHighlight: Color,
@@ -717,6 +730,10 @@ private fun EditableDiffHalf(
         DisableSelection {
         BasicTextField(
             state = state,
+            // Genuine user input into this line marks the shared buffer as user-edited so the
+            // autosave will persist it. Programmatic re-seeds of this cell (after a re-diff) go
+            // through state.edit {} and never reach here, so they can't trigger a write.
+            inputTransformation = InputTransformation { onUserEdit() },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(end = 4.dp)

@@ -174,6 +174,76 @@ class FileEditStoreTest {
         assertFalse(edit.isModified, "an adopted disk copy is in sync, not a pending edit")
     }
 
+    // The autosave collectors in FileEditView / DiffView all gate on this exact condition before
+    // touching disk. Modelled here so the invariant is tested without a Compose harness: nop persists
+    // a buffer only when the user actually edited it through the editor.
+    private fun autosaveTick(edit: FileEdit): SaveResult? =
+        if (edit.hasUserEdit && edit.state.text.toString() != edit.savedText) edit.save() else null
+
+    @Test
+    fun `a buffer nop changed on its own is never autosaved (the merge-revert bug)`(@TempDir tmp: Path) {
+        val f = tmp.resolve("app.kt").also { it.writeText("working\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "working\n", hasUserEdit = false
+
+        // The user commits + merges in a terminal; the file on disk is now the merged version. Nothing
+        // was typed in nop, so the buffer is stale but hasUserEdit stays false.
+        f.writeText("merged\n")
+
+        // An autosave fires (the diff view re-seeded the buffer, a poll ran, whatever). Because the
+        // user never edited through the editor, it must not write — the merged file must survive.
+        val result = autosaveTick(edit)
+
+        assertNull(result, "no user edit ⇒ no write")
+        assertEquals("merged\n", f.readText(), "nop must not revert a merge it didn't make")
+    }
+
+    @Test
+    fun `a genuine user edit is autosaved`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        // The editor's InputTransformation marks the buffer on real input; mirror that here.
+        edit.state.edit { replace(0, length, "v2\n") }
+        edit.markUserEdit()
+
+        val result = autosaveTick(edit)
+
+        assertEquals(SaveResult.Saved, result)
+        assertEquals("v2\n", f.readText())
+        assertFalse(edit.hasUserEdit, "a successful save clears the user-edit marker")
+    }
+
+    @Test
+    fun `save and adoptDiskText both clear the user-edit marker`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        edit.markUserEdit()
+        edit.state.edit { replace(0, length, "v2\n") }
+        edit.save()
+        assertFalse(edit.hasUserEdit, "save clears it")
+
+        edit.markUserEdit()
+        edit.adoptDiskText("from-disk\n")
+        assertFalse(edit.hasUserEdit, "adopting disk content clears it")
+    }
+
+    @Test
+    fun `a pending user edit blocked by an external change stays pending`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        edit.state.edit { replace(0, length, "my-edit\n") }
+        edit.markUserEdit()
+        f.writeText("from-git\n") // the file moves under us before the save lands
+
+        val result = autosaveTick(edit)
+
+        assertEquals(SaveResult.ExternalChange("from-git\n"), result)
+        assertEquals("from-git\n", f.readText(), "external change survives")
+        assertTrue(edit.hasUserEdit, "the user's edit is still pending, not silently dropped")
+    }
+
     @Test
     fun `reconcile flow refreshes clean buffers but preserves dirty ones`(@TempDir tmp: Path) {
         val clean = tmp.resolve("clean.txt").also { it.writeText("c1\n") }.toFile()

@@ -30,6 +30,22 @@ class FileEdit(initialText: String, val file: File) {
     var savedText: String by mutableStateOf(initialText)
         private set
 
+    /**
+     * True once the user changed the buffer *through the editor* (typed, pasted, resolved a conflict,
+     * reverted a hunk) since it was last in sync with disk. The autosave consults this so that buffer
+     * mutations nop makes on its own — adopting an externally-changed file, re-seeding the diff view's
+     * per-line cells after a re-diff — can never trigger a disk write. nop only ever writes back what
+     * the user actually edited; this is what stops it reverting a file after a checkout/pull/merge it
+     * didn't make. Cleared whenever the buffer is brought back in sync with disk (save / adopt).
+     */
+    var hasUserEdit: Boolean by mutableStateOf(false)
+        private set
+
+    /** Record that the user changed the buffer via the editor. Call on the UI thread. */
+    fun markUserEdit() {
+        hasUserEdit = true
+    }
+
     val isModified: Boolean
         get() = state.text.toString() != savedText
 
@@ -48,13 +64,17 @@ class FileEdit(initialText: String, val file: File) {
         val disk = runCatching { file.readText() }.getOrNull()
         if (text == disk) {
             savedText = text
+            hasUserEdit = false
             return SaveResult.AlreadyOnDisk
         }
         if (disk != null && disk != savedText) {
+            // The user's edit is still pending — leave hasUserEdit set so a later save can retry it
+            // once the file stops moving under us; reconciliation handles the clean case.
             return SaveResult.ExternalChange(disk)
         }
         file.writeText(text)
         savedText = text
+        hasUserEdit = false
         return SaveResult.Saved
     }
 
@@ -75,6 +95,7 @@ class FileEdit(initialText: String, val file: File) {
     fun adoptDiskText(diskText: String) {
         state.edit { replace(0, length, diskText) }
         savedText = diskText
+        hasUserEdit = false
     }
 }
 

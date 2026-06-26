@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.rememberTextFieldState
@@ -314,10 +315,11 @@ private fun FileEditView(
             .debounce(AUTOSAVE_DEBOUNCE_MS)
             .distinctUntilChanged()
             .collect { text ->
-                if (text != edit.savedText) {
-                    // save() is a compare-and-swap: if the file changed under us (git checkout/pull,
-                    // an agent), it refuses to overwrite and the background poll reconciles instead.
-                    // Only refresh git status when we actually wrote.
+                // Only persist buffer changes the user actually made (hasUserEdit). A buffer mutated
+                // by nop itself — adopting an externally-changed file — must never be written back,
+                // or we'd revert a checkout/pull/merge the user did outside nop. save() is also a
+                // compare-and-swap as a second line of defence. Only refresh git status on a real write.
+                if (edit.hasUserEdit && text != edit.savedText) {
                     if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
                 }
             }
@@ -475,6 +477,10 @@ private fun FileEditView(
     ) {
         BasicTextField(
             state = edit.state,
+            // Runs only for genuine user input (typing, paste, IME) — never for programmatic
+            // state.edit {} updates — so it's the precise signal that the buffer now holds a user
+            // edit worth saving. Reconcile/adopt mutate the buffer without tripping this.
+            inputTransformation = InputTransformation { edit.markUserEdit() },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(end = 12.dp)
