@@ -6,7 +6,7 @@ import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -123,21 +124,25 @@ fun ProjectRail(
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(divider))
         Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             items.forEachIndexed { index, item ->
-                ReorderableRow(item = item, items = items, reorder = reorder, onMove = onMoveItem) {
-                    when (item) {
-                        is RailItem.Project -> ProjectTab(
-                            project = item.path,
-                            active = item.path == activeProject,
-                            isDark = isDark,
-                            onClick = { onSelect(item.path) },
-                            onClose = { onClose(item.path) },
-                        )
-                        is RailItem.Separator -> SeparatorRow(
-                            name = item.name,
-                            isDark = isDark,
-                            onRename = { sepDialog = SepDialog.Rename(index, item.name) },
-                            onRemove = { onRemoveSeparator(index) },
-                        )
+                // Key by stable per-row identity (not slot position) so a running drag's
+                // pointerInput survives the list reordering under it.
+                key(keyOf(item)) {
+                    ReorderableRow(item = item, items = items, reorder = reorder, onMove = onMoveItem) {
+                        when (item) {
+                            is RailItem.Project -> ProjectTab(
+                                project = item.path,
+                                active = item.path == activeProject,
+                                isDark = isDark,
+                                onClick = { onSelect(item.path) },
+                                onClose = { onClose(item.path) },
+                            )
+                            is RailItem.Separator -> SeparatorRow(
+                                name = item.name,
+                                isDark = isDark,
+                                onRename = { sepDialog = SepDialog.Rename(index, item.name) },
+                                onRemove = { onRemoveSeparator(index) },
+                            )
+                        }
                     }
                 }
             }
@@ -187,10 +192,10 @@ private fun keyOf(item: RailItem): String = when (item) {
 }
 
 /**
- * Wraps one rail row with long-press drag-to-reorder. While dragging, the row follows the pointer
- * (translation + raised above its neighbours); each time it travels past half a neighbour's height
- * we commit a one-step move so the list reflows live. Long-press (not plain press) starts the drag
- * so a normal tap still selects the project and a short flick still scrolls the rail.
+ * Wraps one rail row with drag-to-reorder. While dragging, the row follows the pointer (translation
+ * + raised above its neighbours); each time it travels past half a neighbour's height we commit a
+ * one-step move so the list reflows live. The drag only engages once the pointer passes the touch
+ * slop, so a plain click still selects the project (and the rail still scrolls via the wheel).
  */
 @Composable
 private fun ReorderableRow(
@@ -211,9 +216,12 @@ private fun ReorderableRow(
         modifier = Modifier
             .fillMaxWidth()
             .onSizeChanged { reorder.heights[key] = it.height }
-            .then(if (dragging) Modifier.zIndex(1f).graphicsLayer { translationY = reorder.delta } else Modifier)
+            // zIndex/graphicsLayer are always present (not conditionally inserted) so the modifier
+            // chain — and the pointerInput node below it — isn't rebuilt when a drag starts/ends.
+            .zIndex(if (dragging) 1f else 0f)
+            .graphicsLayer { translationY = if (dragging) reorder.delta else 0f }
             .pointerInput(key) {
-                detectDragGesturesAfterLongPress(
+                detectDragGestures(
                     onDragStart = { reorder.draggingKey = key; reorder.delta = 0f },
                     onDragEnd = { reorder.draggingKey = null; reorder.delta = 0f },
                     onDragCancel = { reorder.draggingKey = null; reorder.delta = 0f },

@@ -516,6 +516,7 @@ fun App(
                                         currentFile,
                                         text,
                                         offset,
+                                        fileIndex,
                                     )
                                 },
                                 onJump = { file, line ->
