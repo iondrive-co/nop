@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,7 +35,6 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import iondrive.nop.diff.DiffRow
@@ -67,6 +67,13 @@ internal val MARKER_LANE_W = 4.dp
 internal val SCROLLBAR_W = 10.dp
 internal val IntrinsicMinHeightLine = 18.dp
 
+// The tokenizer for the file a diff is showing, provided by [DiffView]/[CommitDiffView] and read by
+// the diff halves so the comparison views get the same syntax colouring (and italic comments) as
+// the editor tabs. null means "no highlighting for this file type" — render plain. Lines are
+// tokenized individually; a block comment that spans lines only highlights the lines that carry its
+// delimiters, which is an acceptable approximation for a read-only diff.
+internal val LocalDiffTokenizer = compositionLocalOf<((String) -> List<Token>)?> { null }
+
 /** Body text colour: light grey on the dark theme, near-black on the light theme for contrast. */
 @Composable
 internal fun textColor(): Color =
@@ -83,22 +90,29 @@ internal fun annotateLine(
     text: String,
     spans: List<InlineSpan>,
     highlightColor: Color,
+    tokens: List<Token> = emptyList(),
+    palette: HighlightPalette? = null,
 ): AnnotatedString {
-    if (spans.isEmpty()) return AnnotatedString(text)
+    val hasSyntax = palette != null && tokens.isNotEmpty()
+    if (spans.isEmpty() && !hasSyntax) return AnnotatedString(text)
     return buildAnnotatedString {
+        append(text)
+        // Syntax colouring underneath, so the inline-change background (added next) layers over it.
+        if (palette != null) {
+            for (t in tokens) {
+                val s = t.start.coerceIn(0, text.length)
+                val e = t.endExclusive.coerceIn(s, text.length)
+                if (e > s) addStyle(palette.styleFor(t.kind), s, e)
+            }
+        }
         for (s in spans) {
+            if (!s.changed) continue
             // Defensive: clamp into the line. A malformed span (e.g. start > end after clamping,
             // or a negative start from a stray close sentinel) used to throw StringIndexOOB and
             // tear down the whole row during scroll.
             val start = s.startChar.coerceIn(0, text.length)
             val end = s.endCharExclusive.coerceIn(start, text.length)
-            if (end == start) continue
-            val piece = text.substring(start, end)
-            if (s.changed) {
-                withStyle(SpanStyle(background = highlightColor)) { append(piece) }
-            } else {
-                append(piece)
-            }
+            if (end > start) addStyle(SpanStyle(background = highlightColor), start, end)
         }
     }
 }
@@ -145,6 +159,10 @@ internal fun ReadOnlyDiffHalf(
 ) {
     val displayText = text ?: ""
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    // Same syntax palette the editor uses, so a diff colours identically to the file it compares.
+    val tokenize = LocalDiffTokenizer.current
+    val palette = if (JewelTheme.isDark) HighlightPalette.Dark else HighlightPalette.Light
+    val tokens = remember(displayText, tokenize) { tokenize?.invoke(displayText) ?: emptyList() }
     Row(
         modifier = modifier.fillMaxSize().background(background),
         verticalAlignment = Alignment.Top,
@@ -163,7 +181,13 @@ internal fun ReadOnlyDiffHalf(
         }
         val body = @Composable {
             BasicText(
-                text = annotateLine(displayText, spans, inlineHighlight),
+                text = annotateLine(
+                    displayText,
+                    spans,
+                    inlineHighlight,
+                    tokens,
+                    if (tokenize != null) palette else null,
+                ),
                 style = TextStyle(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 12.sp,

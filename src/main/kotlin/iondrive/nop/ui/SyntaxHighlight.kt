@@ -4,6 +4,7 @@ import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontStyle
 
 enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS }
 
@@ -36,7 +37,8 @@ data class HighlightPalette(
         val Dark = HighlightPalette(
             keyword = SpanStyle(color = Color(0xFFCC7832)),
             string = SpanStyle(color = Color(0xFF6A8759)),
-            comment = SpanStyle(color = Color(0xFF808080)),
+            // IntelliJ renders comments in italics; mirror that so they read as prose, not code.
+            comment = SpanStyle(color = Color(0xFF808080), fontStyle = FontStyle.Italic),
             number = SpanStyle(color = Color(0xFF6897BB)),
             literal = SpanStyle(color = Color(0xFFCC7832)),
             punct = SpanStyle(color = Color(0xFFA9B7C6)),
@@ -48,7 +50,7 @@ data class HighlightPalette(
         val Light = HighlightPalette(
             keyword = SpanStyle(color = Color(0xFF0033B3)),
             string = SpanStyle(color = Color(0xFF067D17)),
-            comment = SpanStyle(color = Color(0xFF8C8C8C)),
+            comment = SpanStyle(color = Color(0xFF8C8C8C), fontStyle = FontStyle.Italic),
             number = SpanStyle(color = Color(0xFF1750EB)),
             literal = SpanStyle(color = Color(0xFF0033B3)),
             punct = SpanStyle(color = Color(0xFF1F2329)),

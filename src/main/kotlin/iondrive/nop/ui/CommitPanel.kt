@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -46,7 +45,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitStatus
-import iondrive.nop.git.StashEntry
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.CheckboxRow
@@ -61,15 +59,12 @@ import java.awt.Cursor
 @Composable
 fun CommitPanel(
     status: GitStatus,
-    stashes: List<StashEntry>,
     selectedPaths: Set<String>,
     onToggle: (String) -> Unit,
     onChangeClick: (FileChange) -> Unit,
     onRevert: (FileChange) -> Unit,
     onCommit: (message: String, included: List<FileChange>) -> Unit,
     onStash: (message: String) -> Unit,
-    onPopStash: (StashEntry) -> Unit,
-    onDropStash: (StashEntry) -> Unit,
     commitInFlight: Boolean,
     messageHeight: Dp,
     onMessageHeightChange: (Dp) -> Unit,
@@ -165,16 +160,6 @@ fun CommitPanel(
                     val next = (messageHeight + deltaDp).coerceIn(MIN_MESSAGE_HEIGHT, MAX_MESSAGE_HEIGHT)
                     if (next != messageHeight) onMessageHeightChange(next)
                 },
-            )
-        }
-
-        if (stashes.isNotEmpty()) {
-            ShelfSection(
-                stashes = stashes,
-                busy = stashInFlight,
-                onPop = onPopStash,
-                onDrop = onDropStash,
-                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             )
         }
 
@@ -319,43 +304,3 @@ private fun ChangeRow(
     }
 }
 
-@Composable
-private fun ShelfSection(
-    stashes: List<StashEntry>,
-    busy: Boolean,
-    onPop: (StashEntry) -> Unit,
-    onDrop: (StashEntry) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(modifier = modifier) {
-        Text(
-            "Shelf — ${stashes.size}",
-            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
-        )
-        // Bound the shelf so a long shelf doesn't crowd out the changes list
-        LazyColumn(modifier = Modifier.heightIn(max = 140.dp).fillMaxWidth()) {
-            items(stashes) { entry ->
-                StashRow(entry = entry, busy = busy, onPop = { onPop(entry) }, onDrop = { onDrop(entry) })
-            }
-        }
-    }
-}
-
-@Composable
-private fun StashRow(
-    entry: StashEntry,
-    busy: Boolean,
-    onPop: () -> Unit,
-    onDrop: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text("stash@{${entry.index}}", color = ChangeColors.UNTRACKED)
-        Text(entry.message, modifier = Modifier.weight(1f))
-        OutlinedButton(onClick = onPop, enabled = !busy) { Text("Pop") }
-        OutlinedButton(onClick = onDrop, enabled = !busy) { Text("Drop") }
-    }
-}

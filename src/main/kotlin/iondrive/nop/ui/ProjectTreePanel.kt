@@ -51,6 +51,10 @@ import java.nio.file.Path
 internal val ProjectIconTintDark = Color(0xFFAFB8C4)
 internal val ProjectIconTintLight = Color(0xFF4A5360)
 
+// Tree row label colour. The dark theme keeps Jewel's default (null → inherit); the light theme's
+// default ran too pale against the near-white panel, so name a near-black that matches the editor.
+internal val ProjectTextLight = Color(0xFF1F2329)
+
 // Jewel's LazyTree resolves its default chevrons through the IntelliJ Platform icons
 // jar, which we don't depend on. Point it at bundled SVGs instead so folder rows
 // don't render as magenta missing-icon placeholders.
@@ -296,6 +300,10 @@ fun ProjectTreePanel(
                 else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
             }
             val color = kind?.let(ChangeColors::forKind)
+            // Git status colour wins; otherwise darken the label in light mode (Jewel's default is
+            // too pale) and leave the dark theme on its inherited default.
+            val labelColor = color ?: if (!JewelTheme.isDark) ProjectTextLight else null
+            val iconTint = if (JewelTheme.isDark) ProjectIconTintDark else ProjectIconTintLight
             ContextMenuArea(items = {
                 buildList {
                     add(ContextMenuItem("New File…") { onNewFile(file) })
@@ -304,7 +312,18 @@ fun ProjectTreePanel(
                     if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
                 }
             }) {
-                if (color != null) Text(file.name, color = color) else Text(file.name)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Directories carry a folder glyph between the expand chevron and the name, the
+                    // way IntelliJ's project view does. Files have none (the task asked only for
+                    // folders), so their label aligns where the chevron's gap leaves them.
+                    if (file.isDirectory) {
+                        Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
+                    }
+                    if (labelColor != null) Text(file.name, color = labelColor) else Text(file.name)
+                }
             }
         }
     }
@@ -347,6 +366,23 @@ private fun openDirectoryViaFileManager1(dir: File): Boolean {
         // auto-starts Thunar/Nautilus/etc. to handle it.
         ProcessBuilder(cmd).redirectErrorStream(true).start().waitFor() == 0
     }.getOrDefault(false)
+}
+
+// A filled manila folder with a tab on the left, drawn in the 16-unit space the other header icons
+// use. Sits between the expand chevron and the directory name in the project tree.
+private fun DrawScope.drawFolderIcon(tint: Color) {
+    drawPath(
+        path = ComposePath().apply {
+            moveTo(2f, 4.5f)       // top-left of the tab
+            lineTo(6f, 4.5f)
+            lineTo(7.3f, 6f)       // diagonal down to where the body's top edge begins
+            lineTo(14f, 6f)        // body top-right
+            lineTo(14f, 12.5f)     // body bottom-right
+            lineTo(2f, 12.5f)      // body bottom-left
+            close()
+        },
+        color = tint,
+    )
 }
 
 // "Open externally" — a rounded box with an arrow leaving the top-right corner. Conveys

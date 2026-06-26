@@ -11,10 +11,10 @@ import org.jetbrains.jewel.ui.component.TabData
 import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.theme.defaultTabStyle
 
-enum class BottomTab { Commit, Search }
+enum class BottomTab { Commit, Search, Stash }
 
 /**
- * Two persistent tabs at the bottom of the window — Commit and Search. Neither is closeable;
+ * Three persistent tabs at the bottom of the window — Commit, Search and Stash. None is closeable;
  * the strip is part of the chrome, not a user-managed tab collection. Selection state lives in
  * [App] so external triggers (e.g. Ctrl+Shift+F) can flip to Search without poking the panel.
  */
@@ -24,6 +24,7 @@ fun BottomTabs(
     onSelect: (BottomTab) -> Unit,
     commit: @Composable () -> Unit,
     search: @Composable () -> Unit,
+    stash: @Composable () -> Unit,
 ) {
     val tabs = listOf(
         TabData.Default(
@@ -40,6 +41,13 @@ fun BottomTabs(
             onClick = { onSelect(BottomTab.Search) },
             content = { state -> SimpleTabContent(label = "Search", state = state) },
         ),
+        TabData.Default(
+            selected = selected == BottomTab.Stash,
+            closable = false,
+            onClose = {},
+            onClick = { onSelect(BottomTab.Stash) },
+            content = { state -> SimpleTabContent(label = "Stash", state = state) },
+        ),
     )
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -48,6 +56,7 @@ fun BottomTabs(
             when (selected) {
                 BottomTab.Commit -> commit()
                 BottomTab.Search -> search()
+                BottomTab.Stash -> stash()
             }
         }
     }

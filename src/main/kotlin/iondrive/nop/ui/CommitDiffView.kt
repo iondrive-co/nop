@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,6 +32,7 @@ import iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.ui.component.Text
+import java.io.File
 
 /**
  * Read-only side-by-side diff of one file at one commit (commit^ vs commit), opened from the
@@ -65,10 +67,13 @@ fun CommitDiffView(repo: GitRepo, tab: Tab.CommitDiff) {
         }
     }
 
-    when {
-        loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
-        error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
-        result != null -> ReadOnlyDiffList(result!!)
+    val tokenize = remember(tab.id) { tokenizerForExtension(File(tab.file.path).extension) }
+    CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
+        when {
+            loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
+            error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
+            result != null -> ReadOnlyDiffList(result!!)
+        }
     }
 }
 

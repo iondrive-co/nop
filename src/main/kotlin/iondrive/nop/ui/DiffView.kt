@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -64,6 +65,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
 import java.io.File
+import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 
 // Diff colours, the read-only half, gutter, change-marker lane and text selection rules live in
@@ -198,6 +200,8 @@ fun DiffView(
         }
     }
 
+    val tokenize = remember(tab.id) { tokenizerForExtension(workingFile.extension) }
+    CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
     when {
         loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
             Text("Loading diff…")
@@ -250,6 +254,7 @@ fun DiffView(
                 onTopLine = onTopLine,
             )
         }
+    }
     }
 }
 
@@ -683,9 +688,14 @@ private fun EditableDiffHalf(
             }
     }
 
-    val transformation = remember(spans, inlineHighlight) {
+    // Same syntax palette as the read-only halves and the editor, so an edited line stays coloured
+    // (and its comments italic) while the inline-change background layers on top.
+    val tokenize = LocalDiffTokenizer.current
+    val palette = if (JewelTheme.isDark) HighlightPalette.Dark else HighlightPalette.Light
+    val transformation = remember(spans, inlineHighlight, tokenize, palette) {
         OutputTransformation {
             val text = asCharSequence().toString()
+            if (tokenize != null) applyTokens(this, tokenize(text), palette)
             for (s in spans) {
                 if (!s.changed) continue
                 val start = s.startChar.coerceIn(0, text.length)

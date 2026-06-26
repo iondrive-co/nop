@@ -533,7 +533,6 @@ fun App(
                                 commit = {
                                     CommitPanel(
                                         status = status,
-                                        stashes = stashes,
                                         selectedPaths = selectedPaths,
                                         onToggle = { path ->
                                             selectedPaths = if (path in selectedPaths) selectedPaths - path else selectedPaths + path
@@ -589,32 +588,6 @@ fun App(
                                                 }
                                             }
                                         },
-                                        onPopStash = { entry ->
-                                            if (repo != null && !stashInFlight) {
-                                                scope.launch {
-                                                    stashInFlight = true
-                                                    try {
-                                                        withContext(Dispatchers.IO) { repo.stashPop(entry) }
-                                                        reloadStatus()
-                                                    } finally {
-                                                        stashInFlight = false
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        onDropStash = { entry ->
-                                            if (repo != null && !stashInFlight) {
-                                                scope.launch {
-                                                    stashInFlight = true
-                                                    try {
-                                                        withContext(Dispatchers.IO) { repo.stashDrop(entry) }
-                                                        reloadStatus()
-                                                    } finally {
-                                                        stashInFlight = false
-                                                    }
-                                                }
-                                            }
-                                        },
                                         commitInFlight = commitInFlight,
                                         messageHeight = commitMessageHeight,
                                         onMessageHeightChange = { commitMessageHeight = it },
@@ -657,6 +630,38 @@ fun App(
                                         onPick = { relPath, line ->
                                             val absolute = File(rootPath.toFile(), relPath)
                                             if (absolute.isFile) tabsState.openAt(Tab.FileView(absolute), line)
+                                        },
+                                    )
+                                },
+                                stash = {
+                                    StashPanel(
+                                        stashes = stashes,
+                                        busy = stashInFlight,
+                                        onPop = { entry ->
+                                            if (repo != null && !stashInFlight) {
+                                                scope.launch {
+                                                    stashInFlight = true
+                                                    try {
+                                                        withContext(Dispatchers.IO) { repo.stashPop(entry) }
+                                                        reloadStatus()
+                                                    } finally {
+                                                        stashInFlight = false
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        onDrop = { entry ->
+                                            if (repo != null && !stashInFlight) {
+                                                scope.launch {
+                                                    stashInFlight = true
+                                                    try {
+                                                        withContext(Dispatchers.IO) { repo.stashDrop(entry) }
+                                                        reloadStatus()
+                                                    } finally {
+                                                        stashInFlight = false
+                                                    }
+                                                }
+                                            }
                                         },
                                     )
                                 },
