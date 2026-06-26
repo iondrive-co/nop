@@ -77,7 +77,7 @@ compose.desktop {
             // must include java.management or opening any repo throws NoClassDefFoundError.
             modules("java.management")
             packageName = "nop"
-            packageVersion = "0.22.0"
+            packageVersion = "0.23.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
