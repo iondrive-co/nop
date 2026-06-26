@@ -62,8 +62,11 @@ class TabsState {
     private val pendingJumpLines = mutableStateMapOf<String, Int>()
 
     fun open(tab: Tab) {
-        if (_tabs.none { it.id == tab.id }) {
+        val existing = _tabs.indexOfFirst { it.id == tab.id }
+        if (existing < 0) {
             _tabs.add(tab)
+        } else if (_tabs[existing] != tab) {
+            _tabs[existing] = tab
         }
         selectedId = tab.id
     }
