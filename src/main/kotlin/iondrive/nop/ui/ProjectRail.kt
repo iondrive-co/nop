@@ -1,9 +1,12 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -24,8 +27,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,9 +39,14 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -45,6 +55,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.ProjectTabs
+import iondrive.nop.RailItem
+import iondrive.nop.RailLayout
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
@@ -70,19 +82,29 @@ private val TAB_MIN_HEIGHT = 52.dp
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ProjectRail(
-    projects: List<Path>,
+    items: List<RailItem>,
     activeProject: Path?,
     recentProjects: List<Path>,
     onSelect: (Path) -> Unit,
     onClose: (Path) -> Unit,
     onOpenRecent: (Path) -> Unit,
     onOpenOther: () -> Unit,
+    onAddSeparator: (String) -> Unit,
+    onRenameSeparator: (Int, String) -> Unit,
+    onRemoveSeparator: (Int) -> Unit,
+    onMoveItem: (Int, Int) -> Unit,
     isDark: Boolean,
     width: Dp = RAIL_WIDTH,
 ) {
     val railBg = if (isDark) Color(0xFF2B2D30) else Color(0xFFF2F3F5)
     val divider = if (isDark) Color(0xFF1E1F22) else Color(0xFFD9DBE0)
     val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
+    val openProjects = remember(items) { RailLayout.projects(items) }
+
+    // Drag-reorder state, shared across all rows so the dragged row tracks the pointer while the
+    // others reflow. A pending separator name prompt (add or rename) is surfaced as a dialog below.
+    val reorder = remember { RailReorder() }
+    var sepDialog by remember { mutableStateOf<SepDialog?>(null) }
 
     Column(
         modifier = Modifier
@@ -91,23 +113,177 @@ fun ProjectRail(
             .background(railBg),
     ) {
         AddProjectTab(
-            openProjects = projects,
+            openProjects = openProjects,
             recentProjects = recentProjects,
             iconTint = iconTint,
             onOpenRecent = onOpenRecent,
             onOpenOther = onOpenOther,
+            onAddSeparator = { sepDialog = SepDialog.Add },
         )
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(divider))
         Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            for (project in projects) {
-                ProjectTab(
-                    project = project,
-                    active = project == activeProject,
-                    isDark = isDark,
-                    onClick = { onSelect(project) },
-                    onClose = { onClose(project) },
-                )
+            items.forEachIndexed { index, item ->
+                ReorderableRow(item = item, items = items, reorder = reorder, onMove = onMoveItem) {
+                    when (item) {
+                        is RailItem.Project -> ProjectTab(
+                            project = item.path,
+                            active = item.path == activeProject,
+                            isDark = isDark,
+                            onClick = { onSelect(item.path) },
+                            onClose = { onClose(item.path) },
+                        )
+                        is RailItem.Separator -> SeparatorRow(
+                            name = item.name,
+                            isDark = isDark,
+                            onRename = { sepDialog = SepDialog.Rename(index, item.name) },
+                            onRemove = { onRemoveSeparator(index) },
+                        )
+                    }
+                }
             }
+        }
+    }
+
+    when (val d = sepDialog) {
+        is SepDialog.Add -> NewEntryDialog(
+            title = "New separator",
+            description = "A bold label to group the project tabs below it. Drag it into place.",
+            confirmLabel = "Add",
+            onSubmit = { name -> onAddSeparator(name); sepDialog = null; null },
+            onCancel = { sepDialog = null },
+        )
+        is SepDialog.Rename -> NewEntryDialog(
+            title = "Rename separator",
+            description = "Rename this group label.",
+            initialText = d.current,
+            confirmLabel = "Rename",
+            onSubmit = { name -> onRenameSeparator(d.index, name); sepDialog = null; null },
+            onCancel = { sepDialog = null },
+        )
+        null -> {}
+    }
+}
+
+/** A pending separator name prompt: adding a new one, or renaming the separator at [index]. */
+private sealed interface SepDialog {
+    data object Add : SepDialog
+    data class Rename(val index: Int, val current: String) : SepDialog
+}
+
+/** Shared drag-reorder state for the rail. One row drags at a time; the rest reflow around it. */
+private class RailReorder {
+    var draggingKey by mutableStateOf<String?>(null)
+    // Vertical offset of the dragged row from its settled slot, in px. Reset to 0 each time the
+    // row crosses a neighbour and we commit a move, so it always measures from the current slot.
+    var delta by mutableStateOf(0f)
+    // Measured heights per row key, so a drag knows how far to travel before swapping a neighbour.
+    val heights = mutableStateMapOf<String, Int>()
+}
+
+/** Stable per-row identity for drag keys: projects by path, separators by their runtime id. */
+private fun keyOf(item: RailItem): String = when (item) {
+    is RailItem.Project -> "p:${item.path}"
+    is RailItem.Separator -> "s:${item.id}"
+}
+
+/**
+ * Wraps one rail row with long-press drag-to-reorder. While dragging, the row follows the pointer
+ * (translation + raised above its neighbours); each time it travels past half a neighbour's height
+ * we commit a one-step move so the list reflows live. Long-press (not plain press) starts the drag
+ * so a normal tap still selects the project and a short flick still scrolls the rail.
+ */
+@Composable
+private fun ReorderableRow(
+    item: RailItem,
+    items: List<RailItem>,
+    reorder: RailReorder,
+    onMove: (Int, Int) -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val key = keyOf(item)
+    // rememberUpdatedState so the long-lived drag coroutine always sees the current order/callback
+    // even though pointerInput(key) is not restarted on a reorder.
+    val itemsUpdated by rememberUpdatedState(items)
+    val onMoveUpdated by rememberUpdatedState(onMove)
+    val dragging = reorder.draggingKey == key
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { reorder.heights[key] = it.height }
+            .then(if (dragging) Modifier.zIndex(1f).graphicsLayer { translationY = reorder.delta } else Modifier)
+            .pointerInput(key) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { reorder.draggingKey = key; reorder.delta = 0f },
+                    onDragEnd = { reorder.draggingKey = null; reorder.delta = 0f },
+                    onDragCancel = { reorder.draggingKey = null; reorder.delta = 0f },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        reorder.delta += amount.y
+                        val ordered = itemsUpdated.map(::keyOf)
+                        val from = ordered.indexOf(key)
+                        if (from >= 0) {
+                            if (reorder.delta > 0f && from < ordered.lastIndex) {
+                                val nextH = reorder.heights[ordered[from + 1]] ?: 0
+                                if (nextH > 0 && reorder.delta > nextH / 2f) {
+                                    onMoveUpdated(from, from + 1)
+                                    reorder.delta -= nextH
+                                }
+                            } else if (reorder.delta < 0f && from > 0) {
+                                val prevH = reorder.heights[ordered[from - 1]] ?: 0
+                                if (prevH > 0 && -reorder.delta > prevH / 2f) {
+                                    onMoveUpdated(from, from - 1)
+                                    reorder.delta += prevH
+                                }
+                            }
+                        }
+                    },
+                )
+            },
+    ) {
+        content()
+    }
+}
+
+/**
+ * A standalone group label in the rail — bold, rotated to run bottom-to-top like the project tabs,
+ * with a divider rule above it. Right-click to rename or remove. Purely visual: it groups the tabs
+ * below it without any containment behaviour.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun SeparatorRow(
+    name: String,
+    isDark: Boolean,
+    onRename: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val rule = if (isDark) Color(0xFF3A3D42) else Color(0xFFCDD0D6)
+    val labelColor = if (isDark) Color(0xFFCED0D6) else Color(0xFF3C4049)
+    ContextMenuArea(items = {
+        listOf(
+            ContextMenuItem("Rename…", onRename),
+            ContextMenuItem("Remove", onRemove),
+        )
+    }) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp).height(1.dp).background(rule))
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = name,
+                color = labelColor,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .padding(bottom = 4.dp)
+                    .heightIn(max = TAB_NAME_MAX)
+                    .vertical()
+                    .rotate(-90f),
+            )
         }
     }
 }
@@ -120,6 +296,7 @@ private fun AddProjectTab(
     iconTint: Color,
     onOpenRecent: (Path) -> Unit,
     onOpenOther: () -> Unit,
+    onAddSeparator: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -141,6 +318,7 @@ private fun AddProjectTab(
                 onDismiss = { expanded = false },
                 onOpenRecent = { expanded = false; onOpenRecent(it) },
                 onOpenOther = { expanded = false; onOpenOther() },
+                onAddSeparator = { expanded = false; onAddSeparator() },
             )
         }
     }
@@ -157,6 +335,7 @@ private fun RecentProjectsPopup(
     onDismiss: () -> Unit,
     onOpenRecent: (Path) -> Unit,
     onOpenOther: () -> Unit,
+    onAddSeparator: () -> Unit,
 ) {
     val visible = remember(recentProjects, openProjects) {
         ProjectTabs.recentMenu(recentProjects, openProjects).filter { Files.isDirectory(it) }
@@ -191,6 +370,7 @@ private fun RecentProjectsPopup(
                 }
                 Separator()
             }
+            RecentRow(title = "Add separator…", subtitle = null, onClick = onAddSeparator)
             RecentRow(title = "Open…", subtitle = null, onClick = onOpenOther)
         }
     }

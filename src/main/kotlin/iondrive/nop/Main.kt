@@ -71,11 +71,22 @@ fun main(args: Array<String>) {
     if (initial.isEmpty()) exitProcess(0)
 
     application {
-        // The persistent project tab list shown in the left rail. Every project that has been
-        // opened stays here — switching tabs only changes which one is active; the little "x"
-        // removes one for good. Saved on every change (including empty) so the same tabs return
-        // on the next launch.
-        val projects = remember { mutableStateListOf<Path>().apply { addAll(initial) } }
+        // The persistent rail layout shown in the left rail: project tabs interleaved with named
+        // separators (bold group labels). Every project opened stays here — switching tabs only
+        // changes which one is active; the little "x" removes one for good. Separators are added
+        // from the "+" menu and dragged into place. Restored from disk; when nop was launched with
+        // an explicit project arg we start fresh from that arg instead. Saved on every change.
+        val railItems = remember {
+            mutableStateListOf<RailItem>().apply {
+                if (args.isNotEmpty()) addAll(initial.map { RailItem.Project(it) })
+                else addAll(Settings.loadRailLayout().ifEmpty { initial.map { RailItem.Project(it) } })
+            }
+        }
+        // Next id to hand a freshly-created separator. Separator ids are runtime-only (drag keys +
+        // rename/remove targeting); seed past whatever the restored layout already used.
+        var nextSepId by remember {
+            mutableStateOf((railItems.filterIsInstance<RailItem.Separator>().maxOfOrNull { it.id } ?: -1L) + 1L)
+        }
         // Most-recently-used projects, newest first, backing the "+" tab's dropdown. Seeded from
         // disk unioned with whatever's open now, so even a first run (before this list was tracked)
         // offers the current projects once they're closed.
@@ -89,7 +100,7 @@ fun main(args: Array<String>) {
         // it's still one of the open tabs, otherwise the first tab. Null only once every tab is
         // closed, which surfaces the empty state.
         var activeProject by remember {
-            mutableStateOf(ProjectTabs.initialActive(projects, Settings.loadActiveProject()))
+            mutableStateOf(ProjectTabs.initialActive(RailLayout.projects(railItems), Settings.loadActiveProject()))
         }
         // The live window, captured so the IPC "focus" signal can raise it.
         val windowRef = remember { mutableStateOf<androidx.compose.ui.awt.ComposeWindow?>(null) }
@@ -102,21 +113,48 @@ fun main(args: Array<String>) {
 
         fun openProject(path: Path) {
             val norm = path.toAbsolutePath().normalize()
-            if (norm !in projects) projects.add(norm)
+            if (railItems.none { it is RailItem.Project && it.path == norm }) {
+                railItems.add(RailItem.Project(norm))
+            }
             activeProject = norm
             bumpRecent(norm)
         }
 
         fun closeProject(path: Path) {
             val norm = path.toAbsolutePath().normalize()
-            val idx = projects.indexOf(norm)
+            val idx = railItems.indexOfFirst { it is RailItem.Project && it.path == norm }
             if (idx < 0) return
-            // Compute the next active tab from the pre-removal list, then drop the tab.
-            val next = ProjectTabs.activeAfterClose(projects.toList(), norm, activeProject)
-            projects.removeAt(idx)
+            // Compute the next active tab from the pre-removal project order, then drop the tab.
+            val next = ProjectTabs.activeAfterClose(RailLayout.projects(railItems), norm, activeProject)
+            railItems.removeAt(idx)
             activeProject = next
             // Keep the just-closed project at the top of recents so it's one click to reopen.
             bumpRecent(norm)
+        }
+
+        // Append a new separator; the user drags it up into place. Blank names get a placeholder so
+        // the row is still visible and right-clickable to rename.
+        fun addSeparator(name: String) {
+            railItems.add(RailItem.Separator(name.trim().ifBlank { "Group" }, nextSepId))
+            nextSepId += 1
+        }
+
+        fun renameSeparator(index: Int, name: String) {
+            val item = railItems.getOrNull(index)
+            if (item is RailItem.Separator) {
+                railItems[index] = RailItem.Separator(name.trim().ifBlank { "Group" }, item.id)
+            }
+        }
+
+        fun removeSeparator(index: Int) {
+            if (railItems.getOrNull(index) is RailItem.Separator) railItems.removeAt(index)
+        }
+
+        // Drag-reorder: move the rail row at [from] to index [to]. Guards keep it a no-op for stale
+        // indices that can arrive mid-drag as the list mutates under the pointer.
+        fun moveItem(from: Int, to: Int) {
+            if (from == to || from !in railItems.indices || to !in railItems.indices) return
+            railItems.add(to, railItems.removeAt(from))
         }
 
         fun raiseWindow() {
@@ -149,12 +187,13 @@ fun main(args: Array<String>) {
             onDispose { handle?.close() }
         }
 
-        // Persist the tab list and active tab on every change. Empty is saved too: the only way
-        // the list empties is the user closing every tab, and that choice should survive a restart.
+        // Persist the rail layout (projects + separators, in order) and active tab on every change.
+        // Empty is saved too: the only way the list empties is the user closing every tab, and that
+        // choice should survive a restart.
         LaunchedEffect(Unit) {
-            snapshotFlow { projects.toList() }
+            snapshotFlow { railItems.toList() }
                 .distinctUntilChanged()
-                .collectLatest { Settings.saveOpenProjects(it) }
+                .collectLatest { Settings.saveRailLayout(it) }
         }
         LaunchedEffect(Unit) {
             snapshotFlow { activeProject }
@@ -169,7 +208,7 @@ fun main(args: Array<String>) {
         LaunchedEffect(darkMode) { Settings.saveDarkMode(darkMode) }
 
         WorkspaceWindow(
-            projects = projects.toList(),
+            railItems = railItems.toList(),
             activeProject = activeProject,
             recentProjects = recentProjects.toList(),
             darkMode = darkMode,
@@ -177,6 +216,10 @@ fun main(args: Array<String>) {
             onCloseProject = ::closeProject,
             onOpenRecent = ::openProject,
             onOpenOther = { pickProjectDir(initial = activeProject?.toFile())?.let(::openProject) },
+            onAddSeparator = ::addSeparator,
+            onRenameSeparator = ::renameSeparator,
+            onRemoveSeparator = ::removeSeparator,
+            onMoveItem = ::moveItem,
             onToggleTheme = { darkMode = !darkMode },
             onCloseWindow = ::exitApplication,
             onRegister = { w -> windowRef.value = w },
@@ -188,7 +231,7 @@ fun main(args: Array<String>) {
 @OptIn(FlowPreview::class)
 @Composable
 private fun ApplicationScope.WorkspaceWindow(
-    projects: List<Path>,
+    railItems: List<RailItem>,
     activeProject: Path?,
     recentProjects: List<Path>,
     darkMode: Boolean,
@@ -196,6 +239,10 @@ private fun ApplicationScope.WorkspaceWindow(
     onCloseProject: (Path) -> Unit,
     onOpenRecent: (Path) -> Unit,
     onOpenOther: () -> Unit,
+    onAddSeparator: (String) -> Unit,
+    onRenameSeparator: (Int, String) -> Unit,
+    onRemoveSeparator: (Int) -> Unit,
+    onMoveItem: (Int, Int) -> Unit,
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
@@ -295,13 +342,17 @@ private fun ApplicationScope.WorkspaceWindow(
         ) {
             Row(modifier = Modifier.fillMaxSize()) {
                 ProjectRail(
-                    projects = projects,
+                    items = railItems,
                     activeProject = activeProject,
                     recentProjects = recentProjects,
                     onSelect = onSelectProject,
                     onClose = onCloseProject,
                     onOpenRecent = onOpenRecent,
                     onOpenOther = onOpenOther,
+                    onAddSeparator = onAddSeparator,
+                    onRenameSeparator = onRenameSeparator,
+                    onRemoveSeparator = onRemoveSeparator,
+                    onMoveItem = onMoveItem,
                     isDark = darkMode,
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {

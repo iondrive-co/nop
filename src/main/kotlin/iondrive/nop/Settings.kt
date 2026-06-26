@@ -97,6 +97,43 @@ object Settings {
         save(map)
     }
 
+    /**
+     * The full ordered rail layout — project tabs interleaved with named separators — stored as
+     * `rail.0`, `rail.1`, … Falls back to the project-only list (open.N / legacy) when no rail.N
+     * entries exist yet, so an upgrade from a pre-separator build keeps every tab.
+     */
+    fun loadRailLayout(): List<RailItem> {
+        val map = load()
+        val encoded = map.entries
+            .mapNotNull { (k, v) ->
+                val idx = if (k.startsWith("rail.")) k.removePrefix("rail.").toIntOrNull() else null
+                if (idx == null) null else idx to v
+            }
+            .filter { it.second.isNotBlank() }
+            .sortedBy { it.first }
+            .map { it.second }
+        if (encoded.isNotEmpty()) {
+            var nextSepId = 0L
+            return encoded.mapNotNull { RailLayout.decode(it, separatorId = nextSepId++) }
+        }
+        return loadOpenProjects().map { RailItem.Project(it) }
+    }
+
+    /**
+     * Persists the rail layout. Writes the typed `rail.N` rows and also mirrors the project paths
+     * into `open.N` (in rail order) so [loadOpenProjects] and older builds still see the open set.
+     */
+    fun saveRailLayout(items: List<RailItem>) {
+        val map = load()
+        map.keys.filter { it.startsWith("rail.") || it.startsWith("open.") }.toList().forEach(map::remove)
+        map.remove("project")
+        items.forEachIndexed { idx, item -> map["rail.$idx"] = RailLayout.encode(item) }
+        RailLayout.projects(items).forEachIndexed { idx, p ->
+            map["open.$idx"] = p.toAbsolutePath().normalize().toString()
+        }
+        save(map)
+    }
+
     /** Most-recently-opened first. */
     fun loadRecentProjects(): List<Path> {
         val map = load()

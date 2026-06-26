@@ -7,7 +7,7 @@ Download the latest installer for your platform from the
 
 <!-- screenshot -->
 ![Diff view](docs/screenshots/latest-diff.png)
-![README preview](docs/screenshots/latest-preview.png)
+![Workspace preview](docs/screenshots/latest-preview.png)
 <!-- screenshot -->
 
 ## Shortcuts

@@ -87,6 +87,56 @@ class SettingsTest {
     }
 
     @Test
+    fun `rail layout round-trips projects and separators in order`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        val items = listOf(
+            RailItem.Separator("Work", 0),
+            RailItem.Project(a),
+            RailItem.Separator("Personal", 1),
+            RailItem.Project(b),
+        )
+        Settings.saveRailLayout(items)
+
+        val loaded = Settings.loadRailLayout()
+        assertEquals(
+            listOf(
+                RailItem.Separator("Work", 0),
+                RailItem.Project(a.toAbsolutePath().normalize()),
+                RailItem.Separator("Personal", 0),
+                RailItem.Project(b.toAbsolutePath().normalize()),
+            ),
+            loaded,
+        )
+    }
+
+    @Test
+    fun `saveRailLayout mirrors projects into the open list for backward compat`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        Settings.saveRailLayout(listOf(RailItem.Separator("Work", 0), RailItem.Project(a), RailItem.Project(b)))
+
+        assertEquals(
+            listOf(a, b).map { it.toAbsolutePath().normalize() },
+            Settings.loadOpenProjects(),
+        )
+    }
+
+    @Test
+    fun `loadRailLayout upgrades a project-only state with no rail entries`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        Settings.saveOpenProjects(listOf(a))
+
+        assertEquals(
+            listOf(RailItem.Project(a.toAbsolutePath().normalize())),
+            Settings.loadRailLayout(),
+        )
+    }
+
+    @Test
     fun `window geometry round-trips alongside the open projects`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val project = tmp.resolve("project").also { Files.createDirectories(it) }
