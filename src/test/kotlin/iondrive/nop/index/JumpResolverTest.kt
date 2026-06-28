@@ -63,6 +63,39 @@ class JumpResolverTest {
     }
 
     @Test
+    fun `a bare roles entry prefers the role over a same-named top-level playbook`() {
+        // Both an Ansible role and a top-level playbook are named "collide"; a bare `- collide`
+        // under `roles:` should jump to the role's tasks file, not the playbook.
+        val symbols = SymbolIndex(
+            listOf(
+                IndexEntry("collide", "collide.yml", 1, SymbolKind.ANSIBLE_TASKS),
+                IndexEntry("collide", "roles/collide/tasks/main.yml", 1, SymbolKind.ANSIBLE_ROLE),
+            ),
+        )
+        val text = "  roles:\n    - collide\n"
+        val offset = text.indexOf("collide", 5) + 2
+        val t = JumpResolver.resolve(symbols, root, File(root, "play.yml"), text, offset, files)
+        assertEquals(File(root, "roles/collide/tasks/main.yml"), t?.file)
+    }
+
+    @Test
+    fun `a name-with-extension reference still resolves to the playbook file`() {
+        // `import_playbook: collide.yml` names a file, so it must land on the playbook even though a
+        // same-named role exists.
+        val symbols = SymbolIndex(
+            listOf(
+                IndexEntry("collide", "collide.yml", 1, SymbolKind.ANSIBLE_TASKS),
+                IndexEntry("collide", "roles/collide/tasks/main.yml", 1, SymbolKind.ANSIBLE_ROLE),
+            ),
+        )
+        val withFile = FileIndex(listOf("collide.yml", "roles/collide/tasks/main.yml"))
+        val text = "  import_playbook: collide.yml\n"
+        val offset = text.indexOf("collide.yml") + 2
+        val t = JumpResolver.resolve(symbols, root, File(root, "play.yml"), text, offset, withFile)
+        assertEquals(File(root, "collide.yml"), t?.file)
+    }
+
+    @Test
     fun `wordAt returns the word straddling the offset`() {
         val text = "hello world"
         assertEquals("hello", JumpResolver.wordAt(text, 0))

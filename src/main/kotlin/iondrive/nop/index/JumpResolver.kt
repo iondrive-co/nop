@@ -59,14 +59,27 @@ object JumpResolver {
         fileIndex: FileIndex? = null,
     ): JumpTarget? {
         val word = wordAt(text, offset)
+        val wordRange = wordRangeAt(text, offset)
+        // A `name.ext` reference (e.g. `import_playbook: site.yml`) names a file, not a bare symbol.
+        // Resolve it as a path first so it lands on that file rather than a same-named role/symbol.
+        val isFilenameRef = wordRange != null &&
+            wordRange.last + 1 < text.length && text[wordRange.last + 1] == '.'
+        if (isFilenameRef && fileIndex != null) {
+            resolveFile(fileIndex, projectRoot, text, offset)?.let { return it }
+        }
         if (word != null) {
             val candidates = index.lookup(word)
             if (candidates.isNotEmpty()) {
+                // A bare name in a `roles:` list should prefer the Ansible role over a same-named
+                // top-level playbook; without this, Ctrl-click lands on the playbook, not the role.
+                // (A `name.yml` reference took the file path above, so playbooks still resolve.)
+                val ordered = if (isFilenameRef) candidates
+                else candidates.sortedByDescending { it.kind == SymbolKind.ANSIBLE_ROLE }
                 val curAbs = currentFile?.toPath()?.toAbsolutePath()?.normalize()
-                val pick = candidates.firstOrNull {
+                val pick = ordered.firstOrNull {
                     val abs = projectRoot.toPath().resolve(it.file).toAbsolutePath().normalize()
                     curAbs == null || abs != curAbs
-                } ?: candidates.first()
+                } ?: ordered.first()
                 return JumpTarget(File(projectRoot, pick.file), pick.line)
             }
         }

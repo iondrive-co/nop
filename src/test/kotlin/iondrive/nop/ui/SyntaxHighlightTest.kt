@@ -186,6 +186,188 @@ class SyntaxHighlightTest {
         assertNull(tasksAsKeyword)
     }
 
+    // ---------- Native YAML ----------
+
+    @Test
+    fun `yaml extension picks native yaml tokenizer`() {
+        assertNotNull(tokenizerForExtension("yml"))
+        assertNotNull(tokenizerForExtension("yaml"))
+        assertNotNull(tokenizerForExtension("YAML"))
+    }
+
+    @Test
+    fun `yaml lexer highlights every key not just a fixed vocabulary`() {
+        val src = """
+            # config
+            my_custom_key: hello
+            another_one: 42
+            enabled: true
+            nothing: null
+            quoted: "a string"
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.containsExact(src, "# config", TokenKind.COMMENT))
+        // Native YAML colours ALL keys, including user-defined ones the Ansible lexer left plain.
+        assertTrue(tokens.containsExact(src, "my_custom_key", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "another_one", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "enabled", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "42", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "true", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "null", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "\"a string\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `yaml lexer highlights anchors aliases and tags`() {
+        val src = """
+            base: &anchor
+              key: val
+            ref: *anchor
+            typed: !!str 123
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.containsExact(src, "&anchor", TokenKind.EMPHASIS))
+        assertTrue(tokens.containsExact(src, "*anchor", TokenKind.EMPHASIS))
+        assertTrue(tokens.containsExact(src, "!!str", TokenKind.EMPHASIS))
+    }
+
+    @Test
+    fun `yaml block scalar body is one string and is not mis-flagged`() {
+        val src = """
+            script: |
+              line one
+              line two: not a key
+            next: 1
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        // Block scalar lines are literal text — coloured STRING, and the free-form ":" inside must
+        // never be parsed as a key or trip the indentation validator.
+        assertTrue(tokens.any { it.kind == TokenKind.STRING && src.substring(it.start, it.endExclusive).contains("not a key") })
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR }, "valid block scalar must not produce errors")
+        assertTrue(tokens.containsExact(src, "next", TokenKind.KEYWORD), "lexer recovers after the block scalar")
+    }
+
+    @Test
+    fun `yaml flow collection across lines is balanced and error-free`() {
+        val src = """
+            items: [
+              1,
+              2,
+              "three"
+            ]
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR }, "balanced multi-line flow has no errors")
+        assertTrue(tokens.containsExact(src, "\"three\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `yaml valid document produces no error tokens`() {
+        val src = """
+            ---
+            name: example
+            version: 1.2
+            list:
+              - a
+              - b
+            nested:
+              child:
+                deep: true
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR }, "well-formed YAML must not be flagged")
+    }
+
+    @Test
+    fun `yaml flags a tab used for indentation`() {
+        val src = "root:\n\tchild: 1"
+        val tokens = tokenizeYaml(src)
+        val tab = tokens.find { it.kind == TokenKind.ERROR && src.substring(it.start, it.endExclusive) == "\t" }
+        assertNotNull(tab, "a leading tab is an indentation error in YAML")
+    }
+
+    @Test
+    fun `yaml flags a dedent that lines up with no open block`() {
+        val src = "a:\n  b:\n    c: 1\n   d: 2"
+        val tokens = tokenizeYaml(src)
+        // `d` is indented 3 — between the open levels 2 and 4 — which is a real YAML indent error.
+        assertTrue(tokens.any { it.kind == TokenKind.ERROR }, "mis-aligned dedent should be flagged")
+    }
+
+    @Test
+    fun `yaml flags an unterminated quoted string`() {
+        val src = "key: \"unterminated"
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.any { it.kind == TokenKind.ERROR }, "an unclosed quote at EOF is an error")
+    }
+
+    @Test
+    fun `yaml flags an unclosed flow collection`() {
+        val src = "items: [1, 2, 3"
+        val tokens = tokenizeYaml(src)
+        val openBracket = tokens.find { it.kind == TokenKind.ERROR && src.substring(it.start, it.endExclusive) == "[" }
+        assertNotNull(openBracket, "an unclosed flow collection should flag its opening bracket")
+    }
+
+    @Test
+    fun `yaml keyword inside a quoted value is not tokenized as a key`() {
+        val src = """msg: "key: not a real key""""
+        val tokens = tokenizeYaml(src)
+        // The whole quoted value is one STRING; the inner "key" must not become a KEYWORD.
+        assertNull(tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "key" }?.takeIf { it.start > 0 })
+        assertTrue(tokens.containsExact(src, "msg", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "\"key: not a real key\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `yaml mapping keys under a sequence dash do not look like a bad dedent`() {
+        // `- hosts:` puts the play's keys at column 2 (after the dash); siblings like `serial`
+        // align there. Before the dash-column fix this dedented "into open air" and false-flagged.
+        val src = """
+            - hosts:
+                - adn_collect_server
+              serial: 1
+              strategy: mitogen_linear
+              roles:
+                - adn_collect_server
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR }, "sequence-of-mappings indentation is valid")
+        assertTrue(tokens.containsExact(src, "serial", TokenKind.KEYWORD))
+    }
+
+    @Test
+    fun `yaml plain scalar with jinja quotes and brackets is not an error`() {
+        // Ansible values are full of Jinja containing quotes/brackets that are NOT YAML syntax.
+        val src = """
+            - debug: msg="{{ update_result.cmd | join(' ') }}"
+            - set_fact: host="{{ groups['ssh_bastion'] | map(attribute="name") | first }}"
+            failed: "{% if x|length > 0 %}{{ y.split(',') }}{% else %}[]{% endif %}"
+        """.trimIndent()
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR }, "Jinja internals must not trip the lexer")
+        // The bare Jinja block is still highlighted as a template unit.
+        assertTrue(tokens.any { it.kind == TokenKind.EMPHASIS && src.substring(it.start, it.endExclusive).startsWith("{{") })
+    }
+
+    @Test
+    fun `yaml plain scalar containing spaces stays one scalar`() {
+        // A space inside a plain scalar must not restart token scanning (which used to misread a
+        // later quote as a string opener).
+        val src = "msg: this is a plain value with 'quotes' and : colons"
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR })
+        assertTrue(tokens.none { it.kind == TokenKind.STRING }, "no real string here, just a plain scalar")
+    }
+
+    @Test
+    fun `yaml multi-line quoted scalar spans lines without error`() {
+        val src = "key: \"first line\n  second line\"\nnext: 1"
+        val tokens = tokenizeYaml(src)
+        assertTrue(tokens.none { it.kind == TokenKind.ERROR }, "a properly closed multi-line quote is valid")
+        assertTrue(tokens.containsExact(src, "next", TokenKind.KEYWORD), "lexer recovers after the multi-line quote")
+    }
+
     @Test
     fun `go extension picks go tokenizer`() {
         assertNotNull(tokenizerForExtension("go"))

@@ -1,5 +1,6 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.VerticalScrollbar
@@ -35,7 +36,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -498,6 +502,14 @@ private fun FileEditView(
                             val change = event.changes.firstOrNull()
                             val tl = layout
 
+                            // The pointer position is in the field's viewport space, but the text
+                            // layout is laid out in document space; shift by the scroll offset so the
+                            // offset lookup is correct once the file has been scrolled (matches how
+                            // BlameGutter and jumpToMatch map between the two). Without this, Ctrl
+                            // hover/click on anything below the fold resolved the wrong word — or none.
+                            fun docOffset(pos: Offset): Int =
+                                tl?.getOffsetForPosition(pos.copy(y = pos.y + scrollState.value)) ?: 0
+
                             // Maintain the hover underline on every event: clear it whenever
                             // Ctrl is released, the pointer leaves the field, or the resolved
                             // target disappears (cursor moved off the word).
@@ -505,7 +517,7 @@ private fun FileEditView(
                                 hoverUnderline = null
                             } else {
                                 val text = edit.state.text.toString()
-                                val offset = tl.getOffsetForPosition(change.position)
+                                val offset = docOffset(change.position)
                                 hoverUnderline = if (resolveCallback(text, offset) != null) {
                                     JumpResolver.wordRangeAt(text, offset)
                                 } else {
@@ -514,7 +526,7 @@ private fun FileEditView(
                             }
 
                             if (event.type == PointerEventType.Press && ctrl && change != null && tl != null) {
-                                val offset = tl.getOffsetForPosition(change.position)
+                                val offset = docOffset(change.position)
                                 val target = resolveCallback(edit.state.text.toString(), offset)
                                 if (target != null) {
                                     change.consume()
@@ -538,6 +550,42 @@ private fun FileEditView(
                 if (r != null) layout = r
             },
         )
+        // Red wavy underline under syntax-error ranges (native YAML errors today). Aligned to the
+        // text the same way BlameGutter is: layout positions are in document space, shifted up by the
+        // scroll offset. Decorative only — no pointerInput, so Ctrl-click still reaches the field.
+        val errorColor = palette.error.color
+        Canvas(modifier = Modifier.fillMaxSize().padding(end = 12.dp)) {
+            val tl = layout ?: return@Canvas
+            val textLen = tl.layoutInput.text.length
+            val scroll = scrollState.value.toFloat()
+            val amplitude = 1.2.dp.toPx()
+            val halfPeriod = 2.dp.toPx()
+            val strokeWidth = 1.dp.toPx()
+            for (t in tokens) {
+                if (t.kind != TokenKind.ERROR) continue
+                val s = t.start.coerceIn(0, textLen)
+                val e = t.endExclusive.coerceIn(s, textLen)
+                if (s >= e) continue
+                val line = tl.getLineForOffset(s)
+                val y = tl.getLineBottom(line) - scroll - strokeWidth
+                if (y < -amplitude || y > size.height + amplitude) continue // off-screen
+                val left = tl.getHorizontalPosition(s, usePrimaryDirection = true)
+                val right = tl.getHorizontalPosition(e, usePrimaryDirection = true)
+                if (right <= left) continue
+                val path = Path().apply {
+                    moveTo(left, y)
+                    var x = left
+                    var up = true
+                    while (x < right) {
+                        val nextX = (x + halfPeriod).coerceAtMost(right)
+                        lineTo(nextX, if (up) y - amplitude else y + amplitude)
+                        x = nextX
+                        up = !up
+                    }
+                }
+                drawPath(path, errorColor, style = Stroke(width = strokeWidth))
+            }
+        }
         VerticalScrollbar(
             adapter = rememberScrollbarAdapter(scrollState),
             style = NopScrollbarStyle,
