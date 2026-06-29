@@ -45,8 +45,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -85,6 +87,7 @@ private val TAB_MIN_HEIGHT = 52.dp
 fun ProjectRail(
     items: List<RailItem>,
     activeProject: Path?,
+    dirtyProjects: Set<Path>,
     recentProjects: List<Path>,
     onSelect: (Path) -> Unit,
     onClose: (Path) -> Unit,
@@ -132,6 +135,7 @@ fun ProjectRail(
                             is RailItem.Project -> ProjectTab(
                                 project = item.path,
                                 active = item.path == activeProject,
+                                dirty = item.path in dirtyProjects,
                                 isDark = isDark,
                                 onClick = { onSelect(item.path) },
                                 onClose = { onClose(item.path) },
@@ -266,7 +270,9 @@ private fun SeparatorRow(
     onRename: () -> Unit,
     onRemove: () -> Unit,
 ) {
-    val rule = if (isDark) Color(0xFF3A3D42) else Color(0xFFCDD0D6)
+    // Strong, near-black rules top and bottom frame the label so it reads clearly as a divider
+    // rather than another project tab.
+    val rule = if (isDark) Color.Black else Color(0xFF1F2329)
     val labelColor = if (isDark) Color(0xFFCED0D6) else Color(0xFF3C4049)
     ContextMenuArea(items = {
         listOf(
@@ -283,15 +289,20 @@ private fun SeparatorRow(
             Text(
                 text = name,
                 color = labelColor,
+                // A monospaced, letter-spaced face sets the group label apart from the project
+                // names so it reads as a heading rather than another tab.
+                fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
-                    .padding(bottom = 4.dp)
                     .heightIn(max = TAB_NAME_MAX)
                     .vertical()
                     .rotate(-90f),
             )
+            Spacer(modifier = Modifier.height(4.dp))
+            Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp).height(1.dp).background(rule))
         }
     }
 }
@@ -423,6 +434,7 @@ private fun Separator() {
 private fun ProjectTab(
     project: Path,
     active: Boolean,
+    dirty: Boolean,
     isDark: Boolean,
     onClick: () -> Unit,
     onClose: () -> Unit,
@@ -460,6 +472,18 @@ private fun ProjectTab(
                     .fillMaxHeight()
                     .background(if (active) accent else Color.Transparent),
             )
+            // A small dot in the top-right corner marks a project with uncommitted changes. Shown
+            // for active and inactive tabs alike, clear of the centred close affordance.
+            if (dirty) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = 5.dp, end = 4.dp)
+                        .size(7.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(ChangeColors.MODIFIED),
+                )
+            }
             Column(
                 modifier = Modifier.fillMaxWidth().align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally,

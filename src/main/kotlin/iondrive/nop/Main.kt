@@ -9,6 +9,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -29,6 +30,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import iondrive.nop.git.GitRepo
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
@@ -36,10 +38,13 @@ import iondrive.nop.ui.EmptyProjectState
 import iondrive.nop.ui.ProjectRail
 import iondrive.nop.ui.projectTint
 import iondrive.nop.ui.projectWindowIcon
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
 import org.jetbrains.jewel.intui.standalone.theme.darkThemeDefinition
@@ -54,6 +59,10 @@ import java.nio.file.Paths
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
+
+// How often the workspace re-checks every open project's working tree for uncommitted changes,
+// to keep the dirty dot on each rail tab current. The active project's own panel polls separately.
+private const val RAIL_GIT_POLL_MS = 3000L
 
 @OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
@@ -207,9 +216,32 @@ fun main(args: Array<String>) {
         }
         LaunchedEffect(darkMode) { Settings.saveDarkMode(darkMode) }
 
+        // Per-project "has uncommitted changes" flags backing the dirty dot on each rail tab. Only
+        // the active project has a running App polling its own git status, so the workspace polls
+        // every open project here — each tick is a cheap JGit status call per repo, off the UI
+        // thread. collectLatest restarts the loop when tabs open/close, dropping stale flags first.
+        val projectDirty = remember { mutableStateMapOf<Path, Boolean>() }
+        LaunchedEffect(Unit) {
+            snapshotFlow { railItems.filterIsInstance<RailItem.Project>().map { it.path } }
+                .distinctUntilChanged()
+                .collectLatest { paths ->
+                    projectDirty.keys.retainAll(paths.toSet())
+                    while (true) {
+                        for (path in paths) {
+                            projectDirty[path] = withContext(Dispatchers.IO) {
+                                runCatching { GitRepo.discover(path)?.use { !it.loadStatus().isClean } }
+                                    .getOrNull() ?: false
+                            }
+                        }
+                        delay(RAIL_GIT_POLL_MS)
+                    }
+                }
+        }
+
         WorkspaceWindow(
             railItems = railItems.toList(),
             activeProject = activeProject,
+            dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
             recentProjects = recentProjects.toList(),
             darkMode = darkMode,
             onSelectProject = { activeProject = it },
@@ -233,6 +265,7 @@ fun main(args: Array<String>) {
 private fun ApplicationScope.WorkspaceWindow(
     railItems: List<RailItem>,
     activeProject: Path?,
+    dirtyProjects: Set<Path>,
     recentProjects: List<Path>,
     darkMode: Boolean,
     onSelectProject: (Path) -> Unit,
@@ -344,6 +377,7 @@ private fun ApplicationScope.WorkspaceWindow(
                 ProjectRail(
                     items = railItems,
                     activeProject = activeProject,
+                    dirtyProjects = dirtyProjects,
                     recentProjects = recentProjects,
                     onSelect = onSelectProject,
                     onClose = onCloseProject,
