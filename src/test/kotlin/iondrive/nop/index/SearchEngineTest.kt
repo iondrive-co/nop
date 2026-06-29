@@ -79,6 +79,37 @@ class SearchEngineTest {
     }
 
     @Test
+    fun `skips files with a known-binary extension`(@TempDir tmp: Path) {
+        // A "PNG" whose bytes happen to contain the needle as text — must not be scanned.
+        Files.writeString(tmp.resolve("logo.png"), "needle\n")
+        Files.writeString(tmp.resolve("kept.txt"), "needle\n")
+        val hits = search(tmp, "needle")
+        assertEquals(1, hits.size)
+        assertEquals("kept.txt", hits.single().path)
+    }
+
+    @Test
+    fun `skips files whose content looks binary`(@TempDir tmp: Path) {
+        // No telltale extension, but a NUL byte near the start marks it binary.
+        Files.write(tmp.resolve("blob.xyz"), byteArrayOf(0) + "needle here".toByteArray())
+        Files.writeString(tmp.resolve("kept.txt"), "needle\n")
+        val hits = search(tmp, "needle")
+        assertEquals(1, hits.size)
+        assertEquals("kept.txt", hits.single().path)
+    }
+
+    @Test
+    fun `results are ordered by path then line then column`(@TempDir tmp: Path) {
+        Files.writeString(tmp.resolve("b.txt"), "needle\n")
+        Files.writeString(tmp.resolve("a.txt"), "x needle\nneedle\n")
+        val hits = search(tmp, "needle")
+        assertEquals(3, hits.size)
+        assertEquals(listOf("a.txt", "a.txt", "b.txt"), hits.map { it.path })
+        assertEquals(listOf(1, 2, 1), hits.map { it.line })
+        assertEquals(listOf(2, 0, 0), hits.map { it.matchStart })
+    }
+
+    @Test
     fun `handles CRLF line endings without including the carriage return`(@TempDir tmp: Path) {
         Files.writeString(tmp.resolve("a.txt"), "foo\r\nbar\r\n")
         val hits = search(tmp, "foo")
