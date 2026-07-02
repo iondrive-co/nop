@@ -112,10 +112,12 @@ fun App(
     LaunchedEffect(tabsState.selectedId) { diffTopLine = 1 }
 
     // F4 from a working-tree diff opens the real file behind it, at the line in view. Ignored for
-    // any other tab, and for diffs whose working file is gone (removed/missing). The trigger starts
-    // at 0; skip that initial value so composition doesn't open a file on its own.
+    // any other tab, and for diffs whose working file is gone (removed/missing). The trigger is a
+    // window-level counter that outlives this per-project composition, so compare against its
+    // value at composition — not 0 — or switching projects after any F4 would re-fire the jump.
+    val jumpToSourceBaseline = remember(projectPath) { jumpToSourceTrigger }
     LaunchedEffect(jumpToSourceTrigger) {
-        if (jumpToSourceTrigger == 0) return@LaunchedEffect
+        if (jumpToSourceTrigger <= jumpToSourceBaseline) return@LaunchedEffect
         val diff = tabsState.selectedTab as? Tab.Diff ?: return@LaunchedEffect
         val file = File(diff.repoRoot, diff.change.path)
         if (file.isFile) tabsState.openAt(Tab.FileView(file), diffTopLine)
@@ -289,10 +291,13 @@ fun App(
         }
     }
 
-    // Open the search popup whenever Main bumps the trigger (double-Shift). Skip the initial 0
-    // so the dialog doesn't pop on first composition.
+    // Open the search popup whenever Main bumps the trigger (double-Shift). The counter is
+    // window-level and outlives this per-project composition, so only bumps past the value seen
+    // at composition count — else the popup would re-open on every project switch after the
+    // session's first double-Shift.
+    val fileSearchBaseline = remember(projectPath) { fileSearchTrigger }
     LaunchedEffect(fileSearchTrigger) {
-        if (fileSearchTrigger > 0) fileSearchOpen = true
+        if (fileSearchTrigger > fileSearchBaseline) fileSearchOpen = true
     }
 
     // Bottom tab selection (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we flip
@@ -301,8 +306,11 @@ fun App(
     var bottomTab by remember(projectPath) { mutableStateOf(BottomTab.Commit) }
     var searchFieldFocusTrigger by remember(projectPath) { mutableStateOf(0) }
     val searchQueryState = remember(rootPath) { TextFieldState() }
+    // Window-level counter; only bumps past the composition-time value count, else switching
+    // back to a project after the session's first Ctrl+Shift+F would land on Search, not Commit.
+    val findInFilesBaseline = remember(projectPath) { findInFilesTrigger }
     LaunchedEffect(findInFilesTrigger) {
-        if (findInFilesTrigger > 0) {
+        if (findInFilesTrigger > findInFilesBaseline) {
             bottomTab = BottomTab.Search
             searchFieldFocusTrigger += 1
         }
