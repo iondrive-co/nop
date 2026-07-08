@@ -88,6 +88,9 @@ fun App(
     var revertInFlight by remember(projectPath) { mutableStateOf(false) }
     // The change pending a "Revert file?" confirmation, or null when no dialog is open.
     var pendingRevert by remember(projectPath) { mutableStateOf<FileChange?>(null) }
+    // A failed git mutation (commit/stash) to show in an error dialog, or null when none. Without
+    // this the exception would escape the launched coroutine and crash the window (see runGitOp).
+    var gitOpError by remember(projectPath) { mutableStateOf<GitOpError?>(null) }
     // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
     var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
     // The pending new-file/directory/package/copy dialog, or null when none is open.
@@ -557,23 +560,25 @@ fun App(
                                                 scope.launch {
                                                     commitInFlight = true
                                                     try {
-                                                        // Refresh before committing: if new unreviewed
-                                                        // changes appeared since the last load, show them
-                                                        // and let the user decide rather than silently
-                                                        // committing a partial snapshot.
-                                                        val fresh = withContext(Dispatchers.IO) { repo.loadStatus() }
-                                                        val knownPaths = status.changes.map { it.path }.toSet()
-                                                        val newPaths = fresh.changes.map { it.path }.toSet() - knownPaths
-                                                        if (newPaths.isNotEmpty()) {
-                                                            status = fresh
-                                                            selectedPaths = fresh.changes.map { it.path }.toSet()
-                                                            fsRefreshKey += 1
-                                                        } else {
-                                                            withContext(Dispatchers.IO) {
-                                                                repo.stageAndCommit(message, included)
+                                                        gitOpError = runGitOp("Commit failed") {
+                                                            // Refresh before committing: if new unreviewed
+                                                            // changes appeared since the last load, show them
+                                                            // and let the user decide rather than silently
+                                                            // committing a partial snapshot.
+                                                            val fresh = withContext(Dispatchers.IO) { repo.loadStatus() }
+                                                            val knownPaths = status.changes.map { it.path }.toSet()
+                                                            val newPaths = fresh.changes.map { it.path }.toSet() - knownPaths
+                                                            if (newPaths.isNotEmpty()) {
+                                                                status = fresh
+                                                                selectedPaths = fresh.changes.map { it.path }.toSet()
+                                                                fsRefreshKey += 1
+                                                            } else {
+                                                                withContext(Dispatchers.IO) {
+                                                                    repo.stageAndCommit(message, included)
+                                                                }
+                                                                rememberMessage(message)
+                                                                reloadStatus()
                                                             }
-                                                            rememberMessage(message)
-                                                            reloadStatus()
                                                         }
                                                     } finally {
                                                         commitInFlight = false
@@ -586,11 +591,13 @@ fun App(
                                                 scope.launch {
                                                     stashInFlight = true
                                                     try {
-                                                        withContext(Dispatchers.IO) {
-                                                            repo.stashCreate(message.ifBlank { null })
+                                                        gitOpError = runGitOp("Stash failed") {
+                                                            withContext(Dispatchers.IO) {
+                                                                repo.stashCreate(message.ifBlank { null })
+                                                            }
+                                                            rememberMessage(message)
+                                                            reloadStatus()
                                                         }
-                                                        rememberMessage(message)
-                                                        reloadStatus()
                                                     } finally {
                                                         stashInFlight = false
                                                     }
@@ -651,8 +658,10 @@ fun App(
                                                 scope.launch {
                                                     stashInFlight = true
                                                     try {
-                                                        withContext(Dispatchers.IO) { repo.stashPop(entry) }
-                                                        reloadStatus()
+                                                        gitOpError = runGitOp("Unstash failed") {
+                                                            withContext(Dispatchers.IO) { repo.stashPop(entry) }
+                                                            reloadStatus()
+                                                        }
                                                     } finally {
                                                         stashInFlight = false
                                                     }
@@ -664,8 +673,10 @@ fun App(
                                                 scope.launch {
                                                     stashInFlight = true
                                                     try {
-                                                        withContext(Dispatchers.IO) { repo.stashDrop(entry) }
-                                                        reloadStatus()
+                                                        gitOpError = runGitOp("Drop stash failed") {
+                                                            withContext(Dispatchers.IO) { repo.stashDrop(entry) }
+                                                            reloadStatus()
+                                                        }
                                                     } finally {
                                                         stashInFlight = false
                                                     }
@@ -706,6 +717,10 @@ fun App(
                 },
                 onCancel = { pendingRevert = null },
             )
+        }
+
+        gitOpError?.let { err ->
+            GitErrorDialog(title = err.title, detail = err.detail, onDismiss = { gitOpError = null })
         }
 
         when (val entry = pendingEntry) {

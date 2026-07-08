@@ -248,8 +248,8 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     }
 
     companion object {
-        fun discover(path: Path): GitRepo? {
-            val gitDir = findGitDir(path.toFile()) ?: return null
+        fun discover(path: Path, ceiling: Path? = null): GitRepo? {
+            val gitDir = findGitDir(path.toFile(), ceiling?.toFile()) ?: return null
             val repository = FileRepositoryBuilder()
                 .setGitDir(gitDir)
                 .readEnvironment()
@@ -258,11 +258,18 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             return GitRepo(rootDir = gitDir.parentFile.toPath(), repository = repository)
         }
 
-        private fun findGitDir(start: File): File? {
+        // Nearest `.git` at or above [start]. The search climbs parent directories
+        // until it finds one or has inspected [ceiling] (inclusive); a null ceiling
+        // climbs to the filesystem root, matching git's default behaviour. The
+        // ceiling (cf. git's GIT_CEILING_DIRECTORIES) lets callers bound the walk —
+        // useful in tests, where a scratch dir often sits inside another working tree.
+        private fun findGitDir(start: File, ceiling: File? = null): File? {
             var cur: File? = start.absoluteFile
+            val stop = ceiling?.absoluteFile
             while (cur != null) {
                 val candidate = File(cur, ".git")
                 if (candidate.exists()) return candidate
+                if (cur == stop) return null
                 cur = cur.parentFile
             }
             return null

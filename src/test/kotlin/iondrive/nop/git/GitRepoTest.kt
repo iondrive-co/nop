@@ -13,8 +13,15 @@ import kotlin.io.path.writeText
 class GitRepoTest {
     @Test
     fun `discover returns null for non-git directory`(@TempDir tmp: Path) {
-        val repo = GitRepo.discover(tmp)
-        assertNull(repo)
+        // A plain @TempDir is not enough on its own: Gradle points the test
+        // worker's java.io.tmpdir at <project>/build/tmp/test, which lives inside
+        // nop's own git working tree, and the sandbox offers no writable directory
+        // outside a git tree. GitRepo.discover would otherwise climb past tmp and
+        // (correctly) find nop/.git. So we bound the upward walk at tmp: with no
+        // .git in tmp or the empty subtree below it, discover must return null.
+        val nested = (tmp / "a" / "b").also { it.createDirectories() }
+        assertNull(GitRepo.discover(nested, ceiling = tmp),
+            "no .git between $nested and the ceiling $tmp, so discover must return null")
     }
 
     @Test
