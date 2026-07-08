@@ -420,11 +420,14 @@ fun App(
                 withContext(Dispatchers.IO) { runCatching { repo.revertFile(change) } }
                 val reverted = File(repo.rootDir.toFile(), change.path)
                 if (reverted.isFile) {
-                    val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
-                    if (disk != null) {
-                        editStore.snapshot()
-                            .filter { it.file.absolutePath == reverted.absolutePath }
-                            .forEach { it.adoptDiskText(disk) }
+                    // Push the reverted on-disk content into any editor tab open on this file, so it
+                    // stops showing the now-discarded edits. Find those buffers first and read the file
+                    // only when one exists: reverting a large binary (never open in the text editor)
+                    // must not pull its whole content into heap — an unconditional read OOM-crashed the app.
+                    val editors = editStore.editorsFor(reverted)
+                    if (editors.isNotEmpty()) {
+                        val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
+                        if (disk != null) editors.forEach { it.adoptDiskText(disk) }
                     }
                 } else {
                     closeTabsUnder(reverted)

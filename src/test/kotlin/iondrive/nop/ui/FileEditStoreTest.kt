@@ -26,6 +26,25 @@ class FileEditStoreTest {
     }
 
     @Test
+    fun `editorsFor is empty when no tab is open on the file, so revert skips the heap read`(@TempDir tmp: Path) {
+        val big = tmp.resolve("big.bin").also { it.writeText("x") }.toFile()
+        val store = FileEditStore()
+        // Nothing open at all: reverting big.bin must not read it back to refresh a nonexistent buffer.
+        assertTrue(store.editorsFor(big).isEmpty())
+        // An unrelated open tab must not make big.bin look open either.
+        store.edit(Tab.FileView(tmp.resolve("other.txt").also { it.writeText("y") }.toFile()))
+        assertTrue(store.editorsFor(big).isEmpty(), "an unrelated open tab is not an editor for big.bin")
+    }
+
+    @Test
+    fun `editorsFor returns the open buffer backing a file`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("hi\n") }.toFile()
+        val store = FileEditStore()
+        val edit = store.edit(Tab.FileView(f))
+        assertEquals(listOf(edit), store.editorsFor(f))
+    }
+
+    @Test
     fun `save writes buffer to disk and clears modified marker`(@TempDir tmp: Path) {
         val f = tmp.resolve("note.txt").also { it.writeText("v1\n") }.toFile()
         val store = FileEditStore()

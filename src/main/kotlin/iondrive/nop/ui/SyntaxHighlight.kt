@@ -73,6 +73,7 @@ fun tokenizerForExtension(ext: String?): ((String) -> List<Token>)? = when (ext?
     "json" -> ::tokenizeJson
     "md", "markdown" -> ::tokenizeMarkdown
     "js", "mjs", "cjs", "ts", "tsx", "jsx" -> ::tokenizeJsTs
+    "py", "pyw", "pyi" -> ::tokenizePython
     "sh", "bash", "zsh" -> ::tokenizeShell
     "yml", "yaml" -> ::tokenizeYaml
     "j2", "jinja", "jinja2" -> ::tokenizeAnsible
@@ -742,6 +743,78 @@ fun tokenizeGo(text: String): List<Token> {
     IDENT.findAll(text).forEach {
         val w = it.value
         if (w in GO_KEYWORDS) add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+    }
+    return out.sortedBy { it.start }
+}
+
+// ---------- Python ----------
+
+// The hard keywords of Python 3. `match`/`case` are soft keywords — outside a match statement they
+// are ordinary identifiers (`re.match(...)`, a `case` variable), and a regex lexer can't tell the
+// two apart, so highlighting them always would mis-colour common code. They're left out on purpose.
+private val PYTHON_KEYWORDS = setOf(
+    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+    "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in",
+    "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield",
+)
+
+// True / False / None are the constants — coloured as literals (like Go's nil, JSON's null) rather
+// than keywords.
+private val PYTHON_LITERALS = setOf("True", "False", "None")
+
+// Comments and strings in a single pass so the *leftmost* delimiter on a line wins: a `#` inside a
+// string stays part of the string, and a quote inside a `# comment` stays part of the comment (a
+// regex-overlap approach can only get one of those directions right). String prefixes (r/b/u/f and
+// their two-letter combos) are consumed as part of the literal; the lookbehind stops us mistaking
+// the tail of an identifier for a prefix. Triple-quoted forms are matched before the single-line
+// forms so `"""..."""` isn't read as an empty `""` followed by more.
+private val PYTHON_COMMENT_OR_STRING = Regex(
+    "#[^\\n]*" +
+        "|(?<![A-Za-z0-9_])[rRbBuUfF]{0,2}(?:" +
+        "\"\"\"[\\s\\S]*?\"\"\"|'''[\\s\\S]*?'''|" +
+        "\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'" +
+        ")",
+)
+
+// Hex / octal / binary / decimal / float / scientific, each with `_` digit separators and an
+// optional imaginary `j` suffix.
+private val PYTHON_NUMBER = Regex(
+    """\b(?:0[xX][0-9a-fA-F_]+|0[oO][0-7_]+|0[bB][01_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?)[jJ]?\b""",
+)
+
+// A decorator: `@name` (dotted, optionally under a module path) at the start of a line. Anchoring to
+// line start keeps the matrix-multiply operator (`a @ b`, always mid-expression) out of it.
+private val PYTHON_DECORATOR = Regex("""(?m)^[ \t]*(@[A-Za-z_][A-Za-z0-9_.]*)""")
+
+fun tokenizePython(text: String): List<Token> {
+    val out = ArrayList<Token>()
+    val taken = BooleanArray(text.length)
+    fun overlap(start: Int, end: Int): Boolean {
+        for (i in start until end) if (taken[i]) return true
+        return false
+    }
+    fun add(start: Int, end: Int, kind: TokenKind) {
+        if (start >= end || overlap(start, end)) return
+        for (i in start until end) taken[i] = true
+        out += Token(start, end, kind)
+    }
+    // Comments and strings first — they swallow keywords/numbers inside. The kind is disambiguated
+    // by the match's first char: a comment always opens with `#`, a string with a prefix or quote.
+    PYTHON_COMMENT_OR_STRING.findAll(text).forEach {
+        val kind = if (text[it.range.first] == '#') TokenKind.COMMENT else TokenKind.STRING
+        add(it.range.first, it.range.last + 1, kind)
+    }
+    PYTHON_DECORATOR.findAll(text).forEach {
+        val g = it.groups[1] ?: return@forEach
+        add(g.range.first, g.range.last + 1, TokenKind.EMPHASIS)
+    }
+    PYTHON_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
+    IDENT.findAll(text).forEach {
+        when (it.value) {
+            in PYTHON_LITERALS -> add(it.range.first, it.range.last + 1, TokenKind.LITERAL)
+            in PYTHON_KEYWORDS -> add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+        }
     }
     return out.sortedBy { it.start }
 }

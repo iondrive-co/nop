@@ -109,6 +109,17 @@ class FileEditStore {
 
     fun peek(id: String): FileEdit? = edits[id]
 
+    /**
+     * Open editor buffers backing [file] (matched by absolute path), or empty when no tab is open on
+     * it. Callers that refresh the on-screen copy of a file after changing it on disk must consult
+     * this *before* reading the file back: a file nothing is displaying — e.g. a large binary being
+     * reverted — must never be pulled into heap just to update a buffer that isn't there.
+     */
+    fun editorsFor(file: File): List<FileEdit> {
+        val path = file.absolutePath
+        return edits.values.filter { it.file.absolutePath == path }
+    }
+
     fun close(id: String) {
         edits.remove(id)
     }

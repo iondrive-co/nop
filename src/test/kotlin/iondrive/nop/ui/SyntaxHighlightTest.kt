@@ -425,6 +425,115 @@ class SyntaxHighlightTest {
         assertTrue(tokens.containsExact(src, "\"func is a keyword\"", TokenKind.STRING))
     }
 
+    // ---------- Python ----------
+
+    @Test
+    fun `python extension picks python tokenizer`() {
+        assertNotNull(tokenizerForExtension("py"))
+        assertNotNull(tokenizerForExtension("pyw"))
+        assertNotNull(tokenizerForExtension("pyi"))
+        assertNotNull(tokenizerForExtension("PY"))
+    }
+
+    @Test
+    fun `python lexer highlights keywords strings numbers and comments`() {
+        val src = """
+            # greet
+            import sys
+
+            def greet(name):
+                msg = "hello"
+                return 42
+        """.trimIndent()
+        val tokens = tokenizePython(src)
+        assertTrue(tokens.containsExact(src, "# greet", TokenKind.COMMENT))
+        assertTrue(tokens.containsExact(src, "import", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "def", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "return", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "\"hello\"", TokenKind.STRING))
+        assertTrue(tokens.containsExact(src, "42", TokenKind.NUMBER))
+    }
+
+    @Test
+    fun `python highlights True False None as literals`() {
+        val src = "x = True\ny = False\nz = None"
+        val tokens = tokenizePython(src)
+        assertTrue(tokens.containsExact(src, "True", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "False", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "None", TokenKind.LITERAL))
+    }
+
+    @Test
+    fun `python keyword inside string is not tokenized`() {
+        val src = "s = \"def is a keyword\""
+        val tokens = tokenizePython(src)
+        assertNull(
+            tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "def" },
+            "string-internal 'def' should not be highlighted as keyword",
+        )
+        assertTrue(tokens.containsExact(src, "\"def is a keyword\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `python hash inside a string is not a comment`() {
+        val src = "url = \"http://x#frag\""
+        val tokens = tokenizePython(src)
+        assertTrue(tokens.containsExact(src, "\"http://x#frag\"", TokenKind.STRING))
+        assertTrue(tokens.none { it.kind == TokenKind.COMMENT }, "the # is inside the string")
+    }
+
+    @Test
+    fun `python quote inside a comment is not a string`() {
+        val src = "x = 1  # don't \"quote\" me"
+        val tokens = tokenizePython(src)
+        assertTrue(tokens.any { it.kind == TokenKind.COMMENT && src.substring(it.start, it.endExclusive).startsWith("#") })
+        assertTrue(tokens.none { it.kind == TokenKind.STRING }, "quotes inside a comment are part of the comment")
+        assertTrue(tokens.containsExact(src, "1", TokenKind.NUMBER))
+    }
+
+    @Test
+    fun `python string prefixes and triple-quoted docstrings`() {
+        val src = "\"\"\"module doc\nspans lines\"\"\"\nr = r\"\\d+\"\nf = f\"hi {name}\"\nb = b\"bytes\""
+        val tokens = tokenizePython(src)
+        assertTrue(
+            tokens.any { it.kind == TokenKind.STRING && src.substring(it.start, it.endExclusive).startsWith("\"\"\"") },
+            "triple-quoted docstring is one multi-line string",
+        )
+        assertTrue(tokens.containsExact(src, "r\"\\d+\"", TokenKind.STRING), "raw-string prefix is part of the literal")
+        assertTrue(tokens.any { it.kind == TokenKind.STRING && src.substring(it.start, it.endExclusive).startsWith("f\"") })
+        assertTrue(tokens.containsExact(src, "b\"bytes\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `python highlights numeric forms`() {
+        val src = "a = 0xFF + 0b1010 + 0o17 + 3.14 + 1_000 + 2j"
+        val tokens = tokenizePython(src)
+        assertTrue(tokens.containsExact(src, "0xFF", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "0b1010", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "0o17", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "3.14", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "1_000", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "2j", TokenKind.NUMBER))
+    }
+
+    @Test
+    fun `python decorator is highlighted`() {
+        val src = "@property\ndef x(self):\n    return 1"
+        val tokens = tokenizePython(src)
+        assertTrue(tokens.containsExact(src, "@property", TokenKind.EMPHASIS))
+        assertTrue(tokens.containsExact(src, "def", TokenKind.KEYWORD))
+    }
+
+    @Test
+    fun `python soft keywords match and case stay identifiers`() {
+        // `match`/`case` are only keywords inside a match statement; here they are ordinary names
+        // and must not be coloured, or a common `re.match(...)` call would light up wrongly.
+        val src = "match = re.match(pattern)\ncase = 1"
+        val tokens = tokenizePython(src)
+        assertNull(tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "match" })
+        assertNull(tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "case" })
+    }
+
     @Test
     fun `every token range is within text bounds and non-empty`() {
         val src = """
