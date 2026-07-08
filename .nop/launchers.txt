@@ -1,3 +1,4 @@
 # nop launchers — one per line: name<TAB>command
 Screenshot	scripts/screenshot.sh
 Release	scripts/release.sh
+Rebuild	scripts/install.sh
