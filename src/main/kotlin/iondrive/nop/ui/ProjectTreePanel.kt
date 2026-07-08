@@ -53,7 +53,7 @@ internal val ProjectIconTintLight = Color(0xFF4A5360)
 
 // Tree row label colour. The dark theme keeps Jewel's default (null → inherit); the light theme's
 // default ran too pale against the near-white panel, so name a near-black that matches the editor.
-internal val ProjectTextLight = Color(0xFF1F2329)
+internal val ProjectTextLight = Color(0xFF000000)
 
 // Jewel's LazyTree resolves its default chevrons through the IntelliJ Platform icons
 // jar, which we don't depend on. Point it at bundled SVGs instead so folder rows

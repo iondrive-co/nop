@@ -330,7 +330,7 @@ private fun FileEditView(
     }
 
     val isDark = JewelTheme.isDark
-    val fg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA9B7C6) else androidx.compose.ui.graphics.Color(0xFF1F2329)
+    val fg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA9B7C6) else androidx.compose.ui.graphics.Color(0xFF000000)
     val palette = if (isDark) HighlightPalette.Dark else HighlightPalette.Light
     val tokenize = remember(tab.id) { tokenizerForExtension(tab.file.extension) }
     // Tokenize once per text change, not on every OutputTransformation invocation. The
@@ -668,7 +668,7 @@ private fun FindBar(
 ) {
     val isDark = JewelTheme.isDark
     val barBg = if (isDark) Color(0xFF2B2D30) else Color(0xFFEDEEF2)
-    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF1F2329)
+    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
     val mutedFg = if (isDark) Color(0xFF7A8290) else Color(0xFF6B7280)
     Row(
         modifier = Modifier

@@ -80,7 +80,7 @@ internal data class MdColors(
             quoteBar = Color(0x55A9B7C6),
         )
         val Light = MdColors(
-            fg = Color(0xFF1F2329),
+            fg = Color(0xFF000000),
             fgMuted = Color(0xFF6C737D),
             codeBg = Color(0x10000000),
             link = Color(0xFF1750EB),

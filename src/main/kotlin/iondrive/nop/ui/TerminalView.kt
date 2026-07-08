@@ -36,7 +36,7 @@ import kotlin.math.roundToInt
 fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
     val isDark = JewelTheme.isDark
     val bg = JewelTheme.globalColors.panelBackground
-    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF1F2329)
+    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
     val awtBg = bg.toAwt()
     val awtFg = fg.toAwt()
 
