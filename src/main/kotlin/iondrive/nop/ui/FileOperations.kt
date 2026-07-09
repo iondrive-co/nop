@@ -59,6 +59,41 @@ object FileOperations {
         return target
     }
 
+    /**
+     * Move [source] into [targetDir], keeping its name — the filesystem side of a project-tree
+     * drag-and-drop. Refuses to move a directory into itself or one of its own descendants, and
+     * never overwrites an existing entry at the destination. Dropping back onto the item's own
+     * current parent is a no-op that returns [source] unchanged.
+     */
+    fun moveFile(source: File, targetDir: File): File {
+        val resolvedSource = source.absoluteFile
+        val resolvedTargetDir = targetDir.absoluteFile
+        require(resolvedTargetDir.isDirectory) { "\"${resolvedTargetDir.name}\" is not a directory" }
+        require(!isSelfOrDescendant(resolvedTargetDir, resolvedSource)) {
+            "Cannot move \"${resolvedSource.name}\" into itself"
+        }
+        val dest = File(resolvedTargetDir, resolvedSource.name)
+        if (dest.path == resolvedSource.path) return resolvedSource
+        if (dest.exists()) throw IOException("\"${dest.name}\" already exists in ${resolvedTargetDir.name}")
+        if (!resolvedSource.renameTo(dest)) {
+            // renameTo can refuse a cross-filesystem move; fall back to copy-then-delete.
+            if (resolvedSource.isDirectory) resolvedSource.copyRecursively(dest) else resolvedSource.copyTo(dest)
+            if (!resolvedSource.deleteRecursively()) throw IOException("Could not move \"${resolvedSource.name}\"")
+        }
+        return dest
+    }
+
+    // True when [candidate] is [ancestor] itself or nested inside it — the destinations that
+    // would move a directory into its own subtree.
+    private fun isSelfOrDescendant(candidate: File, ancestor: File): Boolean {
+        var cur: File? = candidate
+        while (cur != null) {
+            if (cur.path == ancestor.path) return true
+            cur = cur.parentFile
+        }
+        return false
+    }
+
     private fun makeDirs(parentDir: File, segments: List<String>): File {
         val target = resolve(parentDir, segments)
         if (target.exists()) throw IOException("\"${target.name}\" already exists")

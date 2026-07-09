@@ -447,6 +447,25 @@ fun App(
         refresh()
     }
 
+    // Drag-and-drop move from the project tree. Any tab open on the moved path no longer points
+    // at a real file (same situation as a delete), so it's closed the same way — the file reopens
+    // with one click from its new spot in the tree, which afterTreeMutation reveals.
+    fun performMove(source: File, targetDir: File) {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { FileOperations.moveFile(source, targetDir) } }
+            result.fold(
+                onSuccess = { dest ->
+                    if (dest.absolutePath != source.absolutePath) {
+                        closeTabsUnder(source)
+                        afterTreeMutation()
+                        treeReveal = dest
+                    }
+                },
+                onFailure = { e -> gitOpError = GitOpError("Could not move file", e.userMessage()) },
+            )
+        }
+    }
+
     // Where a tree action targeting [target] should create its entry, shown to the user in the
     // dialog as a path relative to the project root ("" → the root itself).
     fun relativeLabel(dir: File): String = runCatching {
@@ -491,6 +510,7 @@ fun App(
                         onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },
                         onNewPackage = { pendingEntry = TreeEntryDialog.NewPackage(FileOperations.parentDirFor(it)) },
                         onCopyFile = { pendingEntry = TreeEntryDialog.CopyFile(it) },
+                        onMoveRequest = ::performMove,
                         onHistoryRequest = { file ->
                             if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
                         },

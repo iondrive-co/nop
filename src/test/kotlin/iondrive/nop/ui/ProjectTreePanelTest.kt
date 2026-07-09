@@ -50,4 +50,22 @@ class ProjectTreePanelTest {
         // a/b/c is not reachable when a/ is collapsed.
         assertEquals(-1, flattenedRowIndexOf(root, tmp.resolve("a/b/c").absolutePathString(), openIds))
     }
+
+    @Test fun `directoryPathAtY finds the row whose band contains the pointer`() {
+        val ranges = mapOf(
+            "/root" to 0f..20f,
+            "/root/a" to 20f..40f,
+            "/root/b" to 40f..60f,
+        )
+        assertEquals("/root", directoryPathAtY(ranges, 5f))
+        assertEquals("/root/a", directoryPathAtY(ranges, 25f))
+        assertEquals("/root/b", directoryPathAtY(ranges, 60f))
+    }
+
+    @Test fun `directoryPathAtY returns null outside every tracked band`() {
+        val ranges = mapOf("/root" to 0f..20f)
+        assertEquals(null, directoryPathAtY(ranges, 25f))
+        assertEquals(null, directoryPathAtY(ranges, -5f))
+        assertEquals(null, directoryPathAtY(emptyMap(), 10f))
+    }
 }

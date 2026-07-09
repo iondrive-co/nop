@@ -107,4 +107,58 @@ class FileOperationsTest {
         assertThrows<IllegalArgumentException> { FileOperations.createDirectory(tmp.toFile(), "a//b") }
         assertFalse(tmp.resolve("a").toFile().exists())
     }
+
+    @Test fun `moveFile relocates a file into a directory`(@TempDir tmp: Path) {
+        val source = tmp.resolve("orig.txt").createFile().toFile()
+        source.writeText("hello")
+        val dir = tmp.resolve("dest").createDirectories().toFile()
+        val moved = FileOperations.moveFile(source, dir)
+        assertEquals(tmp.resolve("dest/orig.txt").toFile(), moved)
+        assertEquals("hello", moved.readText())
+        assertFalse(source.exists())
+    }
+
+    @Test fun `moveFile relocates a directory and its contents`(@TempDir tmp: Path) {
+        val source = tmp.resolve("src").createDirectories().toFile()
+        tmp.resolve("src/child.txt").createFile().writeText("x")
+        val dir = tmp.resolve("dest").createDirectories().toFile()
+        val moved = FileOperations.moveFile(source, dir)
+        assertEquals(tmp.resolve("dest/src").toFile(), moved)
+        assertTrue(tmp.resolve("dest/src/child.txt").toFile().isFile)
+        assertFalse(source.exists())
+    }
+
+    @Test fun `moveFile is a no-op when dropped on its own parent`(@TempDir tmp: Path) {
+        val source = tmp.resolve("orig.txt").createFile().toFile()
+        val moved = FileOperations.moveFile(source, tmp.toFile())
+        assertEquals(source, moved)
+        assertTrue(source.exists())
+    }
+
+    @Test fun `moveFile refuses to overwrite an existing entry`(@TempDir tmp: Path) {
+        val source = tmp.resolve("orig.txt").createFile().toFile()
+        val dir = tmp.resolve("dest").createDirectories().toFile()
+        tmp.resolve("dest/orig.txt").createFile().toFile().writeText("existing")
+        assertThrows<IOException> { FileOperations.moveFile(source, dir) }
+        assertTrue(source.exists())
+        assertEquals("existing", tmp.resolve("dest/orig.txt").toFile().readText())
+    }
+
+    @Test fun `moveFile refuses to move a directory into itself`(@TempDir tmp: Path) {
+        val source = tmp.resolve("src").createDirectories().toFile()
+        assertThrows<IllegalArgumentException> { FileOperations.moveFile(source, source) }
+    }
+
+    @Test fun `moveFile refuses to move a directory into its own descendant`(@TempDir tmp: Path) {
+        val source = tmp.resolve("src").createDirectories().toFile()
+        val child = tmp.resolve("src/child").createDirectories().toFile()
+        assertThrows<IllegalArgumentException> { FileOperations.moveFile(source, child) }
+        assertTrue(source.exists())
+    }
+
+    @Test fun `moveFile refuses a non-directory target`(@TempDir tmp: Path) {
+        val source = tmp.resolve("orig.txt").createFile().toFile()
+        val notADir = tmp.resolve("other.txt").createFile().toFile()
+        assertThrows<IllegalArgumentException> { FileOperations.moveFile(source, notADir) }
+    }
 }

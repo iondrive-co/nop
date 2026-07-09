@@ -3,6 +3,8 @@ package iondrive.nop.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,10 +14,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path as ComposePath
@@ -28,6 +35,10 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import iondrive.nop.git.GitStatus
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -50,6 +61,10 @@ import java.nio.file.Path
 
 internal val ProjectIconTintDark = Color(0xFFAFB8C4)
 internal val ProjectIconTintLight = Color(0xFF4A5360)
+
+// Background wash for the directory row currently under a drag — same accent in both themes so it
+// reads clearly against either panel background.
+private val DropTargetHighlight = Color(0x400A84FF)
 
 // Tree row label colour. The dark theme keeps Jewel's default (null → inherit); the light theme's
 // default ran too pale against the near-white panel, so name a near-black that matches the editor.
@@ -113,6 +128,14 @@ internal fun flattenedRowIndexOf(rootFile: File, targetPath: String, openIds: Se
     return walk(rootFile)
 }
 
+/**
+ * The absolute path of the directory row whose vertical band (root-relative Y range) contains
+ * [pointerY], or null when the pointer isn't over any tracked directory row. Pulled out as a pure
+ * function so the drag-to-move hit test is unit-testable without spinning up Compose.
+ */
+internal fun directoryPathAtY(rowRanges: Map<String, ClosedFloatingPointRange<Float>>, pointerY: Float): String? =
+    rowRanges.entries.firstOrNull { pointerY in it.value }?.key
+
 private fun File.relativePathTo(repoRoot: Path): String? = runCatching {
     repoRoot.toAbsolutePath().normalize().relativize(this.toPath().toAbsolutePath().normalize())
         .toString().replace(File.separatorChar, '/')
@@ -144,11 +167,21 @@ fun ProjectTreePanel(
     onNewDirectory: (File) -> Unit = {},
     onNewPackage: (File) -> Unit = {},
     onCopyFile: (File) -> Unit = {},
+    // Drag-and-drop move: fired when the user drops [source] onto the directory row [targetDir].
+    onMoveRequest: (source: File, targetDir: File) -> Unit = { _, _ -> },
     headerExtras: @Composable () -> Unit = {},
 ) {
     val tree = remember(projectPath, refreshKey) { projectPath.asFilteredTree() }
     val treeState = rememberTreeState()
     val rootId = remember(projectPath) { projectPath.toFile().absolutePath }
+
+    // Drag-to-move state. draggedFile is non-null for the duration of a drag; dropTargetPath is
+    // the absolute path of whichever directory row the pointer is currently over (for highlight
+    // + the eventual move target). dirRowRanges tracks every currently-composed directory row's
+    // root-relative Y band, rebuilt continuously via onGloballyPositioned as rows lay out.
+    var draggedFile by remember(projectPath) { mutableStateOf<File?>(null) }
+    var dropTargetPath by remember(projectPath) { mutableStateOf<String?>(null) }
+    val dirRowRanges = remember(projectPath) { mutableStateMapOf<String, ClosedFloatingPointRange<Float>>() }
 
     LaunchedEffect(rootId) {
         treeState.openNodes(listOf(rootId))
@@ -312,9 +345,58 @@ fun ProjectTreePanel(
                     if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
                 }
             }) {
+                // This row's own layout coordinates, refreshed on every placement — used to convert
+                // drag pointer positions (local to this node) into root coordinates for hit-testing
+                // against dirRowRanges. The project root isn't draggable (there's nowhere to move it
+                // to), so it never starts a drag, but it stays a valid drop target below.
+                val rowCoords = remember(file.absolutePath) { mutableStateOf<LayoutCoordinates?>(null) }
+                val isDropTarget = file.isDirectory && dropTargetPath == file.absolutePath &&
+                    draggedFile != null && draggedFile != file
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned { coords ->
+                            rowCoords.value = coords
+                            if (file.isDirectory) {
+                                val bounds = coords.boundsInRoot()
+                                dirRowRanges[file.absolutePath] = bounds.top..bounds.bottom
+                            } else {
+                                dirRowRanges.remove(file.absolutePath)
+                            }
+                        }
+                        .then(
+                            if (file.absolutePath == rootId) {
+                                Modifier
+                            } else {
+                                Modifier.pointerInput(file.absolutePath) {
+                                    detectDragGestures(
+                                        onDragStart = { draggedFile = file },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            val coords = rowCoords.value ?: return@detectDragGestures
+                                            val rootY = coords.localToRoot(change.position).y
+                                            dropTargetPath = directoryPathAtY(dirRowRanges, rootY)
+                                                ?.takeIf { it != file.absolutePath }
+                                        },
+                                        onDragEnd = {
+                                            val target = dropTargetPath
+                                            val source = draggedFile
+                                            draggedFile = null
+                                            dropTargetPath = null
+                                            if (target != null && source != null) onMoveRequest(source, File(target))
+                                        },
+                                        onDragCancel = {
+                                            draggedFile = null
+                                            dropTargetPath = null
+                                        },
+                                    )
+                                }
+                            },
+                        )
+                        .alpha(if (draggedFile == file) 0.5f else 1f)
+                        .background(if (isDropTarget) DropTargetHighlight else Color.Transparent),
                 ) {
                     // Directories carry a folder glyph between the expand chevron and the name, the
                     // way IntelliJ's project view does. Files have none (the task asked only for
