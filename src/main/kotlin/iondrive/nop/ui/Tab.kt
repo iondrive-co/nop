@@ -61,7 +61,14 @@ class TabsState {
     // jumping to a different line in an already-open file shouldn't open a second tab.
     private val pendingJumpLines = mutableStateMapOf<String, Int>()
 
-    fun open(tab: Tab) {
+    /**
+     * Invoked with the file each time a [Tab.FileView] is opened as a genuine user action (tree
+     * click, search jump, double-shift pick, …) so callers can track access frequency. Session
+     * restore passes `record = false`, so reopening last run's tabs doesn't inflate the counts.
+     */
+    var onFileOpened: ((File) -> Unit)? = null
+
+    fun open(tab: Tab, record: Boolean = true) {
         val existing = _tabs.indexOfFirst { it.id == tab.id }
         if (existing < 0) {
             _tabs.add(tab)
@@ -69,11 +76,12 @@ class TabsState {
             _tabs[existing] = tab
         }
         selectedId = tab.id
+        if (record && tab is Tab.FileView) onFileOpened?.invoke(tab.file)
     }
 
     /** Opens [tab] and queues a one-shot scroll to [line] (1-based) once the editor is laid out. */
-    fun openAt(tab: Tab, line: Int) {
-        open(tab)
+    fun openAt(tab: Tab, line: Int, record: Boolean = true) {
+        open(tab, record)
         pendingJumpLines[tab.id] = line.coerceAtLeast(1)
     }
 

@@ -99,6 +99,30 @@ class TabsStateTest {
     }
 
     @Test
+    fun `onFileOpened fires for file tabs opened as a user action`() {
+        val s = TabsState()
+        val opened = mutableListOf<File>()
+        s.onFileOpened = { opened += it }
+
+        s.open(fileTab("/x/a.txt"))
+        s.openAt(fileTab("/x/b.txt"), 5)
+
+        assertEquals(listOf(File("/x/a.txt"), File("/x/b.txt")), opened)
+    }
+
+    @Test
+    fun `onFileOpened does not fire for restore opens or non-file tabs`() {
+        val s = TabsState()
+        val opened = mutableListOf<File>()
+        s.onFileOpened = { opened += it }
+
+        s.open(fileTab("/x/a.txt"), record = false)
+        s.open(Tab.History(File("/x"), File("/x")))
+
+        assertEquals(emptyList<File>(), opened)
+    }
+
+    @Test
     fun `select changes selection only if id exists`() {
         val s = TabsState()
         val a = fileTab("/x/a.txt")

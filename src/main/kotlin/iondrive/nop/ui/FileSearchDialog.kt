@@ -7,11 +7,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.rememberTextFieldState
@@ -57,6 +58,7 @@ fun FileSearchDialog(
     files: List<String>,
     onPick: (String) -> Unit,
     onDismiss: () -> Unit,
+    accessCounts: Map<String, Int> = emptyMap(),
 ) {
     val state = rememberTextFieldState()
     val focusRequester = remember { FocusRequester() }
@@ -64,8 +66,17 @@ fun FileSearchDialog(
     val listState = rememberLazyListState()
 
     val query by remember { derivedStateOf { state.text.toString() } }
-    val results by remember(files) {
-        derivedStateOf { FileSearchRanking.rank(query, files) }
+    val results by remember(files, accessCounts) {
+        derivedStateOf { FileSearchRanking.rank(query, files, accessCounts) }
+    }
+    // How many leading results are the "most frequently accessed" picks, so we can draw a divider
+    // between them and the rest of the index. Only the empty-query view has this section; once the
+    // user types, results are query-ranked and there's nothing to set apart.
+    val frequentCount by remember(files, accessCounts) {
+        derivedStateOf {
+            if (query.isNotEmpty()) 0
+            else FileSearchRanking.frequent(files, accessCounts).size
+        }
     }
 
     LaunchedEffect(results) {
@@ -133,18 +144,36 @@ fun FileSearchDialog(
                     state = listState,
                     modifier = Modifier.heightIn(max = 380.dp).fillMaxWidth(),
                 ) {
-                    items(results) { path ->
-                        val idx = results.indexOf(path)
-                        ResultRow(
-                            path = path,
-                            selected = idx == selectedIndex,
-                            onClick = { onPick(path) },
-                        )
+                    itemsIndexed(results) { idx, path ->
+                        Column {
+                            // Separate the frequently-accessed head from the rest of the index.
+                            if (frequentCount in 1 until results.size && idx == frequentCount) {
+                                FrequentDivider()
+                            }
+                            ResultRow(
+                                path = path,
+                                selected = idx == selectedIndex,
+                                onClick = { onPick(path) },
+                            )
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/** Thin horizontal rule marking the boundary between the frequently-accessed head and the rest. */
+@Composable
+private fun FrequentDivider() {
+    val line = if (JewelTheme.isDark) Color(0xFF4A4D54) else Color(0xFFC4C6CC)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .height(1.dp)
+            .background(line),
+    )
 }
 
 @Composable

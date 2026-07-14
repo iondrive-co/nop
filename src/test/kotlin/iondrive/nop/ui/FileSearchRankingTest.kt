@@ -70,4 +70,88 @@ class FileSearchRankingTest {
         val r = FileSearchRanking.rank("file", many, limit = 5)
         assertEquals(5, r.size)
     }
+
+    @Test
+    fun `empty query surfaces most-frequently-accessed files in the top slots`() {
+        val counts = mapOf(
+            "README.md" to 5,
+            "build.gradle.kts" to 3,
+            "src/main/kotlin/iondrive/nop/ui/App.kt" to 8,
+        )
+        val r = FileSearchRanking.rank("", sample, counts)
+        assertEquals(
+            listOf(
+                "src/main/kotlin/iondrive/nop/ui/App.kt",
+                "README.md",
+                "build.gradle.kts",
+            ),
+            r.take(3),
+        )
+        // The rest of the index still appears, deduped, so nothing is lost.
+        assertEquals(sample.size, r.size)
+        assertEquals(sample.toSet(), r.toSet())
+    }
+
+    @Test
+    fun `empty query reserves at most three slots for frequent files`() {
+        val counts = mapOf(
+            "README.md" to 5,
+            "build.gradle.kts" to 4,
+            "src/main/kotlin/iondrive/nop/Main.kt" to 3,
+            "src/main/kotlin/iondrive/nop/ui/App.kt" to 2,
+        )
+        val top3 = FileSearchRanking.rank("", sample, counts).take(3)
+        assertEquals(
+            listOf("README.md", "build.gradle.kts", "src/main/kotlin/iondrive/nop/Main.kt"),
+            top3,
+        )
+        // The 4th most-accessed file is not force-promoted; it keeps its natural position.
+        assertTrue("src/main/kotlin/iondrive/nop/ui/App.kt" !in top3)
+    }
+
+    @Test
+    fun `empty query ignores accessed files no longer in the index`() {
+        val counts = mapOf("deleted/old.kt" to 99, "README.md" to 2)
+        val r = FileSearchRanking.rank("", sample, counts)
+        assertEquals("README.md", r.first())
+        assertTrue("deleted/old.kt" !in r)
+        assertEquals(sample.size, r.size)
+    }
+
+    @Test
+    fun `empty query with no access history returns the head unchanged`() {
+        assertEquals(sample.take(3), FileSearchRanking.rank("", sample, emptyMap(), limit = 3))
+    }
+
+    @Test
+    fun `frequent returns most-accessed files capped at TOP_SLOTS, index-only`() {
+        val counts = mapOf(
+            "README.md" to 5,
+            "build.gradle.kts" to 4,
+            "src/main/kotlin/iondrive/nop/Main.kt" to 3,
+            "src/main/kotlin/iondrive/nop/ui/App.kt" to 2,
+            "deleted/old.kt" to 99,
+        )
+        val f = FileSearchRanking.frequent(sample, counts)
+        assertEquals(FileSearchRanking.TOP_SLOTS, f.size)
+        assertEquals(
+            listOf("README.md", "build.gradle.kts", "src/main/kotlin/iondrive/nop/Main.kt"),
+            f,
+        )
+        assertTrue("deleted/old.kt" !in f)
+    }
+
+    @Test
+    fun `frequent is empty without access history`() {
+        assertTrue(FileSearchRanking.frequent(sample, emptyMap()).isEmpty())
+    }
+
+    @Test
+    fun `access count breaks ties within a score bucket`() {
+        // Both are prefix matches for "tab" (equal score). Without counts, the shorter name wins;
+        // a higher access count on the longer name pulls it ahead.
+        val files = listOf("a/tab.kt", "a/tabx.kt")
+        assertEquals("a/tab.kt", FileSearchRanking.rank("tab", files).first())
+        assertEquals("a/tabx.kt", FileSearchRanking.rank("tab", files, mapOf("a/tabx.kt" to 3)).first())
+    }
 }

@@ -82,7 +82,8 @@ object TabsPersistence {
                 KIND_HISTORY -> if (repoRoot != null) Tab.History(file, repoRoot) else continue
                 else -> continue
             }
-            state.open(tab)
+            // record = false: restoring last run's tabs must not count as fresh accesses.
+            state.open(tab, record = false)
             if (s.selected) preferredSelectedId = tab.id
         }
         if (preferredSelectedId != null) state.select(preferredSelectedId)

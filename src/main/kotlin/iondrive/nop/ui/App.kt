@@ -24,6 +24,7 @@ import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.StashEntry
+import iondrive.nop.index.AccessFrequency
 import iondrive.nop.index.FileIndex
 import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
@@ -220,6 +221,29 @@ fun App(
     // under ~/.config/nop/projects/<slug>/ so the project tree stays free of derived files.
     var symbolIndex by remember(rootPath) { mutableStateOf(SymbolIndex()) }
     var fileIndex by remember(rootPath) { mutableStateOf(FileIndex()) }
+    // How often each file has been opened, so the double-shift box can surface the most-used files
+    // in its top slots. Counts every genuine open (tree click, search jump, double-shift pick) via
+    // TabsState.onFileOpened; session restore opts out. Loaded per project, persisted on each open.
+    val accessFreq = remember(rootPath) { mutableStateOf(AccessFrequency()) }
+    LaunchedEffect(rootPath) {
+        val freqFile = Settings.projectDataDir(rootPath).resolve("access-counts.tsv")
+        accessFreq.value = withContext(Dispatchers.IO) { AccessFrequency.load(freqFile) }
+    }
+    LaunchedEffect(tabsState, rootPath) {
+        tabsState.onFileOpened = onOpened@{ file ->
+            val root = rootPath.toFile().toPath().toAbsolutePath().normalize()
+            val rel = runCatching {
+                root.relativize(file.toPath().toAbsolutePath().normalize())
+                    .toString().replace(File.separatorChar, '/')
+            }.getOrNull() ?: return@onOpened
+            // Only count files inside the project (matches FileIndex's relative paths).
+            if (rel.isEmpty() || rel.startsWith("..")) return@onOpened
+            val updated = accessFreq.value.record(rel)
+            accessFreq.value = updated
+            val freqFile = Settings.projectDataDir(rootPath).resolve("access-counts.tsv")
+            scope.launch { withContext(Dispatchers.IO) { AccessFrequency.save(freqFile, updated) } }
+        }
+    }
     // Seed the on-disk cache into memory only once per project; later re-runs (driven by
     // fsRefreshKey) already hold the index and shouldn't re-read a cache that can be large.
     var indexCacheSeeded by remember(rootPath) { mutableStateOf(false) }
@@ -819,8 +843,10 @@ fun App(
         if (fileSearchOpen) {
             FileSearchDialog(
                 files = fileIndex.files,
+                accessCounts = accessFreq.value.counts,
                 onPick = { relPath ->
                     fileSearchOpen = false
+                    // The open itself is recorded via TabsState.onFileOpened (see above).
                     val absolute = File(rootPath.toFile(), relPath)
                     if (absolute.isFile) tabsState.open(Tab.FileView(absolute))
                 },
