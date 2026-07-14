@@ -157,14 +157,15 @@ class FileEditStoreTest {
     }
 
     @Test
-    fun `diskTextIfDivergedAndClean leaves a modified buffer alone`(@TempDir tmp: Path) {
+    fun `diskTextIfDivergedAndClean leaves a genuinely user-edited buffer alone`(@TempDir tmp: Path) {
         val f = tmp.resolve("a.txt").also { it.writeText("one\n") }.toFile()
         val edit = FileEditStore().edit(Tab.FileView(f))
 
-        edit.state.edit { replace(0, length, "my edits\n") } // unsaved in-app work
+        edit.state.edit { replace(0, length, "my edits\n") } // unsaved in-app work…
+        edit.markUserEdit()                                   // …that the user actually typed
         f.writeText("two\n")                                  // and the file also changed on disk
 
-        assertNull(edit.diskTextIfDivergedAndClean(), "unsaved edits must win over the disk copy")
+        assertNull(edit.diskTextIfDivergedAndClean(), "unsaved user edits must win over the disk copy")
     }
 
     @Test
@@ -264,21 +265,61 @@ class FileEditStoreTest {
     }
 
     @Test
+    fun `a buffer that drifted without a user edit is reloaded from disk (the stale-diff bug)`(@TempDir tmp: Path) {
+        // Reproduces the reported bug: a working-tree diff shows a stale, wrong change (a "no-op in a
+        // comment") instead of the real edit that's on disk. Root cause below.
+        val f = tmp.resolve("vars").also { it.writeText("a\nb\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "a\nb\n", hasUserEdit = false
+
+        // The diff view's per-line cells re-seed the shared buffer programmatically (a "stale
+        // writeback echo" — see the revert-bug test above). That drifts state.text off the baseline
+        // WITHOUT any genuine user edit, so isModified is true but hasUserEdit is false.
+        edit.state.edit { replace(0, length, "a\nX\n") }
+        assertTrue(edit.isModified, "programmatic drift reads as modified")
+        assertFalse(edit.hasUserEdit, "but the user never typed anything")
+
+        // Meanwhile the real edit lands on disk (an external editor / agent adds lines).
+        f.writeText("a\nb\nc\nd\n")
+
+        // There is no user work to protect, so reconcile must surface the disk copy: the drift is
+        // discarded and the diff will reflect the real on-disk change. Gating this on !isModified
+        // (instead of !hasUserEdit) strands the buffer forever and is exactly the bug.
+        assertEquals(
+            "a\nb\nc\nd\n",
+            edit.diskTextIfDivergedAndClean(),
+            "a drifted-but-not-user-edited buffer must reload from disk, not show stale content",
+        )
+    }
+
+    @Test
+    fun `pure drift with no external change still heals back to disk`(@TempDir tmp: Path) {
+        // Even with no external write, a buffer that drifted without a user edit must be brought back
+        // in line with disk — otherwise the diff keeps showing the phantom drift (the "no-op" change).
+        val f = tmp.resolve("vars").also { it.writeText("a\nb\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        edit.state.edit { replace(0, length, "a\nX\n") } // drift, no markUserEdit
+        assertEquals("a\nb\n", edit.diskTextIfDivergedAndClean(), "heal the phantom drift from disk")
+    }
+
+    @Test
     fun `reconcile flow refreshes clean buffers but preserves dirty ones`(@TempDir tmp: Path) {
         val clean = tmp.resolve("clean.txt").also { it.writeText("c1\n") }.toFile()
         val dirty = tmp.resolve("dirty.txt").also { it.writeText("d1\n") }.toFile()
         val store = FileEditStore()
         val cleanEdit = store.edit(Tab.FileView(clean))
         val dirtyEdit = store.edit(Tab.FileView(dirty))
-        dirtyEdit.state.edit { replace(0, length, "d-local\n") } // unsaved in-app edit
+        dirtyEdit.state.edit { replace(0, length, "d-local\n") } // unsaved in-app edit…
+        dirtyEdit.markUserEdit()                                 // …the user actually made
 
         // Both files change on disk out from under the app.
         clean.writeText("c2\n")
         dirty.writeText("d2\n")
 
-        // Mirror App.reconcileEdits: read divergence off each snapshot entry, then adopt the clean ones.
+        // Mirror App.reconcileEdits: read divergence off each snapshot entry, then adopt everything the
+        // user hasn't got pending edits in.
         for (edit in store.snapshot()) {
-            edit.diskTextIfDivergedAndClean()?.let { if (!edit.isModified) edit.adoptDiskText(it) }
+            edit.diskTextIfDivergedAndClean()?.let { if (!edit.hasUserEdit) edit.adoptDiskText(it) }
         }
 
         assertEquals("c2\n", cleanEdit.state.text.toString(), "clean buffer reloaded from disk")

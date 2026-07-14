@@ -79,16 +79,23 @@ class FileEdit(initialText: String, val file: File) {
     }
 
     /**
-     * Disk content when this buffer has no unsaved in-app edits *and* the file on disk has diverged
-     * from what we last loaded or saved (an external editor, a branch switch, a pull, an agent). Returns
-     * null otherwise — including when the buffer is modified (the user's unsaved work must win) and when
-     * the file is missing/unreadable (a vanished file must not blank the buffer). Pure read: safe off the
-     * UI thread; hand the result to [adoptDiskText] on the UI thread.
+     * Disk content to adopt when this buffer holds no genuine unsaved *user* edits and what we're
+     * showing differs from the file on disk. Returns null otherwise — when the user has real pending
+     * edits ([hasUserEdit], which must win), when the buffer already matches disk, and when the file
+     * is missing/unreadable (a vanished file must not blank the buffer). Pure read: safe off the UI
+     * thread; hand the result to [adoptDiskText] on the UI thread.
+     *
+     * The guard is [hasUserEdit], not [isModified], on purpose. A buffer can drift off its baseline
+     * without the user touching it — the diff view re-seeds its per-line cells into the shared buffer,
+     * a "writeback echo" that leaves [isModified] true but [hasUserEdit] false. That drift is not work
+     * to protect: gating reload on [isModified] would strand such a buffer, freezing the working side
+     * of the diff on stale content while the real on-disk change never shows. Comparing against the
+     * live [state] text (not [savedText]) also heals a pure drift with no external write.
      */
     fun diskTextIfDivergedAndClean(): String? {
-        if (isModified) return null
+        if (hasUserEdit) return null
         val disk = runCatching { file.readText() }.getOrNull() ?: return null
-        return if (disk == savedText) null else disk
+        return if (disk == state.text.toString()) null else disk
     }
 
     /** Replace the buffer with [diskText] and treat it as the new on-disk baseline. Call on the UI thread. */

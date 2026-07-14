@@ -157,7 +157,9 @@ fun App(
         for ((edit, diskText) in updates) {
             // Re-check on the UI thread: the user may have started typing in the gap between the disk
             // read and here, in which case their unsaved edits take precedence over the disk copy.
-            if (!edit.isModified) edit.adoptDiskText(diskText)
+            // Gate on hasUserEdit (not isModified) so a buffer that merely drifted programmatically
+            // still adopts disk — see FileEdit.diskTextIfDivergedAndClean.
+            if (!edit.hasUserEdit) edit.adoptDiskText(diskText)
         }
     }
 

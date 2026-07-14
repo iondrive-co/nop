@@ -143,7 +143,7 @@ fun DiffView(
             // show a stale snapshot. A modified buffer is left alone — unsaved in-app edits win.
             if (edit != null) {
                 val diskText = withContext(Dispatchers.IO) { edit.diskTextIfDivergedAndClean() }
-                if (diskText != null && !edit.isModified) edit.adoptDiskText(diskText)
+                if (diskText != null && !edit.hasUserEdit) edit.adoptDiskText(diskText)
             }
             val workingNow = when (tab.change.kind) {
                 ChangeKind.REMOVED, ChangeKind.MISSING -> ""
