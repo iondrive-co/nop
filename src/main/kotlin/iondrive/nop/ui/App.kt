@@ -694,7 +694,13 @@ fun App(
                                         focusTrigger = searchFieldFocusTrigger,
                                         onPick = { relPath, line ->
                                             val absolute = File(rootPath.toFile(), relPath)
-                                            if (absolute.isFile) tabsState.openAt(Tab.FileView(absolute), line)
+                                            // Seed the opened tab's in-file find with the active query so its
+                                            // matches highlight in the editor the same way a manual find does.
+                                            if (absolute.isFile) tabsState.openAt(
+                                                Tab.FileView(absolute),
+                                                line,
+                                                searchQuery = searchQueryState.text.toString(),
+                                            )
                                         },
                                     )
                                 },

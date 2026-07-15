@@ -61,6 +61,11 @@ class TabsState {
     // jumping to a different line in an already-open file shouldn't open a second tab.
     private val pendingJumpLines = mutableStateMapOf<String, Int>()
 
+    // Query to seed the tab's in-file find bar with the next time it's composed — set when a global
+    // "Find in files" result is opened so the editor lights up the same matches a manual find would.
+    // Kept off [Tab.FileView] for the same reason as [pendingJumpLines]: it must not change tab identity.
+    private val pendingSearchQueries = mutableStateMapOf<String, String>()
+
     /**
      * Invoked with the file each time a [Tab.FileView] is opened as a genuine user action (tree
      * click, search jump, double-shift pick, …) so callers can track access frequency. Session
@@ -79,10 +84,16 @@ class TabsState {
         if (record && tab is Tab.FileView) onFileOpened?.invoke(tab.file)
     }
 
-    /** Opens [tab] and queues a one-shot scroll to [line] (1-based) once the editor is laid out. */
-    fun openAt(tab: Tab, line: Int, record: Boolean = true) {
+    /**
+     * Opens [tab] and queues a one-shot scroll to [line] (1-based) once the editor is laid out.
+     * When [searchQuery] is non-empty it's also queued so the tab seeds its in-file find bar with
+     * it — used by global "Find in files" so the opened editor highlights the matched text.
+     */
+    fun openAt(tab: Tab, line: Int, record: Boolean = true, searchQuery: String? = null) {
         open(tab, record)
         pendingJumpLines[tab.id] = line.coerceAtLeast(1)
+        if (searchQuery.isNullOrEmpty()) pendingSearchQueries.remove(tab.id)
+        else pendingSearchQueries[tab.id] = searchQuery
     }
 
     /**
@@ -96,11 +107,23 @@ class TabsState {
         pendingJumpLines.remove(tabId)
     }
 
+    /**
+     * Query to seed [tabId]'s in-file find bar with, or null. Observable, so a Compose call site
+     * re-runs when [openAt] queues a new search for an already-open tab.
+     */
+    fun pendingSearchQuery(tabId: String): String? = pendingSearchQueries[tabId]
+
+    /** Marks the pending search seed for [tabId] as handled. Call after the find bar is seeded. */
+    fun clearSearchQuery(tabId: String) {
+        pendingSearchQueries.remove(tabId)
+    }
+
     fun close(id: String) {
         val idx = _tabs.indexOfFirst { it.id == id }
         if (idx < 0) return
         _tabs.removeAt(idx)
         pendingJumpLines.remove(id)
+        pendingSearchQueries.remove(id)
         if (selectedId == id) {
             selectedId = _tabs.getOrNull(idx)?.id ?: _tabs.getOrNull(idx - 1)?.id
         }
@@ -116,7 +139,10 @@ class TabsState {
         val removed = _tabs.filter { it.id != keepId }
         _tabs.clear()
         _tabs.add(keep)
-        removed.forEach { pendingJumpLines.remove(it.id) }
+        removed.forEach {
+            pendingJumpLines.remove(it.id)
+            pendingSearchQueries.remove(it.id)
+        }
         selectedId = keep.id
         return removed
     }

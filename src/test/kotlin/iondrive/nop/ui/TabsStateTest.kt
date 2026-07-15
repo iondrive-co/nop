@@ -123,6 +123,66 @@ class TabsStateTest {
     }
 
     @Test
+    fun `openAt with a query queues it until consumed`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+
+        s.openAt(a, 12, searchQuery = "needle")
+
+        assertEquals(12, s.pendingJumpLine(a.id))
+        assertEquals("needle", s.pendingSearchQuery(a.id))
+
+        s.clearSearchQuery(a.id)
+        assertNull(s.pendingSearchQuery(a.id))
+    }
+
+    @Test
+    fun `openAt without a query leaves no pending search`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+
+        s.openAt(a, 3)
+
+        assertNull(s.pendingSearchQuery(a.id))
+    }
+
+    @Test
+    fun `openAt with an empty query clears any previous pending search`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+
+        s.openAt(a, 1, searchQuery = "old")
+        s.openAt(a, 2, searchQuery = "")
+
+        assertNull(s.pendingSearchQuery(a.id))
+    }
+
+    @Test
+    fun `close discards a pending search`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.openAt(a, 1, searchQuery = "gone")
+
+        s.close(a.id)
+
+        assertNull(s.pendingSearchQuery(a.id))
+    }
+
+    @Test
+    fun `closeOthers discards pending searches on the closed tabs`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        s.openAt(a, 1, searchQuery = "a-hit")
+        s.openAt(b, 2, searchQuery = "b-hit")
+
+        s.closeOthers(b.id)
+
+        assertNull(s.pendingSearchQuery(a.id))
+        assertEquals("b-hit", s.pendingSearchQuery(b.id))
+    }
+
+    @Test
     fun `select changes selection only if id exists`() {
         val s = TabsState()
         val a = fileTab("/x/a.txt")

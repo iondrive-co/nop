@@ -56,4 +56,46 @@ class FindInFileTest {
         val r = findAllMatches(text, "a")
         assertTrue(r.size == 5000, "expected cap at 5000, got ${r.size}")
     }
+
+    @Test
+    fun `lineStartOffset returns 0 for the first line`() {
+        assertEquals(0, lineStartOffset("foo\nbar\nbaz", 1))
+        assertEquals(0, lineStartOffset("foo", 0))
+    }
+
+    @Test
+    fun `lineStartOffset finds the offset after each newline`() {
+        val text = "foo\nbar\nbaz"
+        assertEquals(4, lineStartOffset(text, 2))
+        assertEquals(8, lineStartOffset(text, 3))
+    }
+
+    @Test
+    fun `lineStartOffset past the last line clamps to the end`() {
+        val text = "foo\nbar"
+        assertEquals(text.length, lineStartOffset(text, 99))
+    }
+
+    @Test
+    fun `matchIndexForLine picks the occurrence on the requested line`() {
+        // "foo" appears on lines 1, 3, and 4 (0..2, 8..10, 12..14).
+        val text = "foo\nbar\nfoo\nfoo"
+        val matches = findAllMatches(text, "foo")
+        assertEquals(0, matchIndexForLine(text, matches, 1))
+        assertEquals(1, matchIndexForLine(text, matches, 3))
+        assertEquals(2, matchIndexForLine(text, matches, 4))
+    }
+
+    @Test
+    fun `matchIndexForLine on a line with no match takes the next one`() {
+        // Line 2 has no match; the first hit at/after its start is the line-3 occurrence.
+        val text = "foo\nbar\nfoo"
+        val matches = findAllMatches(text, "foo")
+        assertEquals(1, matchIndexForLine(text, matches, 2))
+    }
+
+    @Test
+    fun `matchIndexForLine falls back to 0 when there are no matches`() {
+        assertEquals(0, matchIndexForLine("nothing here", emptyList(), 5))
+    }
 }

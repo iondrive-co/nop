@@ -179,6 +179,7 @@ fun TabbedViewerPanel(
             when (val current = selected) {
                 is Tab.FileView -> {
                     val pendingLine = tabsState.pendingJumpLine(current.id)
+                    val pendingSearch = tabsState.pendingSearchQuery(current.id)
                     if (current.file.extension.equals("md", ignoreCase = true)) {
                         MarkdownEditWithPreview(current, editStore, onFileSaved, findInFileTrigger)
                     } else {
@@ -190,6 +191,8 @@ fun TabbedViewerPanel(
                             onJump = onJump,
                             pendingLine = pendingLine,
                             onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
+                            pendingSearchQuery = pendingSearch,
+                            onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
                             findInFileTrigger = findInFileTrigger,
                             repo = repo,
                             blameEnabled = blameEnabled,
@@ -252,6 +255,8 @@ private fun FileEditView(
     onJump: (File, Int) -> Unit = { _, _ -> },
     pendingLine: Int? = null,
     onPendingLineConsumed: () -> Unit = {},
+    pendingSearchQuery: String? = null,
+    onPendingSearchConsumed: () -> Unit = {},
     findInFileTrigger: Int = 0,
     repo: GitRepo? = null,
     blameEnabled: Boolean = false,
@@ -265,6 +270,7 @@ private fun FileEditView(
     val resolveCallback by rememberUpdatedState(onResolveAt)
     val jumpCallback by rememberUpdatedState(onJump)
     val pendingConsumedCallback by rememberUpdatedState(onPendingLineConsumed)
+    val pendingSearchConsumedCallback by rememberUpdatedState(onPendingSearchConsumed)
 
     // In-file search state. Per-tab so two open tabs each remember their own query and the bar
     // stays open in whichever tab the user opened it. Matches are recomputed whenever the text
@@ -273,12 +279,19 @@ private fun FileEditView(
     val searchState = rememberTextFieldState()
     var currentMatch by remember(tab.id) { mutableStateOf(0) }
     val searchFocusRequester = remember(tab.id) { FocusRequester() }
+    // Bumped by genuine user find activity — opening the bar with Ctrl+F, and typing in the field
+    // (via the FindBar's InputTransformation). The "re-aim at the first match" effect keys off this
+    // instead of the query text, so a *programmatic* seed (a global-search pick, which sets the
+    // query via state.edit and never trips the InputTransformation) can aim at its own match
+    // without the reset stealing it back to the first hit.
+    var findRevision by remember(tab.id) { mutableStateOf(0) }
     // Snapshot the trigger as of this tab's first composition. We only open the bar on a
     // strictly later value — otherwise switching to a tab inherits whatever Ctrl+F count the
     // sibling tab racked up and the bar pops open unexpectedly.
     val triggerBaseline = remember(tab.id) { findInFileTrigger }
     LaunchedEffect(findInFileTrigger) {
         if (findInFileTrigger > triggerBaseline) {
+            val wasOpen = searchOpen
             searchOpen = true
             // Wait for a frame so the FindBar's BasicTextField is composed + laid out and its
             // FocusRequester modifier is attached. requestFocus() throws if called before the
@@ -290,6 +303,9 @@ private fun FileEditView(
             // new one without manually clearing the field first.
             val len = searchState.text.length
             if (len > 0) searchState.edit { selection = TextRange(0, len) }
+            // Aim at the first match only when the bar is opening fresh — re-pressing Ctrl+F on an
+            // already-open bar just re-selects the query and keeps the user's current position.
+            if (!wasOpen) findRevision++
         }
     }
 
@@ -412,12 +428,31 @@ private fun FileEditView(
         }
     }
 
-    // Re-aim at the first match when the *query* (or the bar's open state) changes — keyed on the
-    // query string alone, so editing the document never retriggers it.
-    LaunchedEffect(searchOpen, searchState.text.toString()) {
-        if (!searchOpen) return@LaunchedEffect
+    // Re-aim at the first match on genuine user find activity — opening the bar with Ctrl+F or
+    // typing in the field, both of which bump findRevision. Keyed on that counter rather than the
+    // query text so a programmatic seed from a global-search pick (below) keeps its own match
+    // instead of being yanked back to the first hit, and so editing the document never retriggers it.
+    LaunchedEffect(findRevision) {
+        if (!searchOpen || findRevision == 0) return@LaunchedEffect
         currentMatch = 0
         jumpToMatch(0)
+    }
+
+    // A global "Find in files" pick arrives here as a query plus the line it matched on. Seed the
+    // in-file find bar with that query so the editor lights up exactly the matches a manual Ctrl+F
+    // would (same case-insensitive substring scan), and make the occurrence on the clicked line the
+    // active (orange) one. Scrolling is left to the inbound-line jump below, which already copes with
+    // the layout not being ready when a not-yet-open file is picked. Setting the query via state.edit
+    // (not user input) deliberately doesn't bump findRevision, so the reset effect leaves it alone.
+    LaunchedEffect(tab.id, pendingSearchQuery) {
+        val q = pendingSearchQuery ?: return@LaunchedEffect
+        if (q.isNotEmpty()) {
+            searchOpen = true
+            searchState.edit { replace(0, length, q) }
+            val text = edit.state.text.toString()
+            currentMatch = matchIndexForLine(text, findAllMatches(text, q), pendingLine ?: 1)
+        }
+        pendingSearchConsumedCallback()
     }
 
     // Inbound jump: once the layout for this tab exists, scroll the requested line to ~3 lines
@@ -442,6 +477,7 @@ private fun FileEditView(
                 focusRequester = searchFocusRequester,
                 matchCount = matches.size,
                 currentIndex = currentMatch,
+                onUserEdit = { findRevision++ },
                 onNext = {
                     if (matches.isNotEmpty()) {
                         val next = (currentMatch + 1) % matches.size
@@ -651,6 +687,33 @@ internal fun findAllMatches(text: String, query: String): List<IntRange> {
     return out
 }
 
+/** Char offset of the first character of 1-based [line] in [text], clamped into range. */
+internal fun lineStartOffset(text: String, line: Int): Int {
+    if (line <= 1) return 0
+    var offset = 0
+    var current = 1
+    while (current < line) {
+        val nl = text.indexOf('\n', offset)
+        if (nl < 0) return text.length
+        offset = nl + 1
+        current++
+    }
+    return offset.coerceAtMost(text.length)
+}
+
+/**
+ * Index into [matches] of the first match that begins on or after the start of 1-based [line] —
+ * i.e. the occurrence a global-search hit reported on that line refers to. Falls back to 0 when
+ * [matches] is empty or nothing starts at/after the line (shouldn't happen for a real hit), so a
+ * valid active-match index is always returned.
+ */
+internal fun matchIndexForLine(text: String, matches: List<IntRange>, line: Int): Int {
+    if (matches.isEmpty()) return 0
+    val start = lineStartOffset(text, line)
+    val idx = matches.indexOfFirst { it.first >= start }
+    return if (idx >= 0) idx else 0
+}
+
 /**
  * Slim search bar pinned above the file content. Enter / Shift+Enter cycle through matches;
  * Esc closes the bar and clears the highlight. The count chip reads "n of m" so the user can
@@ -662,6 +725,7 @@ private fun FindBar(
     focusRequester: FocusRequester,
     matchCount: Int,
     currentIndex: Int,
+    onUserEdit: () -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
     onClose: () -> Unit,
@@ -691,6 +755,9 @@ private fun FindBar(
     ) {
         BasicTextField(
             state = state,
+            // Fires only for genuine user input, never for programmatic state.edit {} — so a
+            // global-search seed that sets the query doesn't count as the user retyping it.
+            inputTransformation = InputTransformation { onUserEdit() },
             modifier = Modifier.weight(1f).focusRequester(focusRequester),
             textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = fg),
             cursorBrush = SolidColor(fg),
