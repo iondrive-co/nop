@@ -151,7 +151,7 @@ fun main(args: Array<String>) {
         fun renameSeparator(index: Int, name: String) {
             val item = railItems.getOrNull(index)
             if (item is RailItem.Separator) {
-                railItems[index] = RailItem.Separator(name.trim().ifBlank { "Group" }, item.id)
+                railItems[index] = RailItem.Separator(name.trim().ifBlank { "Group" }, item.id, item.collapsed)
             }
         }
 
@@ -159,11 +159,22 @@ fun main(args: Array<String>) {
             if (railItems.getOrNull(index) is RailItem.Separator) railItems.removeAt(index)
         }
 
-        // Drag-reorder: move the rail row at [from] to index [to]. Guards keep it a no-op for stale
-        // indices that can arrive mid-drag as the list mutates under the pointer.
-        fun moveItem(from: Int, to: Int) {
-            if (from == to || from !in railItems.indices || to !in railItems.indices) return
-            railItems.add(to, railItems.removeAt(from))
+        // Collapse/expand the group headed by the separator at [index], hiding or revealing the tabs
+        // beneath it. The flag rides on the Separator so it persists with the rest of the layout.
+        fun toggleCollapse(index: Int) {
+            val item = railItems.getOrNull(index)
+            if (item is RailItem.Separator) {
+                railItems[index] = RailItem.Separator(item.name, item.id, !item.collapsed)
+            }
+        }
+
+        // Drag-reorder: adopt the reordered rail the rail hands back (a block swap computed against
+        // the visible rows). Same-size guard keeps a stale mid-drag list a no-op. Reusing the item
+        // instances preserves their identity so the keyed rows just move rather than rebuild.
+        fun reorderRail(new: List<RailItem>) {
+            if (new.size != railItems.size) return
+            railItems.clear()
+            railItems.addAll(new)
         }
 
         fun raiseWindow() {
@@ -251,7 +262,8 @@ fun main(args: Array<String>) {
             onAddSeparator = ::addSeparator,
             onRenameSeparator = ::renameSeparator,
             onRemoveSeparator = ::removeSeparator,
-            onMoveItem = ::moveItem,
+            onToggleCollapse = ::toggleCollapse,
+            onReorder = ::reorderRail,
             onToggleTheme = { darkMode = !darkMode },
             onCloseWindow = ::exitApplication,
             onRegister = { w -> windowRef.value = w },
@@ -275,7 +287,8 @@ private fun ApplicationScope.WorkspaceWindow(
     onAddSeparator: (String) -> Unit,
     onRenameSeparator: (Int, String) -> Unit,
     onRemoveSeparator: (Int) -> Unit,
-    onMoveItem: (Int, Int) -> Unit,
+    onToggleCollapse: (Int) -> Unit,
+    onReorder: (List<RailItem>) -> Unit,
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
@@ -386,7 +399,8 @@ private fun ApplicationScope.WorkspaceWindow(
                     onAddSeparator = onAddSeparator,
                     onRenameSeparator = onRenameSeparator,
                     onRemoveSeparator = onRemoveSeparator,
-                    onMoveItem = onMoveItem,
+                    onToggleCollapse = onToggleCollapse,
+                    onReorder = onReorder,
                     isDark = darkMode,
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxHeight()) {

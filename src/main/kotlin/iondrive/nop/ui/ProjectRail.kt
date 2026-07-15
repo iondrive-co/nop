@@ -96,7 +96,8 @@ fun ProjectRail(
     onAddSeparator: (String) -> Unit,
     onRenameSeparator: (Int, String) -> Unit,
     onRemoveSeparator: (Int) -> Unit,
-    onMoveItem: (Int, Int) -> Unit,
+    onToggleCollapse: (Int) -> Unit,
+    onReorder: (List<RailItem>) -> Unit,
     isDark: Boolean,
     width: Dp = RAIL_WIDTH,
 ) {
@@ -104,6 +105,9 @@ fun ProjectRail(
     val divider = if (isDark) Color(0xFF1E1F22) else Color(0xFFD9DBE0)
     val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
     val openProjects = remember(items) { RailLayout.projects(items) }
+    // The rows actually drawn: projects and separators, with the tabs of any collapsed group folded
+    // away into their separator's block so they neither render nor drag on their own.
+    val blocks = remember(items) { RailLayout.visibleBlocks(items) }
 
     // Drag-reorder state, shared across all rows so the dragged row tracks the pointer while the
     // others reflow. A pending separator name prompt (add or rename) is surfaced as a dialog below.
@@ -126,11 +130,13 @@ fun ProjectRail(
         )
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(divider))
         Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-            items.forEachIndexed { index, item ->
+            blocks.forEach { block ->
+                val index = block.start
+                val item = items[index]
                 // Key by stable per-row identity (not slot position) so a running drag's
                 // pointerInput survives the list reordering under it.
                 key(keyOf(item)) {
-                    ReorderableRow(item = item, items = items, reorder = reorder, onMove = onMoveItem) {
+                    ReorderableRow(item = item, items = items, reorder = reorder, onReorder = onReorder) {
                         when (item) {
                             is RailItem.Project -> ProjectTab(
                                 project = item.path,
@@ -142,7 +148,9 @@ fun ProjectRail(
                             )
                             is RailItem.Separator -> SeparatorRow(
                                 name = item.name,
+                                collapsed = item.collapsed,
                                 isDark = isDark,
+                                onToggleCollapse = { onToggleCollapse(index) },
                                 onRename = { sepDialog = SepDialog.Rename(index, item.name) },
                                 onRemove = { onRemoveSeparator(index) },
                             )
@@ -197,23 +205,26 @@ private fun keyOf(item: RailItem): String = when (item) {
 
 /**
  * Wraps one rail row with drag-to-reorder. While dragging, the row follows the pointer (translation
- * + raised above its neighbours); each time it travels past half a neighbour's height we commit a
- * one-step move so the list reflows live. The drag only engages once the pointer passes the touch
- * slop, so a plain click still selects the project (and the rail still scrolls via the wheel).
+ * + raised above its neighbours); each time it travels past half a neighbour's height we swap it
+ * with that neighbour so the list reflows live. Neighbours are the *visible* rows either side (a
+ * collapsed group counts as one), and a collapsed separator carries its hidden tabs along, so the
+ * swap is over [RailLayout.visibleBlocks] rather than raw list indices. The drag only engages once
+ * the pointer passes the touch slop, so a plain click still selects the project (and the rail still
+ * scrolls via the wheel).
  */
 @Composable
 private fun ReorderableRow(
     item: RailItem,
     items: List<RailItem>,
     reorder: RailReorder,
-    onMove: (Int, Int) -> Unit,
+    onReorder: (List<RailItem>) -> Unit,
     content: @Composable () -> Unit,
 ) {
     val key = keyOf(item)
     // rememberUpdatedState so the long-lived drag coroutine always sees the current order/callback
     // even though pointerInput(key) is not restarted on a reorder.
     val itemsUpdated by rememberUpdatedState(items)
-    val onMoveUpdated by rememberUpdatedState(onMove)
+    val onReorderUpdated by rememberUpdatedState(onReorder)
     val dragging = reorder.draggingKey == key
 
     Box(
@@ -232,19 +243,26 @@ private fun ReorderableRow(
                     onDrag = { change, amount ->
                         change.consume()
                         reorder.delta += amount.y
-                        val ordered = itemsUpdated.map(::keyOf)
-                        val from = ordered.indexOf(key)
+                        val cur = itemsUpdated
+                        val blocks = RailLayout.visibleBlocks(cur)
+                        val from = blocks.indexOfFirst { keyOf(cur[it.start]) == key }
                         if (from >= 0) {
-                            if (reorder.delta > 0f && from < ordered.lastIndex) {
-                                val nextH = reorder.heights[ordered[from + 1]] ?: 0
+                            if (reorder.delta > 0f && from < blocks.lastIndex) {
+                                val next = blocks[from + 1]
+                                val nextH = reorder.heights[keyOf(cur[next.start])] ?: 0
                                 if (nextH > 0 && reorder.delta > nextH / 2f) {
-                                    onMoveUpdated(from, from + 1)
+                                    onReorderUpdated(
+                                        RailLayout.swapAdjacentBlocks(cur, blocks[from].start, blocks[from].span, next.span)
+                                    )
                                     reorder.delta -= nextH
                                 }
                             } else if (reorder.delta < 0f && from > 0) {
-                                val prevH = reorder.heights[ordered[from - 1]] ?: 0
+                                val prev = blocks[from - 1]
+                                val prevH = reorder.heights[keyOf(cur[prev.start])] ?: 0
                                 if (prevH > 0 && -reorder.delta > prevH / 2f) {
-                                    onMoveUpdated(from, from - 1)
+                                    onReorderUpdated(
+                                        RailLayout.swapAdjacentBlocks(cur, prev.start, prev.span, blocks[from].span)
+                                    )
                                     reorder.delta += prevH
                                 }
                             }
@@ -258,15 +276,18 @@ private fun ReorderableRow(
 }
 
 /**
- * A standalone group label in the rail — bold, rotated to run bottom-to-top like the project tabs,
- * with a divider rule above it. Right-click to rename or remove. Purely visual: it groups the tabs
- * below it without any containment behaviour.
+ * A group label in the rail — bold, rotated to run bottom-to-top like the project tabs, with a
+ * divider rule above it and a disclosure chevron marking its state. Click (or the context menu) to
+ * collapse the group, hiding the tabs beneath it down to the next separator; click again to expand.
+ * Right-click also renames or removes it.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun SeparatorRow(
     name: String,
+    collapsed: Boolean,
     isDark: Boolean,
+    onToggleCollapse: () -> Unit,
     onRename: () -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -276,15 +297,22 @@ private fun SeparatorRow(
     val labelColor = if (isDark) Color(0xFFCED0D6) else Color(0xFF3C4049)
     ContextMenuArea(items = {
         listOf(
+            ContextMenuItem(if (collapsed) "Expand" else "Collapse", onToggleCollapse),
             ContextMenuItem("Rename…", onRename),
             ContextMenuItem("Remove", onRemove),
         )
     }) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggleCollapse)
+                .padding(top = 8.dp, bottom = 2.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp).height(1.dp).background(rule))
+            Spacer(modifier = Modifier.height(4.dp))
+            // A disclosure chevron: pointing right while collapsed (tabs hidden), down while open.
+            Canvas(Modifier.size(9.dp)) { drawDisclosure(labelColor, collapsed) }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = name,
@@ -604,4 +632,18 @@ private fun DrawScope.drawCloseIcon(tint: Color) {
     val pad = 0.5f
     drawLine(tint, Offset(pad, pad), Offset(size.width - pad, size.height - pad), strokeWidth = 1.3f, cap = StrokeCap.Round)
     drawLine(tint, Offset(size.width - pad, pad), Offset(pad, size.height - pad), strokeWidth = 1.3f, cap = StrokeCap.Round)
+}
+
+// A disclosure chevron: ">" (points right) when the group is collapsed, "v" (points down) when it's
+// expanded — the usual "click to reveal what's underneath" convention.
+private fun DrawScope.drawDisclosure(tint: Color, collapsed: Boolean) {
+    val w = size.width
+    val h = size.height
+    if (collapsed) {
+        drawLine(tint, Offset(w * 0.35f, h * 0.15f), Offset(w * 0.7f, h * 0.5f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.7f, h * 0.5f), Offset(w * 0.35f, h * 0.85f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+    } else {
+        drawLine(tint, Offset(w * 0.15f, h * 0.35f), Offset(w * 0.5f, h * 0.7f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.5f, h * 0.7f), Offset(w * 0.85f, h * 0.35f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+    }
 }
