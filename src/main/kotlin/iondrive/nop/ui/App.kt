@@ -135,11 +135,14 @@ fun App(
     val savedRatios = remember { Settings.loadSplitRatios() }
     var hRatio by remember { mutableStateOf(savedRatios.horizontal ?: 0.22f) }
     var vRatio by remember { mutableStateOf(savedRatios.vertical ?: 0.55f) }
+    // The divider between a diff's before/after halves — even by default, draggable to favour
+    // whichever side is being read.
+    var diffRatio by remember { mutableStateOf(savedRatios.diff ?: 0.5f) }
     LaunchedEffect(Unit) {
-        snapshotFlow { hRatio to vRatio }
+        snapshotFlow { Triple(hRatio, vRatio, diffRatio) }
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest { (h, v) -> Settings.saveSplitRatios(h, v) }
+            .collectLatest { (h, v, d) -> Settings.saveSplitRatios(h, v, d) }
     }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
@@ -585,6 +588,8 @@ fun App(
                                 onDiffTopLine = { diffTopLine = it },
                                 findInFileTrigger = findInFileTrigger,
                                 blameEnabled = blameEnabled,
+                                diffSplitRatio = diffRatio,
+                                onDiffSplitRatioChange = { diffRatio = it },
                             )
                         },
                         second = {

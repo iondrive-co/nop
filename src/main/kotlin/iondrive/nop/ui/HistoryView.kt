@@ -25,7 +25,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import iondrive.nop.git.CommitFile
@@ -146,7 +145,7 @@ private fun CommitRow(c: CommitInfo, expanded: Boolean, onToggle: () -> Unit) {
         modifier = Modifier.fillMaxWidth().clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(c.shortSha, color = SHA_FG, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text(c.shortSha, color = SHA_FG, fontFamily = NopFonts.Mono, fontSize = 12.sp)
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(c.shortMessage, fontSize = 13.sp)
             Text("$date · ${c.author}", color = META_FG, fontSize = 11.sp)
@@ -172,7 +171,7 @@ private fun CommitFileRow(f: CommitFile, onClick: () -> Unit) {
         modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(start = 36.dp, end = 12.dp, top = 1.dp, bottom = 1.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(prefix, color = color, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text(prefix, color = color, fontFamily = NopFonts.Mono, fontSize = 12.sp)
         Text(f.path, fontSize = 12.sp, color = META_FG)
     }
 }

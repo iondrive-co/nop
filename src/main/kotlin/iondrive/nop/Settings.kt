@@ -12,7 +12,7 @@ data class WindowGeometry(
     val y: Int?,
 )
 
-data class SplitRatios(val horizontal: Float?, val vertical: Float?)
+data class SplitRatios(val horizontal: Float?, val vertical: Float?, val diff: Float?)
 
 /**
  * Tiny persistent settings stored at $XDG_CONFIG_HOME/nop/state (default ~/.config/nop/state)
@@ -204,21 +204,24 @@ object Settings {
     }
 
     /**
-     * Loads the persisted divider ratios for the two splits. Null entries mean the user hasn't
-     * dragged that divider yet, so callers should fall back to a sensible default.
+     * Loads the persisted divider ratios for the app's two splits and the one between a diff's two
+     * halves. Null entries mean the user hasn't dragged that divider yet, so callers should fall
+     * back to a sensible default.
      */
     fun loadSplitRatios(): SplitRatios {
         val map = load()
         return SplitRatios(
             horizontal = map["split.h"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
             vertical = map["split.v"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
+            diff = map["split.diff"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
         )
     }
 
-    fun saveSplitRatios(horizontal: Float, vertical: Float) {
+    fun saveSplitRatios(horizontal: Float, vertical: Float, diff: Float) {
         val map = load()
         map["split.h"] = horizontal.toString()
         map["split.v"] = vertical.toString()
+        map["split.diff"] = diff.toString()
         save(map)
     }
 

@@ -8,10 +8,12 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -61,6 +63,13 @@ import java.nio.file.Path
 
 internal val ProjectIconTintDark = Color(0xFFAFB8C4)
 internal val ProjectIconTintLight = Color(0xFF4A5360)
+
+// Leaf (file) rows have no expand chevron and no folder glyph, so without help their label starts
+// where a directory's chevron would — i.e. to the *left* of a sibling directory's name, which reads
+// as a file being *out*dented from the folder it lives in. Reserving the chevron + folder-icon
+// columns pushes every file name into the same column as directory names, so a file sits one level
+// in from (visibly nested under) its parent directory, the way IntelliJ's project view lays it out.
+private val FileRowIndent = 28.dp
 
 // Background wash for the directory row currently under a drag — same accent in both themes so it
 // reads clearly against either panel background.
@@ -399,10 +408,13 @@ fun ProjectTreePanel(
                         .background(if (isDropTarget) DropTargetHighlight else Color.Transparent),
                 ) {
                     // Directories carry a folder glyph between the expand chevron and the name, the
-                    // way IntelliJ's project view does. Files have none (the task asked only for
-                    // folders), so their label aligns where the chevron's gap leaves them.
+                    // way IntelliJ's project view does. Files get an equivalent-width spacer instead
+                    // (see [FileRowIndent]) so their name lands in the same column as directory names
+                    // rather than out to the left of the folder it lives in.
                     if (file.isDirectory) {
                         Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
+                    } else {
+                        Spacer(Modifier.width(FileRowIndent))
                     }
                     if (labelColor != null) Text(file.name, color = labelColor) else Text(file.name)
                 }

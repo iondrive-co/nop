@@ -26,7 +26,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -155,11 +154,11 @@ private fun HitRow(hit: SearchHit, onClick: () -> Unit) {
         Text(
             "${hit.path}:${hit.line}",
             color = muted,
-            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = 11.sp),
         )
         Text(
             annotateLine(hit.lineText, hit.matchStart, hit.matchEnd, highlight),
-            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp),
             softWrap = false,
         )
     }

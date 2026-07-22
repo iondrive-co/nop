@@ -31,7 +31,6 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -174,7 +173,7 @@ fun BlameGutter(
                         val date = DATE_FMT.format(Instant.ofEpochSecond(info.whenEpochSeconds))
                         val dateLayout = measurer.measure(
                             date,
-                            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = GUTTER_FONT_SIZE, color = dateColor),
+                            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = GUTTER_FONT_SIZE, color = dateColor),
                         )
                         drawText(dateLayout, topLeft = Offset(padPx, top))
                         val dateW = dateLayout.size.width
@@ -182,7 +181,7 @@ fun BlameGutter(
                             measurer,
                             info.author,
                             topLeft = Offset(padPx + dateW + with(density) { 6.dp.toPx() }, top),
-                            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = GUTTER_FONT_SIZE, color = authorColor),
+                            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = GUTTER_FONT_SIZE, color = authorColor),
                             size = Size(contentWidthPx - dateW, rowH),
                             overflow = TextOverflow.Clip,
                             maxLines = 1,
@@ -193,7 +192,7 @@ fun BlameGutter(
                             measurer,
                             "uncommitted",
                             topLeft = Offset(padPx, top),
-                            style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = GUTTER_FONT_SIZE, color = uncommittedColor),
+                            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = GUTTER_FONT_SIZE, color = uncommittedColor),
                             size = Size(contentWidthPx, rowH),
                             overflow = TextOverflow.Clip,
                             maxLines = 1,
@@ -240,7 +239,7 @@ private fun BlameTooltip(info: BlameLine, anchor: Offset, isDark: Boolean) {
                 .border(1.dp, border, RoundedCornerShape(4.dp))
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            Text(header, color = muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+            Text(header, color = muted, fontSize = 11.sp, fontFamily = NopFonts.Mono)
             Text(info.author, color = muted, fontSize = 11.sp)
             Text(info.summary, color = fg, fontSize = 12.sp)
         }

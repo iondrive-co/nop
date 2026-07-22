@@ -56,7 +56,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -109,6 +108,8 @@ fun TabbedViewerPanel(
     onDiffTopLine: (Int) -> Unit = {},
     findInFileTrigger: Int = 0,
     blameEnabled: Boolean = false,
+    diffSplitRatio: Float = 0.5f,
+    onDiffSplitRatioChange: (Float) -> Unit = {},
 ) {
     val selected = tabsState.selectedTab
 
@@ -222,9 +223,16 @@ fun TabbedViewerPanel(
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                     onTopLine = onDiffTopLine,
+                    splitRatio = diffSplitRatio,
+                    onSplitRatioChange = onDiffSplitRatioChange,
                 )
                 is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState)
-                is Tab.CommitDiff -> if (repo != null) CommitDiffView(repo, current)
+                is Tab.CommitDiff -> if (repo != null) CommitDiffView(
+                    repo = repo,
+                    tab = current,
+                    splitRatio = diffSplitRatio,
+                    onSplitRatioChange = onDiffSplitRatioChange,
+                )
                 is Tab.Terminal -> TerminalView(current, terminalCards)
                 null -> {}
             }
@@ -573,8 +581,12 @@ private fun FileEditView(
                     }
                 },
             textStyle = TextStyle(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = NopFonts.Mono,
                 fontSize = 13.sp,
+                // Give each line room to breathe (~1.5x). A generous line height is a big part of
+                // why a modern IDE's editor reads as calm rather than cramped; the default (font
+                // intrinsic) leading packs lines together.
+                lineHeight = 20.sp,
                 color = fg,
             ),
             cursorBrush = SolidColor(fg),
@@ -759,7 +771,7 @@ private fun FindBar(
             // global-search seed that sets the query doesn't count as the user retyping it.
             inputTransformation = InputTransformation { onUserEdit() },
             modifier = Modifier.weight(1f).focusRequester(focusRequester),
-            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = fg),
+            textStyle = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp, color = fg),
             cursorBrush = SolidColor(fg),
             lineLimits = TextFieldLineLimits.SingleLine,
         )

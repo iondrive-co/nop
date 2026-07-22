@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import java.awt.Cursor
 
-private val HorizontalResizeCursor = PointerIcon(Cursor(Cursor.E_RESIZE_CURSOR))
+internal val HorizontalResizeCursor = PointerIcon(Cursor(Cursor.E_RESIZE_CURSOR))
 private val VerticalResizeCursor = PointerIcon(Cursor(Cursor.N_RESIZE_CURSOR))
 
 /**

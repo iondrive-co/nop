@@ -45,7 +45,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
@@ -319,7 +318,7 @@ private fun SeparatorRow(
                 color = labelColor,
                 // A monospaced, letter-spaced face sets the group label apart from the project
                 // names so it reads as a heading rather than another tab.
-                fontFamily = FontFamily.Monospace,
+                fontFamily = NopFonts.Mono,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.5.sp,
                 maxLines = 1,

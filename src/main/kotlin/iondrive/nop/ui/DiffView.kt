@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,7 +48,6 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import iondrive.nop.diff.ConflictParser
@@ -111,6 +111,8 @@ fun DiffView(
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget? = { _, _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
     onTopLine: (Int) -> Unit = {},
+    splitRatio: Float = 0.5f,
+    onSplitRatioChange: (Float) -> Unit = {},
 ) {
     val workingFile = remember(tab.id) { File(tab.repoRoot, tab.change.path) }
     // Resolve a per-file FileEdit via FileEditStore — same instance an open Tab.FileView would
@@ -222,6 +224,8 @@ fun DiffView(
             onResolve = resolveConflict,
             onResolveAt = onResolveAt,
             onJump = onJump,
+            splitRatio = splitRatio,
+            onSplitRatioChange = onSplitRatioChange,
         )
         content is DiffContent.Ordinary -> {
             val result = (content as DiffContent.Ordinary).result
@@ -263,6 +267,8 @@ fun DiffView(
                 onResolveAt = onResolveAt,
                 onJump = onJump,
                 onTopLine = onTopLine,
+                splitRatio = splitRatio,
+                onSplitRatioChange = onSplitRatioChange,
             )
         }
     }
@@ -347,6 +353,8 @@ private fun DiffRowsList(
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
     onTopLine: (Int) -> Unit = {},
+    splitRatio: Float,
+    onSplitRatioChange: (Float) -> Unit,
 ) {
     val listState = rememberLazyListState()
 
@@ -383,14 +391,20 @@ private fun DiffRowsList(
     }
     val firstRowToHunk = remember(hunks) { hunks.indices.associateBy { hunks[it].first } }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    DiffListScaffold(
+        rows = result.rows,
+        kinds = result.rows.map { it.kind },
+        listState = listState,
+        ratio = splitRatio,
+        onRatioChange = onSplitRatioChange,
+    ) { listModifier ->
         // One SelectionContainer over the whole list so a drag spans rows — the user can select a
         // multi-line deleted block on the old (left) side and copy it back. Gutters, the right
         // column and action chips opt out via DisableSelection so the copy is clean left-side text.
         SelectionContainer {
         androidx.compose.foundation.lazy.LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W),
+            modifier = listModifier,
         ) {
             itemsIndexed(
                 items = result.rows,
@@ -423,7 +437,6 @@ private fun DiffRowsList(
             }
         }
         }
-        ChangeMarkerLane(result.rows.map { it.kind }, listState)
     }
 }
 
@@ -434,13 +447,25 @@ private fun MergeRowsList(
     onResolve: ((Int, ConflictParser.Choice) -> Unit)?,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
+    splitRatio: Float,
+    onSplitRatioChange: (Float) -> Unit,
 ) {
     val listState = rememberLazyListState()
-    Box(modifier = Modifier.fillMaxSize()) {
+    val kinds = rows.map { if (it is MergeRow.Control) RowKind.CHANGE else (it as MergeRow.Line).row.kind }
+    val diffRows = remember(rows) { rows.mapNotNull { (it as? MergeRow.Line)?.row } }
+    DiffListScaffold(
+        rows = diffRows,
+        kinds = kinds,
+        listState = listState,
+        ratio = splitRatio,
+        onRatioChange = onSplitRatioChange,
+        // Conflict control rows mark a region; tint their lane slot with the conflict colour.
+        overrideColor = { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null },
+    ) { listModifier ->
         SelectionContainer {
         androidx.compose.foundation.lazy.LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W),
+            modifier = listModifier,
         ) {
             itemsIndexed(rows, key = { index, _ -> index }) { _, item ->
                 when (item) {
@@ -458,9 +483,6 @@ private fun MergeRowsList(
             }
         }
         }
-        val kinds = rows.map { if (it is MergeRow.Control) RowKind.CHANGE else (it as MergeRow.Line).row.kind }
-        // Conflict control rows mark a region; tint their lane slot with the conflict colour.
-        ChangeMarkerLane(kinds, listState) { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null }
     }
 }
 
@@ -480,7 +502,9 @@ private fun ConflictControlStrip(
             .padding(horizontal = 6.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.weight(1f)) {
+        // Ours sits over the left pane and theirs over the right, so the strip follows the split
+        // rather than the strip's own midpoint.
+        Box(diffHalf(DiffSide.OLD)) {
             // Arrows point inward, toward the merged result: ours (left) → , ← theirs (right).
             ActionChip("Use ours →", CONFLICT_CHIP_BG, enabled, Modifier.align(Alignment.CenterStart)) {
                 onChoose(ConflictParser.Choice.OURS)
@@ -509,7 +533,7 @@ private fun ActionChip(
         BasicText(
             text = label,
             style = TextStyle(
-                fontFamily = FontFamily.Monospace,
+                fontFamily = NopFonts.Mono,
                 fontSize = 11.sp,
                 color = if (enabled) textColor() else GUTTER_FG,
             ),
@@ -534,6 +558,7 @@ private fun MergeLineRow(
         horizontalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         ReadOnlyDiffHalf(
+            side = DiffSide.OLD,
             text = row.oldLine,
             spans = row.oldSpans,
             lineNumber = row.oldLineNumber,
@@ -542,10 +567,11 @@ private fun MergeLineRow(
             currentFile = currentFile,
             onResolveAt = onResolveAt,
             onJump = onJump,
-            modifier = Modifier.weight(1f),
+            modifier = diffHalf(DiffSide.OLD),
         )
-        Box(Modifier.width(1.dp).fillMaxSize().background(Color(0x33FFFFFF)))
+        DiffDivider()
         ReadOnlyDiffHalf(
+            side = DiffSide.NEW,
             text = row.newLine,
             spans = row.newSpans,
             lineNumber = row.newLineNumber,
@@ -554,7 +580,7 @@ private fun MergeLineRow(
             currentFile = currentFile,
             onResolveAt = onResolveAt,
             onJump = onJump,
-            modifier = Modifier.weight(1f),
+            modifier = diffHalf(DiffSide.NEW),
             selectable = false,
         )
     }
@@ -583,6 +609,7 @@ private fun DiffRowView(
             horizontalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             ReadOnlyDiffHalf(
+                side = DiffSide.OLD,
                 text = row.oldLine,
                 spans = row.oldSpans,
                 lineNumber = row.oldLineNumber,
@@ -591,9 +618,9 @@ private fun DiffRowView(
                 currentFile = currentFile,
                 onResolveAt = onResolveAt,
                 onJump = onJump,
-                modifier = Modifier.weight(1f),
+                modifier = diffHalf(DiffSide.OLD),
             )
-            Box(Modifier.width(1.dp).fillMaxSize().background(Color(0x33FFFFFF)))
+            DiffDivider()
             val newLineNumber = row.newLineNumber
             if (newLineNumber != null && edit != null && row.newLine != null) {
                 EditableDiffHalf(
@@ -611,10 +638,11 @@ private fun DiffRowView(
                     onFocusConsumed = onFocusConsumed,
                     onResolveAt = onResolveAt,
                     onJump = onJump,
-                    modifier = Modifier.weight(1f),
+                    modifier = diffHalf(DiffSide.NEW),
                 )
             } else {
                 ReadOnlyDiffHalf(
+                    side = DiffSide.NEW,
                     text = row.newLine,
                     spans = row.newSpans,
                     lineNumber = newLineNumber,
@@ -623,18 +651,24 @@ private fun DiffRowView(
                     currentFile = currentFile,
                     onResolveAt = onResolveAt,
                     onJump = onJump,
-                    modifier = Modifier.weight(1f),
+                    modifier = diffHalf(DiffSide.NEW),
                     selectable = false,
                 )
             }
         }
         // Hunk action over the centre divider: copy HEAD's (left) lines over the working side.
+        // It rides the divider rather than the row's midpoint, so it stays put as the split moves.
         if (revertHunk != null) {
+            val dividerX = LocalDiffLayout.current?.oldWidth
             ActionChip(
                 label = "‹ revert",
                 background = CHIP_BG,
                 enabled = true,
-                modifier = Modifier.align(Alignment.TopCenter),
+                modifier = if (dividerX != null) {
+                    Modifier.align(Alignment.TopStart).centredAtX(dividerX)
+                } else {
+                    Modifier.align(Alignment.TopCenter)
+                },
                 onClick = revertHunk,
             )
         }
@@ -725,6 +759,10 @@ private fun EditableDiffHalf(
         verticalAlignment = Alignment.Top,
     ) {
         GutterCell(lineNumber)
+        // Same viewport as the read-only halves so the two sides slide together. Sizing the field
+        // to the diff's widest line also parks its own single-line scrolling — the shared one takes
+        // over, and BasicTextField's bring-the-caret-into-view request rides up to it.
+        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(DiffSide.NEW)) {
         // The editable side keeps its own field selection/copy; DisableSelection stops the
         // list-wide SelectionContainer from also trying to select it.
         DisableSelection {
@@ -735,8 +773,9 @@ private fun EditableDiffHalf(
             // through state.edit {} and never reach here, so they can't trigger a write.
             inputTransformation = InputTransformation { onUserEdit() },
             modifier = Modifier
-                .fillMaxSize()
-                .padding(end = 4.dp)
+                .diffLineWidth(DiffSide.NEW)
+                .fillMaxHeight()
+                .padding(end = LINE_END_PAD)
                 .focusRequester(focusRequester)
                 // Turn the per-line fields into a real editor: Enter splits this line at the caret,
                 // Backspace at column 0 merges it into the line above, Delete at line end pulls the
@@ -769,11 +808,7 @@ private fun EditableDiffHalf(
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                 ),
-            textStyle = TextStyle(
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                color = fg,
-            ),
+            textStyle = DIFF_TEXT_STYLE.copy(color = fg),
             cursorBrush = SolidColor(fg),
             // SingleLine rejects Enter from typing and strips newlines from paste, which matches
             // the v1 contract: edits within an existing line only — no structural changes.
@@ -784,6 +819,7 @@ private fun EditableDiffHalf(
                 if (r != null) layout = r
             },
         )
+        }
         }
     }
 }

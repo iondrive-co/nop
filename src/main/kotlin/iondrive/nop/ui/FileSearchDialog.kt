@@ -34,7 +34,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -191,9 +190,9 @@ private fun ResultRow(path: String, selected: Boolean, onClick: () -> Unit) {
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
         Column {
-            Text(name, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp))
+            Text(name, style = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp))
             if (dir.isNotEmpty()) {
-                Text(dir, color = muted, style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp))
+                Text(dir, color = muted, style = TextStyle(fontFamily = NopFonts.Mono, fontSize = 11.sp))
             }
         }
     }

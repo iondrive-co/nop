@@ -140,7 +140,7 @@ private fun RenderBlock(node: Node, colors: MdColors) {
         is BlockQuote -> BlockQuoteView(node, colors)
         is ThematicBreak -> ThematicRule(colors)
         is TableBlock -> TableBlockView(node, colors)
-        is HtmlBlock -> JewelText(text = node.literal ?: "", fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = colors.fgMuted)
+        is HtmlBlock -> JewelText(text = node.literal ?: "", fontFamily = NopFonts.Mono, fontSize = 12.sp, color = colors.fgMuted)
         // Unknown / unsupported — render visible inline text so the user can still see it.
         else -> JewelText(text = inlineAnnotated(node, colors), fontFamily = FontFamily.Default, fontSize = 14.sp, color = colors.fg)
     }
@@ -205,7 +205,7 @@ private fun CodeBlockView(content: String, colors: MdColors) {
     ) {
         JewelText(
             text = content.trimEnd('\n'),
-            fontFamily = FontFamily.Monospace,
+            fontFamily = NopFonts.Mono,
             fontSize = 12.sp,
             color = colors.fg,
         )
@@ -301,7 +301,7 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendInlineNode(no
         is StrongEmphasis -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { appendInline(node, colors) }
         is Emphasis -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { appendInline(node, colors) }
         is Strikethrough -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { appendInline(node, colors) }
-        is Code -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = colors.codeBg)) { append(node.literal ?: "") }
+        is Code -> withStyle(SpanStyle(fontFamily = NopFonts.Mono, background = colors.codeBg)) { append(node.literal ?: "") }
         is Link -> withStyle(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline)) { appendInline(node, colors) }
         is Image -> {
             // v1: render alt text in place of the image — TODO file calls this out.
@@ -312,7 +312,7 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendInlineNode(no
             }
         }
         is SoftLineBreak, is HardLineBreak -> append("\n")
-        is HtmlInline -> withStyle(SpanStyle(color = colors.fgMuted, fontFamily = FontFamily.Monospace)) {
+        is HtmlInline -> withStyle(SpanStyle(color = colors.fgMuted, fontFamily = NopFonts.Mono)) {
             append(node.literal ?: "")
         }
         else -> appendInline(node, colors)

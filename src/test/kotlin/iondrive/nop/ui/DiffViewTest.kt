@@ -214,4 +214,27 @@ class DiffViewTest {
         assertEquals(2, newSideLineAt(rows, 99))
         assertEquals(1, newSideLineAt(rows, -3))
     }
+
+    @Test
+    fun `maxDiffLineLength measures each side on its own`() {
+        // The two halves scroll separately, so each side's extent has to come from its own longest
+        // line — a long line on the left must not stretch the right side's scroll.
+        val rows = listOf(equal("ab", 1), change("a-very-long-old-line", "new", 2, 2), equal("c", 3))
+        assertEquals("a-very-long-old-line".length, maxDiffLineLength(rows, DiffSide.OLD))
+        assertEquals(3, maxDiffLineLength(rows, DiffSide.NEW))
+    }
+
+    @Test
+    fun `maxDiffLineLength ignores the missing side of an insert or delete`() {
+        // Insert/delete rows carry a null on one side; a null must not read as a line of its own.
+        val rows = listOf(insert("hello", 1), delete("hi", 1))
+        assertEquals(2, maxDiffLineLength(rows, DiffSide.OLD))
+        assertEquals(5, maxDiffLineLength(rows, DiffSide.NEW))
+    }
+
+    @Test
+    fun `maxDiffLineLength is zero for an empty diff`() {
+        assertEquals(0, maxDiffLineLength(emptyList(), DiffSide.OLD))
+        assertEquals(0, maxDiffLineLength(emptyList(), DiffSide.NEW))
+    }
 }

@@ -40,7 +40,12 @@ import java.io.File
  * difference here is that both sides are read-only (no editing, conflict resolution or revert).
  */
 @Composable
-fun CommitDiffView(repo: GitRepo, tab: Tab.CommitDiff) {
+fun CommitDiffView(
+    repo: GitRepo,
+    tab: Tab.CommitDiff,
+    splitRatio: Float = 0.5f,
+    onSplitRatioChange: (Float) -> Unit = {},
+) {
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
@@ -72,23 +77,26 @@ fun CommitDiffView(repo: GitRepo, tab: Tab.CommitDiff) {
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
-            result != null -> ReadOnlyDiffList(result!!)
+            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange)
         }
     }
 }
 
 @Composable
-private fun ReadOnlyDiffList(result: DiffResult) {
+private fun ReadOnlyDiffList(result: DiffResult, splitRatio: Float, onSplitRatioChange: (Float) -> Unit) {
     val listState = rememberLazyListState()
-    Box(modifier = Modifier.fillMaxSize()) {
+    DiffListScaffold(
+        rows = result.rows,
+        kinds = result.rows.map { it.kind },
+        listState = listState,
+        ratio = splitRatio,
+        onRatioChange = onSplitRatioChange,
+    ) { listModifier ->
         // One SelectionContainer over the whole list so a drag spans rows — the user can select a
         // multi-line deleted block on the old (left) side and copy it. Gutters and the right column
         // opt out via DisableSelection (see ReadOnlyDiffHalf) so the copy is clean left-side text.
         SelectionContainer {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W),
-            ) {
+            LazyColumn(state = listState, modifier = listModifier) {
                 items(result.rows, key = { row ->
                     when {
                         row.newLineNumber != null -> "n${row.newLineNumber}"
@@ -100,7 +108,6 @@ private fun ReadOnlyDiffList(result: DiffResult) {
                 }
             }
         }
-        ChangeMarkerLane(result.rows.map { it.kind }, listState)
     }
 }
 
@@ -112,21 +119,23 @@ private fun ReadOnlyDiffRowView(row: DiffRow) {
         horizontalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         ReadOnlyDiffHalf(
+            side = DiffSide.OLD,
             text = row.oldLine,
             spans = row.oldSpans,
             lineNumber = row.oldLineNumber,
             background = oldBg,
             inlineHighlight = INLINE_WORD_BG_OLD,
-            modifier = Modifier.weight(1f),
+            modifier = diffHalf(DiffSide.OLD),
         )
-        Box(Modifier.width(1.dp).fillMaxSize().background(Color(0x33FFFFFF)))
+        DiffDivider()
         ReadOnlyDiffHalf(
+            side = DiffSide.NEW,
             text = row.newLine,
             spans = row.newSpans,
             lineNumber = row.newLineNumber,
             background = newBg,
             inlineHighlight = INLINE_WORD_BG,
-            modifier = Modifier.weight(1f),
+            modifier = diffHalf(DiffSide.NEW),
             selectable = false,
         )
     }
