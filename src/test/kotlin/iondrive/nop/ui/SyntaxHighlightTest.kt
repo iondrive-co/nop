@@ -425,6 +425,83 @@ class SyntaxHighlightTest {
         assertTrue(tokens.containsExact(src, "\"func is a keyword\"", TokenKind.STRING))
     }
 
+    // ---------- Java ----------
+
+    @Test
+    fun `java extension picks java tokenizer`() {
+        assertNotNull(tokenizerForExtension("java"))
+        assertNotNull(tokenizerForExtension("JAVA"))
+    }
+
+    @Test
+    fun `java lexer highlights keywords strings numbers comments and annotations`() {
+        val src = """
+            // health check
+            package consul;
+
+            @Override
+            public int check(String name) {
+                /* block with class inside */
+                var retries = 3;
+                return retries; // 42
+            }
+        """.trimIndent()
+        val tokens = tokenizeJava(src)
+        assertTrue(tokens.containsExact(src, "// health check", TokenKind.COMMENT))
+        assertTrue(tokens.containsExact(src, "/* block with class inside */", TokenKind.COMMENT))
+        assertTrue(tokens.containsExact(src, "package", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "public", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "int", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "return", TokenKind.KEYWORD))
+        assertTrue(tokens.containsExact(src, "var", TokenKind.KEYWORD), "contextual keyword var")
+        assertTrue(tokens.containsExact(src, "@Override", TokenKind.EMPHASIS))
+        assertTrue(tokens.containsExact(src, "3", TokenKind.NUMBER))
+        // "class" appears only inside the block comment, so it must NOT be a keyword.
+        assertNull(tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "class" })
+        // The 42 appears only inside the trailing comment, so it must NOT be a number.
+        assertNull(tokens.find { it.kind == TokenKind.NUMBER && src.substring(it.start, it.endExclusive) == "42" })
+    }
+
+    @Test
+    fun `java lexer highlights literals text blocks chars and numeric forms`() {
+        val src = "String tb = \"\"\"\nmulti line\n\"\"\";\nchar c = 'x';\nboolean ok = true;\nObject o = null;\nlong n = 0xFF_EC + 0b1010 + 1_000L + 3.14f + 1e9;"
+        val tokens = tokenizeJava(src)
+        assertTrue(
+            tokens.any { it.kind == TokenKind.STRING && src.substring(it.start, it.endExclusive).startsWith("\"\"\"") },
+            "text block is one multi-line string",
+        )
+        assertTrue(tokens.containsExact(src, "'x'", TokenKind.STRING), "char literal is a STRING")
+        assertTrue(tokens.containsExact(src, "true", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "null", TokenKind.LITERAL))
+        assertTrue(tokens.containsExact(src, "0xFF_EC", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "0b1010", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "1_000L", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "3.14f", TokenKind.NUMBER))
+        assertTrue(tokens.containsExact(src, "1e9", TokenKind.NUMBER))
+    }
+
+    @Test
+    fun `java keyword inside string is not tokenized`() {
+        val src = "String s = \"class is a keyword\";"
+        val tokens = tokenizeJava(src)
+        assertNull(
+            tokens.find { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "class" },
+            "string-internal 'class' should not be highlighted as keyword",
+        )
+        assertTrue(tokens.containsExact(src, "\"class is a keyword\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `java javadoc tag is comment not annotation`() {
+        val src = "/** does things\n * @param name the name\n */\nvoid f(String name) {}"
+        val tokens = tokenizeJava(src)
+        assertNull(
+            tokens.find { it.kind == TokenKind.EMPHASIS && src.substring(it.start, it.endExclusive) == "@param" },
+            "javadoc @param belongs to the comment, not an annotation",
+        )
+        assertTrue(tokens.any { it.kind == TokenKind.COMMENT && src.substring(it.start, it.endExclusive).contains("@param") })
+    }
+
     // ---------- Python ----------
 
     @Test

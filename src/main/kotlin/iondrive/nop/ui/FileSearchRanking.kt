@@ -9,6 +9,11 @@ package iondrive.nop.ui
  *   * filename contains query
  *   * path contains query (folder hit)
  *
+ * A query containing `*` or `?` is a glob: `*` matches any run of characters within one path
+ * segment (`**` crosses segments), `?` matches a single character — so `Consul*Health` finds
+ * `ConsulServiceHealthCheck.kt`. Globs rank through the same buckets, with "starts with" /
+ * "contains" meaning the pattern matches at the start of / anywhere in the filename.
+ *
  * Ties break on the most-frequently-accessed file first (see [accessCounts]), then shorter
  * filename, then alphabetical.
  *
@@ -51,12 +56,20 @@ object FileSearchRanking {
             val promoted = frequent.toHashSet()
             return (frequent + files.filterNot { it in promoted }).take(limit)
         }
+        val glob = if ('*' in query || '?' in query) globToRegex(query) else null
         val q = query.lowercase()
         val scored = ArrayList<Pair<String, Int>>(files.size)
         for (f in files) {
             val name = f.substringAfterLast('/').lowercase()
             val full = f.lowercase()
             val score = when {
+                glob != null -> when {
+                    glob.matches(name) -> 1000
+                    glob.matchesAt(name, 0) -> 800
+                    glob.containsMatchIn(name) -> 500
+                    glob.containsMatchIn(full) -> 200
+                    else -> 0
+                }
                 name == q -> 1000
                 name.startsWith(q) -> 800
                 name.contains(q) -> 500
@@ -74,5 +87,26 @@ object FileSearchRanking {
             )
             .take(limit)
             .map { it.first }
+    }
+
+    /**
+     * Compile a glob into a case-insensitive regex: `**` → any run of characters, `*` → any run
+     * within one path segment, `?` → one non-separator character. Everything else is literal, so
+     * the result is always a valid pattern.
+     */
+    private fun globToRegex(glob: String): Regex {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < glob.length) {
+            when (val c = glob[i]) {
+                '*' -> {
+                    if (i + 1 < glob.length && glob[i + 1] == '*') { sb.append(".*"); i++ } else sb.append("[^/]*")
+                }
+                '?' -> sb.append("[^/]")
+                else -> sb.append(Regex.escape(c.toString()))
+            }
+            i++
+        }
+        return Regex(sb.toString(), RegexOption.IGNORE_CASE)
     }
 }

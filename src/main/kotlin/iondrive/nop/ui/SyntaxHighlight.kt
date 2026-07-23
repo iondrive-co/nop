@@ -69,6 +69,7 @@ data class HighlightPalette(
 /** Pick a tokenizer from a file extension. `null` means "no highlighting — render plain". */
 fun tokenizerForExtension(ext: String?): ((String) -> List<Token>)? = when (ext?.lowercase()) {
     "kt", "kts" -> ::tokenizeKotlin
+    "java" -> ::tokenizeJava
     "go" -> ::tokenizeGo
     "json" -> ::tokenizeJson
     "md", "markdown" -> ::tokenizeMarkdown
@@ -146,6 +147,61 @@ fun tokenizeKotlin(text: String): List<Token> {
         if (word in KOTLIN_KEYWORDS && !overlap(it.range.first, it.range.last + 1)) {
             add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
         }
+    }
+    return out.sortedBy { it.start }
+}
+
+// ---------- Java ----------
+
+// The reserved words plus the contextual keywords (var, record, sealed, permits, yield) that read
+// as keywords in modern sources. `non-sealed` is left out — the hyphen keeps it from being a
+// single identifier, and its `sealed` half still lights up. true/false/null are constants —
+// coloured as literals (like Go's nil) rather than keywords.
+private val JAVA_KEYWORDS = setOf(
+    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
+    "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
+    "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long",
+    "native", "new", "package", "private", "protected", "public", "return", "short", "static",
+    "strictfp", "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try",
+    "void", "volatile", "while",
+    "var", "record", "sealed", "permits", "yield",
+)
+
+private val JAVA_LITERAL = Regex("""\b(?:true|false|null)\b""")
+// An annotation: `@Name`, optionally dotted (`@jakarta.inject.Inject`). Coloured as emphasis like
+// Python decorators. Javadoc tags (`@param`) sit inside comments, which are lexed first, so the
+// overlap check keeps them out. `@interface` declarations fall through to the keyword pass.
+private val JAVA_ANNOTATION = Regex("""@[A-Za-z_][A-Za-z0-9_.]*""")
+// Hex / binary / decimal / float / scientific, each with `_` digit separators and an optional
+// f/d/l suffix. (Bare-leading-zero octal is covered by the decimal branch.)
+private val JAVA_NUMBER = Regex(
+    """\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)[fFdDlL]?\b""",
+)
+
+fun tokenizeJava(text: String): List<Token> {
+    val out = ArrayList<Token>()
+    val taken = BooleanArray(text.length)
+    fun overlap(start: Int, end: Int): Boolean {
+        for (i in start until end) if (taken[i]) return true
+        return false
+    }
+    fun add(start: Int, end: Int, kind: TokenKind) {
+        if (start >= end || overlap(start, end)) return
+        for (i in start until end) taken[i] = true
+        out += Token(start, end, kind)
+    }
+    // Comments and strings first — they swallow keywords/numbers inside. Text blocks (Java 15's
+    // triple quotes) share Kotlin's shape and must run before plain strings.
+    KOTLIN_BLOCK_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
+    KOTLIN_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
+    KOTLIN_TRIPLE_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    KOTLIN_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    KOTLIN_CHAR.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    JAVA_ANNOTATION.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.EMPHASIS) }
+    JAVA_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
+    JAVA_LITERAL.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
+    IDENT.findAll(text).forEach {
+        if (it.value in JAVA_KEYWORDS) add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
     }
     return out.sortedBy { it.start }
 }

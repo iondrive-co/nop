@@ -147,6 +147,65 @@ class FileSearchRankingTest {
     }
 
     @Test
+    fun `glob query matches across a wildcard gap in the filename`() {
+        val files = listOf(
+            "src/health/ConsulServiceHealthCheck.kt",
+            "src/health/RedisHealthCheck.kt",
+            "src/consul/ConsulClient.kt",
+        )
+        val r = FileSearchRanking.rank("Consul*Health", files)
+        assertEquals(listOf("src/health/ConsulServiceHealthCheck.kt"), r)
+    }
+
+    @Test
+    fun `glob is case insensitive`() {
+        val files = listOf("src/health/ConsulServiceHealthCheck.kt")
+        assertEquals(files, FileSearchRanking.rank("consul*health", files))
+    }
+
+    @Test
+    fun `glob whole-name match outranks prefix which outranks substring`() {
+        val files = listOf(
+            "a/XConsulHealth.kt", // pattern found mid-name → contains bucket
+            "a/ConsulHealth", // pattern matches the whole name → exact bucket
+            "a/ConsulHealth.kt", // pattern matches at the start only → prefix bucket
+        )
+        val r = FileSearchRanking.rank("Consul*Health", files)
+        assertEquals(
+            listOf("a/ConsulHealth", "a/ConsulHealth.kt", "a/XConsulHealth.kt"),
+            r,
+        )
+    }
+
+    @Test
+    fun `glob question mark matches exactly one character`() {
+        val files = listOf("a/Tab.kt", "a/Tub.kt", "a/Trunk.kt")
+        val r = FileSearchRanking.rank("T?b.kt", files)
+        assertEquals(setOf("a/Tab.kt", "a/Tub.kt"), r.toSet())
+    }
+
+    @Test
+    fun `glob single star does not cross directory separators but double star does`() {
+        val files = listOf("ui/App.kt", "ui/sub/App.kt")
+        assertEquals(listOf("ui/App.kt"), FileSearchRanking.rank("ui/*.kt", files))
+        assertEquals(files.toSet(), FileSearchRanking.rank("ui/**.kt", files).toSet())
+    }
+
+    @Test
+    fun `glob with no hits returns empty`() {
+        assertEquals(emptyList<String>(), FileSearchRanking.rank("zzz*nomatch", sample))
+    }
+
+    @Test
+    fun `glob treats regex metacharacters as literals`() {
+        val files = listOf("a/build.gradle.kts", "a/buildXgradleYkts")
+        assertEquals(
+            listOf("a/build.gradle.kts"),
+            FileSearchRanking.rank("build.gradle*", files),
+        )
+    }
+
+    @Test
     fun `access count breaks ties within a score bucket`() {
         // Both are prefix matches for "tab" (equal score). Without counts, the shorter name wins;
         // a higher access count on the longer name pulls it ahead.
