@@ -10,7 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
@@ -45,12 +45,17 @@ fun CommitDiffView(
     tab: Tab.CommitDiff,
     splitRatio: Float = 0.5f,
     onSplitRatioChange: (Float) -> Unit = {},
+    reloadKey: Int = 0,
+    findTrigger: Int = 0,
 ) {
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
 
-    LaunchedEffect(tab.id) {
+    // reloadKey re-reads both revisions. A commit's content is fixed, so this only matters after
+    // the history was rewritten underneath the tab (amend, rebase) — but it also makes "open it
+    // again / F5" mean the same thing on every diff surface.
+    LaunchedEffect(tab.id, reloadKey) {
         try {
             val (oldText, newText) = withContext(Dispatchers.IO) {
                 val parentRev = "${tab.sha}^"
@@ -65,6 +70,7 @@ fun CommitDiffView(
                 old to new
             }
             result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText) }
+            error = null
             loading = false
         } catch (t: Throwable) {
             error = t.message ?: t::class.simpleName
@@ -77,13 +83,19 @@ fun CommitDiffView(
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
-            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange)
+            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, tab.id, findTrigger)
         }
     }
 }
 
 @Composable
-private fun ReadOnlyDiffList(result: DiffResult, splitRatio: Float, onSplitRatioChange: (Float) -> Unit) {
+private fun ReadOnlyDiffList(
+    result: DiffResult,
+    splitRatio: Float,
+    onSplitRatioChange: (Float) -> Unit,
+    searchKey: Any,
+    findTrigger: Int,
+) {
     val listState = rememberLazyListState()
     DiffListScaffold(
         rows = result.rows,
@@ -91,20 +103,22 @@ private fun ReadOnlyDiffList(result: DiffResult, splitRatio: Float, onSplitRatio
         listState = listState,
         ratio = splitRatio,
         onRatioChange = onSplitRatioChange,
+        searchKey = searchKey,
+        findTrigger = findTrigger,
     ) { listModifier ->
         // One SelectionContainer over the whole list so a drag spans rows — the user can select a
         // multi-line deleted block on the old (left) side and copy it. Gutters and the right column
         // opt out via DisableSelection (see ReadOnlyDiffHalf) so the copy is clean left-side text.
         SelectionContainer {
             LazyColumn(state = listState, modifier = listModifier) {
-                items(result.rows, key = { row ->
+                itemsIndexed(result.rows, key = { index, row ->
                     when {
                         row.newLineNumber != null -> "n${row.newLineNumber}"
                         row.oldLineNumber != null -> "o${row.oldLineNumber}"
-                        else -> "x${result.rows.indexOf(row)}"
+                        else -> "x$index"
                     }
-                }) { row ->
-                    ReadOnlyDiffRowView(row)
+                }) { index, row ->
+                    ReadOnlyDiffRowView(row, index)
                 }
             }
         }
@@ -112,7 +126,7 @@ private fun ReadOnlyDiffList(result: DiffResult, splitRatio: Float, onSplitRatio
 }
 
 @Composable
-private fun ReadOnlyDiffRowView(row: DiffRow) {
+private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
     val (oldBg, newBg) = backgroundsFor(row)
     Row(
         modifier = Modifier.fillMaxWidth().height(IntrinsicMinHeightLine),
@@ -125,6 +139,7 @@ private fun ReadOnlyDiffRowView(row: DiffRow) {
             lineNumber = row.oldLineNumber,
             background = oldBg,
             inlineHighlight = INLINE_WORD_BG_OLD,
+            rowIndex = rowIndex,
             modifier = diffHalf(DiffSide.OLD),
         )
         DiffDivider()
@@ -135,6 +150,7 @@ private fun ReadOnlyDiffRowView(row: DiffRow) {
             lineNumber = row.newLineNumber,
             background = newBg,
             inlineHighlight = INLINE_WORD_BG,
+            rowIndex = rowIndex,
             modifier = diffHalf(DiffSide.NEW),
             selectable = false,
         )

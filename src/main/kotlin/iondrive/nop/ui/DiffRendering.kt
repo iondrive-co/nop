@@ -26,16 +26,22 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -50,6 +56,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -61,6 +68,7 @@ import iondrive.nop.diff.InlineSpan
 import iondrive.nop.diff.RowKind
 import iondrive.nop.index.JumpTarget
 import java.io.File
+import kotlinx.coroutines.launch
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 
 // Shared building blocks for every side-by-side diff renderer (the working-tree [DiffView] and the
@@ -122,7 +130,7 @@ internal enum class DiffSide { OLD, NEW }
  * The two sides scroll separately because the divider between them moves: unequal halves are
  * unequal viewports, and a shared state can only carry one extent.
  */
-internal class DiffSideScroll(val state: ScrollState, val contentWidth: Dp)
+internal class DiffSideScroll(val state: ScrollState, val contentWidth: Dp, val charWidth: Dp)
 
 /**
  * What a diff row needs to know about the list around it: where the draggable divider currently
@@ -155,11 +163,14 @@ internal fun rememberDiffSideScroll(rows: List<DiffRow>, side: DiffSide): DiffSi
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val longest = remember(rows, side) { maxDiffLineLength(rows, side) }
-    val contentWidth = remember(longest, measurer, density) {
+    // The per-character advance is also what lets find-in-diff scroll a hit into view sideways:
+    // a match's char offset times this width is its x position within the line.
+    val charWidth = remember(measurer, density) {
         val sample = measurer.measure("0".repeat(ADVANCE_SAMPLE), DIFF_TEXT_STYLE).size.width
-        with(density) { (longest * (sample / ADVANCE_SAMPLE.toFloat())).toDp() } + LINE_END_PAD
+        with(density) { (sample / ADVANCE_SAMPLE.toFloat()).toDp() }
     }
-    return remember(state, contentWidth) { DiffSideScroll(state, contentWidth) }
+    val contentWidth = remember(longest, charWidth) { charWidth * longest + LINE_END_PAD }
+    return remember(state, contentWidth, charWidth) { DiffSideScroll(state, contentWidth, charWidth) }
 }
 
 /** Longest line of [side], in characters — the monospace stand-in for "widest". */
@@ -234,9 +245,10 @@ internal fun annotateLine(
     highlightColor: Color,
     tokens: List<Token> = emptyList(),
     palette: HighlightPalette? = null,
+    find: LineFindHits? = null,
 ): AnnotatedString {
     val hasSyntax = palette != null && tokens.isNotEmpty()
-    if (spans.isEmpty() && !hasSyntax) return AnnotatedString(text)
+    if (spans.isEmpty() && !hasSyntax && find == null) return AnnotatedString(text)
     return buildAnnotatedString {
         append(text)
         // Syntax colouring underneath, so the inline-change background (added next) layers over it.
@@ -256,7 +268,40 @@ internal fun annotateLine(
             val end = s.endCharExclusive.coerceIn(start, text.length)
             if (end > start) addStyle(SpanStyle(background = highlightColor), start, end)
         }
+        // Find hits go on last so the search highlight reads over both the syntax colour and the
+        // inline word-change tint, rather than being swallowed by them.
+        if (find != null) addFindHits(find, text.length)
     }
+}
+
+/** Paints [find]'s ranges onto a line of [length] chars, the active hit in its own colour. */
+private fun AnnotatedString.Builder.addFindHits(find: LineFindHits, length: Int) {
+    for (r in find.ranges) {
+        val start = r.first.coerceIn(0, length)
+        val end = (r.last + 1).coerceIn(start, length)
+        if (end > start) {
+            addStyle(SpanStyle(background = if (r == find.active) find.activeColor else find.color), start, end)
+        }
+    }
+}
+
+/**
+ * The find hits to paint on row [rowIndex]'s [side], or null when no search is running over this
+ * list (or this cell has none). Reads [LocalDiffSearch], which the enclosing [DiffListScaffold]
+ * provides — so a row only has to know its own index to join in.
+ */
+@Composable
+internal fun findHitsFor(rowIndex: Int, side: DiffSide): LineFindHits? {
+    val search = LocalDiffSearch.current
+    if (search == null || rowIndex < 0) return null
+    val ranges = search.rangesFor(rowIndex, side)
+    if (ranges.isEmpty()) return null
+    return LineFindHits(
+        ranges = ranges,
+        active = search.activeRangeFor(rowIndex, side),
+        color = findMatchColor(),
+        activeColor = findActiveMatchColor(),
+    )
 }
 
 @Composable
@@ -281,6 +326,9 @@ internal fun GutterCell(lineNumber: Int?) {
  * opts out so a top-to-bottom drag yields only the left column, not interleaved blank/duplicate
  * lines. When [currentFile]/[onResolveAt]/[onJump] are supplied, Ctrl-click resolves a symbol and
  * jumps; pass them only where jump-to-definition makes sense (the working-tree diff).
+ *
+ * [rowIndex] is this row's position in the list the enclosing scaffold is searching, so the half can
+ * pick up its find-bar hits; -1 (the default) means "not searchable".
  */
 @Composable
 internal fun ReadOnlyDiffHalf(
@@ -292,6 +340,7 @@ internal fun ReadOnlyDiffHalf(
     inlineHighlight: Color,
     modifier: Modifier = Modifier,
     selectable: Boolean = true,
+    rowIndex: Int = -1,
     currentFile: File? = null,
     onResolveAt: ((currentFile: File, text: String, offset: Int) -> JumpTarget?)? = null,
     onJump: ((File, Int) -> Unit)? = null,
@@ -302,6 +351,7 @@ internal fun ReadOnlyDiffHalf(
     val tokenize = LocalDiffTokenizer.current
     val palette = if (JewelTheme.isDark) HighlightPalette.Dark else HighlightPalette.Light
     val tokens = remember(displayText, tokenize) { tokenize?.invoke(displayText) ?: emptyList() }
+    val find = findHitsFor(rowIndex, side)
     Row(
         modifier = modifier.fillMaxSize().background(background),
         verticalAlignment = Alignment.Top,
@@ -326,6 +376,7 @@ internal fun ReadOnlyDiffHalf(
                     inlineHighlight,
                     tokens,
                     if (tokenize != null) palette else null,
+                    find,
                 ),
                 style = DIFF_TEXT_STYLE.copy(color = textColor()),
                 softWrap = false,
@@ -347,6 +398,11 @@ internal fun ReadOnlyDiffHalf(
  *
  * [ratio] is the share of the row given to the old (left) half; it's hoisted so the caller can
  * persist it, and clamped here against the pane's real width.
+ *
+ * Ctrl+F opens a find bar over the list — the same one the file editor uses. [findTrigger] is the
+ * window-level Ctrl+F counter, [searchKey] identifies the tab so switching diffs doesn't inherit
+ * the previous one's query, and [rowToItem] maps an index in [rows] to the LazyColumn item that
+ * renders it (they differ when the list interleaves non-row items, as the merge view does).
  */
 @Composable
 internal fun DiffListScaffold(
@@ -356,12 +412,94 @@ internal fun DiffListScaffold(
     ratio: Float,
     onRatioChange: (Float) -> Unit,
     overrideColor: (Int) -> Color? = { null },
+    searchKey: Any = Unit,
+    findTrigger: Int = 0,
+    rowToItem: (Int) -> Int = { it },
     list: @Composable (Modifier) -> Unit,
 ) {
     val oldScroll = rememberDiffSideScroll(rows, DiffSide.OLD)
     val newScroll = rememberDiffSideScroll(rows, DiffSide.NEW)
+    val density = LocalDensity.current
+
+    // In-diff find state, mirroring FileEditView's: the bar stays open per tab with its own query,
+    // matches recompute off (rows, query), and currentMatch is the active hit Next/Prev walks.
+    var searchOpen by remember(searchKey) { mutableStateOf(false) }
+    val searchState = rememberTextFieldState()
+    var currentMatch by remember(searchKey) { mutableStateOf(0) }
+    val searchFocusRequester = remember(searchKey) { FocusRequester() }
+    // Bumped by genuine user find activity — opening the bar, and typing in the field — so the
+    // "re-aim at the first match" effect can key off it rather than off the query text.
+    var findRevision by remember(searchKey) { mutableStateOf(0) }
+    // Snapshot the trigger as of this diff's first composition, so switching to a diff tab doesn't
+    // inherit whatever Ctrl+F count a sibling tab racked up and pop the bar open unasked.
+    val triggerBaseline = remember(searchKey) { findTrigger }
+    LaunchedEffect(findTrigger) {
+        if (findTrigger <= triggerBaseline) return@LaunchedEffect
+        val wasOpen = searchOpen
+        searchOpen = true
+        // Wait a frame so the bar's field is composed and its FocusRequester attached — requesting
+        // focus before it joins the focus tree throws and the keystrokes go to the old focus owner.
+        withFrameNanos { }
+        runCatching { searchFocusRequester.requestFocus() }
+        val len = searchState.text.length
+        if (len > 0) searchState.edit { selection = TextRange(0, len) }
+        // Only aim at the first match when the bar opens fresh — re-pressing Ctrl+F on an open bar
+        // just re-selects the query and leaves the user where they are.
+        if (!wasOpen) findRevision++
+    }
+
+    val matches by remember(rows) {
+        derivedStateOf {
+            val q = searchState.text.toString()
+            if (!searchOpen || q.isEmpty()) emptyList() else findDiffMatches(rows, q)
+        }
+    }
+    LaunchedEffect(matches.size) {
+        if (currentMatch >= matches.size) currentMatch = 0
+    }
+    val byCell = remember(matches) { groupDiffMatches(matches) }
+    val search = remember(byCell, matches, currentMatch) {
+        if (matches.isEmpty()) null else DiffSearch(byCell, activeDiffCells(matches.getOrNull(currentMatch)))
+    }
+
+    // Bring a hit into view in both axes, and only when it isn't already: stepping between two
+    // matches already on screen shouldn't jolt the page. Horizontal position comes from the
+    // monospace advance — a match's char offset is its x, no text layout needed.
+    val searchScope = rememberCoroutineScope()
+    suspend fun revealMatch(index: Int) {
+        val m = matches.getOrNull(index) ?: return
+        val item = rowToItem(m.rowIndex)
+        if (listState.layoutInfo.visibleItemsInfo.none { it.index == item }) {
+            listState.scrollToItem((item - CONTEXT_ROWS).coerceAtLeast(0))
+        }
+        val sideScroll = if (m.side == DiffSide.OLD) oldScroll else newScroll
+        val viewport = sideScroll.state.viewportSize
+        if (viewport <= 0) return
+        with(density) {
+            val advance = sideScroll.charWidth.toPx()
+            val left = m.range.first * advance
+            val right = (m.range.last + 1) * advance
+            val viewLeft = sideScroll.state.value
+            if (left < viewLeft || right > viewLeft + viewport) {
+                sideScroll.state.scrollTo((left - viewport / 3f).toInt().coerceIn(0, sideScroll.state.maxValue))
+            }
+        }
+    }
+    // Re-aim at the first match on genuine find activity (opening the bar, typing a query). Keyed
+    // on the revision counter rather than the query so a re-diff underneath never moves the user.
+    LaunchedEffect(findRevision) {
+        if (!searchOpen || findRevision == 0) return@LaunchedEffect
+        currentMatch = 0
+        revealMatch(0)
+    }
+    fun step(delta: Int) {
+        if (matches.isEmpty()) return
+        val next = (currentMatch + delta + matches.size) % matches.size
+        currentMatch = next
+        searchScope.launch { revealMatch(next) }
+    }
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val density = LocalDensity.current
         // Rows are inset by the marker lane and vertical scrollbar, so the split divides what's
         // left of the width, not the whole pane — otherwise the drag band and the rows' own
         // hairline would drift apart as the lane's share of a narrow pane grows.
@@ -373,9 +511,22 @@ internal fun DiffListScaffold(
         val oldWidth = with(density) { (available * clamped).toDp() }
 
         Column(modifier = Modifier.fillMaxSize()) {
+            if (searchOpen) {
+                FindBar(
+                    state = searchState,
+                    focusRequester = searchFocusRequester,
+                    matchCount = matches.size,
+                    currentIndex = currentMatch,
+                    onUserEdit = { findRevision++ },
+                    onNext = { step(1) },
+                    onPrev = { step(-1) },
+                    onClose = { searchOpen = false },
+                )
+            }
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 CompositionLocalProvider(
                     LocalDiffLayout provides DiffLayout(oldWidth, oldScroll, newScroll),
+                    LocalDiffSearch provides search,
                 ) {
                     list(Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W))
                 }
@@ -391,6 +542,9 @@ internal fun DiffListScaffold(
         }
     }
 }
+
+/** Rows of context left above a match when find has to scroll it into view. */
+private const val CONTEXT_ROWS = 3
 
 /**
  * The invisible band you grab to move the split. It's wider than the hairline it sits on so the

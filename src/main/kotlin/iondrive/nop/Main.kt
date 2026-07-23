@@ -338,6 +338,8 @@ private fun ApplicationScope.WorkspaceWindow(
     var findInFileTrigger by remember { mutableStateOf(0) }
     // F4 ("jump to source", IntelliJ-style) opens the real working file behind the active diff.
     var jumpToSourceTrigger by remember { mutableStateOf(0) }
+    // F5 reloads what's in front: git status, plus the active tab's content from disk.
+    var refreshTrigger by remember { mutableStateOf(0) }
 
     Window(
         state = windowState,
@@ -373,6 +375,14 @@ private fun ApplicationScope.WorkspaceWindow(
             ) {
                 jumpToSourceTrigger += 1
                 return@Window true
+            }
+            // F5 re-reads the world: git status and whatever the active tab is showing. Left
+            // unconsumed, unlike F4 — a full-screen program running in a terminal tab may bind it
+            // too, and refreshing nop's own view of the repo alongside that does no harm.
+            if (event.type == KeyEventType.KeyDown && event.key == Key.F5 &&
+                !event.isAltPressed && !event.isCtrlPressed && !event.isShiftPressed
+            ) {
+                refreshTrigger += 1
             }
             // Never consume — the underlying field/tree still needs to see the key.
             false
@@ -416,6 +426,7 @@ private fun ApplicationScope.WorkspaceWindow(
                                 findInFilesTrigger = findInFilesTrigger,
                                 findInFileTrigger = findInFileTrigger,
                                 jumpToSourceTrigger = jumpToSourceTrigger,
+                                refreshTrigger = refreshTrigger,
                             )
                         }
                     } else {

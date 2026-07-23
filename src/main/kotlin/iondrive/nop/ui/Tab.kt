@@ -66,6 +66,12 @@ class TabsState {
     // Kept off [Tab.FileView] for the same reason as [pendingJumpLines]: it must not change tab identity.
     private val pendingSearchQueries = mutableStateMapOf<String, String>()
 
+    // How many times each tab has been asked to re-read its content from disk. A diff caches both
+    // sides when it opens, so without this a commit, pull or agent edit leaves it showing the state
+    // of the world when the tab appeared. Kept off the tab itself so a reload never looks like a
+    // different tab.
+    private val reloadCounts = mutableStateMapOf<String, Int>()
+
     /**
      * Invoked with the file each time a [Tab.FileView] is opened as a genuine user action (tree
      * click, search jump, double-shift pick, …) so callers can track access frequency. Session
@@ -73,15 +79,34 @@ class TabsState {
      */
     var onFileOpened: ((File) -> Unit)? = null
 
+    /**
+     * Shows [tab], adding it to the strip if it isn't there yet. Opening a tab that's *already*
+     * open also requests a reload: clicking the same change in the commit panel a second time is
+     * the natural "show me this again" gesture, and the user means the file as it is now, not the
+     * copy the tab captured when it first opened.
+     */
     fun open(tab: Tab, record: Boolean = true) {
         val existing = _tabs.indexOfFirst { it.id == tab.id }
         if (existing < 0) {
             _tabs.add(tab)
-        } else if (_tabs[existing] != tab) {
-            _tabs[existing] = tab
+        } else {
+            if (_tabs[existing] != tab) _tabs[existing] = tab
+            requestReload(tab.id)
         }
         selectedId = tab.id
         if (record && tab is Tab.FileView) onFileOpened?.invoke(tab.file)
+    }
+
+    /**
+     * Counter for [tabId]'s reload requests. Observable, so a view keying its loader on this
+     * re-reads from disk each time [requestReload] fires.
+     */
+    fun reloadKey(tabId: String): Int = reloadCounts[tabId] ?: 0
+
+    /** Asks the view behind [tabId] to re-read its content. No-op for a tab that isn't open. */
+    fun requestReload(tabId: String) {
+        if (_tabs.none { it.id == tabId }) return
+        reloadCounts[tabId] = (reloadCounts[tabId] ?: 0) + 1
     }
 
     /**
@@ -124,6 +149,7 @@ class TabsState {
         _tabs.removeAt(idx)
         pendingJumpLines.remove(id)
         pendingSearchQueries.remove(id)
+        reloadCounts.remove(id)
         if (selectedId == id) {
             selectedId = _tabs.getOrNull(idx)?.id ?: _tabs.getOrNull(idx - 1)?.id
         }
@@ -142,6 +168,7 @@ class TabsState {
         removed.forEach {
             pendingJumpLines.remove(it.id)
             pendingSearchQueries.remove(it.id)
+            reloadCounts.remove(it.id)
         }
         selectedId = keep.id
         return removed

@@ -183,6 +183,76 @@ class TabsStateTest {
     }
 
     @Test
+    fun `reopening an open tab asks it to reload`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+
+        s.open(a)
+        assertEquals(0, s.reloadKey(a.id))
+
+        s.open(a)
+        assertEquals(1, s.reloadKey(a.id))
+
+        s.open(a)
+        assertEquals(2, s.reloadKey(a.id))
+    }
+
+    @Test
+    fun `opening a different tab doesn't reload the others`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+
+        s.open(a)
+        s.open(b)
+
+        assertEquals(0, s.reloadKey(a.id))
+        assertEquals(0, s.reloadKey(b.id))
+    }
+
+    @Test
+    fun `requestReload only counts for tabs that are open`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+
+        s.requestReload(a.id)
+        assertEquals(0, s.reloadKey(a.id))
+
+        s.open(a)
+        s.requestReload(a.id)
+        assertEquals(1, s.reloadKey(a.id))
+    }
+
+    @Test
+    fun `closing a tab forgets its reload count`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        s.open(a)
+        assertEquals(1, s.reloadKey(a.id))
+
+        s.close(a.id)
+        s.open(a)
+
+        assertEquals(0, s.reloadKey(a.id))
+    }
+
+    @Test
+    fun `closeOthers forgets the closed tabs' reload counts`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        s.open(a); s.open(a)
+        s.open(b); s.open(b)
+
+        s.closeOthers(b.id)
+        s.open(a)
+
+        assertEquals(0, s.reloadKey(a.id))
+        assertEquals(1, s.reloadKey(b.id))
+    }
+
+    @Test
     fun `select changes selection only if id exists`() {
         val s = TabsState()
         val a = fileTab("/x/a.txt")

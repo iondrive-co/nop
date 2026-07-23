@@ -113,13 +113,16 @@ fun DiffView(
     onTopLine: (Int) -> Unit = {},
     splitRatio: Float = 0.5f,
     onSplitRatioChange: (Float) -> Unit = {},
+    reloadKey: Int = 0,
+    findTrigger: Int = 0,
 ) {
     val workingFile = remember(tab.id) { File(tab.repoRoot, tab.change.path) }
     // Resolve a per-file FileEdit via FileEditStore — same instance an open Tab.FileView would
     // use, so edits in either view share the buffer and autosave coordinates through one place.
     // For untracked/added files this is still fine; for removed/missing files the working file
-    // doesn't exist and the buffer starts empty.
-    val edit = remember(tab.id) {
+    // doesn't exist and the buffer starts empty. Re-keyed on reloadKey so a file that has since
+    // appeared on disk (created by a checkout, a pull, an agent) gets picked up on a reload.
+    val edit = remember(tab.id, reloadKey) {
         if (workingFile.isFile) editStore.edit(Tab.FileView(workingFile)) else null
     }
 
@@ -130,7 +133,12 @@ fun DiffView(
 
     val savedCallback by rememberUpdatedState(onFileSaved)
 
-    LaunchedEffect(tab.id) {
+    // Loads both sides from scratch. Re-runs on reloadKey — bumped when the user opens this diff
+    // again or hits F5 — because HEAD is otherwise read once and never again, so a commit, branch
+    // switch or pull would leave the left side frozen on whatever it said when the tab opened.
+    // `loading` is deliberately keyed on tab.id alone: a reload updates in place rather than
+    // flashing the placeholder and dropping the user's scroll position.
+    LaunchedEffect(tab.id, reloadKey) {
         try {
             val head = withContext(Dispatchers.IO) {
                 when (tab.change.kind) {
@@ -152,6 +160,7 @@ fun DiffView(
                 else -> edit?.state?.text?.toString() ?: ""
             }
             content = withContext(Dispatchers.Default) { computeContent(head, workingNow) }
+            error = null
             loading = false
         } catch (t: Throwable) {
             error = t.message ?: t::class.simpleName
@@ -226,6 +235,8 @@ fun DiffView(
             onJump = onJump,
             splitRatio = splitRatio,
             onSplitRatioChange = onSplitRatioChange,
+            searchKey = tab.id,
+            findTrigger = findTrigger,
         )
         content is DiffContent.Ordinary -> {
             val result = (content as DiffContent.Ordinary).result
@@ -269,6 +280,8 @@ fun DiffView(
                 onTopLine = onTopLine,
                 splitRatio = splitRatio,
                 onSplitRatioChange = onSplitRatioChange,
+                searchKey = tab.id,
+                findTrigger = findTrigger,
             )
         }
     }
@@ -355,6 +368,8 @@ private fun DiffRowsList(
     onTopLine: (Int) -> Unit = {},
     splitRatio: Float,
     onSplitRatioChange: (Float) -> Unit,
+    searchKey: Any,
+    findTrigger: Int,
 ) {
     val listState = rememberLazyListState()
 
@@ -397,6 +412,8 @@ private fun DiffRowsList(
         listState = listState,
         ratio = splitRatio,
         onRatioChange = onSplitRatioChange,
+        searchKey = searchKey,
+        findTrigger = findTrigger,
     ) { listModifier ->
         // One SelectionContainer over the whole list so a drag spans rows — the user can select a
         // multi-line deleted block on the old (left) side and copy it back. Gutters, the right
@@ -422,6 +439,7 @@ private fun DiffRowsList(
                 val hunkId = firstRowToHunk[index]
                 DiffRowView(
                     row = row,
+                    rowIndex = index,
                     edit = edit,
                     rowStates = rowStates,
                     currentFile = currentFile,
@@ -449,10 +467,25 @@ private fun MergeRowsList(
     onJump: (File, Int) -> Unit,
     splitRatio: Float,
     onSplitRatioChange: (Float) -> Unit,
+    searchKey: Any,
+    findTrigger: Int,
 ) {
     val listState = rememberLazyListState()
     val kinds = rows.map { if (it is MergeRow.Control) RowKind.CHANGE else (it as MergeRow.Line).row.kind }
     val diffRows = remember(rows) { rows.mapNotNull { (it as? MergeRow.Line)?.row } }
+    // The conflict control strips are items in the list but not diff rows, so the two index spaces
+    // drift apart. Find works over diffRows; these translate between it and the LazyColumn — one
+    // way so a row can claim its highlights, the other so scrolling to a match lands on the right
+    // item. A control strip maps to -1: it holds no searchable text.
+    val diffIndexOfItem = remember(rows) {
+        var next = 0
+        IntArray(rows.size) { i -> if (rows[i] is MergeRow.Line) next++ else -1 }
+    }
+    val itemOfDiffIndex = remember(diffIndexOfItem) {
+        IntArray(diffRows.size).also { arr ->
+            diffIndexOfItem.forEachIndexed { item, diffIndex -> if (diffIndex >= 0) arr[diffIndex] = item }
+        }
+    }
     DiffListScaffold(
         rows = diffRows,
         kinds = kinds,
@@ -461,13 +494,16 @@ private fun MergeRowsList(
         onRatioChange = onSplitRatioChange,
         // Conflict control rows mark a region; tint their lane slot with the conflict colour.
         overrideColor = { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null },
+        searchKey = searchKey,
+        findTrigger = findTrigger,
+        rowToItem = { itemOfDiffIndex.getOrElse(it) { 0 } },
     ) { listModifier ->
         SelectionContainer {
         androidx.compose.foundation.lazy.LazyColumn(
             state = listState,
             modifier = listModifier,
         ) {
-            itemsIndexed(rows, key = { index, _ -> index }) { _, item ->
+            itemsIndexed(rows, key = { index, _ -> index }) { index, item ->
                 when (item) {
                     is MergeRow.Control -> ConflictControlStrip(
                         enabled = onResolve != null,
@@ -475,6 +511,7 @@ private fun MergeRowsList(
                     )
                     is MergeRow.Line -> MergeLineRow(
                         row = item.row,
+                        rowIndex = diffIndexOfItem.getOrElse(index) { -1 },
                         currentFile = currentFile,
                         onResolveAt = onResolveAt,
                         onJump = onJump,
@@ -548,6 +585,7 @@ private fun ActionChip(
 @Composable
 private fun MergeLineRow(
     row: DiffRow,
+    rowIndex: Int,
     currentFile: File,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
@@ -564,6 +602,7 @@ private fun MergeLineRow(
             lineNumber = row.oldLineNumber,
             background = oldBg,
             inlineHighlight = INLINE_WORD_BG_OLD,
+            rowIndex = rowIndex,
             currentFile = currentFile,
             onResolveAt = onResolveAt,
             onJump = onJump,
@@ -577,6 +616,7 @@ private fun MergeLineRow(
             lineNumber = row.newLineNumber,
             background = newBg,
             inlineHighlight = INLINE_WORD_BG,
+            rowIndex = rowIndex,
             currentFile = currentFile,
             onResolveAt = onResolveAt,
             onJump = onJump,
@@ -589,6 +629,7 @@ private fun MergeLineRow(
 @Composable
 private fun DiffRowView(
     row: DiffRow,
+    rowIndex: Int,
     edit: FileEdit?,
     rowStates: androidx.compose.runtime.snapshots.SnapshotStateMap<Int, TextFieldState>,
     currentFile: File,
@@ -615,6 +656,7 @@ private fun DiffRowView(
                 lineNumber = row.oldLineNumber,
                 background = oldBg,
                 inlineHighlight = INLINE_WORD_BG_OLD,
+                rowIndex = rowIndex,
                 currentFile = currentFile,
                 onResolveAt = onResolveAt,
                 onJump = onJump,
@@ -632,6 +674,7 @@ private fun DiffRowView(
                     rowStates = rowStates,
                     background = newBg,
                     inlineHighlight = INLINE_WORD_BG,
+                    rowIndex = rowIndex,
                     currentFile = currentFile,
                     onStructuralEdit = onStructuralEdit,
                     pendingFocus = pendingFocus,
@@ -648,6 +691,7 @@ private fun DiffRowView(
                     lineNumber = newLineNumber,
                     background = newBg,
                     inlineHighlight = INLINE_WORD_BG,
+                    rowIndex = rowIndex,
                     currentFile = currentFile,
                     onResolveAt = onResolveAt,
                     onJump = onJump,
@@ -686,6 +730,7 @@ private fun EditableDiffHalf(
     rowStates: androidx.compose.runtime.snapshots.SnapshotStateMap<Int, TextFieldState>,
     background: Color,
     inlineHighlight: Color,
+    rowIndex: Int,
     currentFile: File,
     onStructuralEdit: ((Int, Int, Int, StructuralEdit) -> Boolean)?,
     pendingFocus: Pair<Int, Int>?,
@@ -739,7 +784,11 @@ private fun EditableDiffHalf(
     // (and its comments italic) while the inline-change background layers on top.
     val tokenize = LocalDiffTokenizer.current
     val palette = if (JewelTheme.isDark) HighlightPalette.Dark else HighlightPalette.Light
-    val transformation = remember(spans, inlineHighlight, tokenize, palette) {
+    // Find hits are painted here rather than by annotateLine, because an editable cell renders
+    // through an OutputTransformation instead of an AnnotatedString — same colours, same order
+    // (last, so the highlight reads over the syntax colour and the inline word tint).
+    val find = findHitsFor(rowIndex, DiffSide.NEW)
+    val transformation = remember(spans, inlineHighlight, tokenize, palette, find) {
         OutputTransformation {
             val text = asCharSequence().toString()
             if (tokenize != null) applyTokens(this, tokenize(text), palette)
@@ -748,6 +797,14 @@ private fun EditableDiffHalf(
                 val start = s.startChar.coerceIn(0, text.length)
                 val end = s.endCharExclusive.coerceIn(start, text.length)
                 if (end > start) addStyle(SpanStyle(background = inlineHighlight), start, end)
+            }
+            if (find != null) {
+                for (r in find.ranges) {
+                    val start = r.first.coerceIn(0, text.length)
+                    val end = (r.last + 1).coerceIn(start, text.length)
+                    val bg = if (r == find.active) find.activeColor else find.color
+                    if (end > start) addStyle(SpanStyle(background = bg), start, end)
+                }
             }
         }
     }

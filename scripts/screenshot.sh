@@ -34,6 +34,12 @@ SHOT_H_RATIO=0.30
 
 mkdir -p "$SHOT_DIR"
 
+# Only the two `latest-*.png` are checked in and referenced by the README; older runs used to leave
+# a timestamped pair behind on every invocation. Sweep any such leftovers so the directory doesn't
+# accumulate (the `[0-9]*` prefix matches the YYYYMMDD-HHMMSS names without touching `latest-*`).
+find "$SHOT_DIR" -maxdepth 1 -type f \
+    \( -name '[0-9]*-diff.png' -o -name '[0-9]*-preview.png' \) -delete 2>/dev/null || true
+
 for cmd in wmctrl xdotool xwininfo import convert awk git mktemp sha1sum; do
     if ! command -v "$cmd" >/dev/null; then
         echo "missing required tool: $cmd" >&2
@@ -221,8 +227,7 @@ diff_wid="$LAST_WID"
 read DX DY DW DH < <(geometry_of "$diff_wid")
 echo "diff window $diff_wid at $DX,$DY ${DW}x${DH}"
 
-ts=$(date +%Y%m%d-%H%M%S)
-diff_out="$SHOT_DIR/${ts}-diff.png"
+diff_out="$SHOT_DIR/latest-diff.png"
 
 # Click the single change row in the commit panel to open its diff. The row's exact Y depends on
 # render scale, so try a few offsets below the bottom-panel top and keep whichever capture has the
@@ -296,6 +301,41 @@ cat > "$WEBAPP/README.md" <<'EOF'
 
 A small synthetic project used for the nop screenshot.
 EOF
+# The other two rail projects aren't opened in the shot, but they need a file each so their repo has
+# a commit (an empty repo has no HEAD) and so their tree isn't bare if clicked.
+cat > "$API/main.py" <<'EOF'
+# Tiny synthetic API server for the nop screenshot.
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+
+if __name__ == "__main__":
+    HTTPServer(("", 8080), Handler).serve_forever()
+EOF
+cat > "$BLOG/index.md" <<'EOF'
+# blog
+
+A small synthetic project used for the nop screenshot.
+EOF
+
+# Each demo project is its own git repo. nop roots the tree, editor tabs and commit panel at the
+# discovered git root (App.kt: `rootPath = repo?.rootDir ?: projectPath`), climbing parents until it
+# finds a `.git`. Without one of their own, these /tmp-based projects would climb to whatever `.git`
+# happens to sit higher up — e.g. a stray empty /tmp/.git — and the shot would show the user's real
+# /tmp instead of the synthetic files. A repo per project pins the root to the project itself.
+for demo in "$WEBAPP" "$API" "$BLOG"; do
+    git -C "$demo" init --quiet
+    git -C "$demo" config user.email "screenshot@nop.local"
+    git -C "$demo" config user.name "nop screenshot"
+    git -C "$demo" add -A
+    git -C "$demo" commit --quiet -m "initial commit"
+done
 
 # Rail layout: two named separators grouping three project tabs. open.N mirrors the projects so a
 # no-arg launch restores the layout (Settings.loadRailLayout falls back to open.N otherwise).
@@ -333,15 +373,13 @@ echo "preview window $prev_wid at $PX,$PY ${PW}x${PH}"
 DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( PX + PW * 60 / 100 )) $(( PY + PH * 30 / 100 ))
 sleep 1.0
 
-preview_out="$SHOT_DIR/${ts}-preview.png"
+preview_out="$SHOT_DIR/latest-preview.png"
 capture_to "$preview_out" "$prev_wid"
 
 cleanup
 DEMO_PIDS=()
 trap 'rm -rf "$TMP_PARENT"' EXIT INT TERM
 
-cp -f "$diff_out" "$SHOT_DIR/latest-diff.png"
-cp -f "$preview_out" "$SHOT_DIR/latest-preview.png"
 echo "wrote $diff_out ($(stat -c %s "$diff_out") bytes)"
 echo "wrote $preview_out ($(stat -c %s "$preview_out") bytes)"
 

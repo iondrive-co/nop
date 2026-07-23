@@ -72,6 +72,7 @@ fun App(
     findInFilesTrigger: Int = 0,
     findInFileTrigger: Int = 0,
     jumpToSourceTrigger: Int = 0,
+    refreshTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -196,6 +197,18 @@ fun App(
                 refreshing = false
             }
         }
+    }
+
+    // F5 reloads what the user is looking at: the active tab re-reads its content from disk (which
+    // is what makes an open diff pick up a commit, pull or agent edit without being closed and
+    // reopened), and git status reloads alongside it. Baselined against the composition-time value
+    // for the same reason as the other window-level triggers — the counter outlives this
+    // per-project composition, so a project switch must not replay the session's last F5.
+    val refreshBaseline = remember(projectPath) { refreshTrigger }
+    LaunchedEffect(refreshTrigger) {
+        if (refreshTrigger <= refreshBaseline) return@LaunchedEffect
+        tabsState.selectedId?.let { tabsState.requestReload(it) }
+        refresh()
     }
 
     // Gentle background poll. Unlike reloadStatus() it preserves the user's commit selection —
