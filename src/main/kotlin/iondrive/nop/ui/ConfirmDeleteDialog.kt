@@ -27,8 +27,14 @@ import org.jetbrains.jewel.ui.component.Text
 import java.io.File
 
 @Composable
-fun ConfirmDeleteDialog(target: File, onConfirm: () -> Unit, onCancel: () -> Unit) {
-    val kind = if (target.isDirectory) "directory" else "file"
+fun ConfirmDeleteDialog(targets: List<File>, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    if (targets.isEmpty()) return
+    val single = targets.singleOrNull()
+    val title = when {
+        single != null && single.isDirectory -> "Delete directory?"
+        single != null -> "Delete file?"
+        else -> "Delete ${targets.size} items?"
+    }
     Popup(
         popupPositionProvider = CenteredPositionProvider,
         onDismissRequest = onCancel,
@@ -42,10 +48,21 @@ fun ConfirmDeleteDialog(target: File, onConfirm: () -> Unit, onCancel: () -> Uni
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Delete $kind?")
-            Text(target.absolutePath, color = ChangeColors.UNTRACKED)
-            if (target.isDirectory) {
-                Text("All files inside will be removed.", color = ChangeColors.REMOVED)
+            Text(title)
+            // List the paths so it's unambiguous exactly what's about to go. Cap the list so a large
+            // multi-selection can't grow the dialog past the screen; the count in the title still
+            // conveys the full scope.
+            val shown = targets.take(MaxListedPaths)
+            for (t in shown) Text(t.absolutePath, color = ChangeColors.UNTRACKED)
+            if (targets.size > shown.size) {
+                Text("…and ${targets.size - shown.size} more", color = ChangeColors.UNTRACKED)
+            }
+            if (targets.any { it.isDirectory }) {
+                Text(
+                    if (single != null) "All files inside will be removed."
+                    else "Any directories will be removed with all their contents.",
+                    color = ChangeColors.REMOVED,
+                )
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -57,6 +74,8 @@ fun ConfirmDeleteDialog(target: File, onConfirm: () -> Unit, onCancel: () -> Uni
         }
     }
 }
+
+private const val MaxListedPaths = 12
 
 private val CenteredPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
     override fun calculatePosition(

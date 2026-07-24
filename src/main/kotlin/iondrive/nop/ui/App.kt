@@ -93,8 +93,9 @@ fun App(
     // A failed git mutation (commit/stash) to show in an error dialog, or null when none. Without
     // this the exception would escape the launched coroutine and crash the window (see runGitOp).
     var gitOpError by remember(projectPath) { mutableStateOf<GitOpError?>(null) }
-    // Target of the pending "Delete file?" confirmation, or null when no dialog is open.
-    var pendingDelete by remember(projectPath) { mutableStateOf<File?>(null) }
+    // Rows awaiting a delete confirmation (the whole Ctrl/Shift selection), or null when no dialog
+    // is open.
+    var pendingDelete by remember(projectPath) { mutableStateOf<List<File>?>(null) }
     // The pending new-file/directory/package/copy dialog, or null when none is open.
     var pendingEntry by remember(projectPath) { mutableStateOf<TreeEntryDialog?>(null) }
     // A just-created directory/package to expand and scroll to in the tree (new files reveal
@@ -442,10 +443,14 @@ fun App(
         }
     }
 
-    fun performDelete(target: File) {
+    fun performDelete(targets: List<File>) {
+        if (targets.isEmpty()) return
         scope.launch {
-            withContext(Dispatchers.IO) { target.deleteRecursively() }
-            closeTabsUnder(target)
+            withContext(Dispatchers.IO) { targets.forEach { it.deleteRecursively() } }
+            targets.forEach { closeTabsUnder(it) }
+            // Drop the removed rows from the tree even in a non-git project (reloadStatus is a no-op
+            // without a repo), then reload git status for the survivors' colours.
+            fsRefreshKey += 1
             reloadStatus()
         }
     }
@@ -770,11 +775,11 @@ fun App(
             modifier = Modifier.align(androidx.compose.ui.Alignment.BottomEnd),
         )
 
-        pendingDelete?.let { target ->
+        pendingDelete?.let { targets ->
             ConfirmDeleteDialog(
-                target = target,
+                targets = targets,
                 onConfirm = {
-                    performDelete(target)
+                    performDelete(targets)
                     pendingDelete = null
                 },
                 onCancel = { pendingDelete = null },

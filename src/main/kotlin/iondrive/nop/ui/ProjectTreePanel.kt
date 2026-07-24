@@ -37,6 +37,12 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isMetaPressed
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
@@ -145,6 +151,28 @@ internal fun flattenedRowIndexOf(rootFile: File, targetPath: String, openIds: Se
 internal fun directoryPathAtY(rowRanges: Map<String, ClosedFloatingPointRange<Float>>, pointerY: Float): String? =
     rowRanges.entries.firstOrNull { pointerY in it.value }?.key
 
+/**
+ * The multi-selection as files: every selection key that is an existing path other than the project
+ * root. The LazyTree stores its selection (built up with Ctrl/Shift click) as the set of element
+ * IDs, which for this tree are absolute paths — so this just filters and rehydrates them. Pulled out
+ * as a pure function so the selection-to-files mapping is unit-testable without Compose.
+ */
+internal fun selectedFilesOf(selectedKeys: Set<Any?>, rootId: String): List<File> =
+    selectedKeys.asSequence()
+        .filterIsInstance<String>()
+        .filter { it != rootId }
+        .map(::File)
+        .filter { it.exists() }
+        .toList()
+
+/**
+ * Which rows a delete action triggered from [clicked] should remove: the whole [selection] when the
+ * clicked row is part of it, otherwise just the clicked row. Mirrors the file-manager convention
+ * where right-clicking a row outside the current selection acts only on that row.
+ */
+internal fun deleteTargetsFor(clicked: File, selection: List<File>): List<File> =
+    if (selection.any { it.absolutePath == clicked.absolutePath }) selection else listOf(clicked)
+
 private fun File.relativePathTo(repoRoot: Path): String? = runCatching {
     repoRoot.toAbsolutePath().normalize().relativize(this.toPath().toAbsolutePath().normalize())
         .toString().replace(File.separatorChar, '/')
@@ -165,7 +193,9 @@ fun ProjectTreePanel(
     // directory/package so the tree expands its ancestors, selects it, and scrolls it into view.
     revealRequest: File? = null,
     onFileClick: (File) -> Unit,
-    onDeleteRequest: (File) -> Unit = {},
+    // Delete the given rows. Carries the whole multi-selection (Ctrl/Shift click), so it's a list
+    // even for the common single-file case.
+    onDeleteRequest: (List<File>) -> Unit = {},
     onHistoryRequest: (File) -> Unit = {},
     blameEnabled: Boolean = false,
     onToggleBlame: () -> Unit = {},
@@ -191,6 +221,19 @@ fun ProjectTreePanel(
     var draggedFile by remember(projectPath) { mutableStateOf<File?>(null) }
     var dropTargetPath by remember(projectPath) { mutableStateOf<String?>(null) }
     val dirRowRanges = remember(projectPath) { mutableStateMapOf<String, ClosedFloatingPointRange<Float>>() }
+
+    // Whether the most recent pointer press over the tree carried a multi-select modifier — Ctrl or
+    // Meta (toggle a row) or Shift (extend the range). The LazyTree already grows treeState's
+    // selection on such clicks; this flag lets onElementClick tell that apart from a plain click so
+    // that building a selection doesn't also open a tab per click. Only a plain click opens a file.
+    // Captured on the Initial pointer pass so it's set before the tree's own click handling runs.
+    var pressCarriedSelectModifier by remember(projectPath) { mutableStateOf(false) }
+
+    // The multi-selection as it stood the instant before a right-click press. The tree collapses its
+    // selection to the clicked row on press, so the context menu reads this snapshot instead to let
+    // "Delete" act on the whole set — matching how file managers treat a right-click on a selected
+    // row (the selection is kept and the action applies to all of it).
+    var selectionBeforeSecondaryPress by remember(projectPath) { mutableStateOf<List<File>>(emptyList()) }
 
     LaunchedEffect(rootId) {
         treeState.openNodes(listOf(rootId))
@@ -258,6 +301,10 @@ fun ProjectTreePanel(
         return File(key).takeIf { it.exists() }
     }
 
+    // Every selected row as a file — the whole Ctrl/Shift multi-selection, for actions (delete)
+    // that operate on all of it rather than a single target.
+    fun selectedFiles(): List<File> = selectedFilesOf(treeState.selectedKeys, rootId)
+
     // History falls back to the project root so the button can show whole-repo log
     // when nothing (or the root itself) is selected.
     fun historyTarget(): File = selectedFile() ?: projectPath.toFile()
@@ -320,18 +367,41 @@ fun ProjectTreePanel(
             tree = tree,
             treeState = treeState,
             style = treeStyle,
-            modifier = Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (event.key) {
-                    Key.Delete -> selectedFile()?.let { onDeleteRequest(it); true } ?: false
-                    Key.H -> { onHistoryRequest(historyTarget()); true }
-                    Key.B -> { onToggleBlame(); true }
-                    else -> false
+            modifier = Modifier.fillMaxSize()
+                // Watch the Initial pass so we know, before the tree's own click handling runs,
+                // whether this click is meant to grow the selection (Ctrl/Meta/Shift) or open a
+                // file (plain). Purely observational — never consumes, so selection and drag still
+                // work exactly as before.
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type != PointerEventType.Press) continue
+                            val mods = event.keyboardModifiers
+                            pressCarriedSelectModifier =
+                                mods.isCtrlPressed || mods.isMetaPressed || mods.isShiftPressed
+                            // Snapshot before the tree collapses the selection on a right-click.
+                            if (event.buttons.isSecondaryPressed) {
+                                selectionBeforeSecondaryPress = selectedFilesOf(treeState.selectedKeys, rootId)
+                            }
+                        }
+                    }
                 }
-            },
+                .onPreviewKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (event.key) {
+                        Key.Delete -> selectedFiles().takeIf { it.isNotEmpty() }
+                            ?.let { onDeleteRequest(it); true } ?: false
+                        Key.H -> { onHistoryRequest(historyTarget()); true }
+                        Key.B -> { onToggleBlame(); true }
+                        else -> false
+                    }
+                },
             onElementClick = { element ->
                 val file = element.data
-                if (file.isFile) onFileClick(file)
+                // Ctrl/Shift clicks are building a multi-selection (the tree has already updated it);
+                // don't also open the file, or every click in the selection would spawn a tab.
+                if (file.isFile && !pressCarriedSelectModifier) onFileClick(file)
             },
         ) { element ->
             val file: File = element.data
@@ -352,6 +422,19 @@ fun ProjectTreePanel(
                     add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
                     add(ContextMenuItem("New Package…") { onNewPackage(file) })
                     if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                    // Delete acts on the whole selection when the right-clicked row is part of it,
+                    // else just that row. The project root has nowhere to go, so it's never deletable.
+                    if (file.absolutePath != rootId) {
+                        val targets = deleteTargetsFor(file, selectionBeforeSecondaryPress)
+                        // The right-click already collapsed the highlight to this one row; when it was
+                        // part of a multi-selection, restore the highlight so the menu visibly acts on
+                        // every row it will delete.
+                        if (targets.size > 1) {
+                            treeState.selectedKeys = targets.mapTo(mutableSetOf()) { it.absolutePath }
+                        }
+                        val label = if (targets.size > 1) "Delete ${targets.size} Items" else "Delete"
+                        add(ContextMenuItem(label) { onDeleteRequest(targets) })
+                    }
                 }
             }) {
                 // This row's own layout coordinates, refreshed on every placement — used to convert
