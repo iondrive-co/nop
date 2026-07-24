@@ -3,8 +3,9 @@
 # instance pointed at synthetic state — so the shots are curated and reproducible instead of
 # depending on whatever the user happens to have open:
 #
-#   - A diff-view shot: a one-file git repo with a committed + modified source file, opened to
-#     its side-by-side diff.
+#   - A diff-view shot: a repo with several committed-then-modified files across a few directories,
+#     so the commit panel shows its changes grouped into side-by-side columns (source dirs, tests,
+#     config, docs), with one file opened to its side-by-side diff in the editor above.
 #   - A workspace/preview shot: several synthetic project tabs grouped by named separators in the
 #     left rail, with a few editor tabs open in the active project. NOTHING from the user's real
 #     workspace appears.
@@ -186,13 +187,20 @@ DIFF_DATA=$(project_data_dir "$DIFF_CFG" "$DIFF_PROJECT")
 mkdir -p "$DIFF_DATA"
 echo "40.0" > "$DIFF_DATA/commit-height"
 
+# Several files spread across a few directories so the commit panel groups them into columns:
+# a "ui" source column (2 files), a "model" column, then tests / config / docs. Each file is
+# committed as a baseline, then edited, so every one shows up as a modification with a real diff.
 (
     cd "$DIFF_PROJECT"
     git init --quiet
     git config user.email "screenshot@nop.local"
     git config user.name "nop screenshot"
-    cat > Greeting.kt <<'BASELINE'
-package iondrive.nop.demo
+
+    mkdir -p src/ui src/model src/test docs
+
+    # --- baselines -------------------------------------------------------------------------
+    cat > src/ui/Greeting.kt <<'EOF'
+package iondrive.nop.ui
 
 import androidx.compose.runtime.Composable
 import org.jetbrains.jewel.ui.component.Text
@@ -203,11 +211,57 @@ fun Greeting(name: String) {
     val message = "Hello, $name"
     Text(message)
 }
-BASELINE
-    git add Greeting.kt
-    git commit --quiet -m "initial greeting"
-    cat > Greeting.kt <<'MODIFIED'
-package iondrive.nop.demo
+EOF
+    cat > src/ui/Header.kt <<'EOF'
+package iondrive.nop.ui
+
+import androidx.compose.runtime.Composable
+import org.jetbrains.jewel.ui.component.Text
+
+@Composable
+fun Header(title: String) {
+    Text(title)
+}
+EOF
+    cat > src/model/User.kt <<'EOF'
+package iondrive.nop.model
+
+data class User(val name: String) {
+    fun greeting(): String = "Hello, $name"
+}
+EOF
+    cat > src/test/GreetingTest.kt <<'EOF'
+package iondrive.nop.ui
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class GreetingTest {
+    @Test
+    fun greets() {
+        assertEquals("Hello, Ada", User("Ada").greeting())
+    }
+}
+EOF
+    cat > docs/guide.md <<'EOF'
+# Guide
+
+Greet a user by name.
+EOF
+    cat > build.gradle.kts <<'EOF'
+plugins {
+    kotlin("jvm") version "2.1.0"
+}
+
+version = "0.1.0"
+EOF
+
+    git add -A
+    git commit --quiet -m "initial demo project"
+
+    # --- modifications (each produces a real diff) -----------------------------------------
+    cat > src/ui/Greeting.kt <<'EOF'
+package iondrive.nop.ui
 
 import androidx.compose.runtime.Composable
 import org.jetbrains.jewel.ui.component.Text
@@ -219,7 +273,55 @@ fun Greeting(name: String, excited: Boolean = false) {
     val message = "Hello, $name$punctuation"
     Text(message)
 }
-MODIFIED
+EOF
+    cat > src/ui/Header.kt <<'EOF'
+package iondrive.nop.ui
+
+import androidx.compose.runtime.Composable
+import org.jetbrains.jewel.ui.component.Text
+
+@Composable
+fun Header(title: String, subtitle: String? = null) {
+    Text(if (subtitle != null) "$title — $subtitle" else title)
+}
+EOF
+    cat > src/model/User.kt <<'EOF'
+package iondrive.nop.model
+
+data class User(val name: String, val excited: Boolean = false) {
+    fun greeting(): String = "Hello, $name" + if (excited) "!" else "."
+}
+EOF
+    cat > src/test/GreetingTest.kt <<'EOF'
+package iondrive.nop.ui
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class GreetingTest {
+    @Test
+    fun greets() {
+        assertEquals("Hello, Ada.", User("Ada").greeting())
+    }
+
+    @Test
+    fun greetsExcitedly() {
+        assertEquals("Hello, Ada!", User("Ada", excited = true).greeting())
+    }
+}
+EOF
+    cat > docs/guide.md <<'EOF'
+# Guide
+
+Greet a user by name, optionally with excitement.
+EOF
+    cat > build.gradle.kts <<'EOF'
+plugins {
+    kotlin("jvm") version "2.1.0"
+}
+
+version = "0.2.0"
+EOF
 )
 
 launch_isolated "$DIFF_CFG" "$DIFF_BASENAME" "$DIFF_PROJECT"
@@ -229,11 +331,12 @@ echo "diff window $diff_wid at $DX,$DY ${DW}x${DH}"
 
 diff_out="$SHOT_DIR/latest-diff.png"
 
-# Click the single change row in the commit panel to open its diff. The row's exact Y depends on
-# render scale, so try a few offsets below the bottom-panel top and keep whichever capture has the
+# Click a change row in the first (leftmost, "ui") group column to open its diff. The x sits inside
+# that column whether the groups lay out as one wide row or wrap onto two; the row's exact Y depends
+# on render scale, so try a few offsets below the bottom-panel top and keep whichever capture has the
 # most "ink" in the editor pane (i.e. actually opened the diff).
 diff_panel_top=$(( DY + DH * 55 / 100 ))
-diff_row_x=$(( DX + DW * 45 / 100 ))
+diff_row_x=$(( DX + DW * 37 / 100 ))
 best_ink="-1"
 for off in 150 175 200 225 130; do
     DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$diff_wid" || true
