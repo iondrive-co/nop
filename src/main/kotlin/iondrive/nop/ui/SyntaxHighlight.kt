@@ -5,6 +5,7 @@ import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontStyle
+import iondrive.nop.Log
 
 enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR }
 
@@ -67,18 +68,32 @@ data class HighlightPalette(
 }
 
 /** Pick a tokenizer from a file extension. `null` means "no highlighting — render plain". */
-fun tokenizerForExtension(ext: String?): ((String) -> List<Token>)? = when (ext?.lowercase()) {
-    "kt", "kts" -> ::tokenizeKotlin
-    "java" -> ::tokenizeJava
-    "go" -> ::tokenizeGo
-    "json" -> ::tokenizeJson
-    "md", "markdown" -> ::tokenizeMarkdown
-    "js", "mjs", "cjs", "ts", "tsx", "jsx" -> ::tokenizeJsTs
-    "py", "pyw", "pyi" -> ::tokenizePython
-    "sh", "bash", "zsh" -> ::tokenizeShell
-    "yml", "yaml" -> ::tokenizeYaml
-    "j2", "jinja", "jinja2" -> ::tokenizeAnsible
-    else -> null
+fun tokenizerForExtension(ext: String?): ((String) -> List<Token>)? {
+    val tokenize: (String) -> List<Token> = when (ext?.lowercase()) {
+        "kt", "kts" -> ::tokenizeKotlin
+        "java" -> ::tokenizeJava
+        "go" -> ::tokenizeGo
+        "json" -> ::tokenizeJson
+        "md", "markdown" -> ::tokenizeMarkdown
+        "js", "mjs", "cjs", "ts", "tsx", "jsx" -> ::tokenizeJsTs
+        "py", "pyw", "pyi" -> ::tokenizePython
+        "sh", "bash", "zsh" -> ::tokenizeShell
+        "yml", "yaml" -> ::tokenizeYaml
+        "j2", "jinja", "jinja2" -> ::tokenizeAnsible
+        else -> return null
+    }
+    // A tokenizer bug must not be fatal. Callers run these inside a derivedStateOf that Compose
+    // evaluates *during composition*, so a throwable escapes the composition and kills the AWT
+    // thread — taking the window down with every project and terminal in it. Errors are caught as
+    // well as exceptions on purpose: the failure this guards against was a StackOverflowError from
+    // a runaway regex, and the stack has already unwound by the time we get here. Falling back to
+    // unhighlighted text loses colour on one file; the alternative loses the session.
+    return { text ->
+        runCatching { tokenize(text) }.getOrElse { t ->
+            Log.error("highlighting failed for .$ext (${text.length} chars) — rendering plain", t)
+            emptyList()
+        }
+    }
 }
 
 /** Build an [OutputTransformation] that paints [tokens] over the buffer text. */
@@ -101,6 +116,73 @@ internal fun applyTokens(buffer: TextFieldBuffer, tokens: List<Token>, palette: 
     }
 }
 
+// ---------- Quoted-string scanning ----------
+//
+// Quoted literals are scanned by hand instead of with the obvious regex, `"(?:\\.|[^"\\])*"`.
+// Java compiles a starred *group* containing an alternation into a recursive matcher — roughly six
+// stack frames per character consumed — so a long literal blows the stack rather than failing to
+// match. An 11KB template literal in a .ts file used to take the whole editor down with a
+// StackOverflowError thrown mid-composition. This loop uses O(1) stack and is faster besides.
+//
+// Returns the ranges of each literal, inclusive of both delimiters. An unterminated literal yields
+// nothing, so a stray quote colours no text rather than painting the rest of the file.
+//
+//  [escape]        a backslash escapes the next character (so `\"` does not close the literal).
+//  [doubledQuote]  a doubled delimiter escapes it instead — YAML's '' inside a single-quoted scalar.
+//  [multiline]     the literal may span lines; most may not, JS template literals may.
+private fun delimitedRanges(
+    text: String,
+    quote: Char,
+    escape: Boolean = true,
+    doubledQuote: Boolean = false,
+    multiline: Boolean = false,
+): List<IntRange> {
+    val out = ArrayList<IntRange>()
+    var i = 0
+    while (i < text.length) {
+        if (text[i] != quote) {
+            i++
+            continue
+        }
+        var j = i + 1
+        var closed = false
+        while (j < text.length) {
+            val c = text[j]
+            if (!multiline && (c == '\n' || c == '\r')) break
+            if (escape && c == '\\') {
+                // A trailing backslash at end of input leaves the literal unterminated.
+                if (j + 1 >= text.length) break
+                j += 2
+                continue
+            }
+            if (c == quote) {
+                if (doubledQuote && j + 1 < text.length && text[j + 1] == quote) {
+                    j += 2
+                    continue
+                }
+                closed = true
+                break
+            }
+            j++
+        }
+        if (closed) {
+            out += i..j
+            i = j + 1
+        } else {
+            // Not a literal after all — resume scanning just past the opening quote so a later,
+            // properly closed literal on the same line is still found.
+            i++
+        }
+    }
+    return out
+}
+
+/** Ranges of `"…"` literals — the shape every language here shares. */
+private fun doubleQuoted(text: String): List<IntRange> = delimitedRanges(text, '"')
+
+/** Ranges of `'…'` literals with backslash escapes — JS/TS strings and Go rune literals. */
+private fun singleQuoted(text: String): List<IntRange> = delimitedRanges(text, '\'')
+
 // ---------- Kotlin ----------
 
 private val KOTLIN_KEYWORDS = setOf(
@@ -116,9 +198,9 @@ private val KOTLIN_KEYWORDS = setOf(
 
 private val KOTLIN_LINE_COMMENT = Regex("""//[^\n]*""")
 private val KOTLIN_BLOCK_COMMENT = Regex("""/\*[\s\S]*?\*/""")
-// Triple-quoted strings have no internal escapes. Plain strings allow \" escapes.
+// Triple-quoted strings have no internal escapes. Plain strings allow \" escapes and are scanned
+// by [doubleQuoted] rather than matched by a regex — see the note there.
 private val KOTLIN_TRIPLE_STRING = Regex("\"\"\"[\\s\\S]*?\"\"\"")
-private val KOTLIN_STRING = Regex(""""(?:\\.|[^"\\\n])*"""")
 private val KOTLIN_CHAR = Regex("""'(?:\\.|[^'\\\n])'""")
 private val IDENT = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
 private val NUMBER_RE = Regex("""\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?[fFLuU]?\b""")
@@ -139,7 +221,7 @@ fun tokenizeKotlin(text: String): List<Token> {
     KOTLIN_BLOCK_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     KOTLIN_LINE_COMMENT.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     KOTLIN_TRIPLE_STRING.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    KOTLIN_STRING.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    doubleQuoted(text).forEach { if (!overlap(it.first, it.last + 1)) add(it.first, it.last + 1, TokenKind.STRING) }
     KOTLIN_CHAR.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.STRING) }
     NUMBER_RE.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     IDENT.findAll(text).forEach {
@@ -195,7 +277,7 @@ fun tokenizeJava(text: String): List<Token> {
     KOTLIN_BLOCK_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     KOTLIN_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     KOTLIN_TRIPLE_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    KOTLIN_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    doubleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
     KOTLIN_CHAR.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
     JAVA_ANNOTATION.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.EMPHASIS) }
     JAVA_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
@@ -208,7 +290,6 @@ fun tokenizeJava(text: String): List<Token> {
 
 // ---------- JSON ----------
 
-private val JSON_STRING = Regex("""(?<!\\)"(?:\\.|[^"\\])*"""")
 private val JSON_NUMBER = Regex("""-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?""")
 private val JSON_LITERAL = Regex("""\b(?:true|false|null)\b""")
 
@@ -224,7 +305,9 @@ fun tokenizeJson(text: String): List<Token> {
         for (i in start until end) taken[i] = true
         out += Token(start, end, kind)
     }
-    JSON_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    // JSON strings never contain a raw newline, so an unterminated one stops at end of line
+    // instead of colouring the rest of the document.
+    doubleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
     JSON_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     JSON_LITERAL.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
     return out.sortedBy { it.start }
@@ -272,8 +355,6 @@ private val JSTS_KEYWORDS = setOf(
     "true", "try", "type", "typeof", "undefined", "var", "void", "while", "with", "yield",
 )
 
-private val JS_TEMPLATE = Regex("""`(?:\\.|[^`\\])*`""")
-
 fun tokenizeJsTs(text: String): List<Token> {
     val out = ArrayList<Token>()
     val taken = BooleanArray(text.length)
@@ -288,9 +369,10 @@ fun tokenizeJsTs(text: String): List<Token> {
     }
     KOTLIN_BLOCK_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     KOTLIN_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
-    JS_TEMPLATE.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    KOTLIN_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    Regex("""'(?:\\.|[^'\\\n])*'""").findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    // Template literals are the one string form that may span lines.
+    delimitedRanges(text, '`', multiline = true).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
+    doubleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
+    singleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
     NUMBER_RE.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     IDENT.findAll(text).forEach {
         val w = it.value
@@ -330,8 +412,6 @@ private val ANSIBLE_KEYWORDS = setOf(
 )
 
 private val YAML_LINE_COMMENT = Regex("""(?m)#[^\n]*""")
-private val YAML_DOUBLE_STRING = Regex(""""(?:\\.|[^"\\\n])*"""")
-private val YAML_SINGLE_STRING = Regex("""'(?:''|[^'\n])*'""")
 // Jinja2 substitution / statement / comment forms. Highlighted as a unit so module args like
 // `path: "{{ var }}"` show the templated portion distinctly from the surrounding string.
 private val JINJA_BLOCK = Regex("""\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}""")
@@ -358,8 +438,10 @@ fun tokenizeAnsible(text: String): List<Token> {
     // inside a comment is part of the comment, but a `{{ var }}` in a double-quoted value
     // would normally be swallowed by the string — we accept that to keep the lexer simple.
     YAML_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
-    YAML_DOUBLE_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    YAML_SINGLE_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    doubleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
+    // A single-quoted YAML scalar has no backslash escapes; '' is a literal quote.
+    delimitedRanges(text, '\'', escape = false, doubledQuote = true)
+        .forEach { add(it.first, it.last + 1, TokenKind.STRING) }
     JINJA_BLOCK.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.EMPHASIS) }
 
     // Highlight the key portion when it names a known Ansible directive/module; the rest of the
@@ -732,7 +814,7 @@ fun tokenizeShell(text: String): List<Token> {
         out += Token(start, end, kind)
     }
     SHELL_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
-    KOTLIN_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    doubleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
     Regex("""'[^'\n]*'""").findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
     SHELL_VAR.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
     NUMBER_RE.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
@@ -765,11 +847,11 @@ private val GO_KEYWORDS = setOf(
 // Predeclared constants. Coloured as literals (like JSON's true/false/null) rather than keywords.
 private val GO_LITERAL = Regex("""\b(?:true|false|nil|iota)\b""")
 // Raw string literals are backtick-delimited, span lines, and contain no escapes — a backslash
-// is just a backslash, so (unlike the JS template regex) we match everything up to the next `.
+// is just a backslash, so (unlike a JS template literal) we match everything up to the next `.
+// A plain starred character class is safe to do with a regex; it compiles to a flat loop.
 private val GO_RAW_STRING = Regex("""`[^`]*`""")
-// A rune literal holds a single character or escape. The reluctant body stops at the first
-// closing quote so `'a' + 'b'` is two runes, while `'\n'` and `'ÿ'` stay whole.
-private val GO_RUNE = Regex("""'(?:\\[^\n]|[^'\\\n])*?'""")
+// A rune literal holds a single character or escape. [singleQuoted] stops at the first unescaped
+// closing quote, so `'a' + 'b'` is two runes, while `'\n'` and `'ÿ'` stay whole.
 // Hex (incl. p-exponent hex floats), binary, octal (0o), and decimal/float forms, each with an
 // optional imaginary `i` suffix and `_` digit separators.
 private val GO_NUMBER = Regex(
@@ -792,8 +874,8 @@ fun tokenizeGo(text: String): List<Token> {
     KOTLIN_BLOCK_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     KOTLIN_LINE_COMMENT.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.COMMENT) }
     GO_RAW_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    KOTLIN_STRING.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
-    GO_RUNE.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    doubleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
+    singleQuoted(text).forEach { add(it.first, it.last + 1, TokenKind.STRING) }
     GO_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     GO_LITERAL.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
     IDENT.findAll(text).forEach {

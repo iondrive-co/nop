@@ -92,6 +92,45 @@ class SyntaxHighlightTest {
         assertTrue(tokens.any { it.kind == TokenKind.STRING })
     }
 
+    // Regression: a .ts file with a multi-thousand-character template literal used to throw
+    // StackOverflowError out of the tokenizer — the old `(?:\\.|[^`\\])*` regex recursed once per
+    // character — and because tokenizing happens during composition it killed the whole window.
+    @Test
+    fun `js ts lexer handles a very long multi-line template literal`() {
+        val body = (1..4000).joinToString("\n") { "  line $it of a long template" }
+        val src = "const doc = `$body`;\nexport default doc;"
+        val tokens = tokenizeJsTs(src)
+        assertTrue(tokens.containsExact(src, "`$body`", TokenKind.STRING))
+        assertTrue(tokens.containsExact(src, "const", TokenKind.KEYWORD))
+    }
+
+    // Same failure shape, reached through a plain double-quoted string: one long line, as in a
+    // minified bundle. The old regex was newline-bounded, which only meant it needed a long line.
+    @Test
+    fun `js ts lexer handles a very long single-line string`() {
+        val body = "x".repeat(50_000)
+        val src = """const s = "$body";"""
+        val tokens = tokenizeJsTs(src)
+        assertTrue(tokens.containsExact(src, "\"$body\"", TokenKind.STRING))
+    }
+
+    @Test
+    fun `js ts strings respect escapes and stop at end of line`() {
+        val src = """
+            const a = "he said \"hi\" loudly";
+            const b = 'it\'s fine';
+            const unterminated = "oops
+            const after = "ok";
+        """.trimIndent()
+        val tokens = tokenizeJsTs(src)
+        assertTrue(tokens.containsExact(src, """"he said \"hi\" loudly"""", TokenKind.STRING))
+        assertTrue(tokens.containsExact(src, """'it\'s fine'""", TokenKind.STRING))
+        // The unterminated literal must not swallow the following line — `after` is still a string
+        // of its own, and `const` after it still reads as a keyword.
+        assertTrue(tokens.containsExact(src, "\"ok\"", TokenKind.STRING))
+        assertEquals(4, tokens.count { it.kind == TokenKind.KEYWORD && src.substring(it.start, it.endExclusive) == "const" })
+    }
+
     @Test
     fun `shell lexer highlights keywords comments and variables`() {
         // Note: $HOME inside double quotes is correctly subsumed by the STRING token —

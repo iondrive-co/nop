@@ -66,6 +66,10 @@ private const val RAIL_GIT_POLL_MS = 3000L
 
 @OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
+    // First thing, before any UI: route uncaught throwables to ~/.config/nop/nop.log. Without this
+    // a crash on the AWT thread takes the window down and leaves no trace anywhere findable.
+    Log.install(args)
+
     val argPaths = args.map { Paths.get(it).toAbsolutePath().normalize() }
         .filter { Files.isDirectory(it) }
 
@@ -122,6 +126,7 @@ fun main(args: Array<String>) {
 
         fun openProject(path: Path) {
             val norm = path.toAbsolutePath().normalize()
+            Log.info("open project $norm")
             if (railItems.none { it is RailItem.Project && it.path == norm }) {
                 railItems.add(RailItem.Project(norm))
             }

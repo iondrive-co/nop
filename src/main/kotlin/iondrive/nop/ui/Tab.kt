@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import iondrive.nop.Log
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.FileChange
 import iondrive.nop.terminal.TerminalSession
@@ -86,6 +87,9 @@ class TabsState {
      * copy the tab captured when it first opened.
      */
     fun open(tab: Tab, record: Boolean = true) {
+        // Breadcrumb: the last tab opened is the single most useful piece of context when nop dies
+        // while rendering something, so it goes in the log before the render is attempted.
+        Log.info("open tab ${tab.id}")
         val existing = _tabs.indexOfFirst { it.id == tab.id }
         if (existing < 0) {
             _tabs.add(tab)
