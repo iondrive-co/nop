@@ -192,6 +192,9 @@ private class RailReorder {
     // Vertical offset of the dragged row from its settled slot, in px. Reset to 0 each time the
     // row crosses a neighbour and we commit a move, so it always measures from the current slot.
     var delta by mutableStateOf(0f)
+    // Whether the dragged row carries its group. Decided once at drag start (see the drag handler)
+    // so the granularity can't flip part-way through a drag.
+    var dragAsGroup by mutableStateOf(false)
     // Measured heights per row key, so a drag knows how far to travel before swapping a neighbour.
     val heights = mutableStateMapOf<String, Int>()
 }
@@ -205,11 +208,12 @@ private fun keyOf(item: RailItem): String = when (item) {
 /**
  * Wraps one rail row with drag-to-reorder. While dragging, the row follows the pointer (translation
  * + raised above its neighbours); each time it travels past half a neighbour's height we swap it
- * with that neighbour so the list reflows live. Neighbours are the *visible* rows either side (a
- * collapsed group counts as one), and a collapsed separator carries its hidden tabs along, so the
- * swap is over [RailLayout.visibleBlocks] rather than raw list indices. The drag only engages once
- * the pointer passes the touch slop, so a plain click still selects the project (and the rail still
- * scrolls via the wheel).
+ * with that neighbour so the list reflows live — see [RailLayout.dragStep], which owns the whole
+ * decision. A separator that heads tabs drags as its group, so it takes them along and hops a
+ * neighbouring group whole rather than shedding tabs into it a row at a time; everything else steps
+ * one visible row at a time, which is how a bare separator gets dropped into place. The drag only
+ * engages once the pointer passes the touch slop, so a plain click still selects the project (and
+ * the rail still scrolls via the wheel).
  */
 @Composable
 private fun ReorderableRow(
@@ -236,35 +240,30 @@ private fun ReorderableRow(
             .graphicsLayer { translationY = if (dragging) reorder.delta else 0f }
             .pointerInput(key) {
                 detectDragGestures(
-                    onDragStart = { reorder.draggingKey = key; reorder.delta = 0f },
+                    onDragStart = {
+                        reorder.draggingKey = key
+                        reorder.delta = 0f
+                        // Pinned for the whole drag: a separator heading tabs moves as a group, while
+                        // one heading none stays a bare divider that can be dropped between any two
+                        // rows. Deciding once keeps a divider from turning into a group mid-drag as it
+                        // picks up tabs on the way past them.
+                        val cur = itemsUpdated
+                        reorder.dragAsGroup =
+                            RailLayout.groupSpan(cur, cur.indexOfFirst { keyOf(it) == key }) > 1
+                    },
                     onDragEnd = { reorder.draggingKey = null; reorder.delta = 0f },
                     onDragCancel = { reorder.draggingKey = null; reorder.delta = 0f },
                     onDrag = { change, amount ->
                         change.consume()
                         reorder.delta += amount.y
                         val cur = itemsUpdated
-                        val blocks = RailLayout.visibleBlocks(cur)
-                        val from = blocks.indexOfFirst { keyOf(cur[it.start]) == key }
-                        if (from >= 0) {
-                            if (reorder.delta > 0f && from < blocks.lastIndex) {
-                                val next = blocks[from + 1]
-                                val nextH = reorder.heights[keyOf(cur[next.start])] ?: 0
-                                if (nextH > 0 && reorder.delta > nextH / 2f) {
-                                    onReorderUpdated(
-                                        RailLayout.swapAdjacentBlocks(cur, blocks[from].start, blocks[from].span, next.span)
-                                    )
-                                    reorder.delta -= nextH
-                                }
-                            } else if (reorder.delta < 0f && from > 0) {
-                                val prev = blocks[from - 1]
-                                val prevH = reorder.heights[keyOf(cur[prev.start])] ?: 0
-                                if (prevH > 0 && -reorder.delta > prevH / 2f) {
-                                    onReorderUpdated(
-                                        RailLayout.swapAdjacentBlocks(cur, prev.start, prev.span, blocks[from].span)
-                                    )
-                                    reorder.delta += prevH
-                                }
-                            }
+                        val from = cur.indexOfFirst { keyOf(it) == key }
+                        val step = RailLayout.dragStep(cur, from, reorder.dragAsGroup, reorder.delta) { i ->
+                            reorder.heights[keyOf(cur[i])] ?: 0
+                        }
+                        if (step != null) {
+                            onReorderUpdated(step.items)
+                            reorder.delta -= step.travelled
                         }
                     },
                 )

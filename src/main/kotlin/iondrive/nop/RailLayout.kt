@@ -36,6 +36,13 @@ sealed interface RailItem {
 data class RailBlock(val start: Int, val span: Int)
 
 /**
+ * The result of one drag step: the reordered [items], and the on-screen distance the dragged row
+ * [travelled] to get there (signed — positive moving down the rail, negative moving up). The caller
+ * subtracts [travelled] from the drag's running offset so it keeps measuring from the new slot.
+ */
+data class RailDragStep(val items: List<RailItem>, val travelled: Int)
+
+/**
  * Pure helpers for the rail's ordered list and its on-disk encoding, kept out of the Compose/IO
  * layers so they can be unit-tested directly.
  */
@@ -67,12 +74,39 @@ object RailLayout {
      * beneath it (up to the next separator) into its span so the whole group renders — and drags —
      * as one row. Projects hidden inside a collapsed group never get their own block.
      */
-    fun visibleBlocks(items: List<RailItem>): List<RailBlock> {
+    fun visibleBlocks(items: List<RailItem>): List<RailBlock> = blocksBy(items) { it.collapsed }
+
+    /**
+     * The same list at *group* granularity: every separator swallows the tabs beneath it, collapsed
+     * or not, and each project above the first separator stands alone. Dragging a group's header
+     * moves over these, so a group hops a whole neighbouring group in one step — and carries its own
+     * tabs with it — instead of leaving them behind for whichever separator ends up above them.
+     */
+    fun groupBlocks(items: List<RailItem>): List<RailBlock> = blocksBy(items) { true }
+
+    /**
+     * Rows covered by the group headed by the item at [index]: the separator plus the run of
+     * projects below it. 1 for a separator heading no tabs, and for a project (which heads nothing),
+     * so a caller can read this as "does this row drag as a group?" by testing for more than 1.
+     */
+    fun groupSpan(items: List<RailItem>, index: Int): Int {
+        if (items.getOrNull(index) !is RailItem.Separator) return 1
+        var j = index + 1
+        while (j < items.size && items[j] is RailItem.Project) j++
+        return j - index
+    }
+
+    /**
+     * The rows [items] renders, in order, each pointing back into the list. A separator swallows the
+     * run of projects beneath it (up to the next separator) into its span when [swallows] says so;
+     * every other entry is its own single-span block.
+     */
+    private fun blocksBy(items: List<RailItem>, swallows: (RailItem.Separator) -> Boolean): List<RailBlock> {
         val out = mutableListOf<RailBlock>()
         var i = 0
         while (i < items.size) {
             val item = items[i]
-            if (item is RailItem.Separator && item.collapsed) {
+            if (item is RailItem.Separator && swallows(item)) {
                 var j = i + 1
                 while (j < items.size && items[j] is RailItem.Project) j++
                 out.add(RailBlock(i, j - i))
@@ -100,6 +134,56 @@ object RailLayout {
             addAll(items.subList(aStart, bStart))
             addAll(items.subList(bStart + bLen, items.size))
         }
+    }
+
+    /**
+     * One step of a drag-reorder. The row at [from] has been dragged [delta] px from its settled slot
+     * (positive downwards); once that passes half the height of the neighbour it is heading for, the
+     * two swap and the new order comes back. Returns null while the row hasn't travelled far enough,
+     * when it's already at the end it's heading towards, or when [from] isn't a block start (a stale
+     * mid-drag index).
+     *
+     * [asGroup] picks the granularity, and the caller pins it for the whole drag: a group header
+     * moves with its tabs and steps over whole neighbouring groups, while a bare row (a project, or a
+     * separator heading no tabs) steps one visible row at a time so it can be dropped inside a group.
+     * [rowHeight] gives the measured height of the row at an item index.
+     */
+    fun dragStep(
+        items: List<RailItem>,
+        from: Int,
+        asGroup: Boolean,
+        delta: Float,
+        rowHeight: (Int) -> Int,
+    ): RailDragStep? {
+        val blocks = if (asGroup) groupBlocks(items) else visibleBlocks(items)
+        val at = blocks.indexOfFirst { it.start == from }
+        if (at < 0) return null
+        val block = blocks[at]
+        if (delta > 0f && at < blocks.lastIndex) {
+            val next = blocks[at + 1]
+            val height = blockHeight(items, next, rowHeight)
+            if (height > 0 && delta > height / 2f) {
+                return RailDragStep(swapAdjacentBlocks(items, block.start, block.span, next.span), height)
+            }
+        } else if (delta < 0f && at > 0) {
+            val prev = blocks[at - 1]
+            val height = blockHeight(items, prev, rowHeight)
+            if (height > 0 && -delta > height / 2f) {
+                return RailDragStep(swapAdjacentBlocks(items, prev.start, prev.span, block.span), -height)
+            }
+        }
+        return null
+    }
+
+    /**
+     * How tall [block] stands on screen: its head row plus the member rows of an expanded group. A
+     * collapsed group is just its separator row, since its tabs aren't drawn — so the distance a drag
+     * has to cover to pass a neighbour always matches what the user sees.
+     */
+    private fun blockHeight(items: List<RailItem>, block: RailBlock, rowHeight: (Int) -> Int): Int {
+        val head = items.getOrNull(block.start)
+        val rows = if (head is RailItem.Separator && head.collapsed) 1 else block.span
+        return (block.start until block.start + rows).sumOf { rowHeight(it) }
     }
 
     /** State-file value for one rail row. Newlines in a name are flattened so the line format holds. */

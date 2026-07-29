@@ -2,6 +2,7 @@ package iondrive.nop
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import java.nio.file.Paths
@@ -99,6 +100,111 @@ class RailLayoutTest {
             listOf(RailBlock(0, 1), RailBlock(1, 1), RailBlock(2, 1), RailBlock(3, 1)),
             RailLayout.visibleBlocks(items),
         )
+    }
+
+    @Test
+    fun `groupBlocks folds an expanded group's tabs into the separator's span`() {
+        val items = listOf(proj("/a"), sep("Work"), proj("/b"), proj("/c"), sep("Other"), proj("/d"))
+        assertEquals(
+            // /a stands alone above the first separator; "Work" covers /b and /c; "Other" covers /d.
+            listOf(RailBlock(0, 1), RailBlock(1, 3), RailBlock(4, 2)),
+            RailLayout.groupBlocks(items),
+        )
+    }
+
+    @Test
+    fun `groupBlocks gives a separator heading no tabs a span of one`() {
+        val items = listOf(sep("Empty"), sepC("Work"), proj("/a"))
+        assertEquals(listOf(RailBlock(0, 1), RailBlock(1, 2)), RailLayout.groupBlocks(items))
+    }
+
+    @Test
+    fun `groupSpan counts a separator's tabs and is one for anything else`() {
+        val items = listOf(proj("/a"), sep("Work"), proj("/b"), proj("/c"), sep("Tail"))
+        assertEquals(3, RailLayout.groupSpan(items, 1))
+        assertEquals(1, RailLayout.groupSpan(items, 4)) // separator heading no tabs
+        assertEquals(1, RailLayout.groupSpan(items, 0)) // a project heads nothing
+        assertEquals(1, RailLayout.groupSpan(items, 9)) // out of range
+    }
+
+    // Drag steps below measure every row at ROW px, so a group of n rows stands n * ROW tall and has
+    // to be travelled halfway for the swap to commit.
+    private val ROW = 50
+    private fun step(items: List<RailItem>, from: Int, asGroup: Boolean, delta: Float) =
+        RailLayout.dragStep(items, from, asGroup, delta) { ROW }
+
+    @Test
+    fun `dragStep moves a group above the previous group with its tabs`() {
+        // The reported bug: dragging the last group's header up used to move the bare label, leaving
+        // its tabs behind to be swallowed by whichever separator ended up above them.
+        val items = listOf(sep("A", 1), proj("/a"), sep("B", 2), proj("/b"), sep("C", 3), proj("/c"))
+        val moved = step(items, from = 4, asGroup = true, delta = -60f)!!
+        assertEquals(
+            listOf(sep("A", 1), proj("/a"), sep("C", 3), proj("/c"), sep("B", 2), proj("/b")),
+            moved.items,
+        )
+        // Group B is two rows tall, so the drag consumed its full height moving up past it.
+        assertEquals(-2 * ROW, moved.travelled)
+    }
+
+    @Test
+    fun `dragStep moves a group below the next group with its tabs`() {
+        val items = listOf(sep("B", 1), proj("/b1"), proj("/b2"), sep("C", 2), proj("/c"))
+        val moved = step(items, from = 0, asGroup = true, delta = 60f)!!
+        assertEquals(
+            listOf(sep("C", 2), proj("/c"), sep("B", 1), proj("/b1"), proj("/b2")),
+            moved.items,
+        )
+        assertEquals(2 * ROW, moved.travelled)
+    }
+
+    @Test
+    fun `dragStep waits until a group has been travelled halfway`() {
+        val items = listOf(sep("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b"))
+        // Group A is three rows tall (150px): 70px up isn't yet past its midpoint, 80px is.
+        assertNull(step(items, from = 3, asGroup = true, delta = -70f))
+        assertNotNull(step(items, from = 3, asGroup = true, delta = -80f))
+    }
+
+    @Test
+    fun `dragStep measures a collapsed neighbour by its separator row alone`() {
+        // "Work" hides two tabs, so it's one row on screen — half of ROW is all the travel it takes
+        // to hop it, even though the block that moves is three entries long.
+        val items = listOf(sepC("Work", 1), proj("/b"), proj("/c"), sep("New", 2))
+        val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
+        assertEquals(listOf(sep("New", 2), sepC("Work", 1), proj("/b"), proj("/c")), moved.items)
+        assertEquals(-ROW, moved.travelled)
+    }
+
+    @Test
+    fun `dragStep steps a bare separator one row at a time so it can split a group`() {
+        // A newly added separator heads no tabs, so it drags as a plain row: one step up drops it
+        // between the tabs of the group above, splitting it.
+        val items = listOf(sep("Work", 1), proj("/a"), proj("/b"), sep("New", 2))
+        val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
+        assertEquals(listOf(sep("Work", 1), proj("/a"), sep("New", 2), proj("/b")), moved.items)
+    }
+
+    @Test
+    fun `dragStep moves a project across a group boundary a row at a time`() {
+        val items = listOf(sep("A", 1), proj("/a"), sep("B", 2), proj("/b"))
+        val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
+        assertEquals(listOf(sep("A", 1), proj("/a"), proj("/b"), sep("B", 2)), moved.items)
+    }
+
+    @Test
+    fun `dragStep is a no-op at the ends and for a stale index`() {
+        val items = listOf(sep("A", 1), proj("/a"), proj("/b"))
+        assertNull(step(items, from = 0, asGroup = true, delta = -80f)) // already at the top
+        assertNull(step(items, from = 2, asGroup = false, delta = 80f)) // already at the bottom
+        assertNull(step(items, from = -1, asGroup = false, delta = 80f))
+        assertNull(step(items, from = 1, asGroup = true, delta = 0f))
+    }
+
+    @Test
+    fun `dragStep ignores a row it hasn't measured yet`() {
+        val items = listOf(proj("/a"), proj("/b"))
+        assertNull(RailLayout.dragStep(items, from = 1, asGroup = false, delta = -80f) { 0 })
     }
 
     @Test
