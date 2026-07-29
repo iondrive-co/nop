@@ -224,6 +224,7 @@ fun TabbedViewerPanel(
                     tab = current,
                     splitRatio = diffSplitRatio,
                     onSplitRatioChange = onDiffSplitRatioChange,
+                    onTopLine = onDiffTopLine,
                     reloadKey = tabsState.reloadKey(current.id),
                     findTrigger = findInFileTrigger,
                 )

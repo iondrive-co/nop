@@ -19,7 +19,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,6 +32,7 @@ import iondrive.nop.diff.DiffRow
 import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.ui.component.Text
 import java.io.File
@@ -45,6 +48,7 @@ fun CommitDiffView(
     tab: Tab.CommitDiff,
     splitRatio: Float = 0.5f,
     onSplitRatioChange: (Float) -> Unit = {},
+    onTopLine: (Int) -> Unit = {},
     reloadKey: Int = 0,
     findTrigger: Int = 0,
 ) {
@@ -83,7 +87,7 @@ fun CommitDiffView(
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
-            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, tab.id, findTrigger)
+            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, onTopLine, tab.id, findTrigger)
         }
     }
 }
@@ -93,10 +97,20 @@ private fun ReadOnlyDiffList(
     result: DiffResult,
     splitRatio: Float,
     onSplitRatioChange: (Float) -> Unit,
+    onTopLine: (Int) -> Unit,
     searchKey: Any,
     findTrigger: Int,
 ) {
     val listState = rememberLazyListState()
+
+    // Report the commit-side line at the top of the viewport so a "jump to source" (F4) lands the
+    // working file on what's on screen. Same contract as the working-tree diff — see DiffRowsList.
+    val rowsForTopLine by rememberUpdatedState(result.rows)
+    LaunchedEffect(listState, onTopLine) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .collect { idx -> onTopLine(newSideLineAt(rowsForTopLine, idx)) }
+    }
     DiffListScaffold(
         rows = result.rows,
         kinds = result.rows.map { it.kind },

@@ -1,6 +1,8 @@
 package iondrive.nop.ui
 
 import iondrive.nop.git.ChangeKind
+import iondrive.nop.git.CommitFile
+import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.FileChange
 import iondrive.nop.terminal.TerminalSession
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -52,6 +54,83 @@ class TabsPersistenceTest {
         assertEquals(1, loaded.size)
         assertEquals("file", loaded[0].kind)
         assertEquals(keep.absolutePath, loaded[0].path)
+    }
+
+    @Test
+    fun `save then restore round-trips a CommitDiff tab opened from history`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        val sha = "b09a25a656445718a494da86beba0f623e78ce56"
+        val original = Tab.CommitDiff(
+            sha = sha,
+            shortSha = sha.take(7),
+            file = CommitFile("src/app/admin/api-key/api-key-edit-page.component.ts", CommitFileChange.MODIFIED),
+            repoRoot = repo,
+        )
+        TabsPersistence.save(target, listOf(original), selectedId = original.id)
+
+        val loaded = TabsPersistence.load(target)
+        assertEquals(1, loaded.size)
+        assertEquals("commitdiff", loaded[0].kind)
+        assertEquals(true, loaded[0].selected)
+
+        val state = TabsState()
+        TabsPersistence.restore(state, loaded, repoRoot = repo)
+        assertEquals(1, state.tabs.size)
+        val restored = state.tabs[0] as Tab.CommitDiff
+        assertEquals(original, restored)
+        assertEquals(original.id, state.selectedId)
+    }
+
+    @Test
+    fun `a CommitDiff restores even when the file is gone from the working tree`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        // The commit deleted the file, so nothing under repoRoot matches it — the diff is still
+        // readable out of history, so the tab must survive.
+        val tab = Tab.CommitDiff("abc1234def", "abc1234", CommitFile("gone.ts", CommitFileChange.DELETED), repo)
+        TabsPersistence.save(target, listOf(tab), selectedId = null)
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
+        assertEquals(1, state.tabs.size)
+        assertEquals(CommitFileChange.DELETED, (state.tabs[0] as Tab.CommitDiff).file.changeType)
+    }
+
+    @Test
+    fun `commit diffs need a repoRoot to be restored`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        val tab = Tab.CommitDiff("abc1234def", "abc1234", CommitFile("a.ts", CommitFileChange.ADDED), repo)
+        TabsPersistence.save(target, listOf(tab), selectedId = null)
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = null)
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun `load drops commit-diff lines missing the sha or change type`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        Files.writeString(
+            target,
+            listOf(
+                "commitdiff\ta.ts\t0",                  // no sha, no change type
+                "commitdiff\tb.ts\t0\tabc1234def",      // no change type
+                "commitdiff\tc.ts\t0\tabc1234def\tNOPE", // change type isn't a CommitFileChange
+                "commitdiff\td.ts\t0\tabc1234def\tMODIFIED",
+            ).joinToString("\n"),
+        )
+
+        // The first two are unparseable, so they never become SavedTabs at all…
+        val loaded = TabsPersistence.load(target)
+        assertEquals(listOf("c.ts", "d.ts"), loaded.map { it.path })
+
+        // …and the bogus change type is dropped at restore, where the enum is resolved.
+        val state = TabsState()
+        TabsPersistence.restore(state, loaded, repoRoot = tmp.toFile())
+        assertEquals(1, state.tabs.size)
+        assertEquals("d.ts", (state.tabs[0] as Tab.CommitDiff).file.path)
     }
 
     @Test

@@ -117,16 +117,18 @@ fun App(
     var diffTopLine by remember(projectPath) { mutableStateOf(1) }
     LaunchedEffect(tabsState.selectedId) { diffTopLine = 1 }
 
-    // F4 from a working-tree diff opens the real file behind it, at the line in view. Ignored for
-    // any other tab, and for diffs whose working file is gone (removed/missing). The trigger is a
+    // F4 from a diff opens the real file behind it, at the line in view — from a working-tree diff
+    // and from a historic commit's diff alike. For a commit diff the line comes from that revision,
+    // so it only points at the same code while the file hasn't moved on much since; it's still a far
+    // better landing spot than the top of the file. Ignored for any other tab, and for diffs whose
+    // working file is gone (removed/missing, or deleted by the commit being read). The trigger is a
     // window-level counter that outlives this per-project composition, so compare against its
     // value at composition — not 0 — or switching projects after any F4 would re-fire the jump.
     val jumpToSourceBaseline = remember(projectPath) { jumpToSourceTrigger }
     LaunchedEffect(jumpToSourceTrigger) {
         if (jumpToSourceTrigger <= jumpToSourceBaseline) return@LaunchedEffect
-        val diff = tabsState.selectedTab as? Tab.Diff ?: return@LaunchedEffect
-        val file = File(diff.repoRoot, diff.change.path)
-        if (file.isFile) tabsState.openAt(Tab.FileView(file), diffTopLine)
+        val file = jumpToSourceTarget(tabsState.selectedTab) ?: return@LaunchedEffect
+        tabsState.openAt(Tab.FileView(file), diffTopLine)
     }
     val editStore = remember(projectPath) { FileEditStore() }
     val scope = rememberCoroutineScope()

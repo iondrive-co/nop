@@ -184,3 +184,19 @@ class TabsState {
 
     val selectedTab: Tab? get() = _tabs.firstOrNull { it.id == selectedId }
 }
+
+/**
+ * The working file behind a diff tab — where F4 ("jump to source") lands. Both diff surfaces
+ * resolve to a path in the working tree: a [Tab.Diff] shows changes against it directly, and a
+ * [Tab.CommitDiff] shows a historic revision *of* it. Null for every other tab kind, and for either
+ * diff when the file isn't in the working tree any more (reverted, deleted, renamed away, or removed
+ * by the very commit being read) — there's nothing to open in that case.
+ */
+internal fun jumpToSourceTarget(tab: Tab?): File? {
+    val file = when (tab) {
+        is Tab.Diff -> File(tab.repoRoot, tab.change.path)
+        is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
+        else -> null
+    }
+    return file?.takeIf { it.isFile }
+}

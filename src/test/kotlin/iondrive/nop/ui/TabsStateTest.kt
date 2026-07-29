@@ -1,9 +1,15 @@
 package iondrive.nop.ui
 
+import iondrive.nop.git.ChangeKind
+import iondrive.nop.git.CommitFile
+import iondrive.nop.git.CommitFileChange
+import iondrive.nop.git.FileChange
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.nio.file.Path
 
 class TabsStateTest {
     private fun fileTab(path: String) = Tab.FileView(File(path))
@@ -262,5 +268,40 @@ class TabsStateTest {
         assertEquals(a.id, s.selectedId)
         s.select("nope")
         assertEquals(a.id, s.selectedId)
+    }
+
+    @Test
+    fun `jump to source resolves the working file behind both diff kinds`(@TempDir tmp: Path) {
+        val repo = tmp.toFile()
+        val tracked = tmp.resolve("app.component.ts").toFile().apply { writeText("x") }
+
+        val workingDiff = Tab.Diff(FileChange("app.component.ts", ChangeKind.MODIFIED), repo)
+        assertEquals(tracked, jumpToSourceTarget(workingDiff))
+
+        val commitDiff = Tab.CommitDiff(
+            sha = "abc1234def",
+            shortSha = "abc1234",
+            file = CommitFile("app.component.ts", CommitFileChange.MODIFIED),
+            repoRoot = repo,
+        )
+        assertEquals(tracked, jumpToSourceTarget(commitDiff))
+    }
+
+    @Test
+    fun `jump to source has no target for a non-diff tab or a vanished file`(@TempDir tmp: Path) {
+        val repo = tmp.toFile()
+
+        assertNull(jumpToSourceTarget(null))
+        assertNull(jumpToSourceTarget(fileTab("/x/a.txt")))
+        assertNull(jumpToSourceTarget(Tab.History(repo, repo)))
+        // Deleted by the commit being read, so there's no working file to jump to.
+        assertNull(
+            jumpToSourceTarget(
+                Tab.CommitDiff("abc1234def", "abc1234", CommitFile("gone.ts", CommitFileChange.DELETED), repo),
+            ),
+        )
+        // A directory is never a jump target either, even if a path collides with one.
+        tmp.resolve("dir.ts").toFile().mkdirs()
+        assertNull(jumpToSourceTarget(Tab.Diff(FileChange("dir.ts", ChangeKind.MODIFIED), repo)))
     }
 }
