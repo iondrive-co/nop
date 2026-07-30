@@ -26,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
@@ -59,6 +60,7 @@ import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.ProjectTabs
 import iondrive.nop.RailItem
 import iondrive.nop.RailLayout
+import kotlinx.coroutines.delay
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
@@ -73,6 +75,9 @@ private val CLOSE_ZONE = 18.dp
 // tab absurdly tall — anything longer is ellipsized.
 private val TAB_NAME_MAX = 150.dp
 private val TAB_MIN_HEIGHT = 52.dp
+// How long a drag has to be held over a collapsed group before it opens to take the dragged row.
+// Long enough that a drag passing over one on its way somewhere else doesn't spring it open.
+private const val DRAG_EXPAND_MS = 600L
 
 /**
  * A slim vertical rail of project tabs down the left edge. The top tab is a "+" that drops a list
@@ -112,6 +117,23 @@ fun ProjectRail(
     // others reflow. A pending separator name prompt (add or rename) is surfaced as a dialog below.
     val reorder = remember { RailReorder() }
     var sepDialog by remember { mutableStateOf<SepDialog?>(null) }
+
+    // Hover-to-open: a drag held over a closed group opens it after a beat and slides the dragged row
+    // in at the top, so a tab can be moved *into* a closed group and not just over it. Keyed on
+    // `items` too, so a reorder mid-drag (including this one) restarts the wait.
+    LaunchedEffect(items, reorder.draggingKey, reorder.expandSepId) {
+        val dragKey = reorder.draggingKey ?: return@LaunchedEffect
+        val sepId = reorder.expandSepId ?: return@LaunchedEffect
+        delay(DRAG_EXPAND_MS)
+        val sep = items.indexOfFirst { it is RailItem.Separator && it.id == sepId }
+        val from = items.indexOfFirst { keyOf(it) == dragKey }
+        val step = RailLayout.expandUnderDrag(items, from, sep) { reorder.heights[keyOf(it)] ?: 0 }
+        if (step != null) {
+            onReorder(step.items)
+            reorder.delta -= step.travelled
+        }
+        reorder.expandSepId = null
+    }
 
     Column(
         modifier = Modifier
@@ -195,8 +217,18 @@ private class RailReorder {
     // Whether the dragged row carries its group. Decided once at drag start (see the drag handler)
     // so the granularity can't flip part-way through a drag.
     var dragAsGroup by mutableStateOf(false)
+    // Id of the collapsed separator the drag is currently held over, which hover-to-open expands once
+    // the drag has rested on it. Null whenever the drag isn't over a closed group.
+    var expandSepId by mutableStateOf<Long?>(null)
     // Measured heights per row key, so a drag knows how far to travel before swapping a neighbour.
     val heights = mutableStateMapOf<String, Int>()
+
+    /** Drops the drag: the row snaps back into its slot and stops eyeing a group to open. */
+    fun settle() {
+        draggingKey = null
+        delta = 0f
+        expandSepId = null
+    }
 }
 
 /** Stable per-row identity for drag keys: projects by path, separators by their runtime id. */
@@ -211,9 +243,10 @@ private fun keyOf(item: RailItem): String = when (item) {
  * with that neighbour so the list reflows live — see [RailLayout.dragStep], which owns the whole
  * decision. A separator that heads tabs drags as its group, so it takes them along and hops a
  * neighbouring group whole rather than shedding tabs into it a row at a time; everything else steps
- * one visible row at a time, which is how a bare separator gets dropped into place. The drag only
- * engages once the pointer passes the touch slop, so a plain click still selects the project (and
- * the rail still scrolls via the wheel).
+ * one visible row at a time, which is how a bare separator gets dropped into place. A closed group is
+ * dragged *over*, never into — resting on one opens it instead (see the hover-to-open effect in
+ * [ProjectRail]). The drag only engages once the pointer passes the touch slop, so a plain click
+ * still selects the project (and the rail still scrolls via the wheel).
  */
 @Composable
 private fun ReorderableRow(
@@ -251,19 +284,31 @@ private fun ReorderableRow(
                         reorder.dragAsGroup =
                             RailLayout.groupSpan(cur, cur.indexOfFirst { keyOf(it) == key }) > 1
                     },
-                    onDragEnd = { reorder.draggingKey = null; reorder.delta = 0f },
-                    onDragCancel = { reorder.draggingKey = null; reorder.delta = 0f },
+                    onDragEnd = { reorder.settle() },
+                    onDragCancel = { reorder.settle() },
                     onDrag = { change, amount ->
                         change.consume()
                         reorder.delta += amount.y
                         val cur = itemsUpdated
+                        val height = { item: RailItem -> reorder.heights[keyOf(item)] ?: 0 }
                         val from = cur.indexOfFirst { keyOf(it) == key }
-                        val step = RailLayout.dragStep(cur, from, reorder.dragAsGroup, reorder.delta) { i ->
-                            reorder.heights[keyOf(cur[i])] ?: 0
-                        }
+                        val step = RailLayout.dragStep(cur, from, reorder.dragAsGroup, reorder.delta, height)
                         if (step != null) {
                             onReorderUpdated(step.items)
                             reorder.delta -= step.travelled
+                        }
+                        // Whether the row now rests on a closed group, which hover-to-open expands if
+                        // the drag stays there. Read off the order the step just produced, since the
+                        // offset was rebased to match it. A group header never opens one — a group
+                        // can't nest inside another — so it only ever passes over them.
+                        val after = step?.items ?: cur
+                        reorder.expandSepId = if (reorder.dragAsGroup) null else {
+                            RailLayout.collapsedUnderDrag(
+                                after,
+                                after.indexOfFirst { keyOf(it) == key },
+                                reorder.delta,
+                                height,
+                            )?.let { (after[it] as RailItem.Separator).id }
                         }
                     },
                 )

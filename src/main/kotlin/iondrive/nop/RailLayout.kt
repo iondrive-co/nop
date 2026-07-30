@@ -97,6 +97,21 @@ object RailLayout {
     }
 
     /**
+     * Whether the row at [index] is drawn at all. A separator always is; a project is hidden when the
+     * nearest separator above it is collapsed. Drag-reorder leans on this to reject a landing slot
+     * that would swallow the dragged row into a closed group, where it would simply disappear.
+     */
+    fun isVisible(items: List<RailItem>, index: Int): Boolean {
+        if (index !in items.indices) return false
+        if (items[index] is RailItem.Separator) return true
+        for (i in index - 1 downTo 0) {
+            val above = items[i]
+            if (above is RailItem.Separator) return !above.collapsed
+        }
+        return true
+    }
+
+    /**
      * The rows [items] renders, in order, each pointing back into the list. A separator swallows the
      * run of projects beneath it (up to the next separator) into its span when [swallows] says so;
      * every other entry is its own single-span block.
@@ -138,52 +153,135 @@ object RailLayout {
 
     /**
      * One step of a drag-reorder. The row at [from] has been dragged [delta] px from its settled slot
-     * (positive downwards); once that passes half the height of the neighbour it is heading for, the
-     * two swap and the new order comes back. Returns null while the row hasn't travelled far enough,
-     * when it's already at the end it's heading towards, or when [from] isn't a block start (a stale
-     * mid-drag index).
+     * (positive downwards); each neighbour whose midpoint it passes counts as crossed, and the row
+     * moves to the furthest crossed slot where it would still be *drawn*. Returns null while it
+     * hasn't travelled far enough, when there's no such slot left in that direction, or when [from]
+     * isn't a block start (a stale mid-drag index).
+     *
+     * Skipping slots the row wouldn't be drawn in is what carries it over a closed group rather than
+     * into one: the position after a collapsed separator's tabs belongs to that group, so landing
+     * there would make the dragged row vanish. Crossing it needs one more neighbour's worth of
+     * travel, to the far side of the group (or, dragging down, into the next open group) — and if no
+     * drawn slot exists beyond it, the row stays put instead of dropping out of sight. Holding still
+     * over the group is the way in; see [collapsedUnderDrag].
      *
      * [asGroup] picks the granularity, and the caller pins it for the whole drag: a group header
      * moves with its tabs and steps over whole neighbouring groups, while a bare row (a project, or a
-     * separator heading no tabs) steps one visible row at a time so it can be dropped inside a group.
-     * [rowHeight] gives the measured height of the row at an item index.
+     * separator heading no tabs) steps one visible row at a time so it can be dropped inside an open
+     * group. [rowHeight] gives the measured height of a row.
      */
     fun dragStep(
         items: List<RailItem>,
         from: Int,
         asGroup: Boolean,
         delta: Float,
-        rowHeight: (Int) -> Int,
+        rowHeight: (RailItem) -> Int,
     ): RailDragStep? {
         val blocks = if (asGroup) groupBlocks(items) else visibleBlocks(items)
         val at = blocks.indexOfFirst { it.start == from }
-        if (at < 0) return null
+        if (at < 0 || delta == 0f) return null
         val block = blocks[at]
-        if (delta > 0f && at < blocks.lastIndex) {
-            val next = blocks[at + 1]
+        val down = delta > 0f
+        val travel = if (down) delta else -delta
+        // Neighbours crossed so far: their on-screen height, and the list entries they cover.
+        var crossed = 0
+        var span = 0
+        var best: RailDragStep? = null
+        var i = at
+        while (true) {
+            val next = blocks.getOrNull(if (down) ++i else --i) ?: break
             val height = blockHeight(items, next, rowHeight)
-            if (height > 0 && delta > height / 2f) {
-                return RailDragStep(swapAdjacentBlocks(items, block.start, block.span, next.span), height)
-            }
-        } else if (delta < 0f && at > 0) {
-            val prev = blocks[at - 1]
-            val height = blockHeight(items, prev, rowHeight)
-            if (height > 0 && -delta > height / 2f) {
-                return RailDragStep(swapAdjacentBlocks(items, prev.start, prev.span, block.span), -height)
-            }
+            // A neighbour we haven't measured yet (freshly revealed, or not laid out) has no midpoint
+            // to pass, and nothing beyond it can be reached without crossing it.
+            if (height <= 0) break
+            if (travel <= crossed + height / 2f) break
+            crossed += height
+            span += next.span
+            val moved =
+                if (down) swapAdjacentBlocks(items, block.start, block.span, span)
+                else swapAdjacentBlocks(items, next.start, span, block.span)
+            val landed = if (down) block.start + span else next.start
+            if (isVisible(moved, landed)) best = RailDragStep(moved, if (down) crossed else -crossed)
         }
-        return null
+        return best
     }
+
+    /**
+     * The collapsed separator the dragged row at [from] is being held over, or null if it isn't over
+     * one. The row's leading edge — its bottom dragging down, its top dragging up — has travelled
+     * [delta] px into the rows on that side, and whichever it currently covers is the group that
+     * hover-to-open should expand. A row dragged clear past the end keeps the last closed group it
+     * covered, so parking above a run of them still opens one. Bare rows only: a group header can't
+     * be nested inside another group, so the caller doesn't ask on its behalf.
+     */
+    fun collapsedUnderDrag(
+        items: List<RailItem>,
+        from: Int,
+        delta: Float,
+        rowHeight: (RailItem) -> Int,
+    ): Int? {
+        val blocks = visibleBlocks(items)
+        val at = blocks.indexOfFirst { it.start == from }
+        if (at < 0 || delta == 0f) return null
+        val down = delta > 0f
+        val travel = if (down) delta else -delta
+        var passed = 0
+        var last: Int? = null
+        var i = at
+        while (true) {
+            val next = blocks.getOrNull(if (down) ++i else --i) ?: break
+            val height = blockHeight(items, next, rowHeight)
+            if (height <= 0) break
+            val head = items[next.start]
+            val collapsed = head is RailItem.Separator && head.collapsed
+            if (travel <= passed + height) return if (collapsed) next.start else null
+            if (collapsed) last = next.start
+            passed += height
+        }
+        return last
+    }
+
+    /**
+     * Opens the collapsed separator at [sep] mid-drag and lifts the dragged row at [from] to the top
+     * of the group it heads, so the row settles where the pointer is holding instead of being shoved
+     * down the rail by the tabs that just appeared. This is how a tab gets *into* a closed group,
+     * which a drag over it can't do. [RailDragStep.travelled] is the distance the row moved on screen
+     * for the caller to take off the drag's running offset; every row above its new slot was already
+     * drawn, so measured heights cover it. Returns null unless [sep] heads a collapsed group and
+     * [from] is a row that can move into one (a project, or a separator heading no tabs of its own).
+     */
+    fun expandUnderDrag(
+        items: List<RailItem>,
+        from: Int,
+        sep: Int,
+        rowHeight: (RailItem) -> Int,
+    ): RailDragStep? {
+        val head = items.getOrNull(sep) as? RailItem.Separator ?: return null
+        val dragged = items.getOrNull(from) ?: return null
+        if (!head.collapsed || from == sep || groupSpan(items, from) > 1) return null
+        val before = visibleTop(items, from, rowHeight)
+        val out = items.toMutableList()
+        out.removeAt(from)
+        // Indices after the removal: everything below the dragged row shifted up by one.
+        val open = if (from < sep) sep - 1 else sep
+        out[open] = RailItem.Separator(head.name, head.id, collapsed = false)
+        out.add(open + 1, dragged)
+        return RailDragStep(out, visibleTop(out, open + 1, rowHeight) - before)
+    }
+
+    /** How far down the rail's list the row at [index] sits: the heights of the drawn rows above it. */
+    private fun visibleTop(items: List<RailItem>, index: Int, rowHeight: (RailItem) -> Int): Int =
+        (0 until index).sumOf { if (isVisible(items, it)) rowHeight(items[it]) else 0 }
 
     /**
      * How tall [block] stands on screen: its head row plus the member rows of an expanded group. A
      * collapsed group is just its separator row, since its tabs aren't drawn — so the distance a drag
      * has to cover to pass a neighbour always matches what the user sees.
      */
-    private fun blockHeight(items: List<RailItem>, block: RailBlock, rowHeight: (Int) -> Int): Int {
+    private fun blockHeight(items: List<RailItem>, block: RailBlock, rowHeight: (RailItem) -> Int): Int {
         val head = items.getOrNull(block.start)
         val rows = if (head is RailItem.Separator && head.collapsed) 1 else block.span
-        return (block.start until block.start + rows).sumOf { rowHeight(it) }
+        return (block.start until block.start + rows).sumOf { rowHeight(items[it]) }
     }
 
     /** State-file value for one rail row. Newlines in a name are flattened so the line format holds. */

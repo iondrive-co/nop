@@ -133,6 +133,9 @@ class RailLayoutTest {
     private fun step(items: List<RailItem>, from: Int, asGroup: Boolean, delta: Float) =
         RailLayout.dragStep(items, from, asGroup, delta) { ROW }
 
+    private fun under(items: List<RailItem>, from: Int, delta: Float) =
+        RailLayout.collapsedUnderDrag(items, from, delta) { ROW }
+
     @Test
     fun `dragStep moves a group above the previous group with its tabs`() {
         // The reported bug: dragging the last group's header up used to move the bare label, leaving
@@ -190,6 +193,122 @@ class RailLayoutTest {
         val items = listOf(sep("A", 1), proj("/a"), sep("B", 2), proj("/b"))
         val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
         assertEquals(listOf(sep("A", 1), proj("/a"), proj("/b"), sep("B", 2)), moved.items)
+    }
+
+    @Test
+    fun `dragStep carries a project over a closed group above rather than into it`() {
+        // The reported bug: one step up used to swap /b1 with its own separator, parking it after the
+        // closed group's tabs — i.e. inside it — where it stopped being drawn at all. Both rows above
+        // have to be crossed to reach the next slot /b1 still shows in, at the top of the rail.
+        val items = listOf(sepC("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b1"), proj("/b2"))
+        assertNull(step(items, from = 4, asGroup = false, delta = -30f)) // past B's row, nowhere to land
+        val moved = step(items, from = 4, asGroup = false, delta = -80f)!!
+        assertEquals(
+            listOf(proj("/b1"), sepC("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b2")),
+            moved.items,
+        )
+        // Closed A is one row on screen despite its two hidden tabs, so B's row plus A's is 2 * ROW.
+        assertEquals(-2 * ROW, moved.travelled)
+    }
+
+    @Test
+    fun `dragStep carries a project over a closed group below into the next open one`() {
+        val items = listOf(proj("/a"), sepC("W", 1), proj("/w"), sep("O", 2), proj("/o"))
+        val moved = step(items, from = 0, asGroup = false, delta = 80f)!!
+        assertEquals(
+            // /a lands as the first tab of the open group, the nearest slot below where it shows.
+            listOf(sepC("W", 1), proj("/w"), sep("O", 2), proj("/a"), proj("/o")),
+            moved.items,
+        )
+        assertEquals(2 * ROW, moved.travelled)
+    }
+
+    @Test
+    fun `dragStep leaves a project put when only closed groups lie beyond it`() {
+        // Nothing below is drawn — every slot is inside "W" — so the row holds its place instead of
+        // disappearing into the group. Hover-to-open is the way in; see expandUnderDrag.
+        val items = listOf(proj("/a"), sepC("W", 1), proj("/w1"), proj("/w2"))
+        assertNull(step(items, from = 0, asGroup = false, delta = 30f))
+        assertNull(step(items, from = 0, asGroup = false, delta = 500f))
+    }
+
+    @Test
+    fun `dragStep hops a bare separator over a closed group instead of splitting it`() {
+        // Slots inside a closed group aren't drop targets even for a separator, which would otherwise
+        // take two visually identical steps to cross one that hides two tabs.
+        val items = listOf(sepC("W", 1), proj("/w1"), proj("/w2"), sep("New", 2))
+        val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
+        assertEquals(listOf(sep("New", 2), sepC("W", 1), proj("/w1"), proj("/w2")), moved.items)
+    }
+
+    @Test
+    fun `dragStep moves a group over a closed group whole`() {
+        val items = listOf(sepC("A", 1), proj("/a"), sep("B", 2), proj("/b"))
+        val moved = step(items, from = 2, asGroup = true, delta = -30f)!!
+        assertEquals(listOf(sep("B", 2), proj("/b"), sepC("A", 1), proj("/a")), moved.items)
+        assertEquals(-ROW, moved.travelled)
+    }
+
+    @Test
+    fun `collapsedUnderDrag names the closed group the row is held over`() {
+        val items = listOf(sepC("A", 1), proj("/a"), sepC("B", 2), proj("/b"), sep("C", 3), proj("/c"))
+        // Dragging /c up: C's row covers the first ROW of travel, then closed B, then closed A.
+        assertNull(under(items, from = 5, delta = -30f)) // still over C's own separator
+        assertEquals(2, under(items, from = 5, delta = -70f)) // over B
+        assertEquals(0, under(items, from = 5, delta = -120f)) // over A
+        // Dragged clear off the top it keeps A, so parking above the lot still opens the last one.
+        assertEquals(0, under(items, from = 5, delta = -900f))
+    }
+
+    @Test
+    fun `collapsedUnderDrag ignores rows that are already open`() {
+        val items = listOf(sep("A", 1), proj("/a"), proj("/b"))
+        assertNull(under(items, from = 2, delta = -30f))
+        assertNull(under(items, from = 2, delta = 0f))
+        assertNull(under(items, from = 1, delta = 30f)) // nothing below
+    }
+
+    @Test
+    fun `expandUnderDrag opens a group above and lifts the dragged row into it`() {
+        val items = listOf(sepC("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b"))
+        val moved = RailLayout.expandUnderDrag(items, from = 4, sep = 0) { ROW }!!
+        assertEquals(
+            listOf(sep("A", 1), proj("/b"), proj("/a1"), proj("/a2"), sep("B", 2)),
+            moved.items,
+        )
+        // /b sat below the two separator rows and now sits below one, so it rose a single row — the
+        // tabs that just appeared are beneath it and don't shove it anywhere.
+        assertEquals(-ROW, moved.travelled)
+    }
+
+    @Test
+    fun `expandUnderDrag opens a group below and lifts the dragged row into it`() {
+        val items = listOf(proj("/a"), sepC("W", 1), proj("/w"))
+        val moved = RailLayout.expandUnderDrag(items, from = 0, sep = 1) { ROW }!!
+        assertEquals(listOf(sep("W", 1), proj("/a"), proj("/w")), moved.items)
+        // /a dropped past the separator row it was held over.
+        assertEquals(ROW, moved.travelled)
+    }
+
+    @Test
+    fun `expandUnderDrag refuses a group that is already open, a non-separator, and a group header`() {
+        val items = listOf(sep("A", 1), proj("/a"), sepC("W", 2), proj("/w"), sep("Bare", 3))
+        assertNull(RailLayout.expandUnderDrag(items, from = 3, sep = 0) { ROW }) // "A" isn't closed
+        assertNull(RailLayout.expandUnderDrag(items, from = 3, sep = 1) { ROW }) // /a isn't a separator
+        assertNull(RailLayout.expandUnderDrag(items, from = 9, sep = 2) { ROW }) // stale row index
+        assertNull(RailLayout.expandUnderDrag(items, from = 0, sep = 2) { ROW }) // "A" heads tabs
+        // A separator heading no tabs is a bare row, so it can be dropped into a group like any tab.
+        assertNotNull(RailLayout.expandUnderDrag(items, from = 4, sep = 2) { ROW })
+    }
+
+    @Test
+    fun `isVisible hides only the tabs inside a closed group`() {
+        val items = listOf(proj("/a"), sepC("W", 1), proj("/w"), sep("O", 2), proj("/o"))
+        assertEquals(true, RailLayout.isVisible(items, 0)) // above every separator
+        assertEquals(true, RailLayout.isVisible(items, 1)) // separators always show
+        assertEquals(false, RailLayout.isVisible(items, 2)) // inside closed "W"
+        assertEquals(true, RailLayout.isVisible(items, 4)) // inside open "O"
+        assertEquals(false, RailLayout.isVisible(items, 9)) // out of range
     }
 
     @Test
