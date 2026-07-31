@@ -1,17 +1,20 @@
 package iondrive.nop.ui
 
-import iondrive.nop.git.FileChange
-
-/** A named column of related changes shown side by side in the commit panel. */
-data class ChangeGroup(
+/**
+ * A named column of related items, each sitting at a project-relative path. [paths] runs parallel
+ * to [items] — the grouping keeps it so a column can size and label its rows without knowing what
+ * kind of item it holds.
+ */
+data class PathGroup<T>(
     val title: String,
-    val changes: List<FileChange>,
+    val items: List<T>,
+    val paths: List<String>,
 ) {
     /** Directory prefix (with trailing '/') shared by every member; "" when members span roots. */
-    val commonPrefix: String = commonDirPrefix(changes.map { it.path })
+    val commonPrefix: String = commonDirPrefix(paths)
 
     /** Column heading: the group title and its member count, e.g. "ui · 3". */
-    val header: String get() = "$title · ${changes.size}"
+    val header: String get() = "$title · ${items.size}"
 
     /** Row label: the path with the group's shared directory prefix stripped. */
     fun labelFor(path: String): String =
@@ -19,59 +22,72 @@ data class ChangeGroup(
 }
 
 /**
- * Splits a flat change list into related groups so a review reads by concern rather than as one
- * long list: tests, config, and docs are pulled into their own groups, and the remaining source
- * files are grouped by the directory that contains them. Purely heuristic — no per-file state.
+ * Splits a flat list of path-bearing items into related groups so a long list reads by concern
+ * rather than as one mixed run: tests, config, and docs are pulled into their own groups, and the
+ * remaining source files are grouped by the directory that contains them. Shared by the commit
+ * panel's change columns and the find-in-files result columns, so both label their columns the same
+ * way. Purely heuristic — no per-item state.
+ *
+ * Several items may share a path (a search turning up many matches in one file); they stay together
+ * in that path's group, and a group's count reflects items, not files.
  */
-object ChangeGrouping {
+object PathGrouping {
 
     /** Upper bound on groups so side-by-side columns stay wide enough to read. */
     const val MAX_GROUPS = 6
 
     const val OTHER_TITLE = "other"
 
-    fun group(changes: List<FileChange>): List<ChangeGroup> {
-        if (changes.isEmpty()) return emptyList()
-        val tests = mutableListOf<FileChange>()
-        val config = mutableListOf<FileChange>()
-        val docs = mutableListOf<FileChange>()
-        val byDir = LinkedHashMap<String, MutableList<FileChange>>()
-        for (change in changes) {
-            when (classify(change.path)) {
-                Category.TESTS -> tests += change
-                Category.CONFIG -> config += change
-                Category.DOCS -> docs += change
-                Category.SOURCE -> byDir.getOrPut(sourceTitle(change.path)) { mutableListOf() } += change
+    fun <T> group(items: List<T>, pathOf: (T) -> String): List<PathGroup<T>> {
+        if (items.isEmpty()) return emptyList()
+        val tests = mutableListOf<Member<T>>()
+        val config = mutableListOf<Member<T>>()
+        val docs = mutableListOf<Member<T>>()
+        val byDir = LinkedHashMap<String, MutableList<Member<T>>>()
+        for (item in items) {
+            val member = Member(pathOf(item), item)
+            when (classify(member.path)) {
+                Category.TESTS -> tests += member
+                Category.CONFIG -> config += member
+                Category.DOCS -> docs += member
+                Category.SOURCE -> byDir.getOrPut(sourceTitle(member.path)) { mutableListOf() } += member
             }
         }
 
         // Source groups lead (largest first — the core of the change), with the catch-all last;
         // tests/config/docs trail as supporting material.
-        var source = byDir.map { (title, members) -> ChangeGroup(title, members) }
-            .sortedWith(compareByDescending<ChangeGroup> { it.changes.size }.thenBy { it.title })
-        source = source.filter { it.title != OTHER_TITLE } + source.filter { it.title == OTHER_TITLE }
+        var source = byDir.map { (title, members) -> title to members.toList() }
+            .sortedWith(
+                compareByDescending<Pair<String, List<Member<T>>>> { it.second.size }.thenBy { it.first },
+            )
+        source = source.filter { it.first != OTHER_TITLE } + source.filter { it.first == OTHER_TITLE }
 
         val specials = listOfNotNull(
-            tests.takeIf { it.isNotEmpty() }?.let { ChangeGroup("tests", it) },
-            config.takeIf { it.isNotEmpty() }?.let { ChangeGroup("config", it) },
-            docs.takeIf { it.isNotEmpty() }?.let { ChangeGroup("docs", it) },
+            tests.takeIf { it.isNotEmpty() }?.let { "tests" to it.toList() },
+            config.takeIf { it.isNotEmpty() }?.let { "config" to it.toList() },
+            docs.takeIf { it.isNotEmpty() }?.let { "docs" to it.toList() },
         )
 
         val maxSource = (MAX_GROUPS - specials.size).coerceAtLeast(1)
         if (source.size > maxSource) {
             val kept = source.take(maxSource - 1)
-            val merged = source.drop(maxSource - 1).flatMap { it.changes }
-            source = kept + ChangeGroup(OTHER_TITLE, merged)
+            val merged = source.drop(maxSource - 1).flatMap { it.second }
+            source = kept + (OTHER_TITLE to merged)
         }
 
         // A source directory literally named "tests"/"config"/"docs" would otherwise produce two
         // columns with the same heading — fold such duplicates together.
-        val out = LinkedHashMap<String, MutableList<FileChange>>()
-        for (group in source + specials) {
-            out.getOrPut(group.title) { mutableListOf() } += group.changes
+        val out = LinkedHashMap<String, MutableList<Member<T>>>()
+        for ((title, members) in source + specials) {
+            out.getOrPut(title) { mutableListOf() } += members
         }
-        return out.map { (title, members) -> ChangeGroup(title, members) }
+        return out.map { (title, members) ->
+            PathGroup(title, members.map { it.item }, members.map { it.path })
+        }
     }
+
+    /** An item paired with its path, so [group]'s `pathOf` is called once per item. */
+    private data class Member<T>(val path: String, val item: T)
 
     private enum class Category { TESTS, CONFIG, DOCS, SOURCE }
 

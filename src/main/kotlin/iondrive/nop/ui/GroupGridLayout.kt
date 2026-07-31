@@ -6,7 +6,8 @@ import kotlin.math.ceil
 import kotlin.math.floor
 
 /**
- * How the change-group columns are packed into the available commit-panel area.
+ * How a panel's group columns are packed into the available area. Both the commit panel's changes
+ * and the find-in-files results lay out through this.
  *
  * Columns fill left to right at [columnWidth]. When another column won't fit at the width that
  * just covers the longest file name, the grid wraps to a new row *below* (splitting the panel
@@ -14,7 +15,7 @@ import kotlin.math.floor
  * [rows] is capped by the height — does the grid grow past the right edge, at which point
  * [scrollHorizontally] is set and the caller wraps the grid in a horizontal scroller.
  */
-data class ChangeGrid(
+data class GroupGrid(
     val columnWidth: Dp,
     val rowHeight: Dp,
     val columnsPerRow: Int,
@@ -23,10 +24,10 @@ data class ChangeGrid(
 ) {
     /** Total width the grid occupies — wider than the viewport exactly when [scrollHorizontally]. */
     val contentWidth: Dp
-        get() = columnWidth * columnsPerRow + ChangeGridMetrics.COLUMN_GAP * (columnsPerRow - 1).coerceAtLeast(0)
+        get() = columnWidth * columnsPerRow + GroupGridMetrics.COLUMN_GAP * (columnsPerRow - 1).coerceAtLeast(0)
 }
 
-object ChangeGridMetrics {
+object GroupGridMetrics {
     /** Never render a column narrower than this — below it even short names get cramped. */
     val MIN_COLUMN_WIDTH = 140.dp
 
@@ -36,7 +37,7 @@ object ChangeGridMetrics {
     val COLUMN_GAP = 12.dp
     val ROW_GAP = 12.dp
 
-    /** A row must fit its header, rule and a few change rows to stay legible before we add another. */
+    /** A row must fit its header, rule and a few item rows to stay legible before we add another. */
     val MIN_ROW_HEIGHT = 108.dp
 
     /**
@@ -49,8 +50,8 @@ object ChangeGridMetrics {
         naturalColumnWidth: Dp,
         availableWidth: Dp,
         availableHeight: Dp,
-    ): ChangeGrid {
-        if (groupCount <= 0) return ChangeGrid(availableWidth, availableHeight, 0, 0, false)
+    ): GroupGrid {
+        if (groupCount <= 0) return GroupGrid(availableWidth, availableHeight, 0, 0, false)
 
         val colGap = COLUMN_GAP.value
         val rowGap = ROW_GAP.value
@@ -95,6 +96,6 @@ object ChangeGridMetrics {
             maxOf(natural, (availW - colGap * (columnsPerRow - 1)) / columnsPerRow)
         }
         val rowHeight = if (rows <= 1) availH else (availH - rowGap * (rows - 1)) / rows
-        return ChangeGrid(columnWidth.dp, rowHeight.dp, columnsPerRow, rows, scroll)
+        return GroupGrid(columnWidth.dp, rowHeight.dp, columnsPerRow, rows, scroll)
     }
 }

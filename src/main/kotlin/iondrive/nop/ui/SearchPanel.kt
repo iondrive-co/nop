@@ -22,10 +22,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +49,10 @@ import org.jetbrains.jewel.ui.component.TextField
  * The scan runs on every query change but uses `collectLatest`, so a fast typist's stale
  * queries are cancelled before they finish. Results are static once produced — clicking a row
  * jumps via [onPick] to the file and line.
+ *
+ * Hits are grouped by [PathGrouping] and shown in the same side-by-side columns the commit panel
+ * groups changes into — source directories first, then tests, config and docs — so matches in tests
+ * or config don't interleave with the ones in the implementation.
  */
 @OptIn(FlowPreview::class)
 @Composable
@@ -116,6 +122,9 @@ private fun StatusText(text: String) {
     Text(text, color = muted)
 }
 
+/** Row chrome around a hit's text: the row padding plus the column's list scrollbar. */
+private val HIT_ROW_CHROME = 28.dp
+
 @Composable
 private fun ResultsList(
     results: List<SearchHit>,
@@ -123,26 +132,63 @@ private fun ResultsList(
     truncated: Boolean,
     onPick: (path: String, line: Int) -> Unit,
 ) {
-    val listState = rememberLazyListState()
-    ScrollableColumn(listState = listState, modifier = Modifier.fillMaxSize()) {
-        items(results) { hit ->
-            HitRow(hit = hit, onClick = { onPick(hit.path, hit.line) })
+    val groups = remember(results) { PathGrouping.group(results) { it.path } }
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    // Widest row text across the columns, so the grid can size them to fit the matched code. Both
+    // row lines are monospaced, so the longest string by character count is also the widest — one
+    // measure per line style per column instead of one per hit.
+    val naturalTextPx = remember(groups) {
+        var widest = 0
+        for (group in groups) {
+            val label = group.paths.maxByOrNull { it.length }?.let { "${group.labelFor(it)}:0000" }
+            val code = group.items.maxByOrNull { it.lineText.length }?.lineText
+            if (label != null) widest = maxOf(widest, measurer.measure(label, LOCATION_STYLE).size.width)
+            if (code != null) widest = maxOf(widest, measurer.measure(code, CODE_STYLE).size.width)
         }
+        widest
+    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        GroupColumnGrid(
+            columns = groups.map { group ->
+                GroupColumn(key = group.title, header = group.header) {
+                    HitRows(group = group, onPick = onPick)
+                }
+            },
+            naturalColumnWidth = with(density) { naturalTextPx.toDp() } + HIT_ROW_CHROME,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+        )
         if (truncated) {
-            item {
-                val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
-                Text(
-                    "(showing first ${SearchEngine.MAX_TOTAL_HITS} matches for \"$query\")",
-                    color = muted,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                )
-            }
+            val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
+            Text(
+                "(showing first ${SearchEngine.MAX_TOTAL_HITS} matches for \"$query\")",
+                color = muted,
+                modifier = Modifier.padding(top = 4.dp),
+            )
         }
     }
 }
 
+/** The hit rows filling one column of the grid, under the heading [GroupColumnGrid] draws. */
 @Composable
-private fun HitRow(hit: SearchHit, onClick: () -> Unit) {
+private fun HitRows(group: PathGroup<SearchHit>, onPick: (path: String, line: Int) -> Unit) {
+    val listState = rememberLazyListState()
+    ScrollableColumn(listState = listState, modifier = Modifier.fillMaxSize()) {
+        items(group.items) { hit ->
+            HitRow(
+                hit = hit,
+                label = group.labelFor(hit.path),
+                onClick = { onPick(hit.path, hit.line) },
+            )
+        }
+    }
+}
+
+private val LOCATION_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 11.sp)
+private val CODE_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp)
+
+@Composable
+private fun HitRow(hit: SearchHit, label: String, onClick: () -> Unit) {
     val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
     val highlight = if (JewelTheme.isDark) Color(0x66629755) else Color(0x66629755)
     Column(
@@ -151,14 +197,10 @@ private fun HitRow(hit: SearchHit, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 3.dp),
     ) {
-        Text(
-            "${hit.path}:${hit.line}",
-            color = muted,
-            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = 11.sp),
-        )
+        Text("$label:${hit.line}", color = muted, style = LOCATION_STYLE)
         Text(
             annotateLine(hit.lineText, hit.matchStart, hit.matchEnd, highlight),
-            style = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp),
+            style = CODE_STYLE,
             softWrap = false,
         )
     }

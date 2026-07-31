@@ -3,17 +3,14 @@ package iondrive.nop.ui
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -26,13 +23,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -172,11 +167,9 @@ fun CommitPanel(
         }
 
         // Related changes are grouped into side-by-side columns (source dirs, then tests/config/
-        // docs) so a review reads by concern instead of one long mixed list. Columns pack left to
-        // right at a width that just covers the longest name; rather than squeezing thinner when
-        // they run out of room they wrap to a new row below, and only once the height is used up
-        // does the grid scroll horizontally.
-        val groups = remember(status.changes) { ChangeGrouping.group(status.changes) }
+        // docs) so a review reads by concern instead of one long mixed list. [GroupColumnGrid]
+        // handles the packing; all this needs to supply is the width that covers the longest name.
+        val groups = remember(status.changes) { PathGrouping.group(status.changes) { it.path } }
         if (groups.isNotEmpty()) {
             val measurer = rememberTextMeasurer()
             val labelStyle = JewelTheme.defaultTextStyle
@@ -184,61 +177,27 @@ fun CommitPanel(
                 var widest = 0
                 for (group in groups) {
                     widest = maxOf(widest, measurer.measure(group.header, labelStyle.copy(fontWeight = FontWeight.Bold)).size.width)
-                    for (change in group.changes) {
-                        widest = maxOf(widest, measurer.measure(group.labelFor(change.path), labelStyle).size.width)
+                    for (path in group.paths) {
+                        widest = maxOf(widest, measurer.measure(group.labelFor(path), labelStyle).size.width)
                     }
                 }
                 widest
             }
-            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val naturalColumn = with(density) { naturalTextPx.toDp() } + CHANGE_ROW_CHROME
-                var grid = ChangeGridMetrics.layout(groups.size, naturalColumn, maxWidth, maxHeight)
-                if (grid.scrollHorizontally) {
-                    // Leave a strip at the bottom for the scrollbar so it can't cover a change row.
-                    grid = ChangeGridMetrics.layout(groups.size, naturalColumn, maxWidth, maxHeight - H_SCROLLBAR_RESERVE)
-                }
-                val gridContent: @Composable () -> Unit = {
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(ChangeGridMetrics.ROW_GAP),
-                        modifier = if (grid.scrollHorizontally) Modifier.width(grid.contentWidth) else Modifier.fillMaxWidth(),
-                    ) {
-                        for (rowIndex in 0 until grid.rows) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(ChangeGridMetrics.COLUMN_GAP),
-                                modifier = Modifier.height(grid.rowHeight),
-                            ) {
-                                for (colIndex in 0 until grid.columnsPerRow) {
-                                    val groupIndex = rowIndex * grid.columnsPerRow + colIndex
-                                    if (groupIndex < groups.size) {
-                                        val group = groups[groupIndex]
-                                        key(group.title) {
-                                            ChangeGroupColumn(
-                                                group = group,
-                                                selectedPaths = selectedPaths,
-                                                onToggle = onToggle,
-                                                onChangeClick = onChangeClick,
-                                                onRevert = onRevert,
-                                                modifier = Modifier.width(grid.columnWidth).fillMaxHeight(),
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            GroupColumnGrid(
+                columns = groups.map { group ->
+                    GroupColumn(key = group.title, header = group.header) {
+                        ChangeRows(
+                            group = group,
+                            selectedPaths = selectedPaths,
+                            onToggle = onToggle,
+                            onChangeClick = onChangeClick,
+                            onRevert = onRevert,
+                        )
                     }
-                }
-                if (grid.scrollHorizontally) {
-                    val hScroll = rememberScrollState()
-                    Box(modifier = Modifier.fillMaxSize().horizontalScroll(hScroll)) { gridContent() }
-                    HorizontalScrollbar(
-                        adapter = rememberScrollbarAdapter(hScroll),
-                        style = NopScrollbarStyle,
-                        modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth(),
-                    )
-                } else {
-                    gridContent()
-                }
-            }
+                },
+                naturalColumnWidth = with(density) { naturalTextPx.toDp() } + CHANGE_ROW_CHROME,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }
@@ -246,41 +205,26 @@ fun CommitPanel(
 /** Row chrome to the left of the file name (checkbox, kind prefix, gaps) plus the list scrollbar. */
 private val CHANGE_ROW_CHROME = 76.dp
 
-/** Height reserved at the bottom of the grid for the horizontal scrollbar when it's shown. */
-private val H_SCROLLBAR_RESERVE = 14.dp
-
+/** The change rows filling one column of the grid, under the heading [GroupColumnGrid] draws. */
 @Composable
-private fun ChangeGroupColumn(
-    group: ChangeGroup,
+private fun ChangeRows(
+    group: PathGroup<FileChange>,
     selectedPaths: Set<String>,
     onToggle: (String) -> Unit,
     onChangeClick: (FileChange) -> Unit,
     onRevert: (FileChange) -> Unit,
-    modifier: Modifier = Modifier,
 ) {
-    val labelColor = if (JewelTheme.isDark) Color(0xFFCED0D6) else Color(0xFF3C4049)
-    val rule = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
-    Column(modifier = modifier) {
-        Text(
-            text = group.header,
-            color = labelColor,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Box(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 2.dp).height(1.dp).background(rule))
-        val listState = rememberLazyListState()
-        ScrollableColumn(listState = listState, modifier = Modifier.fillMaxSize()) {
-            items(group.changes, key = { it.path }) { change ->
-                ChangeRow(
-                    change = change,
-                    label = group.labelFor(change.path),
-                    checked = change.path in selectedPaths,
-                    onToggle = { onToggle(change.path) },
-                    onPathClick = { onChangeClick(change) },
-                    onRevert = { onRevert(change) },
-                )
-            }
+    val listState = rememberLazyListState()
+    ScrollableColumn(listState = listState, modifier = Modifier.fillMaxSize()) {
+        items(group.items, key = { it.path }) { change ->
+            ChangeRow(
+                change = change,
+                label = group.labelFor(change.path),
+                checked = change.path in selectedPaths,
+                onToggle = { onToggle(change.path) },
+                onPathClick = { onChangeClick(change) },
+                onRevert = { onRevert(change) },
+            )
         }
     }
 }
