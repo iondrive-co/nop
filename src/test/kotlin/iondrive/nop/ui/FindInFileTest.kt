@@ -1,5 +1,7 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.ui.text.TextRange
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -98,4 +100,86 @@ class FindInFileTest {
     fun `matchIndexForLine falls back to 0 when there are no matches`() {
         assertEquals(0, matchIndexForLine("nothing here", emptyList(), 5))
     }
+
+    private fun bufferOf(text: String, caret: Int = 0) =
+        TextFieldState(text).also { it.edit { selection = TextRange(caret) } }
+
+    @Test
+    fun `replaceMatches swaps a single hit`() {
+        val state = bufferOf("hello world")
+        replaceMatches(state, findAllMatches("hello world", "world"), "there")
+        assertEquals("hello there", state.state())
+    }
+
+    @Test
+    fun `replaceMatches rewrites every hit in one pass`() {
+        val state = bufferOf("foo bar foo baz foo")
+        replaceMatches(state, findAllMatches(state.state(), "foo"), "qux")
+        assertEquals("qux bar qux baz qux", state.state())
+    }
+
+    @Test
+    fun `a longer replacement does not shift the hits that follow it`() {
+        // The reason the splice runs back-to-front: front-to-back, each rewrite would move every
+        // later match right by the length difference and the second hit would land mid-word.
+        val state = bufferOf("a x a x a")
+        replaceMatches(state, findAllMatches(state.state(), "a"), "LONGER")
+        assertEquals("LONGER x LONGER x LONGER", state.state())
+    }
+
+    @Test
+    fun `a shorter replacement does not shift the hits that follow it`() {
+        val state = bufferOf("aaa-aaa-aaa")
+        replaceMatches(state, findAllMatches(state.state(), "aaa"), "b")
+        assertEquals("b-b-b", state.state())
+    }
+
+    @Test
+    fun `a replacement containing the query is not re-replaced`() {
+        // Replace-all is one pass over the matches found before it started, so growing "a" into
+        // "aa" terminates instead of feeding itself.
+        val state = bufferOf("a b a")
+        replaceMatches(state, findAllMatches(state.state(), "a"), "aa")
+        assertEquals("aa b aa", state.state())
+    }
+
+    @Test
+    fun `replaceMatches replaces case-insensitive hits with the exact replacement`() {
+        val state = bufferOf("Foo foo FOO")
+        replaceMatches(state, findAllMatches(state.state(), "foo"), "bar")
+        assertEquals("bar bar bar", state.state())
+    }
+
+    @Test
+    fun `replaceMatches with nothing to replace leaves the buffer alone`() {
+        val state = bufferOf("untouched", caret = 3)
+        replaceMatches(state, emptyList(), "x")
+        assertEquals("untouched", state.state())
+        assertEquals(3, state.selection.start)
+    }
+
+    @Test
+    fun `the caret follows the text it was sitting on rather than jumping to the end`() {
+        // The whole point of splicing rather than rewriting the buffer: a replace must not dump the
+        // user at the bottom of the document (the reported find-then-type bug).
+        val text = "foo bar foo baz"
+        val state = bufferOf(text, caret = text.indexOf("baz"))
+        replaceMatches(state, findAllMatches(text, "foo"), "X")
+
+        assertEquals("X bar X baz", state.state())
+        assertTrue(
+            state.state().substring(state.selection.start).startsWith("baz"),
+            "caret should still be on \"baz\", was at ${state.selection.start} in \"${state.state()}\"",
+        )
+    }
+
+    @Test
+    fun `a caret ahead of every hit stays exactly where it was`() {
+        val state = bufferOf("keep me | foo foo", caret = 4)
+        replaceMatches(state, findAllMatches(state.state(), "foo"), "replaced")
+        assertEquals(4, state.selection.start, "nothing before the caret changed, so it must not move")
+    }
 }
+
+/** The buffer's text, spelled out once so the assertions above read as comparisons. */
+private fun TextFieldState.state(): String = text.toString()

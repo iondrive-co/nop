@@ -341,6 +341,8 @@ private fun ApplicationScope.WorkspaceWindow(
     var findInFilesTrigger by remember { mutableStateOf(0) }
     // Ctrl+F opens the in-file search bar above the currently-focused file viewer.
     var findInFileTrigger by remember { mutableStateOf(0) }
+    // Ctrl+R opens the same bar with its replacement half showing.
+    var replaceInFileTrigger by remember { mutableStateOf(0) }
     // F4 ("jump to source", IntelliJ-style) opens the real working file behind the active diff.
     var jumpToSourceTrigger by remember { mutableStateOf(0) }
     // F5 reloads what's in front: git status, plus the active tab's content from disk.
@@ -371,6 +373,17 @@ private fun ApplicationScope.WorkspaceWindow(
                 event.isCtrlPressed && !event.isShiftPressed && event.key == Key.F
             ) {
                 findInFileTrigger += 1
+                return@Window true
+            }
+            // Ctrl+R widens that bar into find-and-replace. Consumed like Ctrl+F so it can't also
+            // reach the field underneath; a terminal tab keeps its own Ctrl+R (reverse history
+            // search) because focus there sits in the Swing terminal widget, which this preview
+            // handler never sees.
+            if (event.type == KeyEventType.KeyDown &&
+                event.isCtrlPressed && !event.isShiftPressed && !event.isAltPressed &&
+                event.key == Key.R
+            ) {
+                replaceInFileTrigger += 1
                 return@Window true
             }
             // Plain F4 jumps from the active diff to its working file. Exclude Alt so Alt+F4
@@ -430,6 +443,7 @@ private fun ApplicationScope.WorkspaceWindow(
                                 fileSearchTrigger = fileSearchTrigger,
                                 findInFilesTrigger = findInFilesTrigger,
                                 findInFileTrigger = findInFileTrigger,
+                                replaceInFileTrigger = replaceInFileTrigger,
                                 jumpToSourceTrigger = jumpToSourceTrigger,
                                 refreshTrigger = refreshTrigger,
                             )

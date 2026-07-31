@@ -12,12 +12,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
-import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -97,6 +96,7 @@ fun TabbedViewerPanel(
     onJump: (File, Int) -> Unit = { _, _ -> },
     onDiffTopLine: (Int) -> Unit = {},
     findInFileTrigger: Int = 0,
+    replaceInFileTrigger: Int = 0,
     blameEnabled: Boolean = false,
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
@@ -172,7 +172,17 @@ fun TabbedViewerPanel(
                     val pendingLine = tabsState.pendingJumpLine(current.id)
                     val pendingSearch = tabsState.pendingSearchQuery(current.id)
                     if (current.file.extension.equals("md", ignoreCase = true)) {
-                        MarkdownEditWithPreview(current, editStore, onFileSaved, findInFileTrigger)
+                        MarkdownEditWithPreview(
+                            tab = current,
+                            store = editStore,
+                            onSaved = onFileSaved,
+                            pendingLine = pendingLine,
+                            onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
+                            pendingSearchQuery = pendingSearch,
+                            onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
+                            findInFileTrigger = findInFileTrigger,
+                            replaceInFileTrigger = replaceInFileTrigger,
+                        )
                     } else {
                         FileEditView(
                             tab = current,
@@ -185,6 +195,7 @@ fun TabbedViewerPanel(
                             pendingSearchQuery = pendingSearch,
                             onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
                             findInFileTrigger = findInFileTrigger,
+                            replaceInFileTrigger = replaceInFileTrigger,
                             repo = repo,
                             blameEnabled = blameEnabled,
                             // A blame line resolves to the commit that last touched it; open that
@@ -261,6 +272,7 @@ private fun FileEditView(
     pendingSearchQuery: String? = null,
     onPendingSearchConsumed: () -> Unit = {},
     findInFileTrigger: Int = 0,
+    replaceInFileTrigger: Int = 0,
     repo: GitRepo? = null,
     blameEnabled: Boolean = false,
     onOpenBlameCommit: (sha: String) -> Unit = {},
@@ -268,7 +280,9 @@ private fun FileEditView(
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
     val focusRequester = remember(tab.id) { FocusRequester() }
-    val scrollState = rememberScrollState()
+    // Viewport and find/replace text come from the per-file FileEdit rather than a remember here, so
+    // each tab keeps its own across switches instead of inheriting the last file's — see FileEdit.
+    val scrollState = edit.scroll
     val savedCallback by rememberUpdatedState(onSaved)
     val resolveCallback by rememberUpdatedState(onResolveAt)
     val jumpCallback by rememberUpdatedState(onJump)
@@ -279,9 +293,14 @@ private fun FileEditView(
     // stays open in whichever tab the user opened it. Matches are recomputed whenever the text
     // or query changes; currentMatch is the active hit that's highlighted and scrolled into view.
     var searchOpen by remember(tab.id) { mutableStateOf(false) }
-    val searchState = rememberTextFieldState()
+    val searchState = edit.findQuery
     var currentMatch by remember(tab.id) { mutableStateOf(0) }
     val searchFocusRequester = remember(tab.id) { FocusRequester() }
+    // Replace half of the bar (Ctrl+R). replaceOpen is separate from searchOpen because Ctrl+F opens
+    // a find-only bar and Ctrl+R widens it; the text itself is per-file like the query.
+    var replaceOpen by remember(tab.id) { mutableStateOf(false) }
+    val replaceState = edit.replaceWith
+    val replaceFocusRequester = remember(tab.id) { FocusRequester() }
     // Bumped by genuine user find activity — opening the bar with Ctrl+F, and typing in the field
     // (via the FindBar's InputTransformation). The "re-aim at the first match" effect keys off this
     // instead of the query text, so a *programmatic* seed (a global-search pick, which sets the
@@ -308,6 +327,28 @@ private fun FileEditView(
             if (len > 0) searchState.edit { selection = TextRange(0, len) }
             // Aim at the first match only when the bar is opening fresh — re-pressing Ctrl+F on an
             // already-open bar just re-selects the query and keeps the user's current position.
+            if (!wasOpen) findRevision++
+        }
+    }
+
+    // Ctrl+R is Ctrl+F plus the replacement half: the bar opens (or widens, if find was already up)
+    // and focus lands wherever there's still something to type. With a query already in hand —
+    // Ctrl+F, type, then Ctrl+R — that's the replacement field; from cold it's the query field,
+    // because there's nothing to replace yet. Baselined for the same reason as the find trigger.
+    val replaceTriggerBaseline = remember(tab.id) { replaceInFileTrigger }
+    LaunchedEffect(replaceInFileTrigger) {
+        if (replaceInFileTrigger > replaceTriggerBaseline) {
+            val wasOpen = searchOpen
+            searchOpen = true
+            replaceOpen = true
+            withFrameNanos { }
+            val hasQuery = searchState.text.isNotEmpty()
+            val field = if (hasQuery) replaceFocusRequester else searchFocusRequester
+            runCatching { field.requestFocus() }
+            // Select what's already there so the next keystroke replaces it, as Ctrl+F does.
+            val target = if (hasQuery) replaceState else searchState
+            val len = target.text.length
+            if (len > 0) target.edit { selection = TextRange(0, len) }
             if (!wasOpen) findRevision++
         }
     }
@@ -431,6 +472,29 @@ private fun FileEditView(
         }
     }
 
+    // Swap the hit the user is parked on for the replacement text, then step onto the next one so
+    // repeated Enter walks the file. The replaced hit has gone by the time this coroutine runs, so
+    // the *same* index now addresses the following match (and wraps past the end).
+    fun replaceCurrent() {
+        val m = matches.getOrNull(currentMatch) ?: return
+        edit.markUserEdit()
+        replaceMatches(edit.state, listOf(m), replaceState.text.toString())
+        searchScope.launch {
+            val next = if (matches.isEmpty()) 0 else currentMatch % matches.size
+            currentMatch = next
+            jumpToMatch(next)
+        }
+    }
+
+    // Every hit in one edit, so it lands as a single autosave and a single undo-sized change rather
+    // than a burst of them. Deliberately computed from the matches on screen: what the "n of m"
+    // chip says is what gets replaced.
+    fun replaceAll() {
+        if (matches.isEmpty()) return
+        edit.markUserEdit()
+        replaceMatches(edit.state, matches, replaceState.text.toString())
+    }
+
     // Re-aim at the first match on genuine user find activity — opening the bar with Ctrl+F or
     // typing in the field, both of which bump findRevision. Keyed on that counter rather than the
     // query text so a programmatic seed from a global-search pick (below) keeps its own match
@@ -496,6 +560,16 @@ private fun FileEditView(
                     }
                 },
                 onClose = { searchOpen = false },
+                replace = if (replaceOpen) {
+                    ReplaceFields(
+                        state = replaceState,
+                        focusRequester = replaceFocusRequester,
+                        onReplace = ::replaceCurrent,
+                        onReplaceAll = ::replaceAll,
+                    )
+                } else {
+                    null
+                },
             )
         }
     Row(modifier = Modifier.fillMaxSize()) {
@@ -649,20 +723,44 @@ internal fun repoRelativePath(repo: GitRepo, file: File): String? = runCatching 
         .toString().replace(File.separatorChar, '/')
 }.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") }
 
-/** Markdown tab layout: editor on the left, live-rendered preview on the right. */
+/**
+ * Markdown tab layout: editor on the left, live-rendered preview on the right.
+ *
+ * Everything the plain editor is given has to be forwarded to the editor half — a markdown file is
+ * still a file, and dropping the inbound jump/search parameters here is what used to make a global
+ * "Find in files" hit in a .md open the tab at the top with nothing highlighted (and leave the
+ * queued jump uncleared in TabsState, since nothing ever consumed it).
+ */
 @Composable
 private fun MarkdownEditWithPreview(
     tab: Tab.FileView,
     store: FileEditStore,
     onSaved: () -> Unit,
+    pendingLine: Int? = null,
+    onPendingLineConsumed: () -> Unit = {},
+    pendingSearchQuery: String? = null,
+    onPendingSearchConsumed: () -> Unit = {},
     findInFileTrigger: Int = 0,
+    replaceInFileTrigger: Int = 0,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
     val previewText by remember(edit) {
         derivedStateOf { edit.state.text.toString() }
     }
     HorizontalSplitLayout(
-        first = { FileEditView(tab, store, onSaved, findInFileTrigger = findInFileTrigger) },
+        first = {
+            FileEditView(
+                tab = tab,
+                store = store,
+                onSaved = onSaved,
+                pendingLine = pendingLine,
+                onPendingLineConsumed = onPendingLineConsumed,
+                pendingSearchQuery = pendingSearchQuery,
+                onPendingSearchConsumed = onPendingSearchConsumed,
+                findInFileTrigger = findInFileTrigger,
+                replaceInFileTrigger = replaceInFileTrigger,
+            )
+        },
         second = {
             MarkdownPreview(
                 text = previewText,
@@ -692,6 +790,28 @@ internal fun findAllMatches(text: String, query: String): List<IntRange> {
         if (out.size >= 5000) break
     }
     return out
+}
+
+/**
+ * Replace [matches] in [state] with [replacement], as one edit.
+ *
+ * Splices from the last match backwards so every range still addresses the text it was found in —
+ * rewriting front-to-back would shift each later match by the length difference of the ones before
+ * it. Doing the lot inside a single `edit {}` also means Compose maps the caret through the splices
+ * instead of collapsing it to the end of the document the way a whole-buffer rewrite does, and the
+ * debounced autosave sees one change rather than a burst.
+ *
+ * [matches] must be non-overlapping and ascending — what [findAllMatches] returns.
+ */
+internal fun replaceMatches(state: TextFieldState, matches: List<IntRange>, replacement: String) {
+    if (matches.isEmpty()) return
+    state.edit {
+        for (m in matches.asReversed()) {
+            val start = m.first.coerceIn(0, length)
+            val end = (m.last + 1).coerceIn(start, length)
+            replace(start, end, replacement)
+        }
+    }
 }
 
 /** Char offset of the first character of 1-based [line] in [text], clamped into range. */

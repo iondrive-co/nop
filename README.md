@@ -12,16 +12,19 @@ Download the latest installer for your platform from the
 
 ## Shortcuts
 
+- Ctrl click on an element in a file to jump to source.
+- Ctrl F to search within the current file
+- Ctrl R to find and replace within the current file — the search field splits in half, the query on
+  the left and its replacement on the right
+- Ctrl Shift F to search across all files
+- Shift-Shift to search for file
+- F4 from a diff to open the working file behind it, at the line you were reading
+- F5 to reload git status and re-read the active tab from disk
 - Select a file or directory in the project tree, then:
 	- `Delete` — remove it from disk (asks for confirmation first)
 	- `H` — open a tab showing its git history
-- Ctrl click on an element in a file to jump to source.
-- Ctrl F to search within the current file
-- Ctrl Shift F to search across all files
-- Shift-Shift to search for file
+	- `B` — toggle the git blame column in the editor
 
 ## Troubleshooting
 
-nop logs startup, project/tab opens, and every uncaught error to
-`$XDG_CONFIG_HOME/nop/nop.log` (default `~/.config/nop/nop.log`), rotating once past 2MB. If nop
-disappears or misbehaves, that file is the first place to look.
+Check `$XDG_CONFIG_HOME/nop/nop.log` (default `~/.config/nop/nop.log`), and file an issue if necessary.

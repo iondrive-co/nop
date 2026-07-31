@@ -71,6 +71,7 @@ fun App(
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
     findInFileTrigger: Int = 0,
+    replaceInFileTrigger: Int = 0,
     jumpToSourceTrigger: Int = 0,
     refreshTrigger: Int = 0,
 ) {
@@ -607,6 +608,7 @@ fun App(
                                 },
                                 onDiffTopLine = { diffTopLine = it },
                                 findInFileTrigger = findInFileTrigger,
+                                replaceInFileTrigger = replaceInFileTrigger,
                                 blameEnabled = blameEnabled,
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },

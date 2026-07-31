@@ -26,7 +26,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -424,7 +424,9 @@ internal fun DiffListScaffold(
     // In-diff find state, mirroring FileEditView's: the bar stays open per tab with its own query,
     // matches recompute off (rows, query), and currentMatch is the active hit Next/Prev walks.
     var searchOpen by remember(searchKey) { mutableStateOf(false) }
-    val searchState = rememberTextFieldState()
+    // Keyed on the tab like the rest of this bar's state: only the selected tab is composed, so an
+    // unkeyed query is handed to whichever diff is shown next instead of starting empty.
+    val searchState = remember(searchKey) { TextFieldState() }
     var currentMatch by remember(searchKey) { mutableStateOf(0) }
     val searchFocusRequester = remember(searchKey) { FocusRequester() }
     // Bumped by genuine user find activity — opening the bar, and typing in the field — so the

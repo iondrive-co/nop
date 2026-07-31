@@ -1,5 +1,6 @@
 package iondrive.nop.ui
 
+import androidx.compose.ui.text.TextRange
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotSame
@@ -42,6 +43,33 @@ class FileEditStoreTest {
         val store = FileEditStore()
         val edit = store.edit(Tab.FileView(f))
         assertEquals(listOf(edit), store.editorsFor(f))
+    }
+
+    @Test
+    fun `each file gets its own viewport and find state`(@TempDir tmp: Path) {
+        // Only the selected tab's editor is composed, so this state can't live in a remember inside
+        // it: the previous file's scroll offset and query used to be restored into the next tab.
+        val store = FileEditStore()
+        val a = store.edit(Tab.FileView(tmp.resolve("a.txt").also { it.writeText("a\n") }.toFile()))
+        val b = store.edit(Tab.FileView(tmp.resolve("b.txt").also { it.writeText("b\n") }.toFile()))
+
+        a.findQuery.edit { replace(0, length, "needle") }
+        a.replaceWith.edit { replace(0, length, "thread") }
+
+        assertEquals("", b.findQuery.text.toString(), "a sibling tab must not inherit the query")
+        assertEquals("", b.replaceWith.text.toString(), "nor the replacement")
+        assertNotSame(a.scroll, b.scroll, "nor the scroll position")
+    }
+
+    @Test
+    fun `a file keeps its viewport and find state across a tab switch`(@TempDir tmp: Path) {
+        // The store is what survives a switch away and back — edit() returns the same FileEdit, so
+        // reopening the tab lands where the user left it with the query they last used.
+        val store = FileEditStore()
+        val tab = Tab.FileView(tmp.resolve("a.txt").also { it.writeText("a\n") }.toFile())
+        store.edit(tab).findQuery.edit { replace(0, length, "needle") }
+
+        assertEquals("needle", store.edit(tab).findQuery.text.toString())
     }
 
     @Test
@@ -192,6 +220,89 @@ class FileEditStoreTest {
 
         assertEquals("two\n", edit.state.text.toString())
         assertFalse(edit.isModified, "an adopted disk copy is in sync, not a pending edit")
+    }
+
+    @Test
+    fun `adoptDiskText keeps the caret instead of dropping it at the end of the document`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("alpha\nbeta\ngamma\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { selection = TextRange(3) } // user is typing inside "alpha"
+
+        // An agent / checkout appends to the file and reconcile adopts it.
+        edit.adoptDiskText("alpha\nbeta\ngamma\ndelta\nepsilon\n")
+
+        assertEquals(
+            3,
+            edit.state.selection.start,
+            "adopting an external change must not teleport the caret to the bottom of the file",
+        )
+    }
+
+    @Test
+    fun `adoptDiskText clamps a caret that the shorter disk copy no longer has room for`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("a long line of text\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { selection = TextRange(15) }
+
+        edit.adoptDiskText("short\n")
+
+        assertEquals(6, edit.state.selection.start, "caret clamps into the new text rather than throwing")
+    }
+
+    /**
+     * The autosave race, replayed deterministically. save() snapshots the buffer, then spends a whole
+     * file read plus a write off the UI thread before doing its bookkeeping; a keystroke landing in
+     * that window is user work the write didn't include. [FileEdit.markSaved] is that bookkeeping, so
+     * driving it with a buffer already ahead of the written text *is* the race.
+     */
+    private fun typeDuringSave(edit: FileEdit, written: String, typedMeanwhile: String) {
+        edit.state.edit { replace(0, length, written) }
+        edit.markUserEdit() // the editor's InputTransformation, on the keystrokes save() will capture
+        // save() snapshots `written` here, then goes to disk…
+        edit.state.edit { replace(0, length, typedMeanwhile) }
+        edit.markUserEdit() // …and the user keeps typing while it's away
+        edit.file.writeText(written) // …the write lands, carrying only the snapshot
+        edit.markSaved(written)
+    }
+
+    @Test
+    fun `keystrokes typed during a save stay pending instead of being reverted from disk`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        typeDuringSave(edit, written = "typed\n", typedMeanwhile = "typed more\n")
+
+        assertTrue(edit.hasUserEdit, "keystrokes the save didn't capture are still pending user work")
+        assertNull(
+            edit.diskTextIfDivergedAndClean(),
+            "so reconcile must not mistake them for drift and revert the buffer from disk",
+        )
+    }
+
+    @Test
+    fun `the next autosave picks up the keystrokes the previous one raced past`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        typeDuringSave(edit, written = "typed\n", typedMeanwhile = "typed more\n")
+
+        assertEquals(SaveResult.Saved, autosaveTick(edit), "still dirty, so the timer saves again")
+        assertEquals("typed more\n", f.readText(), "and the raced keystrokes reach disk")
+        assertFalse(edit.hasUserEdit)
+    }
+
+    @Test
+    fun `a save that captured everything still clears the marker`(@TempDir tmp: Path) {
+        // The common case must not regress into permanently-dirty buffers: when nothing was typed
+        // during the write, the marker clears and reconcile is free to reload the file later.
+        val f = tmp.resolve("a.txt").also { it.writeText("v1\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        edit.state.edit { replace(0, length, "v2\n") }
+        edit.markUserEdit()
+
+        assertEquals(SaveResult.Saved, edit.save())
+        assertFalse(edit.hasUserEdit, "nothing raced the write, so the buffer is genuinely clean")
     }
 
     // The autosave collectors in FileEditView / DiffView all gate on this exact condition before
