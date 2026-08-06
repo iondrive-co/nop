@@ -6,12 +6,9 @@ import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -24,7 +21,6 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import java.awt.Cursor
 
 internal val HorizontalResizeCursor = PointerIcon(Cursor(Cursor.E_RESIZE_CURSOR))
-private val VerticalResizeCursor = PointerIcon(Cursor(Cursor.N_RESIZE_CURSOR))
 
 /**
  * Two side-by-side panes split by a draggable vertical line. Replaces Jewel's
@@ -60,8 +56,6 @@ fun HorizontalSplit(
             Box(Modifier.width(firstWidthDp).fillMaxHeight()) { first() }
             DividerBar(
                 thickness = dividerThickness,
-                orientation = Orientation.Horizontal,
-                cursor = HorizontalResizeCursor,
                 onDrag = { delta ->
                     onRatioChange(((clampedRatio * available + delta) / available).coerceIn(minRatio, maxRatio))
                 },
@@ -71,52 +65,9 @@ fun HorizontalSplit(
     }
 }
 
-/**
- * Two stacked panes split by a draggable horizontal line. Replaces Jewel's VerticalSplitLayout.
- */
-@Composable
-fun VerticalSplit(
-    ratio: Float,
-    onRatioChange: (Float) -> Unit,
-    modifier: Modifier = Modifier,
-    minFirstDp: Dp = 80.dp,
-    minSecondDp: Dp = 80.dp,
-    dividerThickness: Dp = 4.dp,
-    first: @Composable () -> Unit,
-    second: @Composable () -> Unit,
-) {
-    BoxWithConstraints(modifier) {
-        val density = LocalDensity.current
-        val totalPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
-        val dividerPx = with(density) { dividerThickness.toPx() }
-        val minFirstPx = with(density) { minFirstDp.toPx() }
-        val minSecondPx = with(density) { minSecondDp.toPx() }
-        val available = (totalPx - dividerPx).coerceAtLeast(1f)
-        val minRatio = (minFirstPx / available).coerceIn(0f, 1f)
-        val maxRatio = (1f - (minSecondPx / available)).coerceIn(minRatio, 1f)
-        val clampedRatio = ratio.coerceIn(minRatio, maxRatio)
-        val firstHeightDp = with(density) { (available * clampedRatio).toDp() }
-
-        Column(modifier = Modifier.fillMaxSize()) {
-            Box(Modifier.height(firstHeightDp).fillMaxWidth()) { first() }
-            DividerBar(
-                thickness = dividerThickness,
-                orientation = Orientation.Vertical,
-                cursor = VerticalResizeCursor,
-                onDrag = { delta ->
-                    onRatioChange(((clampedRatio * available + delta) / available).coerceIn(minRatio, maxRatio))
-                },
-            )
-            Box(Modifier.weight(1f).fillMaxWidth()) { second() }
-        }
-    }
-}
-
 @Composable
 private fun DividerBar(
     thickness: Dp,
-    orientation: Orientation,
-    cursor: PointerIcon,
     onDrag: (Float) -> Unit,
 ) {
     val color =if (JewelTheme.isDark) androidx.compose.ui.graphics.Color(0xFF323438)
@@ -125,17 +76,13 @@ private fun DividerBar(
     // is exceeded. Without it the user has to overshoot the divider's slop distance, but by then
     // the cursor has left the thin divider's hit area and pointerInput stops receiving moves —
     // Compose only delivers pointer events while the pointer is inside the modifier's bounds.
-    val sized = when (orientation) {
-        Orientation.Horizontal -> Modifier.width(thickness).fillMaxHeight()
-        Orientation.Vertical -> Modifier.fillMaxWidth().height(thickness)
-    }
     Box(
-        sized
+        Modifier.width(thickness).fillMaxHeight()
             .background(color)
-            .pointerHoverIcon(cursor)
+            .pointerHoverIcon(HorizontalResizeCursor)
             .draggable(
                 state = rememberDraggableState(onDelta = onDrag),
-                orientation = orientation,
+                orientation = Orientation.Horizontal,
                 startDragImmediately = true,
             )
     )

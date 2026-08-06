@@ -37,6 +37,21 @@ class DiffComputerTest {
     }
 
     @Test
+    fun `html-special characters stay literal, tabs expand`() {
+        // The DiffRowGenerator default normalizer escapes rows for HTML display; a diff of
+        // `List<String>` must not come back as `List&lt;String&gt;` in our plain-text renderer.
+        val r = DiffComputer.compute(
+            "fun f(x: List<String>) = x\n\tif (a && b) g()\n",
+            "fun f(x: List<String>, n: Int) = x\n\tif (a && b) g()\n",
+        )
+        val texts = r.rows.flatMap { listOfNotNull(it.oldLine, it.newLine) }
+        assertTrue(texts.any { it.contains("List<String>") })
+        assertTrue(texts.any { it.contains("&& b") })
+        assertTrue(texts.none { it.contains("&lt;") || it.contains("&amp;") })
+        assertTrue(texts.any { it.startsWith("    if") }, "tabs should still expand to spaces")
+    }
+
+    @Test
     fun `change with inline word edit produces CHANGE row with changed span`() {
         val r = DiffComputer.compute("the quick brown fox\n", "the slow brown fox\n")
         val change = r.rows.single { it.kind == RowKind.CHANGE }

@@ -13,6 +13,9 @@ object DiffComputer {
         .inlineDiffByWord(true)
         .oldTag { isOpen -> if (isOpen) OLD_OPEN else OLD_CLOSE }
         .newTag { isOpen -> if (isOpen) NEW_OPEN else NEW_CLOSE }
+        // The default normalizer prepares rows for HTML display, so `<` `>` `&` come back as
+        // literal `&lt;` `&gt;` `&amp;` in our plain-text renderer. Keep only its tab expansion.
+        .lineNormalizer { line -> line.replace("\t", "    ") }
         .build()
 
     fun compute(oldText: String, newText: String): DiffResult {

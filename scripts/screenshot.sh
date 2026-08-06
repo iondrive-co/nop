@@ -4,8 +4,10 @@
 # depending on whatever the user happens to have open:
 #
 #   - A diff-view shot: a repo with several committed-then-modified files across a few directories,
-#     so the commit panel shows its changes grouped into side-by-side columns (source dirs, tests,
-#     config, docs), with one file opened to its side-by-side diff in the editor above.
+#     so the tool panel on the right lists the changes grouped by directory (source dirs, tests,
+#     config, docs), with one file opened to its side-by-side diff in the editor beside it. The
+#     opened file is long enough to scroll past the window bottom, with its hunks spread far
+#     apart, so the change stripe beside the diff shows separate blocks marking where they are.
 #   - A workspace/preview shot: several synthetic project tabs grouped by named separators in the
 #     left rail, with a few editor tabs open in the active project. NOTHING from the user's real
 #     workspace appears.
@@ -27,11 +29,16 @@ DISPLAY_SPEC="${DISPLAY:-:0}"
 README_MARKER="<!-- screenshot -->"
 STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/nop/state"
 
-SHOT_WIDTH=1400
+# When testing on a headless Xvfb, give the screen comfortable margin over these dimensions
+# (e.g. 2100x1200): the WM places the window at an offset, and any part hanging past the screen
+# edge is silently missing from `import` captures — the shot comes out cropped, not failed.
+# Wide window + slim side panels: the editor is the subject of both shots, so it gets the width —
+# each half of the side-by-side diff must fit its code lines untruncated.
+SHOT_WIDTH=1720
 SHOT_HEIGHT=900
-# Project-pane width as a fraction of total width. Wider than the App.kt default (0.22) so
-# filenames in the tree never wrap one character per line.
-SHOT_H_RATIO=0.30
+# Project-pane width as a fraction of total width (~290px): enough for the demo tree's deepest
+# filenames without wrapping, no more.
+SHOT_H_RATIO=0.17
 
 mkdir -p "$SHOT_DIR"
 
@@ -158,11 +165,14 @@ capture_to() {
 
 # Visual "ink" of the editor pane's top band: high when a diff (gutter + coloured code) is showing,
 # near-zero for the empty "click a file…" placeholder. Used to pick the click offset that actually
-# opened the diff, so the shot doesn't silently capture a blank pane if the layout shifted.
+# opened the diff, so the shot doesn't silently capture a blank pane if the layout shifted. The
+# crop must stay inside the editor: right of the project tree (ends at SHOT_H_RATIO) and left of
+# the tool panel (starts at ~83% width with the split.tools seeded below) — the panel's change
+# list is itself full of ink and would mask a missed click.
 pane_ink() {
     local img="$1" w="$2" h="$3"
-    local cw=$(( w * 60 / 100 )) ch=$(( h * 22 / 100 ))
-    local cx=$(( w * 33 / 100 )) cy=$(( h * 2 / 100 ))
+    local cw=$(( w * 50 / 100 )) ch=$(( h * 22 / 100 ))
+    local cx=$(( w * 25 / 100 )) cy=$(( h * 2 / 100 ))
     convert "$img" -crop "${cw}x${ch}+${cx}+${cy}" +repage -colorspace Gray \
         -format '%[fx:standard_deviation]' info: 2>/dev/null || echo 0
 }
@@ -175,21 +185,21 @@ DIFF_CFG="$TMP_PARENT/diff-cfg"
 DIFF_PROJECT="$TMP_PARENT/$DIFF_BASENAME"
 mkdir -p "$DIFF_CFG/nop" "$DIFF_PROJECT"
 
+# split.tools gives the editor 80% of the width right of the tree; the tool panel keeps ~285px —
+# slim, but still wide enough that the commit-message row's buttons don't clip.
 cat > "$DIFF_CFG/nop/state" <<EOF
 window.width=$SHOT_WIDTH
 window.height=$SHOT_HEIGHT
 theme=$opposite_theme
 split.h=$SHOT_H_RATIO
-split.v=0.55
+split.tools=0.80
 EOF
-# Pin a short commit-message box so the single change row sits predictably high in the panel.
-DIFF_DATA=$(project_data_dir "$DIFF_CFG" "$DIFF_PROJECT")
-mkdir -p "$DIFF_DATA"
-echo "40.0" > "$DIFF_DATA/commit-height"
 
-# Several files spread across a few directories so the commit panel groups them into columns:
-# a "ui" source column (2 files), a "model" column, then tests / config / docs. Each file is
+# Several files spread across a few directories so the tool panel groups them by directory:
+# a "ui" source group (2 files), a "model" group, then tests / config / docs. Each file is
 # committed as a baseline, then edited, so every one shows up as a modification with a real diff.
+# Greeting.kt — the file the shot opens — is long enough to scroll past the window bottom, with
+# its edits spread far apart, so the diff's change stripe shows several separate blocks.
 (
     cd "$DIFF_PROJECT"
     git init --quiet
@@ -202,14 +212,78 @@ echo "40.0" > "$DIFF_DATA/commit-height"
     cat > src/ui/Greeting.kt <<'EOF'
 package iondrive.nop.ui
 
-import androidx.compose.runtime.Composable
-import org.jetbrains.jewel.ui.component.Text
+/**
+ * Builds the greeting lines shown in the demo UI.
+ *
+ * The service is deliberately small and readable: each function
+ * does one thing, and the companion holds the couple of knobs the
+ * banner rendering needs.
+ */
+class GreetingService(private val locale: String) {
 
-@Composable
-fun Greeting(name: String) {
-    // Render a friendly greeting.
-    val message = "Hello, $name"
-    Text(message)
+    /** Greets a single user by name. */
+    fun greet(name: String): String {
+        val message = "Hello, $name"
+        return decorate(message)
+    }
+
+    /** Greets every user in [names], one line each. */
+    fun greetAll(names: List<String>): String =
+        names.joinToString("\n") { greet(it) }
+
+    /**
+     * Says goodbye. Mirrors [greet] so the two read the same way
+     * in calling code.
+     */
+    fun farewell(name: String): String {
+        val message = "Goodbye, $name"
+        return decorate(message)
+    }
+
+    /** Title-cases a raw name for display. */
+    fun formatName(raw: String): String =
+        raw.trim().split(Regex("\\s+")).joinToString(" ") {
+            it.replaceFirstChar(Char::uppercaseChar)
+        }
+
+    /** True when [name] can be greeted at all. */
+    fun canGreet(name: String): Boolean =
+        name.isNotBlank()
+
+    /**
+     * Wraps a message with the locale's decorations. The plain
+     * locale adds nothing; every other locale gets a full stop.
+     */
+    private fun decorate(message: String): String {
+        if (locale == "plain") return message
+        return "$message."
+    }
+
+    /**
+     * Summarises how many users were greeted, for the status bar
+     * at the bottom of the demo window.
+     */
+    fun summary(count: Int): String = when (count) {
+        0 -> "Nobody greeted yet"
+        1 -> "Greeted one user"
+        else -> "Greeted $count users"
+    }
+
+    /** Longest name that still fits the banner. */
+    fun fitsBanner(name: String): Boolean =
+        name.length <= BANNER_WIDTH
+
+    /** Pads [name] so banner lines align in a mono column. */
+    fun padForBanner(name: String): String =
+        name.padEnd(BANNER_WIDTH)
+
+    companion object {
+        /** Banner column budget, in characters. */
+        const val BANNER_WIDTH = 42
+
+        /** Locales the demo ships translations for. */
+        val SUPPORTED = listOf("en", "plain")
+    }
 }
 EOF
     cat > src/ui/Header.kt <<'EOF'
@@ -260,18 +334,86 @@ EOF
     git commit --quiet -m "initial demo project"
 
     # --- modifications (each produces a real diff) -----------------------------------------
+    # Greeting.kt gets four edits spread through the file (greet, farewell, decorate, and the
+    # companion constants) so the diff's change stripe shows distinct, separated blocks.
     cat > src/ui/Greeting.kt <<'EOF'
 package iondrive.nop.ui
 
-import androidx.compose.runtime.Composable
-import org.jetbrains.jewel.ui.component.Text
+/**
+ * Builds the greeting lines shown in the demo UI.
+ *
+ * The service is deliberately small and readable: each function
+ * does one thing, and the companion holds the couple of knobs the
+ * banner rendering needs.
+ */
+class GreetingService(private val locale: String) {
 
-@Composable
-fun Greeting(name: String, excited: Boolean = false) {
-    // Render a friendly, optionally excited greeting.
-    val punctuation = if (excited) "!" else "."
-    val message = "Hello, $name$punctuation"
-    Text(message)
+    /** Greets a single user by name, optionally excitedly. */
+    fun greet(name: String, excited: Boolean = false): String {
+        val punctuation = if (excited) "!" else ""
+        val message = "Hello, $name$punctuation"
+        return decorate(message)
+    }
+
+    /** Greets every user in [names], one line each. */
+    fun greetAll(names: List<String>): String =
+        names.joinToString("\n") { greet(it) }
+
+    /**
+     * Says goodbye. Mirrors [greet] so the two read the same way
+     * in calling code.
+     */
+    fun farewell(name: String): String {
+        val message = "See you later, $name"
+        return decorate(message)
+    }
+
+    /** Title-cases a raw name for display. */
+    fun formatName(raw: String): String =
+        raw.trim().split(Regex("\\s+")).joinToString(" ") {
+            it.replaceFirstChar(Char::uppercaseChar)
+        }
+
+    /** True when [name] can be greeted at all. */
+    fun canGreet(name: String): Boolean =
+        name.isNotBlank()
+
+    /**
+     * Wraps a message with the locale's decorations. The plain
+     * locale adds nothing, shout upper-cases the whole line, and
+     * every other locale gets a full stop.
+     */
+    private fun decorate(message: String): String {
+        if (locale == "plain") return message
+        if (locale == "shout") return message.uppercase()
+        return "$message."
+    }
+
+    /**
+     * Summarises how many users were greeted, for the status bar
+     * at the bottom of the demo window.
+     */
+    fun summary(count: Int): String = when (count) {
+        0 -> "No greetings sent yet"
+        1 -> "Greeted one user"
+        else -> "Greeted $count users"
+    }
+
+    /** Longest name that still fits the banner. */
+    fun fitsBanner(name: String): Boolean =
+        name.length <= BANNER_WIDTH
+
+    /** Pads [name] so banner lines align in a mono column. */
+    fun padForBanner(name: String): String =
+        name.padEnd(BANNER_WIDTH)
+
+    companion object {
+        /** Banner column budget, in characters. */
+        const val BANNER_WIDTH = 48
+
+        /** Locales the demo ships translations for. */
+        val SUPPORTED = listOf("en", "plain", "shout")
+    }
 }
 EOF
     cat > src/ui/Header.kt <<'EOF'
@@ -331,18 +473,21 @@ echo "diff window $diff_wid at $DX,$DY ${DW}x${DH}"
 
 diff_out="$SHOT_DIR/latest-diff.png"
 
-# Click a change row in the first (leftmost, "ui") group column to open its diff. The x sits inside
-# that column whether the groups lay out as one wide row or wrap onto two; the row's exact Y depends
-# on render scale, so try a few offsets below the bottom-panel top and keep whichever capture has the
-# most "ink" in the editor pane (i.e. actually opened the diff).
-diff_panel_top=$(( DY + DH * 55 / 100 ))
-diff_row_x=$(( DX + DW * 37 / 100 ))
+# Click the FIRST change row in the tool panel on the right edge — Greeting.kt, the long file
+# whose diff the shot is about. The x sits at 92% of the window width: past the row's checkbox
+# and kind prefix, inside the click-to-open area that spans the rest of the row (panel starts at
+# ~83% with the ratios seeded above). That first row sits ~245px below the window top (tab strip,
+# header, buttons, recent-messages dropdown, message box); the exact Y depends on render scale,
+# so the offsets cover the row's position at 1x through 1.5x. Each is only tried until one
+# lands: the ink probe stops the loop at the first capture whose editor pane clearly shows a
+# diff, because a later offset would hit a DIFFERENT row and put the wrong file in the shot.
+diff_row_x=$(( DX + DW * 92 / 100 ))
 best_ink="-1"
-for off in 150 175 200 225 130; do
+for off in 245 215 300 330 365; do
     DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$diff_wid" || true
     DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$diff_wid"
     sleep 0.2
-    DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$diff_row_x" $(( diff_panel_top + off ))
+    DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$diff_row_x" $(( DY + off ))
     sleep 0.15
     DISPLAY="$DISPLAY_SPEC" xdotool click 1
     # Park the cursor over the editor (not the rail's "+" button) so no tooltip is in the shot.
@@ -358,8 +503,9 @@ for off in 150 175 200 225 130; do
             -define png:compression-level=9 -define png:compression-filter=5 "$diff_out"
     fi
     rm -f "$cand"
-    # Clearly-a-diff already: stop early.
-    if awk -v a="$ink" 'BEGIN{exit !(a>0.10)}'; then break; fi
+    # A blank editor pane probes near zero and an open diff ~0.09+, so 0.05 separates them
+    # cleanly. Stopping at the first hit matters: later offsets would open other rows' diffs.
+    if awk -v a="$ink" 'BEGIN{exit !(a>0.05)}'; then break; fi
 done
 echo "diff shot ink=$best_ink"
 
@@ -447,7 +593,7 @@ window.width=$SHOT_WIDTH
 window.height=$SHOT_HEIGHT
 theme=$user_theme
 split.h=$SHOT_H_RATIO
-split.v=0.62
+split.tools=0.80
 active=$WEBAPP
 rail.0=sep:WORK
 rail.1=project:$WEBAPP

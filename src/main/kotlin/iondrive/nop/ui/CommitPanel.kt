@@ -90,12 +90,14 @@ fun CommitPanel(
             status.isClean -> "Commit — on ${status.branch} · no changes"
             else -> "Commit — on ${status.branch} · ${selectedPaths.size}/${status.changes.size} selected"
         }
+        // The tool panel is a narrow column on the window's right edge, so the header sits on
+        // its own line instead of competing with the action buttons for row width.
+        Text(header, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp))
         Row(
             modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(header, modifier = Modifier.weight(1f))
             if (inRepo) {
                 Tooltip(tooltip = { Text("Undo the last commit, keeping its changes (git reset --soft HEAD~1)") }) {
                     OutlinedButton(

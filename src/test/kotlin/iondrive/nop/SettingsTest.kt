@@ -204,17 +204,17 @@ class SettingsTest {
         Settings.configRoot = tmp
         val r = Settings.loadSplitRatios()
         assertNull(r.horizontal)
-        assertNull(r.vertical)
+        assertNull(r.tools)
         assertNull(r.diff)
     }
 
     @Test
     fun `split ratios round-trip`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
-        Settings.saveSplitRatios(horizontal = 0.31f, vertical = 0.42f, diff = 0.63f)
+        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f)
         val r = Settings.loadSplitRatios()
         assertEquals(0.31f, r.horizontal)
-        assertEquals(0.42f, r.vertical)
+        assertEquals(0.42f, r.tools)
         assertEquals(0.63f, r.diff)
     }
 
@@ -223,12 +223,22 @@ class SettingsTest {
         Settings.configRoot = tmp
         val state = tmp.resolve("nop/state").also {
             Files.createDirectories(it.parent)
-            Files.writeString(it, "split.h=1.5\nsplit.v=-0.2\nsplit.diff=2.0\n")
+            Files.writeString(it, "split.h=1.5\nsplit.tools=-0.2\nsplit.diff=2.0\n")
         }
         val r = Settings.loadSplitRatios()
         assertNull(r.horizontal, "h=1.5 should be rejected")
-        assertNull(r.vertical, "v=-0.2 should be rejected")
+        assertNull(r.tools, "tools=-0.2 should be rejected")
         assertNull(r.diff, "diff=2.0 should be rejected")
+    }
+
+    @Test
+    fun `loadSplitRatios ignores the retired bottom-panel key`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        tmp.resolve("nop/state").also {
+            Files.createDirectories(it.parent)
+            Files.writeString(it, "split.v=0.55\n")
+        }
+        assertNull(Settings.loadSplitRatios().tools, "split.v held a height fraction; it must not seed the width split")
     }
 
     @Test

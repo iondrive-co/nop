@@ -139,15 +139,17 @@ fun App(
     // unsaved values fall back to the original defaults.
     val savedRatios = remember { Settings.loadSplitRatios() }
     var hRatio by remember { mutableStateOf(savedRatios.horizontal ?: 0.22f) }
-    var vRatio by remember { mutableStateOf(savedRatios.vertical ?: 0.55f) }
+    // Share of the area right of the project tree given to the viewer; the rest is the tool
+    // panel (Commit/Search/Stash) on the window's right edge.
+    var toolsRatio by remember { mutableStateOf(savedRatios.tools ?: 0.68f) }
     // The divider between a diff's before/after halves — even by default, draggable to favour
     // whichever side is being read.
     var diffRatio by remember { mutableStateOf(savedRatios.diff ?: 0.5f) }
     LaunchedEffect(Unit) {
-        snapshotFlow { Triple(hRatio, vRatio, diffRatio) }
+        snapshotFlow { Triple(hRatio, toolsRatio, diffRatio) }
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest { (h, v, d) -> Settings.saveSplitRatios(h, v, d) }
+            .collectLatest { (h, t, d) -> Settings.saveSplitRatios(h, t, d) }
     }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
@@ -349,10 +351,10 @@ fun App(
         if (fileSearchTrigger > fileSearchBaseline) fileSearchOpen = true
     }
 
-    // Bottom tab selection (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we flip
-    // the bottom strip to Search and forward the trigger into SearchPanel so it requests focus
-    // on its input field.
-    var bottomTab by remember(projectPath) { mutableStateOf(BottomTab.Commit) }
+    // Tool-panel tab selection (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we
+    // flip the tool panel to Search and forward the trigger into SearchPanel so it requests
+    // focus on its input field.
+    var toolTab by remember(projectPath) { mutableStateOf(ToolTab.Commit) }
     var searchFieldFocusTrigger by remember(projectPath) { mutableStateOf(0) }
     val searchQueryState = remember(rootPath) { TextFieldState() }
     // Window-level counter; only bumps past the composition-time value count, else switching
@@ -360,7 +362,7 @@ fun App(
     val findInFilesBaseline = remember(projectPath) { findInFilesTrigger }
     LaunchedEffect(findInFilesTrigger) {
         if (findInFilesTrigger > findInFilesBaseline) {
-            bottomTab = BottomTab.Search
+            toolTab = ToolTab.Search
             searchFieldFocusTrigger += 1
         }
     }
@@ -583,10 +585,14 @@ fun App(
                     )
                 },
                 second = {
-                    VerticalSplit(
+                    // Viewer in the middle, tool panel (Commit/Search/Stash) on the right edge,
+                    // running the full height of the window to mirror the project tree on the left.
+                    HorizontalSplit(
                         modifier = Modifier.fillMaxSize(),
-                        ratio = vRatio,
-                        onRatioChange = { vRatio = it },
+                        ratio = toolsRatio,
+                        onRatioChange = { toolsRatio = it },
+                        minFirstDp = 240.dp,
+                        minSecondDp = 240.dp,
                         first = {
                             TabbedViewerPanel(
                                 tabsState = tabsState,
@@ -615,9 +621,9 @@ fun App(
                             )
                         },
                         second = {
-                            BottomTabs(
-                                selected = bottomTab,
-                                onSelect = { bottomTab = it },
+                            ToolTabs(
+                                selected = toolTab,
+                                onSelect = { toolTab = it },
                                 commit = {
                                     CommitPanel(
                                         status = status,

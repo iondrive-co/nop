@@ -11,41 +11,42 @@ import org.jetbrains.jewel.ui.component.TabData
 import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.theme.defaultTabStyle
 
-enum class BottomTab { Commit, Search, Stash }
+enum class ToolTab { Commit, Search, Stash }
 
 /**
- * Three persistent tabs at the bottom of the window — Commit, Search and Stash. None is closeable;
- * the strip is part of the chrome, not a user-managed tab collection. Selection state lives in
- * [App] so external triggers (e.g. Ctrl+Shift+F) can flip to Search without poking the panel.
+ * Three persistent tabs in the tool panel on the window's right edge — Commit, Search and Stash.
+ * None is closeable; the strip is part of the chrome, not a user-managed tab collection. Selection
+ * state lives in [App] so external triggers (e.g. Ctrl+Shift+F) can flip to Search without poking
+ * the panel.
  */
 @Composable
-fun BottomTabs(
-    selected: BottomTab,
-    onSelect: (BottomTab) -> Unit,
+fun ToolTabs(
+    selected: ToolTab,
+    onSelect: (ToolTab) -> Unit,
     commit: @Composable () -> Unit,
     search: @Composable () -> Unit,
     stash: @Composable () -> Unit,
 ) {
     val tabs = listOf(
         TabData.Default(
-            selected = selected == BottomTab.Commit,
+            selected = selected == ToolTab.Commit,
             closable = false,
             onClose = {},
-            onClick = { onSelect(BottomTab.Commit) },
+            onClick = { onSelect(ToolTab.Commit) },
             content = { state -> SimpleTabContent(label = "Commit", state = state) },
         ),
         TabData.Default(
-            selected = selected == BottomTab.Search,
+            selected = selected == ToolTab.Search,
             closable = false,
             onClose = {},
-            onClick = { onSelect(BottomTab.Search) },
+            onClick = { onSelect(ToolTab.Search) },
             content = { state -> SimpleTabContent(label = "Search", state = state) },
         ),
         TabData.Default(
-            selected = selected == BottomTab.Stash,
+            selected = selected == ToolTab.Stash,
             closable = false,
             onClose = {},
-            onClick = { onSelect(BottomTab.Stash) },
+            onClick = { onSelect(ToolTab.Stash) },
             content = { state -> SimpleTabContent(label = "Stash", state = state) },
         ),
     )
@@ -54,9 +55,9 @@ fun BottomTabs(
         TabStrip(tabs = tabs, style = JewelTheme.defaultTabStyle)
         Box(modifier = Modifier.fillMaxSize()) {
             when (selected) {
-                BottomTab.Commit -> commit()
-                BottomTab.Search -> search()
-                BottomTab.Stash -> stash()
+                ToolTab.Commit -> commit()
+                ToolTab.Search -> search()
+                ToolTab.Stash -> stash()
             }
         }
     }
