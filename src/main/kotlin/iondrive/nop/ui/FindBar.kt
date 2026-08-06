@@ -37,7 +37,11 @@ import org.jetbrains.jewel.ui.component.Text
 // makes Ctrl+F feel the same wherever the caret happens to be — same key handling, same "n of m"
 // chip, same highlight colours.
 
-/** Background behind every hit of the current query. */
+/**
+ * Background behind every hit of the current query. Amber, deliberately: green and red are spoken
+ * for by the diff views' insert/delete tints, and a green highlight on a diff line reads as "this
+ * line was added" rather than "your search matched here".
+ */
 @Composable
 internal fun findMatchColor(): Color =
     if (JewelTheme.isDark) Color(0xFF5A4A20) else Color(0xFFFFF38C)
@@ -85,9 +89,11 @@ internal fun FindBar(
     replace: ReplaceFields? = null,
 ) {
     val isDark = JewelTheme.isDark
-    val barBg = if (isDark) Color(0xFF2B2D30) else Color(0xFFEDEEF2)
-    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
-    val mutedFg = if (isDark) Color(0xFF7A8290) else Color(0xFF6B7280)
+    // The bar sits above the content it searches, so it takes the panel-chrome background rather
+    // than the editor's — it should read as a strip of chrome, not as another line of the file.
+    val barBg = if (isDark) Color(0xFF1E1F22) else Color(0xFFF7F8FA)
+    val fg = if (isDark) Color(0xFFBCBEC4) else Color(0xFF000000)
+    val mutedFg = if (isDark) Color(0xFF6F737A) else Color(0xFF6B7280)
     Row(
         modifier = Modifier
             .fillMaxWidth()

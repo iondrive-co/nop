@@ -16,14 +16,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
-/** Thumb colours sit well above the panel background — visible by default, brighter on hover. */
+/**
+ * Thin fully-rounded thumb over a transparent track (Compose Desktop's ScrollbarStyle draws no
+ * track of its own). The thumb is a neutral grey rather than a tinted one so it doesn't compete
+ * with the change markers drawn in the same lane, but it stays opaque enough to find without
+ * hunting — a thumb you have to look for is worse than one that's a shade too loud.
+ */
 val NopScrollbarStyle: ScrollbarStyle = ScrollbarStyle(
-    minimalHeight = 24.dp,
-    thickness = 10.dp,
-    shape = RoundedCornerShape(3.dp),
-    hoverDurationMillis = 200,
-    unhoverColor = Color(0x88A9B7C6),
-    hoverColor = Color(0xCCC8D2DE),
+    minimalHeight = 16.dp,
+    thickness = 8.dp,
+    shape = RoundedCornerShape(4.dp),
+    hoverDurationMillis = 150,
+    unhoverColor = Color(0x99A6A6A6),
+    hoverColor = Color(0xCCC8C8C8),
 )
 
 /** LazyColumn with a vertical scrollbar overlaid on the right edge. */
@@ -36,7 +41,7 @@ fun ScrollableColumn(
     Box(modifier = modifier) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxHeight().padding(end = 10.dp),
+            modifier = Modifier.fillMaxHeight().padding(end = 8.dp),
             content = content,
         )
         VerticalScrollbar(

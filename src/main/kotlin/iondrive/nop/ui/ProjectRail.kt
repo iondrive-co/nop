@@ -105,8 +105,11 @@ fun ProjectRail(
     isDark: Boolean,
     width: Dp = RAIL_WIDTH,
 ) {
-    val railBg = if (isDark) Color(0xFF2B2D30) else Color(0xFFF2F3F5)
-    val divider = if (isDark) Color(0xFF1E1F22) else Color(0xFFD9DBE0)
+    // The rail sits a shade darker than the editor it flanks, so the two read as separate surfaces
+    // without needing a heavy border between them.
+    val railBg = if (isDark) Color(0xFF1E1F22) else Color(0xFFF7F8FA)
+    // Subtle border between rail and main content
+    val divider = if (isDark) Color(0xFF323438) else Color(0xFFE0E1E3)
     val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
     val openProjects = remember(items) { RailLayout.projects(items) }
     // The rows actually drawn: projects and separators, with the tabs of any collapsed group folded
@@ -334,10 +337,10 @@ private fun SeparatorRow(
     onRename: () -> Unit,
     onRemove: () -> Unit,
 ) {
-    // Strong, near-black rules top and bottom frame the label so it reads clearly as a divider
-    // rather than another project tab.
-    val rule = if (isDark) Color.Black else Color(0xFF1F2329)
-    val labelColor = if (isDark) Color(0xFFCED0D6) else Color(0xFF3C4049)
+    // Rules top and bottom frame the label so it reads clearly as a divider rather than another
+    // project tab.
+    val rule = if (isDark) Color(0xFF43454A) else Color(0xFFD0D2D5)
+    val labelColor = if (isDark) Color(0xFFBBBFC4) else Color(0xFF3C4049)
     ContextMenuArea(items = {
         listOf(
             ContextMenuItem(if (collapsed) "Expand" else "Collapse", onToggleCollapse),
@@ -513,8 +516,10 @@ private fun ProjectTab(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
 
-    val activeBg = if (isDark) Color(0xFF1E1F22) else Color(0xFFFFFFFF)
-    val hoverBg = if (isDark) Color(0xFF323539) else Color(0xFFE6E8EC)
+    // The active tab is a step *lighter* than the rail behind it — it should look lifted off the
+    // rail, the way the editor surface does. Hover lands between the two.
+    val activeBg = if (isDark) Color(0xFF2B2D30) else Color(0xFFFFFFFF)
+    val hoverBg = if (isDark) Color(0xFF2D2F33) else Color(0xFFEBECEE)
     val rowBg = when {
         active -> activeBg
         hovered -> hoverBg
@@ -522,7 +527,7 @@ private fun ProjectTab(
     }
     val accent = projectTint(project, isDark)
     val name = project.fileName?.toString() ?: project.toString()
-    val muted = if (isDark) Color(0xFF9AA0AA) else Color(0xFF6B7079)
+    val muted =if (isDark) Color(0xFF808488) else Color(0xFF6B7079)
     // Color.Unspecified lets the active tab inherit the theme's default (full-strength) text colour.
     val textColor = if (active) Color.Unspecified else muted
 
@@ -592,12 +597,12 @@ private fun ProjectTab(
 private fun CloseButton(isDark: Boolean, onClose: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    val base = if (isDark) Color(0xFF9AA0AA) else Color(0xFF6B7079)
+    val base =if (isDark) Color(0xFF7A7E85) else Color(0xFF6B7079)
     val tint = if (hovered) {
-        if (isDark) Color(0xFFE6E8EC) else Color(0xFF1F2329)
+        if (isDark) Color(0xFFDFE1E5) else Color(0xFF1F2329)
     } else base
     val bg = if (hovered) {
-        if (isDark) Color(0xFF45494F) else Color(0xFFD0D3D8)
+        if (isDark) Color(0xFF393B40) else Color(0xFFD0D3D8)
     } else Color.Transparent
     Box(
         modifier = Modifier

@@ -36,33 +36,33 @@ data class HighlightPalette(
     }
 
     companion object {
-        // Darcula-ish dark palette — matches the editor foreground at #A9B7C6.
+        // Dark palette — hues picked to sit against the editor foreground at #BCBEC4.
         val Dark = HighlightPalette(
-            keyword = SpanStyle(color = Color(0xFFCC7832)),
-            string = SpanStyle(color = Color(0xFF6A8759)),
+            keyword = SpanStyle(color = Color(0xFFCF8E6D)),  // Orange keywords
+            string = SpanStyle(color = Color(0xFF6AAB73)),   // Green strings
             // IntelliJ renders comments in italics; mirror that so they read as prose, not code.
-            comment = SpanStyle(color = Color(0xFF808080), fontStyle = FontStyle.Italic),
-            number = SpanStyle(color = Color(0xFF6897BB)),
-            literal = SpanStyle(color = Color(0xFFCC7832)),
-            punct = SpanStyle(color = Color(0xFFA9B7C6)),
-            heading = SpanStyle(color = Color(0xFFFFC66D)),
-            emphasis = SpanStyle(color = Color(0xFF9876AA)),
+            comment = SpanStyle(color = Color(0xFF7A7E85), fontStyle = FontStyle.Italic),
+            number = SpanStyle(color = Color(0xFF2AACB8)),   // Cyan numbers
+            literal = SpanStyle(color = Color(0xFFCF8E6D)),  // Orange literals like keywords
+            punct = SpanStyle(color = Color(0xFFBCBEC4)),    // Light grey punctuation
+            heading = SpanStyle(color = Color(0xFFC77DBB)),  // Pink/magenta for markdown headings
+            emphasis = SpanStyle(color = Color(0xFFB389C5)), // Purple for annotations/emphasis
             // Errors are tinted red; the editor draws a red wavy underline under the range on top
             // of this (see ErrorSquiggles) for the IntelliJ-style "this is wrong" squiggle.
-            error = SpanStyle(color = Color(0xFFFF5261)),
+            error = SpanStyle(color = Color(0xFFFF6B68)),
         )
 
         // IntelliJ-default light palette — darker hues so they read on a near-white background.
         val Light = HighlightPalette(
-            keyword = SpanStyle(color = Color(0xFF0033B3)),
-            string = SpanStyle(color = Color(0xFF067D17)),
+            keyword = SpanStyle(color = Color(0xFF0033B3)),  // Dark blue keywords
+            string = SpanStyle(color = Color(0xFF067D17)),   // Green strings
             comment = SpanStyle(color = Color(0xFF8C8C8C), fontStyle = FontStyle.Italic),
-            number = SpanStyle(color = Color(0xFF1750EB)),
-            literal = SpanStyle(color = Color(0xFF0033B3)),
-            punct = SpanStyle(color = Color(0xFF1F2329)),
-            heading = SpanStyle(color = Color(0xFF8A4A00)),
-            emphasis = SpanStyle(color = Color(0xFF6F2DA8)),
-            error = SpanStyle(color = Color(0xFFD32F2F)),
+            number = SpanStyle(color = Color(0xFF1750EB)),   // Blue numbers
+            literal = SpanStyle(color = Color(0xFF0033B3)),  // Dark blue literals
+            punct = SpanStyle(color = Color(0xFF000000)),    // Black punctuation
+            heading = SpanStyle(color = Color(0xFF871094)),  // Purple headings
+            emphasis = SpanStyle(color = Color(0xFF9E4585)), // Magenta emphasis
+            error = SpanStyle(color = Color(0xFFFF0000)),    // Red errors
         )
     }
 }

@@ -97,7 +97,7 @@ fun FileSearchDialog(
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
     ) {
-        val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
+        val border =if (JewelTheme.isDark) Color(0xFF43454A) else Color(0xFFD3D5DB)
         Column(
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
@@ -165,7 +165,7 @@ fun FileSearchDialog(
 /** Thin horizontal rule marking the boundary between the frequently-accessed head and the rest. */
 @Composable
 private fun FrequentDivider() {
-    val line = if (JewelTheme.isDark) Color(0xFF4A4D54) else Color(0xFFC4C6CC)
+    val line = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFC4C6CC)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -179,8 +179,8 @@ private fun FrequentDivider() {
 private fun ResultRow(path: String, selected: Boolean, onClick: () -> Unit) {
     val name = path.substringAfterLast('/')
     val dir = if ('/' in path) path.substringBeforeLast('/') else ""
-    val highlight = if (JewelTheme.isDark) Color(0xFF2E436E) else Color(0xFFD4E2FF)
-    val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
+    val highlight =if (JewelTheme.isDark) Color(0xFF2E436E) else Color(0xFFCFE3F9)
+    val muted = if (JewelTheme.isDark) Color(0xFF6F737A) else Color(0xFF7A7E87)
     val bg = if (selected) highlight else Color.Transparent
     Box(
         modifier = Modifier

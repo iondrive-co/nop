@@ -119,8 +119,8 @@ private fun DividerBar(
     cursor: PointerIcon,
     onDrag: (Float) -> Unit,
 ) {
-    val color = if (JewelTheme.isDark) androidx.compose.ui.graphics.Color(0xFF2B2D30)
-        else androidx.compose.ui.graphics.Color(0xFFD3D5DB)
+    val color =if (JewelTheme.isDark) androidx.compose.ui.graphics.Color(0xFF323438)
+        else androidx.compose.ui.graphics.Color(0xFFD0D2D5)
     // We pass startDragImmediately=true so the drag fires from the first press, before slop
     // is exceeded. Without it the user has to overshoot the divider's slop distance, but by then
     // the cursor has left the thin divider's hit area and pointerInput stops receiving moves —

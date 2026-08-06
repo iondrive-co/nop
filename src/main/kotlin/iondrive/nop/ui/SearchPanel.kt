@@ -118,7 +118,7 @@ fun SearchPanel(
 
 @Composable
 private fun StatusText(text: String) {
-    val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
+    val muted =if (JewelTheme.isDark) Color(0xFF6F737A) else Color(0xFF7A7E87)
     Text(text, color = muted)
 }
 

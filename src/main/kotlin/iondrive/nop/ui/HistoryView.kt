@@ -105,7 +105,7 @@ private fun CommitList(repo: GitRepo, tab: Tab.History, commits: List<CommitInfo
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize().padding(end = 10.dp),
+            modifier = Modifier.fillMaxSize().padding(end = 8.dp),
         ) {
             for (c in commits) {
                 item(key = c.sha) {
@@ -133,7 +133,7 @@ private fun CommitList(repo: GitRepo, tab: Tab.History, commits: List<CommitInfo
         VerticalScrollbar(
             adapter = rememberScrollbarAdapter(listState),
             style = NopScrollbarStyle,
-            modifier = Modifier.align(Alignment.CenterEnd).width(10.dp).fillMaxHeight(),
+            modifier = Modifier.align(Alignment.CenterEnd).width(8.dp).fillMaxHeight(),
         )
     }
 }

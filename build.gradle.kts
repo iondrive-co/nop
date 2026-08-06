@@ -126,11 +126,24 @@ tasks.register("installDesktopEntry") {
         size to file("$home/.local/share/icons/hicolor/${size}x${size}/apps/iondrive.nop.png")
     }
     val fallbackIcon = file("$home/.local/share/icons/iondrive.nop.png")
+    // Only the main checkout gets to own the launcher. A linked git worktree (an agent's throwaway
+    // checkout) builds a distributable that is deleted along with the worktree, and Exec= would be
+    // left pointing at a path that no longer exists. A .desktop entry whose binary is missing is
+    // rejected wholesale by GLib — so the dock loses nop's name and icon, not just the click,
+    // falling back to a generic tile labelled "iondrive.nop". A linked worktree has .git as a file
+    // (a gitdir: pointer) rather than a directory.
+    val checkout = rootDir
+    val isLinkedWorktree = checkout.resolve(".git").isFile
 
     inputs.dir(distDir)
     outputs.files(desktopFile, fallbackIcon, *themedIcons.map { it.second }.toTypedArray())
 
     doLast {
+        if (isLinkedWorktree) {
+            println("Skipping desktop entry: $checkout is a linked git worktree. Run installDesktopEntry from the main checkout so the launcher points at a distributable that outlives it.")
+            return@doLast
+        }
+
         // Draw the "n" tile at each requested size in a neutral grey, so the launcher icon
         // exists even before any project window picks its tint. Per-window icons override at
         // runtime via Window(icon = …). Java2D keeps this self-contained.

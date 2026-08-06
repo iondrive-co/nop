@@ -67,7 +67,7 @@ import org.jetbrains.jewel.ui.icon.PathIconKey
 import java.io.File
 import java.nio.file.Path
 
-internal val ProjectIconTintDark = Color(0xFFAFB8C4)
+internal val ProjectIconTintDark = Color(0xFF9DA3AB)
 internal val ProjectIconTintLight = Color(0xFF4A5360)
 
 // Leaf (file) rows have no expand chevron and no folder glyph, so without help their label starts
@@ -79,7 +79,7 @@ private val FileRowIndent = 28.dp
 
 // Background wash for the directory row currently under a drag — same accent in both themes so it
 // reads clearly against either panel background.
-private val DropTargetHighlight = Color(0x400A84FF)
+private val DropTargetHighlight = Color(0x403574F0)
 
 // Tree row label colour. The dark theme keeps Jewel's default (null → inherit); the light theme's
 // default ran too pale against the near-white panel, so name a near-black that matches the editor.

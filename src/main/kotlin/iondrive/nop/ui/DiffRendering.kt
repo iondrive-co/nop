@@ -77,21 +77,21 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 // applies to both views at once instead of having to be copied between near-identical files.
 
 // Background tints — muted dark-theme palette.
-internal val INSERT_BG = Color(0x33629755) // green
-internal val DELETE_BG = Color(0x33B35E5E) // red
-internal val CHANGE_BG = Color(0x33547B9D) // blue
-internal val EMPTY_BG = Color(0x14FFFFFF)  // subtle gray (filler for missing side)
-internal val INLINE_WORD_BG = Color(0x66629755)
-internal val INLINE_WORD_BG_OLD = Color(0x66B35E5E)
-internal val GUTTER_FG = Color(0xFF808080)
+internal val INSERT_BG = Color(0x30456E4E)  // Green tint for insertions
+internal val DELETE_BG = Color(0x305E3D40)  // Red tint for deletions
+internal val CHANGE_BG = Color(0x30374F6B)  // Blue tint for changes
+internal val EMPTY_BG = Color(0x0AFFFFFF)   // Very subtle gray for filler
+internal val INLINE_WORD_BG = Color(0x60456E4E)       // Stronger green for inline word changes
+internal val INLINE_WORD_BG_OLD = Color(0x605E3D40)   // Stronger red for deleted words
+internal val GUTTER_FG = Color(0xFF6F737A)
 
 // Saturated marker colours for the scrollbar lane — must read at a glance on the dark panel.
-internal val INSERT_MARK = Color(0xFF7DBE6E)
-internal val DELETE_MARK = Color(0xFFD96B6B)
-internal val CHANGE_MARK = Color(0xFF6FA8DC)
+internal val INSERT_MARK = Color(0xFF5FAD65)
+internal val DELETE_MARK = Color(0xFFE05555)
+internal val CHANGE_MARK = Color(0xFF6B9BD2)
 
 internal val MARKER_LANE_W = 4.dp
-internal val SCROLLBAR_W = 10.dp
+internal val SCROLLBAR_W = 8.dp
 internal val IntrinsicMinHeightLine = 18.dp
 
 /** Breathing room after a line's last character, so text never butts against the centre divider. */
@@ -230,7 +230,7 @@ internal fun Modifier.centredAtX(x: Dp): Modifier = layout { measurable, constra
 /** Body text colour: light grey on the dark theme, near-black on the light theme for contrast. */
 @Composable
 internal fun textColor(): Color =
-    if (JewelTheme.isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
+    if (JewelTheme.isDark) Color(0xFFBCBEC4) else Color(0xFF000000)
 
 internal fun backgroundsFor(row: DiffRow): Pair<Color, Color> = when (row.kind) {
     RowKind.EQUAL -> Color.Transparent to Color.Transparent

@@ -390,7 +390,7 @@ private fun FileEditView(
     }
 
     val isDark = JewelTheme.isDark
-    val fg = if (isDark) androidx.compose.ui.graphics.Color(0xFFA9B7C6) else androidx.compose.ui.graphics.Color(0xFF000000)
+    val fg =if (isDark) androidx.compose.ui.graphics.Color(0xFFBCBEC4) else androidx.compose.ui.graphics.Color(0xFF000000)
     val palette = if (isDark) HighlightPalette.Dark else HighlightPalette.Light
     val tokenize = remember(tab.id) { tokenizerForExtension(tab.file.extension) }
     // Tokenize once per text change, not on every OutputTransformation invocation. The
@@ -708,7 +708,7 @@ private fun FileEditView(
             style = NopScrollbarStyle,
             modifier = Modifier
                 .align(androidx.compose.ui.Alignment.CenterEnd)
-                .width(10.dp)
+                .width(8.dp)
                 .fillMaxHeight(),
         )
     }
