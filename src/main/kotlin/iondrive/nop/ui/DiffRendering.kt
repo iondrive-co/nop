@@ -60,6 +60,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -92,7 +93,6 @@ internal val CHANGE_MARK = Color(0xFF6B9BD2)
 
 internal val MARKER_LANE_W = 4.dp
 internal val SCROLLBAR_W = 8.dp
-internal val IntrinsicMinHeightLine = 18.dp
 
 /** Breathing room after a line's last character, so text never butts against the centre divider. */
 internal val LINE_END_PAD = 4.dp
@@ -104,8 +104,53 @@ private val DIVIDER_GRAB_W = 9.dp
 /** Neither half may be dragged narrower than this, so a gutter always has room to render. */
 private val MIN_HALF_W = 80.dp
 
-/** The face every diff line renders in; callers layer the row's foreground colour on top. */
-internal val DIFF_TEXT_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 12.sp)
+/**
+ * The face every diff line renders in; callers layer the row's foreground colour on top.
+ *
+ * The line height is pinned rather than left to the font's own leading because the editable half of
+ * a diff is a *multi-line* text field: its lines have to land exactly on the rows the other half
+ * draws beside them, and the only way both sides agree is for every diff surface — read-only
+ * paragraph, gutter, editable field — to lay out on the same fixed step. [rememberDiffLineHeightPx]
+ * measures what that step actually comes to and everything else positions off it.
+ */
+internal val DIFF_TEXT_STYLE = TextStyle(
+    fontFamily = NopFonts.Mono,
+    fontSize = 12.sp,
+    lineHeight = 18.sp,
+    // Trim.None keeps the leading on the first and last lines too, so an N-line paragraph is
+    // exactly N steps tall and a one-line cell is exactly one — otherwise the halves would drift
+    // apart by the trimmed half-leading at every block boundary.
+    lineHeightStyle = LineHeightStyle(
+        alignment = LineHeightStyle.Alignment.Center,
+        trim = LineHeightStyle.Trim.None,
+    ),
+)
+
+/**
+ * The exact pixel step between two rendered diff lines, measured from [DIFF_TEXT_STYLE] itself.
+ *
+ * Everything that has to sit on the diff's line grid — row backgrounds, gutter numbers, the height
+ * of a list item, where a hunk's revert chip hangs — is positioned as a multiple of this. Measuring
+ * rather than assuming `18.dp` is what makes the alignment exact: the fixed heights we lay rows out
+ * at and the line height the text engine actually uses are then the same number by construction, on
+ * any display scale, instead of two roundings of it that drift a half-pixel per line.
+ */
+@Composable
+internal fun rememberDiffLineHeightPx(): Float {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    return remember(measurer, density) {
+        val two = measurer.measure(AnnotatedString("A\nA"), DIFF_TEXT_STYLE)
+        (two.getLineTop(1) - two.getLineTop(0)).coerceAtLeast(1f)
+    }
+}
+
+/** [rememberDiffLineHeightPx] as a [Dp], for the per-row renderers that lay out one line at a time. */
+@Composable
+internal fun rememberDiffLineHeight(): Dp {
+    val px = rememberDiffLineHeightPx()
+    return with(LocalDensity.current) { px.toDp() }
+}
 
 // The tokenizer for the file a diff is showing, provided by [DiffView]/[CommitDiffView] and read by
 // the diff halves so the comparison views get the same syntax colouring (and italic comments) as
@@ -232,6 +277,15 @@ internal fun Modifier.centredAtX(x: Dp): Modifier = layout { measurable, constra
 internal fun textColor(): Color =
     if (JewelTheme.isDark) Color(0xFFBCBEC4) else Color(0xFF000000)
 
+/**
+ * The syntax palette every diff surface colours in — the editor's, but with comments lifted clear of
+ * the row tints these views paint behind their text. See [HighlightPalette.DarkDiff] for the
+ * measurements; the short version is that the editor's comment grey is unreadable on a green row.
+ */
+@Composable
+internal fun diffPalette(): HighlightPalette =
+    if (JewelTheme.isDark) HighlightPalette.DarkDiff else HighlightPalette.LightDiff
+
 internal fun backgroundsFor(row: DiffRow): Pair<Color, Color> = when (row.kind) {
     RowKind.EQUAL -> Color.Transparent to Color.Transparent
     RowKind.CHANGE -> CHANGE_BG to CHANGE_BG
@@ -304,6 +358,82 @@ internal fun findHitsFor(rowIndex: Int, side: DiffSide): LineFindHits? {
     )
 }
 
+/**
+ * [findHitsFor] for a whole run of rows at once — rows `[firstRowIndex, firstRowIndex + count)` on
+ * [side], in order. A block renders its lines as one paragraph, so it needs every line's hits up
+ * front to fold them into a single annotated string.
+ */
+@Composable
+internal fun rememberFindHits(firstRowIndex: Int, count: Int, side: DiffSide): List<LineFindHits?> {
+    val search = LocalDiffSearch.current
+    val color = findMatchColor()
+    val activeColor = findActiveMatchColor()
+    return remember(search, firstRowIndex, count, side, color, activeColor) {
+        if (search == null) return@remember List(count) { null }
+        List(count) { i ->
+            val ranges = search.rangesFor(firstRowIndex + i, side)
+            if (ranges.isEmpty()) null
+            else LineFindHits(ranges, search.activeRangeFor(firstRowIndex + i, side), color, activeColor)
+        }
+    }
+}
+
+/**
+ * The lines of one block, folded into a single annotated string — [annotateLine] per line, joined
+ * by newlines so the whole run lays out as one paragraph. A null line is a filler slot on this side
+ * (the other half has a line here and this one doesn't) and contributes an empty line.
+ *
+ * Tokenizing line by line rather than over the joined text keeps the colouring identical to the
+ * per-row renderers, block comments included (see [LocalDiffTokenizer] for why that approximation
+ * is the one we want).
+ */
+internal fun annotateBlock(
+    lines: List<String?>,
+    spans: List<List<InlineSpan>>,
+    highlightColor: Color,
+    tokenize: ((String) -> List<Token>)?,
+    palette: HighlightPalette?,
+    find: List<LineFindHits?>,
+): AnnotatedString = buildAnnotatedString {
+    lines.forEachIndexed { i, line ->
+        if (i > 0) append('\n')
+        val text = line ?: ""
+        append(
+            annotateLine(
+                text,
+                spans.getOrElse(i) { emptyList() },
+                highlightColor,
+                tokenize?.invoke(text) ?: emptyList(),
+                if (tokenize != null) palette else null,
+                find.getOrElse(i) { null },
+            ),
+        )
+    }
+}
+
+/** Paints one full-width band per line of a block, in the row tints [backgrounds] gives. */
+internal fun DrawScope.drawLineBackgrounds(backgrounds: List<Color>, lineHeightPx: Float) {
+    backgrounds.forEachIndexed { i, color ->
+        if (color == Color.Transparent) return@forEachIndexed
+        drawRect(color, Offset(0f, i * lineHeightPx), Size(size.width, lineHeightPx))
+    }
+}
+
+/** The line-number column beside a block: one right-aligned number per line, blanks for fillers. */
+@Composable
+internal fun BlockGutter(numbers: List<Int?>) {
+    // Line numbers sit inside the list-wide SelectionContainer; keep them out of selections so a
+    // copied deletion is source text only, no gutter digits.
+    DisableSelection {
+        BasicText(
+            text = numbers.joinToString("\n") { it?.toString()?.padStart(5) ?: "     " },
+            style = DIFF_TEXT_STYLE.copy(color = GUTTER_FG),
+            softWrap = false,
+            modifier = Modifier.padding(horizontal = 6.dp),
+        )
+    }
+}
+
 @Composable
 internal fun GutterCell(lineNumber: Int?) {
     // Line numbers sit inside the list-wide SelectionContainer; keep them out of selections so a
@@ -347,9 +477,8 @@ internal fun ReadOnlyDiffHalf(
 ) {
     val displayText = text ?: ""
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    // Same syntax palette the editor uses, so a diff colours identically to the file it compares.
     val tokenize = LocalDiffTokenizer.current
-    val palette = if (JewelTheme.isDark) HighlightPalette.Dark else HighlightPalette.Light
+    val palette = diffPalette()
     val tokens = remember(displayText, tokenize) { tokenize?.invoke(displayText) ?: emptyList() }
     val find = findHitsFor(rowIndex, side)
     Row(
@@ -401,8 +530,10 @@ internal fun ReadOnlyDiffHalf(
  *
  * Ctrl+F opens a find bar over the list — the same one the file editor uses. [findTrigger] is the
  * window-level Ctrl+F counter, [searchKey] identifies the tab so switching diffs doesn't inherit
- * the previous one's query, and [rowToItem] maps an index in [rows] to the LazyColumn item that
- * renders it (they differ when the list interleaves non-row items, as the merge view does).
+ * the previous one's query, and [rowLocation] says where an index in [rows] is rendered: which
+ * LazyColumn item, and how far down it. Both parts matter — the merge view interleaves non-row
+ * items so the indices drift apart, and the working-tree diff packs many rows into one item, so
+ * "scroll to the item" is not the same as "scroll to the row".
  */
 @Composable
 internal fun DiffListScaffold(
@@ -414,7 +545,7 @@ internal fun DiffListScaffold(
     overrideColor: (Int) -> Color? = { null },
     searchKey: Any = Unit,
     findTrigger: Int = 0,
-    rowToItem: (Int) -> Int = { it },
+    rowLocation: (Int) -> RowLocation = { RowLocation(it, 0) },
     list: @Composable (Modifier) -> Unit,
 ) {
     val oldScroll = rememberDiffSideScroll(rows, DiffSide.OLD)
@@ -468,11 +599,18 @@ internal fun DiffListScaffold(
     // matches already on screen shouldn't jolt the page. Horizontal position comes from the
     // monospace advance — a match's char offset is its x, no text layout needed.
     val searchScope = rememberCoroutineScope()
+    val lineHeightPx = rememberDiffLineHeightPx()
     suspend fun revealMatch(index: Int) {
         val m = matches.getOrNull(index) ?: return
-        val item = rowToItem(m.rowIndex)
-        if (listState.layoutInfo.visibleItemsInfo.none { it.index == item }) {
-            listState.scrollToItem((item - CONTEXT_ROWS).coerceAtLeast(0))
+        val loc = rowLocation(m.rowIndex)
+        // An item can hold hundreds of rows, so "the item is on screen" doesn't mean the row is —
+        // find where the row itself lands in the viewport and scroll only when it's outside it.
+        val info = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == loc.item }
+        val rowTop = info?.let { it.offset + loc.offsetPx }
+        val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+        if (rowTop == null || rowTop < 0 || rowTop + lineHeightPx > viewportHeight) {
+            val context = (CONTEXT_ROWS * lineHeightPx).toInt()
+            listState.scrollToItem(loc.item, (loc.offsetPx - context).coerceAtLeast(0))
         }
         val sideScroll = if (m.side == DiffSide.OLD) oldScroll else newScroll
         val viewport = sideScroll.state.viewportSize
@@ -547,6 +685,9 @@ internal fun DiffListScaffold(
 
 /** Rows of context left above a match when find has to scroll it into view. */
 private const val CONTEXT_ROWS = 3
+
+/** Where a diff row is rendered: the list item that holds it, and its offset down that item. */
+internal data class RowLocation(val item: Int, val offsetPx: Int)
 
 /**
  * The invisible band you grab to move the split. It's wider than the hairline it sits on so the

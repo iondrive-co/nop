@@ -3,7 +3,6 @@ package iondrive.nop.ui
 import iondrive.nop.diff.DiffRow
 import iondrive.nop.diff.RowKind
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -22,46 +21,173 @@ class DiffViewTest {
     private fun delete(old: String, oldN: Int) =
         DiffRow(RowKind.DELETE, old, null, emptyList(), emptyList(), oldN, null)
 
+    /** Replace the lines a block owns, the way its write-back does, so spans read as edits here. */
+    private fun replaceLines(full: String, startLine: Int, count: Int, text: String): String {
+        val span = lineSpanOf(full, startLine, count) ?: return full
+        return full.substring(0, span.start) + text + full.substring(span.endExclusive)
+    }
+
     @Test
-    fun `replaceLine swaps a single line in the middle`() {
+    fun `lineSpanOf covers one line without its newline`() {
         val full = "alpha\nbeta\ngamma\n"
-        assertEquals("alpha\nBETA\ngamma\n", replaceLine(full, 2, "BETA"))
+        val span = lineSpanOf(full, 2, 1)!!
+        assertEquals("beta", full.substring(span.start, span.endExclusive))
     }
 
     @Test
-    fun `replaceLine on the first line`() {
-        val full = "alpha\nbeta\n"
-        assertEquals("ALPHA\nbeta\n", replaceLine(full, 1, "ALPHA"))
+    fun `lineSpanOf covers a run of lines and the newlines between them`() {
+        val full = "alpha\nbeta\ngamma\n"
+        val span = lineSpanOf(full, 1, 2)!!
+        assertEquals("alpha\nbeta", full.substring(span.start, span.endExclusive))
     }
 
     @Test
-    fun `replaceLine preserves the trailing blank produced by a final newline`() {
-        val full = "alpha\nbeta\n"
-        // split('\n') on "alpha\nbeta\n" yields ["alpha","beta",""], so the file's final newline
-        // round-trips. Verify we don't lose it when patching line 1.
-        val patched = replaceLine(full, 1, "alpha")
-        assertEquals(full, patched)
+    fun `lineSpanOf reaches the trailing empty line a final newline produces`() {
+        // "a\nb\n" splits to [a, b, ""], so line 3 exists and is empty — replacing lines 1..3 has
+        // to be able to drop or keep the file's final newline.
+        val full = "a\nb\n"
+        val span = lineSpanOf(full, 3, 1)!!
+        assertEquals(4, span.start)
+        assertEquals(4, span.endExclusive)
     }
 
     @Test
-    fun `replaceLine returns same instance when the line already matches`() {
-        val full = "alpha\nbeta\n"
-        val patched = replaceLine(full, 2, "beta")
-        assertSame(full, patched, "no-op edits must not allocate")
+    fun `lineSpanOf is null past the end and for nonsense input`() {
+        val full = "alpha\nbeta"
+        assertEquals(null, lineSpanOf(full, 3, 1))
+        assertEquals(null, lineSpanOf(full, 2, 2))
+        assertEquals(null, lineSpanOf(full, 0, 1))
+        assertEquals(null, lineSpanOf(full, 1, 0))
     }
 
     @Test
-    fun `replaceLine ignores out-of-range line numbers`() {
-        val full = "alpha\nbeta\n"
-        assertSame(full, replaceLine(full, 0, "x"))
-        assertSame(full, replaceLine(full, 99, "x"))
-        assertSame(full, replaceLine(full, -1, "x"))
+    fun `replacing a block's span swaps exactly its lines`() {
+        val full = "alpha\nbeta\ngamma\n"
+        assertEquals("alpha\nBETA\ngamma\n", replaceLines(full, 2, 1, "BETA"))
+        assertEquals("ALPHA\nbeta\ngamma\n", replaceLines(full, 1, 1, "ALPHA"))
+        // The file's final newline round-trips: line 4 is the empty trailer and stays put.
+        assertEquals(full, replaceLines(full, 1, 3, "alpha\nbeta\ngamma"))
     }
 
     @Test
-    fun `replaceLine on a single-line file without a trailing newline`() {
-        val full = "only"
-        assertEquals("changed", replaceLine(full, 1, "changed"))
+    fun `replacing a block's span can grow and shrink the file`() {
+        val full = "alpha\nbeta\ngamma\n"
+        assertEquals("alpha\nbe\nta\ngamma\n", replaceLines(full, 2, 1, "be\nta"))
+        assertEquals("alphabeta\ngamma\n", replaceLines(full, 1, 2, "alphabeta"))
+    }
+
+    @Test
+    fun `linesAt reads back the lines a block stands for`() {
+        val full = "alpha\nbeta\ngamma\n"
+        assertEquals("beta\ngamma", linesAt(full, 2, 2))
+        assertEquals("alpha", linesAt(full, 1, 1))
+        assertEquals(null, linesAt(full, 3, 3))
+    }
+
+    @Test
+    fun `lineCountOf counts the empty line a trailing newline leaves`() {
+        assertEquals(1, lineCountOf(""))
+        assertEquals(1, lineCountOf("alpha"))
+        assertEquals(2, lineCountOf("alpha\n"))
+        assertEquals(3, lineCountOf("alpha\nbeta\n"))
+    }
+
+    @Test
+    fun `lineIndexOf and lineStartOf locate an offset`() {
+        val text = "alpha\nbeta\ngamma"
+        assertEquals(0, lineIndexOf(text, 0))
+        assertEquals(0, lineIndexOf(text, 5)) // end of "alpha", before the newline
+        assertEquals(1, lineIndexOf(text, 6)) // start of "beta"
+        assertEquals(2, lineIndexOf(text, text.length))
+        assertEquals(0, lineStartOf(text, 0))
+        assertEquals(6, lineStartOf(text, 1))
+        assertEquals(11, lineStartOf(text, 2))
+    }
+
+    @Test
+    fun `offsetOfLineCol clamps the column to its own line`() {
+        val text = "alpha\nbeta\ngamma"
+        assertEquals(8, offsetOfLineCol(text, 1, 2))
+        // Int.MAX_VALUE is how "put the caret at the end of that line" is asked for.
+        assertEquals(10, offsetOfLineCol(text, 1, Int.MAX_VALUE))
+        assertEquals(6, offsetOfLineCol(text, 1, -4))
+        assertEquals(text.length, offsetOfLineCol(text, 9, 0))
+    }
+
+    @Test
+    fun `diffBlocks keeps one contiguous run of working lines together`() {
+        // Nothing deleted, so the whole file is one block: selecting and pasting spans all of it.
+        val rows = listOf(equal("a", 1), change("b", "B", 2, 2), insert("c", 3))
+        assertEquals(listOf(DiffBlock(0..2, editable = true)), diffBlocks(rows, editable = true))
+    }
+
+    @Test
+    fun `diffBlocks splits where the working side has no line`() {
+        // A deleted row has nothing on the working side, so the buffer isn't contiguous across it.
+        val rows = listOf(equal("a", 1), delete("b", 2), delete("c", 3), equal("d", 2))
+        assertEquals(
+            listOf(
+                DiffBlock(0..0, editable = true),
+                DiffBlock(1..2, editable = false),
+                DiffBlock(3..3, editable = true),
+            ),
+            diffBlocks(rows, editable = true),
+        )
+    }
+
+    @Test
+    fun `diffBlocks caps a long run so a big file stays lazy`() {
+        val rows = (1..7).map { equal("line $it", it) }
+        assertEquals(
+            listOf(
+                DiffBlock(0..2, editable = true),
+                DiffBlock(3..5, editable = true),
+                DiffBlock(6..6, editable = true),
+            ),
+            diffBlocks(rows, editable = true, maxLines = 3),
+        )
+    }
+
+    @Test
+    fun `diffBlocks marks everything display-only when there is no buffer`() {
+        // A removed file has no working copy to edit; the blocks still group, but none is editable.
+        val rows = listOf(equal("a", 1), delete("b", 2))
+        assertEquals(
+            listOf(DiffBlock(0..0, editable = false), DiffBlock(1..1, editable = false)),
+            diffBlocks(rows, editable = false),
+        )
+    }
+
+    @Test
+    fun `diffBlocks keeps a boundary at the block holding the caret`() {
+        // Typing can make a line pair up with HEAD where it didn't before, closing the gap that
+        // separated two blocks. Without the forced split the lower block — the one being typed into
+        // — would be absorbed, taking its text field, caret and focus out of the list mid-word.
+        val rows = listOf(equal("a", 1), change("b", "B", 2, 2), equal("c", 3))
+        assertEquals(listOf(DiffBlock(0..2, editable = true)), diffBlocks(rows, editable = true))
+        assertEquals(
+            listOf(DiffBlock(0..0, editable = true), DiffBlock(1..2, editable = true)),
+            diffBlocks(rows, editable = true, splitAtLine = 2),
+        )
+    }
+
+    @Test
+    fun `diffBlocks ignores a caret line that no longer starts anything`() {
+        // The line was deleted, or never had a working side: nothing to pin, so group as usual.
+        val rows = listOf(equal("a", 1), equal("b", 2))
+        val natural = diffBlocks(rows, editable = true)
+        assertEquals(natural, diffBlocks(rows, editable = true, splitAtLine = 99))
+        // Deletion rows carry a null line number, which must not be read as "matches null".
+        val withDelete = listOf(equal("a", 1), delete("b", 2), delete("c", 3))
+        assertEquals(
+            listOf(DiffBlock(0..0, editable = true), DiffBlock(1..2, editable = false)),
+            diffBlocks(withDelete, editable = true),
+        )
+    }
+
+    @Test
+    fun `diffBlocks is empty for an empty diff`() {
+        assertTrue(diffBlocks(emptyList(), editable = true).isEmpty())
     }
 
     @Test
@@ -110,42 +236,20 @@ class DiffViewTest {
     }
 
     @Test
-    fun `applyStructuralEdit splits a line at the caret`() {
-        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 2, 2, 2, StructuralEdit.SPLIT)!!
-        assertEquals("alpha\nbe\nta\ngamma", text)
-        assertEquals(3 to 0, focus)
-    }
-
-    @Test
-    fun `applyStructuralEdit split drops the selected range`() {
-        // Caret had "cd" selected in "abcdef"; Enter replaces the selection with the line break.
-        val (text, focus) = applyStructuralEdit("abcdef", 1, 2, 4, StructuralEdit.SPLIT)!!
-        assertEquals("ab\nef", text)
-        assertEquals(2 to 0, focus)
-    }
-
-    @Test
-    fun `applyStructuralEdit split at end of line opens a blank line below`() {
-        val (text, focus) = applyStructuralEdit("alpha\nbeta", 1, 5, 5, StructuralEdit.SPLIT)!!
-        assertEquals("alpha\n\nbeta", text)
-        assertEquals(2 to 0, focus)
-    }
-
-    @Test
     fun `applyStructuralEdit merges a line into the one above`() {
-        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 2, 0, 0, StructuralEdit.MERGE_PREV)!!
+        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 2, StructuralEdit.MERGE_PREV)!!
         assertEquals("alphabeta\ngamma", text)
         assertEquals(1 to 5, focus)
     }
 
     @Test
     fun `applyStructuralEdit merge-prev is a no-op on the first line`() {
-        assertEquals(null, applyStructuralEdit("alpha\nbeta", 1, 0, 0, StructuralEdit.MERGE_PREV))
+        assertEquals(null, applyStructuralEdit("alpha\nbeta", 1, StructuralEdit.MERGE_PREV))
     }
 
     @Test
     fun `applyStructuralEdit pulls the next line up`() {
-        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 1, 0, 0, StructuralEdit.MERGE_NEXT)!!
+        val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 1, StructuralEdit.MERGE_NEXT)!!
         assertEquals("alphabeta\ngamma", text)
         assertEquals(1 to 5, focus)
     }
@@ -153,20 +257,34 @@ class DiffViewTest {
     @Test
     fun `applyStructuralEdit merge-next on the last real line drops the trailing newline`() {
         // "a\nb\n" splits to [a, b, ""]; Delete at the end of "b" joins the empty trailer onto it.
-        val (text, focus) = applyStructuralEdit("a\nb\n", 2, 0, 0, StructuralEdit.MERGE_NEXT)!!
+        val (text, focus) = applyStructuralEdit("a\nb\n", 2, StructuralEdit.MERGE_NEXT)!!
         assertEquals("a\nb", text)
         assertEquals(2 to 1, focus)
     }
 
     @Test
     fun `applyStructuralEdit merge-next is a no-op past the end`() {
-        assertEquals(null, applyStructuralEdit("alpha\nbeta", 2, 0, 0, StructuralEdit.MERGE_NEXT))
+        assertEquals(null, applyStructuralEdit("alpha\nbeta", 2, StructuralEdit.MERGE_NEXT))
     }
 
     @Test
     fun `applyStructuralEdit ignores out-of-range lines`() {
-        assertEquals(null, applyStructuralEdit("alpha", 0, 0, 0, StructuralEdit.SPLIT))
-        assertEquals(null, applyStructuralEdit("alpha", 9, 0, 0, StructuralEdit.SPLIT))
+        assertEquals(null, applyStructuralEdit("alpha", 0, StructuralEdit.MERGE_PREV))
+        assertEquals(null, applyStructuralEdit("alpha", 9, StructuralEdit.MERGE_NEXT))
+    }
+
+    @Test
+    fun `merging across a block boundary joins the lines the diff separated`() {
+        // HEAD had a line the working file doesn't, so the diff splits these lines into two blocks.
+        // Backspace at the top of the lower one still has to join it onto the line above it in the
+        // *file* — the deleted line isn't there to get in the way.
+        val rows = listOf(equal("keep", 1), delete("gone", 2), equal("next", 2))
+        val blocks = diffBlocks(rows, editable = true)
+        assertEquals(3, blocks.size)
+        val lowerBlockStart = rows[blocks[2].range.first].newLineNumber!!
+        val (text, focus) = applyStructuralEdit("keep\nnext\n", lowerBlockStart, StructuralEdit.MERGE_PREV)!!
+        assertEquals("keepnext\n", text)
+        assertEquals(1 to 4, focus)
     }
 
     @Test

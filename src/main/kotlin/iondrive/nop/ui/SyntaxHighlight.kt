@@ -64,6 +64,17 @@ data class HighlightPalette(
             emphasis = SpanStyle(color = Color(0xFF9E4585)), // Magenta emphasis
             error = SpanStyle(color = Color(0xFFFF0000)),    // Red errors
         )
+
+        // Diff variants. A diff row paints a colour tint behind its text (see DiffRendering's
+        // INSERT_BG/INLINE_WORD_BG), and green is the luminous one: the editor's comment grey lands
+        // at 2.9:1 over the dark insert tint and 2.5:1 over the light one, dropping to 2.3:1 / 1.9:1
+        // over the stronger inline word-change green — far below the rest of the palette, which
+        // clears ~4:1 there, and the reason a changed comment reads as a smudge. Only the comment
+        // colour moves; every other token already sits in that ~4:1 band over the tints, and pushing
+        // comments past it would make them the *highest*-contrast token on the row, which is
+        // backwards. The editor keeps IntelliJ's greys — it has no tint to fight.
+        val DarkDiff = Dark.copy(comment = Dark.comment.copy(color = Color(0xFFA0A3AB)))
+        val LightDiff = Light.copy(comment = Light.comment.copy(color = Color(0xFF4A4D52)))
     }
 }
 

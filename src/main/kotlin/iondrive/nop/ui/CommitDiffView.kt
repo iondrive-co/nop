@@ -143,7 +143,7 @@ private fun ReadOnlyDiffList(
 private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
     val (oldBg, newBg) = backgroundsFor(row)
     Row(
-        modifier = Modifier.fillMaxWidth().height(IntrinsicMinHeightLine),
+        modifier = Modifier.fillMaxWidth().height(rememberDiffLineHeight()),
         horizontalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         ReadOnlyDiffHalf(
