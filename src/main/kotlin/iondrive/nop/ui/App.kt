@@ -74,6 +74,7 @@ fun App(
     replaceInFileTrigger: Int = 0,
     jumpToSourceTrigger: Int = 0,
     refreshTrigger: Int = 0,
+    saveTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -413,18 +414,30 @@ fun App(
     // we subscribe to changes, and we drop the first emission so the restore itself doesn't
     // immediately trigger a no-op save.
     val tabsFile = remember(rootPath) { Settings.projectDataDir(rootPath).resolve("tabs.tsv") }
+    // Guards the restore against the flush below: switching projects tears this composition down and
+    // builds the new project's, and the outgoing flush must not race the incoming restore's own read.
+    var tabsRestored by remember(rootPath) { mutableStateOf(false) }
     LaunchedEffect(rootPath, tabsState) {
         val saved = withContext(Dispatchers.IO) { TabsPersistence.load(tabsFile) }
         TabsPersistence.restore(tabsState, saved, repo?.rootDir?.toFile())
-        snapshotFlow { tabsState.tabs.map { it.id } to tabsState.selectedId }
+        tabsRestored = true
+        // Groups are part of the strip's shape, so renaming, collapsing, reordering or re-homing one
+        // has to trip the save the same way opening a tab does.
+        snapshotFlow { tabsState.snapshot() }
             .drop(1)
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest {
-                val snapshotTabs = tabsState.tabs.toList()
-                val selectedId = tabsState.selectedId
-                withContext(Dispatchers.IO) { TabsPersistence.save(tabsFile, snapshotTabs, selectedId) }
+            .collectLatest { snapshot ->
+                withContext(Dispatchers.IO) { TabsPersistence.save(tabsFile, snapshot) }
             }
+    }
+    // The debounced save above dies with this composition, so anything done in the half-second before
+    // switching projects (or closing the window) would never reach disk — which is how a group made
+    // and then switched away from came back missing. Write the strip out once more on the way out.
+    // Synchronous on purpose: a coroutine launched here would be cancelled by the same teardown, and
+    // the file is a handful of lines.
+    DisposableEffect(rootPath, tabsFile) {
+        onDispose { if (tabsRestored) TabsPersistence.save(tabsFile, tabsState.snapshot()) }
     }
 
     // Close any open tabs that point at the given file or anything under it (when it's a dir).
@@ -615,6 +628,7 @@ fun App(
                                 onDiffTopLine = { diffTopLine = it },
                                 findInFileTrigger = findInFileTrigger,
                                 replaceInFileTrigger = replaceInFileTrigger,
+                                saveTrigger = saveTrigger,
                                 blameEnabled = blameEnabled,
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },

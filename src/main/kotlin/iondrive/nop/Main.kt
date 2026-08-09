@@ -347,6 +347,8 @@ private fun ApplicationScope.WorkspaceWindow(
     var jumpToSourceTrigger by remember { mutableStateOf(0) }
     // F5 reloads what's in front: git status, plus the active tab's content from disk.
     var refreshTrigger by remember { mutableStateOf(0) }
+    // Ctrl+S writes the active editor's buffer now, rather than waiting out the autosave debounce.
+    var saveTrigger by remember { mutableStateOf(0) }
 
     Window(
         state = windowState,
@@ -384,6 +386,17 @@ private fun ApplicationScope.WorkspaceWindow(
                 event.key == Key.R
             ) {
                 replaceInFileTrigger += 1
+                return@Window true
+            }
+            // Ctrl+S saves the active editor immediately. Autosave already writes on a debounce,
+            // so this is mostly about the answer it gives back: a save the user asked for reports
+            // when it can't write, where the silent one behind it never could. Consumed so the
+            // keystroke can't also reach the text field underneath.
+            if (event.type == KeyEventType.KeyDown &&
+                event.isCtrlPressed && !event.isShiftPressed && !event.isAltPressed &&
+                event.key == Key.S
+            ) {
+                saveTrigger += 1
                 return@Window true
             }
             // Plain F4 jumps from the active diff to its working file. Exclude Alt so Alt+F4
@@ -446,6 +459,7 @@ private fun ApplicationScope.WorkspaceWindow(
                                 replaceInFileTrigger = replaceInFileTrigger,
                                 jumpToSourceTrigger = jumpToSourceTrigger,
                                 refreshTrigger = refreshTrigger,
+                                saveTrigger = saveTrigger,
                             )
                         }
                     } else {

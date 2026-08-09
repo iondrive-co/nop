@@ -1,6 +1,7 @@
 package iondrive.nop.ui
 
 import androidx.compose.ui.text.TextRange
+import iondrive.nop.diff.ConflictParser
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotSame
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.writeText
 
@@ -435,5 +437,156 @@ class FileEditStoreTest {
 
         assertEquals("c2\n", cleanEdit.state.text.toString(), "clean buffer reloaded from disk")
         assertEquals("d-local\n", dirtyEdit.state.text.toString(), "dirty buffer kept the user's edits")
+    }
+
+    // ---- The silent-stall bug: a buffer blocked by an external change never saved again, and
+    // ---- nothing on screen said so. These pin down the signal and the three ways out.
+
+    @Test
+    fun `a blocked save publishes the block instead of failing silently`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        assertNull(edit.saveBlock, "nothing wrong yet")
+
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        f.writeText("theirs\n")
+
+        edit.save()
+
+        assertEquals(SaveBlock.Conflict("theirs\n"), edit.saveBlock)
+    }
+
+    @Test
+    fun `the block persists across further typing — this is the stall the user hit`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        f.writeText("theirs\n")
+
+        repeat(20) { i ->
+            edit.state.edit { replace(0, length, "mine-$i\n") }
+            edit.markUserEdit()
+            assertTrue(autosaveTick(edit) is SaveResult.ExternalChange, "tick $i")
+        }
+
+        assertEquals("theirs\n", f.readText(), "nothing typed reached disk — as before")
+        // …but now the editor has something to show for it, for the whole time it lasts.
+        assertTrue(edit.saveBlock is SaveBlock.Conflict, "and the user can see why")
+    }
+
+    @Test
+    fun `the block clears itself when disk comes back into agreement`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        f.writeText("theirs\n")
+        edit.save()
+        assertTrue(edit.saveBlock is SaveBlock.Conflict)
+
+        // The other writer puts the file back (a checkout undone, an agent reverting itself).
+        f.writeText("base\n")
+        val result = edit.save()
+
+        assertEquals(SaveResult.Saved, result)
+        assertNull(edit.saveBlock, "no click needed — the banner goes away on its own")
+        assertEquals("mine\n", f.readText())
+    }
+
+    @Test
+    fun `keep mine overwrites the external version and unblocks`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        f.writeText("theirs\n")
+        edit.save()
+
+        val result = edit.overwriteDisk()
+
+        assertEquals(SaveResult.Saved, result)
+        assertEquals("mine\n", f.readText())
+        assertNull(edit.saveBlock)
+        assertFalse(edit.hasUserEdit, "the edit has landed; nothing pending")
+    }
+
+    @Test
+    fun `take theirs discards the buffer edits and unblocks`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        f.writeText("theirs\n")
+        edit.save()
+
+        edit.adoptDiskText("theirs\n")
+
+        assertEquals("theirs\n", edit.state.text.toString())
+        assertEquals("theirs\n", f.readText(), "disk untouched")
+        assertNull(edit.saveBlock)
+    }
+
+    @Test
+    fun `merge keeps both sides' edits and the next save writes the result`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("one\ntwo\nthree\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        // The user rewrites the first line…
+        edit.state.edit { replace(0, length, "ONE\ntwo\nthree\n") }
+        edit.markUserEdit()
+        // …while an agent rewrites the last.
+        f.writeText("one\ntwo\nTHREE\n")
+        edit.save()
+        val block = edit.saveBlock as SaveBlock.Conflict
+
+        val conflicts = edit.mergeDiskIntoBuffer(block.diskText)
+
+        assertEquals(0, conflicts, "edits to different lines merge cleanly")
+        assertEquals("ONE\ntwo\nTHREE\n", edit.state.text.toString())
+        assertNull(edit.saveBlock)
+        assertTrue(edit.hasUserEdit, "the merged buffer is user work and must still be written")
+
+        // The compare-and-swap is unstuck: the baseline is what disk actually holds now.
+        assertEquals(SaveResult.Saved, edit.save())
+        assertEquals("ONE\ntwo\nTHREE\n", f.readText(), "both edits are on disk")
+    }
+
+    @Test
+    fun `merge marks genuinely overlapping edits instead of picking a winner`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("a\nb\nc\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "a\nMINE\nc\n") }
+        edit.markUserEdit()
+        f.writeText("a\nTHEIRS\nc\n")
+        edit.save()
+
+        val conflicts = edit.mergeDiskIntoBuffer((edit.saveBlock as SaveBlock.Conflict).diskText)
+
+        assertEquals(1, conflicts)
+        val text = edit.state.text.toString()
+        assertTrue(text.contains("MINE"), "our version survives")
+        assertTrue(text.contains("THEIRS"), "theirs does too")
+        assertTrue(ConflictParser.hasConflicts(text), "left as a resolvable conflict region")
+    }
+
+    @Test
+    fun `a write that throws is reported, not propagated — it used to kill autosave outright`(
+        @TempDir tmp: Path,
+    ) {
+        // A path that can't be written: writeText on a directory throws. Standing in for the real
+        // cases (read-only file, full disk, deleted parent), which are awkward to force portably.
+        val blocked = tmp.resolve("wedged").also { Files.createDirectory(it) }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(blocked))
+        edit.state.edit { replace(0, length, "content\n") }
+        edit.markUserEdit()
+
+        // The whole point: this returns rather than throwing. An exception here escaped the
+        // autosave's collect{} and cancelled the coroutine, so the tab silently stopped saving.
+        val result = edit.save()
+
+        assertTrue(result is SaveResult.Failed, "reported as a result, got $result")
+        assertTrue(edit.saveBlock is SaveBlock.Failed, "and shown to the user")
+        assertTrue(edit.hasUserEdit, "the edit is still pending, not marked saved")
     }
 }

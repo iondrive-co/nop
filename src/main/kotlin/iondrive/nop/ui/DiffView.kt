@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -123,6 +124,7 @@ fun DiffView(
     onSplitRatioChange: (Float) -> Unit = {},
     reloadKey: Int = 0,
     findTrigger: Int = 0,
+    saveTrigger: Int = 0,
 ) {
     val workingFile = remember(tab.id) { File(tab.repoRoot, tab.change.path) }
     // Resolve a per-file FileEdit via FileEditStore — same instance an open Tab.FileView would
@@ -225,6 +227,15 @@ fun DiffView(
         LaunchedEffect(edit) {
             snapshotFlow { edit.savedText }.drop(1).collect { bufferReset++ }
         }
+
+        // Ctrl+S from a diff tab saves the working side, same as it would from the file tab —
+        // it's the same buffer. Baselined so arriving on this tab doesn't fire a save by itself.
+        val saveTriggerBaseline = remember(tab.id) { saveTrigger }
+        LaunchedEffect(saveTrigger) {
+            if (saveTrigger > saveTriggerBaseline) {
+                if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
+            }
+        }
     }
 
     // Resolve conflict [regionId] by copying ours / theirs / both into the working buffer. We
@@ -243,6 +254,10 @@ fun DiffView(
 
     val tokenize = remember(tab.id) { tokenizerForExtension(workingFile.extension) }
     CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
+    Column(modifier = Modifier.fillMaxSize()) {
+    // The working side of a diff is an editor like any other, and stops reaching disk the same way.
+    if (edit != null) SaveStatusStrip(edit, onSaved = savedCallback)
+    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
     when {
         loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
             Text("Loading diff…")
@@ -319,6 +334,8 @@ fun DiffView(
                 findTrigger = findTrigger,
             )
         }
+    }
+    }
     }
     }
 }

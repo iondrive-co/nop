@@ -24,6 +24,10 @@ import java.nio.file.Path
  * `<TAB>sha<TAB>changeType` for commit diffs. One tab per line; unparseable lines are skipped so a
  * partial corruption doesn't wipe the strip. [path] is absolute except for a commit diff, where it
  * is the repo-relative path git knows the file by.
+ *
+ * Tab groups are written as `group<TAB>name<TAB>active?<TAB>collapsed?` rows and own the tab rows
+ * that follow them, the same way a group header owns the tabs to its right on screen. A file with no
+ * group rows is one written by a pre-groups build: everything in it restores into the default group.
  */
 data class SavedTab(
     val kind: String,
@@ -31,26 +35,45 @@ data class SavedTab(
     val selected: Boolean,
     val sha: String? = null,
     val changeType: String? = null,
+    val collapsed: Boolean = false,
+)
+
+/**
+ * Immutable copy of everything the strip persists, taken on the UI thread by
+ * [TabsState.snapshot] so the write itself can run on an IO thread.
+ */
+data class TabsSnapshot(
+    val groups: List<TabGroup>,
+    val tabs: List<Tab>,
+    val groupOf: Map<String, Long>,
+    val selectedId: String?,
+    val activeGroupId: Long,
 )
 
 object TabsPersistence {
     private const val KIND_FILE = "file"
     private const val KIND_HISTORY = "history"
     private const val KIND_COMMITDIFF = "commitdiff"
+    private const val KIND_GROUP = "group"
 
-    fun save(target: Path, tabs: List<Tab>, selectedId: String?) {
-        val rows = tabs.mapNotNull { tab ->
-            val selected = if (tab.id == selectedId) "1" else "0"
-            val (kind, file) = when (tab) {
-                is Tab.FileView -> KIND_FILE to tab.file
-                is Tab.History -> KIND_HISTORY to tab.file
-                // Repo-relative path, and the two extra columns the diff can't be rebuilt without.
-                is Tab.CommitDiff -> return@mapNotNull listOf(
-                    KIND_COMMITDIFF, tab.file.path, selected, tab.sha, tab.file.changeType.name,
-                ).joinToString("\t")
-                is Tab.Diff, is Tab.Terminal -> return@mapNotNull null
+    fun save(target: Path, snapshot: TabsSnapshot) {
+        val rows = buildList {
+            for (group in snapshot.groups) {
+                add(
+                    listOf(
+                        KIND_GROUP,
+                        // The row format is one line of tab-separated fields, so a name carrying
+                        // either is flattened rather than allowed to split the row in two.
+                        group.name.replace('\t', ' ').replace('\n', ' ').replace('\r', ' '),
+                        if (group.id == snapshot.activeGroupId) "1" else "0",
+                        if (group.collapsed) "1" else "0",
+                    ).joinToString("\t"),
+                )
+                for (tab in snapshot.tabs) {
+                    if (snapshot.groupOf[tab.id] != group.id) continue
+                    add(encodeTab(tab, snapshot.selectedId) ?: continue)
+                }
             }
-            "$kind\t${file.absolutePath}\t$selected"
         }
         runCatching {
             Files.createDirectories(target.parent)
@@ -58,6 +81,21 @@ object TabsPersistence {
             // the load side. An empty file loads as an empty list.
             Files.writeString(target, rows.joinToString("\n"))
         }
+    }
+
+    /** One tab's row, or null for the kinds that can't outlive the session. */
+    private fun encodeTab(tab: Tab, selectedId: String?): String? {
+        val selected = if (tab.id == selectedId) "1" else "0"
+        val (kind, file) = when (tab) {
+            is Tab.FileView -> KIND_FILE to tab.file
+            is Tab.History -> KIND_HISTORY to tab.file
+            // Repo-relative path, and the two extra columns the diff can't be rebuilt without.
+            is Tab.CommitDiff -> return listOf(
+                KIND_COMMITDIFF, tab.file.path, selected, tab.sha, tab.file.changeType.name,
+            ).joinToString("\t")
+            is Tab.Diff, is Tab.Terminal -> return null
+        }
+        return "$kind\t${file.absolutePath}\t$selected"
     }
 
     fun load(source: Path): List<SavedTab> {
@@ -73,6 +111,8 @@ object TabsPersistence {
             val selected = parts.getOrNull(2) == "1"
             when (kind) {
                 KIND_FILE, KIND_HISTORY -> out += SavedTab(kind, path, selected)
+                // A group's "selected" column means "this is the group new tabs open into".
+                KIND_GROUP -> out += SavedTab(kind, path, selected, collapsed = parts.getOrNull(3) == "1")
                 KIND_COMMITDIFF -> {
                     // Both extra columns are mandatory for this kind — a line missing either can't
                     // name a diff, so it's dropped rather than guessed at.
@@ -92,14 +132,29 @@ object TabsPersistence {
      * tab. Commit diffs are exempt — they read out of history, not the working tree.
      * Falls back to whichever tab was selected when saving; if that one didn't survive the
      * filter, leaves the last remaining tab selected (matching [TabsState.open]'s contract).
+     *
+     * Each tab goes back into the group whose row precedes it. Collapsed state is applied last,
+     * because opening a tab unfolds the group it lands in.
      */
     fun restore(
         state: TabsState,
         saved: List<SavedTab>,
         repoRoot: File?,
     ) {
+        val groupRows = saved.filter { it.kind == KIND_GROUP }
+        // No group rows means a file from a pre-groups build: everything restores into the default.
+        val groups = if (groupRows.isEmpty()) state.groups else state.replaceGroups(groupRows.map { it.path })
         var preferredSelectedId: String? = null
+        var activeGroupId = groups.firstOrNull()?.id
+        var groupIdx = -1
         for (s in saved) {
+            if (s.kind == KIND_GROUP) {
+                groupIdx++
+                val group = groups.getOrNull(groupIdx) ?: continue
+                state.selectGroup(group.id)
+                if (s.selected) activeGroupId = group.id
+                continue
+            }
             val tab: Tab = when (s.kind) {
                 KIND_FILE -> Tab.FileView(File(s.path).takeIf { it.isFile } ?: continue)
                 // History on a directory is valid (e.g. log for an entire role), so allow either
@@ -126,5 +181,9 @@ object TabsPersistence {
             if (s.selected) preferredSelectedId = tab.id
         }
         if (preferredSelectedId != null) state.select(preferredSelectedId)
+        groupRows.forEachIndexed { i, row ->
+            if (row.collapsed) groups.getOrNull(i)?.let { state.setCollapsed(it.id, collapsed = true) }
+        }
+        activeGroupId?.let { state.selectGroup(it) }
     }
 }

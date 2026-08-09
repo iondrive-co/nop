@@ -66,21 +66,9 @@ import javax.swing.JPanel
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.HorizontalSplitLayout
-import org.jetbrains.jewel.ui.component.SimpleTabContent
-import org.jetbrains.jewel.ui.component.TabData
-import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.rememberSplitLayoutState
-import org.jetbrains.jewel.ui.component.styling.TabIcons
-import org.jetbrains.jewel.ui.component.styling.TabStyle
-import org.jetbrains.jewel.ui.icon.PathIconKey
 import org.jetbrains.jewel.ui.theme.editorTabStyle
-
-// Jewel's TabStrip pulls its close glyph from the IntelliJ Platform icons jar
-// (which we don't depend on), so editor-tab close buttons render as magenta
-// missing-icon placeholders. Bundle a local SVG and override the style.
-private object TabIconsClass
-private val TabCloseIconKey = PathIconKey("icons/close-small.svg", TabIconsClass::class.java)
 
 /** How long to wait for the typing to settle before writing the buffer to disk. */
 private const val AUTOSAVE_DEBOUNCE_MS = 400L
@@ -97,21 +85,12 @@ fun TabbedViewerPanel(
     onDiffTopLine: (Int) -> Unit = {},
     findInFileTrigger: Int = 0,
     replaceInFileTrigger: Int = 0,
+    saveTrigger: Int = 0,
     blameEnabled: Boolean = false,
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
 ) {
     val selected = tabsState.selectedTab
-
-    if (tabsState.tabs.isEmpty()) {
-        Box(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            contentAlignment = androidx.compose.ui.Alignment.Center,
-        ) {
-            Text("Click a file in the tree, or a change in the commit panel, to view it here")
-        }
-        return
-    }
 
     // Closing a tab also flushes its edit buffer and stops any launcher process behind it. Shared
     // by the close button (onClose) and the "Close Other Tabs" context-menu action so both paths
@@ -121,51 +100,21 @@ fun TabbedViewerPanel(
         if (tab is Tab.Terminal) tab.session.dispose()
     }
 
-    val tabData = tabsState.tabs.map { tab ->
-        val label = labelFor(tab, editStore)
-        TabData.Editor(
-            selected = tab.id == tabsState.selectedId,
-            content = { state ->
-                ContextMenuArea(
-                    items = {
-                        if (tabsState.tabs.size > 1) {
-                            listOf(ContextMenuItem("Close Other Tabs") {
-                                tabsState.closeOthers(tab.id).forEach(::cleanUp)
-                            })
-                        } else {
-                            emptyList()
-                        }
-                    },
-                ) {
-                    SimpleTabContent(label = label, state = state)
-                }
-            },
-            onClick = { tabsState.select(tab.id) },
-            onClose = {
-                cleanUp(tab)
-                tabsState.close(tab.id)
-            },
-        )
-    }
-
-    val baseTabStyle = JewelTheme.editorTabStyle
-    val tabStyle = remember(baseTabStyle) {
-        TabStyle(
-            colors = baseTabStyle.colors,
-            metrics = baseTabStyle.metrics,
-            icons = TabIcons(close = TabCloseIconKey),
-            contentAlpha = baseTabStyle.contentAlpha,
-            scrollbarStyle = baseTabStyle.scrollbarStyle,
-        )
-    }
-
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
     // SwingPanel-per-tab can't work). Remembered here so it — and the live PTYs inside it —
     // outlive switches to non-terminal tabs.
     val terminalCards = remember { JPanel(CardLayout()) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TabStrip(tabs = tabData, style = tabStyle)
+        // Drawn even with nothing open: the strip is where the tab groups live, so a project whose
+        // tabs were all closed (or were terminals and diffs, which don't survive a restart) still
+        // shows its groups and the "+" that adds one.
+        TabStripBar(
+            state = tabsState,
+            style = JewelTheme.editorTabStyle,
+            labelFor = { labelFor(it, editStore) },
+            onTabsClosed = { closed -> closed.forEach(::cleanUp) },
+        )
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = selected) {
                 is Tab.FileView -> {
@@ -182,6 +131,7 @@ fun TabbedViewerPanel(
                             onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
                             findInFileTrigger = findInFileTrigger,
                             replaceInFileTrigger = replaceInFileTrigger,
+                            saveTrigger = saveTrigger,
                         )
                     } else {
                         FileEditView(
@@ -196,6 +146,7 @@ fun TabbedViewerPanel(
                             onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
                             findInFileTrigger = findInFileTrigger,
                             replaceInFileTrigger = replaceInFileTrigger,
+                            saveTrigger = saveTrigger,
                             repo = repo,
                             blameEnabled = blameEnabled,
                             // A blame line resolves to the commit that last touched it; open that
@@ -228,6 +179,7 @@ fun TabbedViewerPanel(
                     onSplitRatioChange = onDiffSplitRatioChange,
                     reloadKey = tabsState.reloadKey(current.id),
                     findTrigger = findInFileTrigger,
+                    saveTrigger = saveTrigger,
                 )
                 is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState)
                 is Tab.CommitDiff -> if (repo != null) CommitDiffView(
@@ -240,23 +192,37 @@ fun TabbedViewerPanel(
                     findTrigger = findInFileTrigger,
                 )
                 is Tab.Terminal -> TerminalView(current, terminalCards)
-                null -> {}
+                null -> Box(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentAlignment = androidx.compose.ui.Alignment.Center,
+                ) {
+                    Text("Click a file in the tree, or a change in the commit panel, to view it here")
+                }
             }
         }
     }
 }
 
+/**
+ * Tab caption. `*` is the ordinary unsaved-changes marker; `!` replaces it when the buffer can't
+ * reach disk at all, so a file that has silently stopped saving is distinguishable at a glance
+ * from one that simply hasn't hit its autosave debounce yet — the banner over the editor says
+ * which of the two it is. Diff tabs carry the same marker: their working side is the same buffer.
+ */
 @Composable
 private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
-    is Tab.FileView -> {
-        val edit = editStore.peek(tab.id)
-        val base = tab.file.name
-        if (edit != null && edit.isModified) "*$base" else base
-    }
-    is Tab.Diff -> tab.title
+    is Tab.FileView -> saveMarker(editStore.peek(tab.id)) + tab.file.name
+    is Tab.Diff -> saveMarker(editStore.peek(Tab.FileView(File(tab.repoRoot, tab.change.path)).id)) + tab.title
     is Tab.CommitDiff -> tab.title
     is Tab.History -> tab.title
     is Tab.Terminal -> tab.title
+}
+
+private fun saveMarker(edit: FileEdit?): String = when {
+    edit == null -> ""
+    edit.saveBlock != null -> "!"
+    edit.isModified -> "*"
+    else -> ""
 }
 
 @OptIn(FlowPreview::class)
@@ -273,6 +239,7 @@ private fun FileEditView(
     onPendingSearchConsumed: () -> Unit = {},
     findInFileTrigger: Int = 0,
     replaceInFileTrigger: Int = 0,
+    saveTrigger: Int = 0,
     repo: GitRepo? = null,
     blameEnabled: Boolean = false,
     onOpenBlameCommit: (sha: String) -> Unit = {},
@@ -387,6 +354,17 @@ private fun FileEditView(
                     if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
                 }
             }
+    }
+
+    // Ctrl+S: write now instead of waiting out the debounce. Baselined like the find triggers so
+    // switching to this tab doesn't inherit a sibling's count and fire a save on arrival. Runs
+    // save() even when the buffer looks clean — that's the cheap way to re-test a file that's been
+    // stuck on an external change, since save() clears the block itself once disk agrees again.
+    val saveTriggerBaseline = remember(tab.id) { saveTrigger }
+    LaunchedEffect(saveTrigger) {
+        if (saveTrigger > saveTriggerBaseline) {
+            if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
+        }
     }
 
     val isDark = JewelTheme.isDark
@@ -538,6 +516,7 @@ private fun FileEditView(
     }
 
     Column(modifier = modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
+        SaveStatusStrip(edit, onSaved = savedCallback)
         if (searchOpen) {
             FindBar(
                 state = searchState,
@@ -742,6 +721,7 @@ private fun MarkdownEditWithPreview(
     onPendingSearchConsumed: () -> Unit = {},
     findInFileTrigger: Int = 0,
     replaceInFileTrigger: Int = 0,
+    saveTrigger: Int = 0,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
     val previewText by remember(edit) {
@@ -759,6 +739,7 @@ private fun MarkdownEditWithPreview(
                 onPendingSearchConsumed = onPendingSearchConsumed,
                 findInFileTrigger = findInFileTrigger,
                 replaceInFileTrigger = replaceInFileTrigger,
+                saveTrigger = saveTrigger,
             )
         },
         second = {

@@ -14,6 +14,21 @@ import java.nio.file.Path
 
 class TabsPersistenceTest {
 
+    /** The snapshot a session that never touched groups produces: everything in the default one. */
+    private fun snapshotOf(tabs: List<Tab>, selectedId: String? = null): TabsSnapshot {
+        val group = TabGroup(id = 0L, name = TabGroups.DEFAULT_NAME)
+        return TabsSnapshot(
+            groups = listOf(group),
+            tabs = tabs,
+            groupOf = tabs.associate { it.id to group.id },
+            selectedId = selectedId,
+            activeGroupId = group.id,
+        )
+    }
+
+    /** Loaded rows with the group headers dropped, for the assertions that only care about tabs. */
+    private fun tabRows(rows: List<SavedTab>) = rows.filter { it.kind != "group" }
+
     @Test
     fun `save then load round-trips a FileView and a History tab`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
@@ -25,9 +40,9 @@ class TabsPersistenceTest {
             Tab.FileView(viewed),
             Tab.History(historyTarget, repo),
         )
-        TabsPersistence.save(target, tabs, selectedId = tabs[1].id)
+        TabsPersistence.save(target, snapshotOf(tabs, selectedId = tabs[1].id))
 
-        val loaded = TabsPersistence.load(target)
+        val loaded = tabRows(TabsPersistence.load(target))
         assertEquals(2, loaded.size)
         assertEquals("file", loaded[0].kind)
         assertEquals(viewed.absolutePath, loaded[0].path)
@@ -48,9 +63,9 @@ class TabsPersistenceTest {
             Tab.Diff(FileChange("foo.kt", ChangeKind.MODIFIED), repo),
             Tab.Terminal(TerminalSession.shell(repo)),
         )
-        TabsPersistence.save(target, tabs, selectedId = null)
+        TabsPersistence.save(target, snapshotOf(tabs))
 
-        val loaded = TabsPersistence.load(target)
+        val loaded = tabRows(TabsPersistence.load(target))
         assertEquals(1, loaded.size)
         assertEquals("file", loaded[0].kind)
         assertEquals(keep.absolutePath, loaded[0].path)
@@ -67,15 +82,15 @@ class TabsPersistenceTest {
             file = CommitFile("src/app/admin/api-key/api-key-edit-page.component.ts", CommitFileChange.MODIFIED),
             repoRoot = repo,
         )
-        TabsPersistence.save(target, listOf(original), selectedId = original.id)
+        TabsPersistence.save(target, snapshotOf(listOf(original), selectedId = original.id))
 
-        val loaded = TabsPersistence.load(target)
+        val loaded = tabRows(TabsPersistence.load(target))
         assertEquals(1, loaded.size)
         assertEquals("commitdiff", loaded[0].kind)
         assertEquals(true, loaded[0].selected)
 
         val state = TabsState()
-        TabsPersistence.restore(state, loaded, repoRoot = repo)
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
         assertEquals(1, state.tabs.size)
         val restored = state.tabs[0] as Tab.CommitDiff
         assertEquals(original, restored)
@@ -89,7 +104,7 @@ class TabsPersistenceTest {
         // The commit deleted the file, so nothing under repoRoot matches it — the diff is still
         // readable out of history, so the tab must survive.
         val tab = Tab.CommitDiff("abc1234def", "abc1234", CommitFile("gone.ts", CommitFileChange.DELETED), repo)
-        TabsPersistence.save(target, listOf(tab), selectedId = null)
+        TabsPersistence.save(target, snapshotOf(listOf(tab)))
 
         val state = TabsState()
         TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
@@ -102,7 +117,7 @@ class TabsPersistenceTest {
         val target = tmp.resolve("tabs.tsv")
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
         val tab = Tab.CommitDiff("abc1234def", "abc1234", CommitFile("a.ts", CommitFileChange.ADDED), repo)
-        TabsPersistence.save(target, listOf(tab), selectedId = null)
+        TabsPersistence.save(target, snapshotOf(listOf(tab)))
 
         val state = TabsState()
         TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = null)
@@ -139,11 +154,7 @@ class TabsPersistenceTest {
         val alive = tmp.resolve("alive.kt").toFile().apply { writeText("") }
         val gone = tmp.resolve("gone.kt").toFile().apply { writeText("") }
 
-        TabsPersistence.save(
-            target,
-            tabs = listOf(Tab.FileView(alive), Tab.FileView(gone)),
-            selectedId = null,
-        )
+        TabsPersistence.save(target, snapshotOf(listOf(Tab.FileView(alive), Tab.FileView(gone))))
         gone.delete()
 
         val state = TabsState()
@@ -160,8 +171,7 @@ class TabsPersistenceTest {
         val b = tmp.resolve("b.kt").toFile().apply { writeText("") }
         TabsPersistence.save(
             target,
-            tabs = listOf(Tab.FileView(a), Tab.FileView(b)),
-            selectedId = Tab.FileView(b).id,
+            snapshotOf(listOf(Tab.FileView(a), Tab.FileView(b)), selectedId = Tab.FileView(b).id),
         )
 
         val state = TabsState()
@@ -175,11 +185,19 @@ class TabsPersistenceTest {
     }
 
     @Test
-    fun `save with an empty list writes an empty file that loads cleanly`(@TempDir tmp: Path) {
+    fun `save with no tabs still records the groups, so empty ones survive a restart`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
-        TabsPersistence.save(target, emptyList(), selectedId = null)
+        TabsPersistence.save(target, snapshotOf(emptyList()))
         assertTrue(Files.isRegularFile(target))
-        assertTrue(TabsPersistence.load(target).isEmpty())
+
+        val loaded = TabsPersistence.load(target)
+        assertEquals(listOf("group"), loaded.map { it.kind })
+        assertTrue(tabRows(loaded).isEmpty())
+
+        val state = TabsState()
+        TabsPersistence.restore(state, loaded, repoRoot = null)
+        assertTrue(state.tabs.isEmpty())
+        assertEquals(listOf(TabGroups.DEFAULT_NAME), state.groups.map { it.name })
     }
 
     @Test
@@ -187,11 +205,7 @@ class TabsPersistenceTest {
         val target = tmp.resolve("tabs.tsv")
         val file = tmp.resolve("x.kt").toFile().apply { writeText("") }
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
-        TabsPersistence.save(
-            target,
-            tabs = listOf(Tab.History(file, repo)),
-            selectedId = null,
-        )
+        TabsPersistence.save(target, snapshotOf(listOf(Tab.History(file, repo))))
 
         // Without a repoRoot, the History tab can't be reconstructed; it should be silently dropped.
         val stateNoRoot = TabsState()
@@ -201,5 +215,68 @@ class TabsPersistenceTest {
         val stateWithRoot = TabsState()
         TabsPersistence.restore(stateWithRoot, TabsPersistence.load(target), repoRoot = repo)
         assertEquals(1, stateWithRoot.tabs.size)
+    }
+
+    @Test
+    fun `save then restore round-trips the whole grouped strip`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val a = tmp.resolve("a.kt").toFile().apply { writeText("") }
+        val b = tmp.resolve("b.kt").toFile().apply { writeText("") }
+        val c = tmp.resolve("c.kt").toFile().apply { writeText("") }
+
+        val saved = TabsState()
+        saved.open(Tab.FileView(a))
+        val second = saved.addGroup()
+        saved.renameGroup(saved.groups[0].id, "Review")
+        saved.open(Tab.FileView(b))
+        saved.open(Tab.FileView(c))
+        saved.select(Tab.FileView(b).id)
+        saved.setCollapsed(saved.groups[0].id, collapsed = true)
+        TabsPersistence.save(target, saved.snapshot())
+
+        val restored = TabsState()
+        TabsPersistence.restore(restored, TabsPersistence.load(target), repoRoot = null)
+
+        assertEquals(listOf("Review", "MR2"), restored.groups.map { it.name })
+        assertEquals(listOf(true, false), restored.groups.map { it.collapsed })
+        assertEquals(listOf(a.absolutePath), restored.tabsIn(restored.groups[0].id).map { (it as Tab.FileView).file.absolutePath })
+        assertEquals(
+            listOf(b.absolutePath, c.absolutePath),
+            restored.tabsIn(restored.groups[1].id).map { (it as Tab.FileView).file.absolutePath },
+        )
+        // The armed group and the selected tab both come back.
+        assertEquals(restored.groups[1].id, restored.activeGroupId)
+        assertEquals(Tab.FileView(b).id, restored.selectedId)
+        assertEquals(second.name, restored.groups[1].name)
+    }
+
+    @Test
+    fun `a file written before groups existed restores into the default group`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val a = tmp.resolve("a.kt").toFile().apply { writeText("") }
+        val b = tmp.resolve("b.kt").toFile().apply { writeText("") }
+        Files.writeString(
+            target,
+            listOf("file\t${a.absolutePath}\t0", "file\t${b.absolutePath}\t1").joinToString("\n"),
+        )
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = null)
+
+        assertEquals(listOf(TabGroups.DEFAULT_NAME), state.groups.map { it.name })
+        assertEquals(2, state.tabsIn(state.groups[0].id).size)
+        assertEquals(Tab.FileView(b).id, state.selectedId)
+    }
+
+    @Test
+    fun `a group name carrying tabs or newlines is flattened so the row survives`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val state = TabsState()
+        state.renameGroup(state.groups[0].id, "one\ttwo\nthree")
+        TabsPersistence.save(target, state.snapshot())
+
+        val restored = TabsState()
+        TabsPersistence.restore(restored, TabsPersistence.load(target), repoRoot = null)
+        assertEquals(listOf("one two three"), restored.groups.map { it.name })
     }
 }

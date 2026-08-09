@@ -39,8 +39,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
@@ -54,9 +52,9 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import iondrive.nop.GroupedStrip
 import iondrive.nop.ProjectTabs
 import iondrive.nop.RailItem
 import iondrive.nop.RailLayout
@@ -114,7 +112,7 @@ fun ProjectRail(
     val openProjects = remember(items) { RailLayout.projects(items) }
     // The rows actually drawn: projects and separators, with the tabs of any collapsed group folded
     // away into their separator's block so they neither render nor drag on their own.
-    val blocks = remember(items) { RailLayout.visibleBlocks(items) }
+    val blocks = remember(items) { GroupedStrip.visibleBlocks(items) }
 
     // Drag-reorder state, shared across all rows so the dragged row tracks the pointer while the
     // others reflow. A pending separator name prompt (add or rename) is surfaced as a dialog below.
@@ -130,7 +128,7 @@ fun ProjectRail(
         delay(DRAG_EXPAND_MS)
         val sep = items.indexOfFirst { it is RailItem.Separator && it.id == sepId }
         val from = items.indexOfFirst { keyOf(it) == dragKey }
-        val step = RailLayout.expandUnderDrag(items, from, sep) { reorder.heights[keyOf(it)] ?: 0 }
+        val step = GroupedStrip.expandUnderDrag(items, from, sep) { reorder.heights[keyOf(it)] ?: 0 }
         if (step != null) {
             onReorder(step.items)
             reorder.delta -= step.travelled
@@ -285,7 +283,7 @@ private fun ReorderableRow(
                         // picks up tabs on the way past them.
                         val cur = itemsUpdated
                         reorder.dragAsGroup =
-                            RailLayout.groupSpan(cur, cur.indexOfFirst { keyOf(it) == key }) > 1
+                            GroupedStrip.groupSpan(cur, cur.indexOfFirst { keyOf(it) == key }) > 1
                     },
                     onDragEnd = { reorder.settle() },
                     onDragCancel = { reorder.settle() },
@@ -295,7 +293,8 @@ private fun ReorderableRow(
                         val cur = itemsUpdated
                         val height = { item: RailItem -> reorder.heights[keyOf(item)] ?: 0 }
                         val from = cur.indexOfFirst { keyOf(it) == key }
-                        val step = RailLayout.dragStep(cur, from, reorder.dragAsGroup, reorder.delta, height)
+                        val step =
+                            GroupedStrip.dragStep(cur, from, reorder.dragAsGroup, reorder.delta, extent = height)
                         if (step != null) {
                             onReorderUpdated(step.items)
                             reorder.delta -= step.travelled
@@ -306,7 +305,7 @@ private fun ReorderableRow(
                         // can't nest inside another — so it only ever passes over them.
                         val after = step?.items ?: cur
                         reorder.expandSepId = if (reorder.dragAsGroup) null else {
-                            RailLayout.collapsedUnderDrag(
+                            GroupedStrip.collapsedUnderDrag(
                                 after,
                                 after.indexOfFirst { keyOf(it) == key },
                                 reorder.delta,
@@ -592,31 +591,6 @@ private fun ProjectTab(
     }
 }
 
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-@Composable
-private fun CloseButton(isDark: Boolean, onClose: () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    val hovered by interaction.collectIsHoveredAsState()
-    val base =if (isDark) Color(0xFF7A7E85) else Color(0xFF6B7079)
-    val tint = if (hovered) {
-        if (isDark) Color(0xFFDFE1E5) else Color(0xFF1F2329)
-    } else base
-    val bg = if (hovered) {
-        if (isDark) Color(0xFF393B40) else Color(0xFFD0D3D8)
-    } else Color.Transparent
-    Box(
-        modifier = Modifier
-            .size(16.dp)
-            .clip(RoundedCornerShape(3.dp))
-            .background(bg)
-            .hoverable(interaction)
-            .clickable(onClick = onClose),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(Modifier.size(8.dp)) { drawCloseIcon(tint) }
-    }
-}
-
 /**
  * Centred empty state shown when every project tab has been closed. Nudges the user toward the
  * "+" tab (and lets them click straight through to the project picker).
@@ -670,28 +644,3 @@ private fun Modifier.vertical(): Modifier = layout { measurable, constraints ->
     }
 }
 
-private fun DrawScope.drawPlusIcon(tint: Color) {
-    val c = size.width / 2f
-    drawLine(tint, Offset(c, 2.5f), Offset(c, size.height - 2.5f), strokeWidth = 1.5f, cap = StrokeCap.Round)
-    drawLine(tint, Offset(2.5f, c), Offset(size.width - 2.5f, c), strokeWidth = 1.5f, cap = StrokeCap.Round)
-}
-
-private fun DrawScope.drawCloseIcon(tint: Color) {
-    val pad = 0.5f
-    drawLine(tint, Offset(pad, pad), Offset(size.width - pad, size.height - pad), strokeWidth = 1.3f, cap = StrokeCap.Round)
-    drawLine(tint, Offset(size.width - pad, pad), Offset(pad, size.height - pad), strokeWidth = 1.3f, cap = StrokeCap.Round)
-}
-
-// A disclosure chevron: ">" (points right) when the group is collapsed, "v" (points down) when it's
-// expanded — the usual "click to reveal what's underneath" convention.
-private fun DrawScope.drawDisclosure(tint: Color, collapsed: Boolean) {
-    val w = size.width
-    val h = size.height
-    if (collapsed) {
-        drawLine(tint, Offset(w * 0.35f, h * 0.15f), Offset(w * 0.7f, h * 0.5f), strokeWidth = 1.3f, cap = StrokeCap.Round)
-        drawLine(tint, Offset(w * 0.7f, h * 0.5f), Offset(w * 0.35f, h * 0.85f), strokeWidth = 1.3f, cap = StrokeCap.Round)
-    } else {
-        drawLine(tint, Offset(w * 0.15f, h * 0.35f), Offset(w * 0.5f, h * 0.7f), strokeWidth = 1.3f, cap = StrokeCap.Round)
-        drawLine(tint, Offset(w * 0.5f, h * 0.7f), Offset(w * 0.85f, h * 0.35f), strokeWidth = 1.3f, cap = StrokeCap.Round)
-    }
-}

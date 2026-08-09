@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
+import iondrive.nop.diff.ThreeWayMerge
 import java.io.File
 
 /** Outcome of a [FileEdit.save]. */
@@ -24,6 +25,32 @@ sealed interface SaveResult {
      * (null if the file is now unreadable) so the caller can reconcile.
      */
     data class ExternalChange(val diskText: String?) : SaveResult
+
+    /** The write itself failed — permissions, a full disk, a directory that no longer exists. */
+    data class Failed(val message: String) : SaveResult
+}
+
+/**
+ * Why the buffer on screen is not on disk, or null when the last attempt got there.
+ *
+ * This exists because both of nop's save paths are silent by construction: the autosave nobody
+ * asked for, and (before this) no explicit save at all. A [FileEdit.save] that declines to write
+ * leaves the user typing into a buffer that will never reach disk, with nothing on screen saying
+ * so — the file just quietly stops being saved for the rest of the session, because neither the
+ * baseline nor the disk content changes on a refusal, so every later attempt refuses identically.
+ * Held as observable state so the editor can keep a banner up for exactly as long as the condition
+ * lasts, and drop it by itself the moment a save succeeds.
+ */
+sealed interface SaveBlock {
+    /**
+     * Disk moved under us and holds [diskText]; the buffer was left alone. Only the user can say
+     * which version wins, so this stays put until they choose — see the resolutions on [FileEdit]:
+     * [FileEdit.overwriteDisk], [FileEdit.adoptDiskText] and [FileEdit.mergeDiskIntoBuffer].
+     */
+    data class Conflict(val diskText: String) : SaveBlock
+
+    /** The write threw. Retrying is worth offering — a full disk or a lock usually clears. */
+    data class Failed(val message: String) : SaveBlock
 }
 
 /** Per-file editor state cached across tab switches. */
@@ -56,6 +83,14 @@ class FileEdit(initialText: String, val file: File) {
     var hasUserEdit: Boolean by mutableStateOf(false)
         private set
 
+    /**
+     * Why the last save didn't reach disk, or null if it did. Set and cleared by [save]; the
+     * editor renders it as a banner over the file, which is the only thing that tells the user
+     * their typing has stopped being persisted. See [SaveBlock].
+     */
+    var saveBlock: SaveBlock? by mutableStateOf(null)
+        private set
+
     /** Record that the user changed the buffer via the editor. Call on the UI thread. */
     fun markUserEdit() {
         hasUserEdit = true
@@ -79,15 +114,64 @@ class FileEdit(initialText: String, val file: File) {
         val disk = runCatching { file.readText() }.getOrNull()
         if (text == disk) {
             markSaved(text)
+            saveBlock = null
             return SaveResult.AlreadyOnDisk
         }
         if (disk != null && disk != savedText) {
             // The user's edit is still pending — leave hasUserEdit set so a later save can retry it
-            // once the file stops moving under us; reconciliation handles the clean case.
+            // once the file stops moving under us; reconciliation handles the clean case. Nothing
+            // here can un-stick it on its own, which is why the block is published to the UI.
+            saveBlock = SaveBlock.Conflict(disk)
             return SaveResult.ExternalChange(disk)
         }
-        file.writeText(text)
+        return writeBuffer(text)
+    }
+
+    /**
+     * Write the buffer over whatever is on disk, skipping the compare-and-swap in [save] — the
+     * "keep mine" resolution, where the user has seen the conflict and chosen their own version.
+     */
+    fun overwriteDisk(): SaveResult = writeBuffer(state.text.toString())
+
+    /**
+     * Three-way merge the on-disk version back into the buffer: [savedText] is the common
+     * ancestor, the buffer is ours, [diskText] is theirs. Edits to different parts of the file
+     * both survive; overlapping ones come back as conflict markers, which the diff view already
+     * knows how to resolve. Returns how many conflict blocks it had to leave behind.
+     *
+     * The baseline advances to [diskText] because that is genuinely what the file holds now, which
+     * un-sticks the compare-and-swap: the merged buffer is a real user edit ([hasUserEdit] stays
+     * set), so the next save writes it — markers and all, exactly as git leaves a conflicted merge
+     * in the working tree. Call on the UI thread.
+     */
+    fun mergeDiskIntoBuffer(diskText: String): Int {
+        val merged = ThreeWayMerge.merge(base = savedText, ours = state.text.toString(), theirs = diskText)
+        val caret = state.selection.start.coerceIn(0, merged.text.length)
+        state.edit {
+            replace(0, length, merged.text)
+            selection = TextRange(caret)
+        }
+        savedText = diskText
+        hasUserEdit = true
+        saveBlock = null
+        return merged.conflicts
+    }
+
+    /**
+     * The one place bytes actually go to disk. The write is guarded because an IOException here —
+     * a read-only file, a full disk, a directory deleted underneath us — used to propagate out of
+     * the autosave's `collect`, cancelling the coroutine and taking autosave for that tab down for
+     * good, silently. A failure is now just another [SaveBlock] the user can see and retry.
+     */
+    private fun writeBuffer(text: String): SaveResult {
+        val failure = runCatching { file.writeText(text) }.exceptionOrNull()
+        if (failure != null) {
+            val message = failure.message ?: failure::class.simpleName ?: "write failed"
+            saveBlock = SaveBlock.Failed(message)
+            return SaveResult.Failed(message)
+        }
         markSaved(text)
+        saveBlock = null
         return SaveResult.Saved
     }
 
@@ -149,6 +233,9 @@ class FileEdit(initialText: String, val file: File) {
         }
         savedText = diskText
         hasUserEdit = false
+        // Taking the disk copy resolves any conflict by definition — there is nothing left of ours
+        // to be blocked on.
+        saveBlock = null
     }
 }
 

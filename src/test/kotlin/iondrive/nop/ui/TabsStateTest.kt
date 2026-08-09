@@ -271,6 +271,248 @@ class TabsStateTest {
     }
 
     @Test
+    fun `a fresh state has one group that everything opens into`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+
+        assertEquals(listOf(TabGroups.DEFAULT_NAME), s.groups.map { it.name })
+        assertEquals(s.groups[0].id, s.activeGroupId)
+        assertEquals(s.groups[0].id, s.groupOf(a.id))
+    }
+
+    @Test
+    fun `a new group is armed, so the next file opens into it`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+
+        assertEquals(listOf("MR1", "MR2"), s.groups.map { it.name })
+        assertEquals(second.id, s.activeGroupId)
+        assertEquals(listOf(a), s.tabsIn(s.groups[0].id))
+        assertEquals(listOf(b), s.tabsIn(second.id))
+    }
+
+    @Test
+    fun `tabs stay grouped in strip order however they were opened`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        val c = fileTab("/x/c.txt")
+        s.open(a)
+        val second = s.addGroup()
+        s.open(b)
+        // Back to the first group for one more file: it joins MR1's run, not the end of the strip.
+        s.selectGroup(s.groups[0].id)
+        s.open(c)
+
+        assertEquals(listOf(a, c, b), s.tabs)
+        assertEquals(listOf(a, c), s.tabsIn(s.groups[0].id))
+        assertEquals(listOf(b), s.tabsIn(second.id))
+    }
+
+    @Test
+    fun `opening into a collapsed group unfolds it`() {
+        val s = TabsState()
+        s.open(fileTab("/x/a.txt"))
+        s.toggleCollapse(s.groups[0].id)
+        assertEquals(true, s.groups[0].collapsed)
+
+        s.open(fileTab("/x/b.txt"))
+
+        assertEquals(false, s.groups[0].collapsed)
+    }
+
+    @Test
+    fun `collapsing a group moves the selection onto a tab still on show`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+        assertEquals(b.id, s.selectedId)
+
+        s.setCollapsed(second.id, collapsed = true)
+
+        assertEquals(a.id, s.selectedId)
+    }
+
+    @Test
+    fun `collapsing the only group leaves the selection alone`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+
+        s.setCollapsed(s.groups[0].id, collapsed = true)
+
+        // Nothing is drawn to move to, so the editor keeps showing what it was showing.
+        assertEquals(a.id, s.selectedId)
+    }
+
+    @Test
+    fun `closing a tab skips over one folded away in a collapsed group`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+        s.setCollapsed(second.id, collapsed = true)
+        s.select(a.id)
+
+        s.close(a.id)
+
+        // b is the only tab left but it's hidden, so it's the fallback rather than the first choice.
+        assertEquals(b.id, s.selectedId)
+        assertEquals(listOf(b), s.tabs)
+    }
+
+    @Test
+    fun `removeGroup closes its tabs and hands back what it removed`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        val c = fileTab("/x/c.txt")
+        s.open(b)
+        s.open(c)
+
+        val removed = s.removeGroup(second.id)
+
+        assertEquals(listOf(b, c), removed)
+        assertEquals(listOf(a), s.tabs)
+        assertEquals(listOf("MR1"), s.groups.map { it.name })
+        assertEquals(s.groups[0].id, s.activeGroupId)
+        assertEquals(a.id, s.selectedId)
+    }
+
+    @Test
+    fun `removing the last group leaves a fresh default behind`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+
+        val removed = s.removeGroup(s.groups[0].id)
+
+        assertEquals(listOf(a), removed)
+        assertEquals(listOf(TabGroups.DEFAULT_NAME), s.groups.map { it.name })
+        assertEquals(s.groups[0].id, s.activeGroupId)
+        assertNull(s.selectedId)
+
+        // …and it still works as a bucket.
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+        assertEquals(s.groups[0].id, s.groupOf(b.id))
+    }
+
+    @Test
+    fun `renameGroup ignores a blank name`() {
+        val s = TabsState()
+        s.renameGroup(s.groups[0].id, "Review")
+        assertEquals("Review", s.groups[0].name)
+
+        s.renameGroup(s.groups[0].id, "   ")
+        assertEquals("Review", s.groups[0].name)
+    }
+
+    @Test
+    fun `moveTabToGroup re-homes a tab and unfolds where it lands`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        s.open(a)
+        s.open(b)
+        val second = s.addGroup()
+        s.setCollapsed(second.id, collapsed = true)
+
+        s.moveTabToGroup(a.id, second.id)
+
+        assertEquals(second.id, s.groupOf(a.id))
+        assertEquals(false, s.groups[1].collapsed)
+        // The strip stays grouped: MR1's remaining tab first, then MR2's.
+        assertEquals(listOf(b, a), s.tabs)
+    }
+
+    @Test
+    fun `applyStrip adopts a dragged order, membership and all`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+
+        // What a drag of "a" one slot to the right produces: it crosses into MR2.
+        val dragged = listOf(
+            StripItem.Header(s.groups[0]),
+            StripItem.Header(s.groups[1]),
+            StripItem.Slot(a.id),
+            StripItem.Slot(b.id),
+        )
+        s.applyStrip(dragged)
+
+        assertEquals(second.id, s.groupOf(a.id))
+        assertEquals(listOf(a, b), s.tabsIn(second.id))
+        assertEquals(emptyList<Tab>(), s.tabsIn(s.groups[0].id))
+    }
+
+    @Test
+    fun `applyStrip ignores a list that isn't the strip it has`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val before = s.strip
+
+        s.applyStrip(listOf(StripItem.Header(s.groups[0]))) // a tab went missing — a stale drag
+        s.applyStrip(emptyList())
+
+        assertEquals(before, s.strip)
+    }
+
+    @Test
+    fun `the strip reads as headers followed by their tabs`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+
+        assertEquals(
+            listOf(
+                StripItem.Header(s.groups[0]),
+                StripItem.Slot(a.id),
+                StripItem.Header(s.groups[1]),
+                StripItem.Slot(b.id),
+            ),
+            s.strip,
+        )
+        assertEquals(second.id, s.groups[1].id)
+    }
+
+    @Test
+    fun `closeOthers keeps the groups it emptied`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+        val second = s.addGroup()
+        val b = fileTab("/x/b.txt")
+        s.open(b)
+
+        s.closeOthers(b.id)
+
+        assertEquals(listOf(b), s.tabs)
+        assertEquals(2, s.groups.size)
+        assertEquals(second.id, s.groupOf(b.id))
+        assertNull(s.groupOf(a.id))
+    }
+
+    @Test
     fun `jump to source resolves the working file behind both diff kinds`(@TempDir tmp: Path) {
         val repo = tmp.toFile()
         val tracked = tmp.resolve("app.component.ts").toFile().apply { writeText("x") }
