@@ -92,8 +92,13 @@ fun CommitDiffView(
     }
 }
 
+/**
+ * The read-only side-by-side list both historic diffs are drawn with — a commit's revision of a file
+ * (above) and a local-history revision of it (see [LocalDiffView]). Neither side is editable, so the
+ * only thing either caller has to supply is the computed diff.
+ */
 @Composable
-private fun ReadOnlyDiffList(
+internal fun ReadOnlyDiffList(
     result: DiffResult,
     splitRatio: Float,
     onSplitRatioChange: (Float) -> Unit,

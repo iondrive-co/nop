@@ -1,10 +1,13 @@
 package iondrive.nop
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.text.LocalTextContextMenu
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,7 +38,9 @@ import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
 import iondrive.nop.ui.EmptyProjectState
+import iondrive.nop.ui.NopTextContextMenu
 import iondrive.nop.ui.ProjectRail
+import iondrive.nop.ui.nopMenuStyle
 import iondrive.nop.ui.projectTint
 import iondrive.nop.ui.projectWindowIcon
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +56,7 @@ import org.jetbrains.jewel.intui.standalone.theme.darkThemeDefinition
 import org.jetbrains.jewel.intui.standalone.theme.default
 import org.jetbrains.jewel.intui.standalone.theme.lightThemeDefinition
 import org.jetbrains.jewel.ui.ComponentStyling
+import org.jetbrains.jewel.ui.component.styling.LocalMenuStyle
 import java.awt.Frame
 import java.io.File
 import java.nio.file.Files
@@ -277,7 +283,7 @@ fun main(args: Array<String>) {
     }
 }
 
-@OptIn(FlowPreview::class)
+@OptIn(FlowPreview::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ApplicationScope.WorkspaceWindow(
     railItems: List<RailItem>,
@@ -425,8 +431,11 @@ private fun ApplicationScope.WorkspaceWindow(
         }
         IntUiTheme(
             theme = if (darkMode) JewelTheme.darkThemeDefinition() else JewelTheme.lightThemeDefinition(),
-            styling = ComponentStyling.default(),
+            styling = ComponentStyling.default().provide(LocalMenuStyle provides nopMenuStyle(darkMode)),
         ) {
+            // nop's own text-field context menu, in place of Jewel's icon-carrying one — see
+            // [NopTextContextMenu].
+            CompositionLocalProvider(LocalTextContextMenu provides NopTextContextMenu) {
             Row(modifier = Modifier.fillMaxSize()) {
                 ProjectRail(
                     items = railItems,
@@ -466,6 +475,7 @@ private fun ApplicationScope.WorkspaceWindow(
                         EmptyProjectState(onAdd = onOpenOther)
                     }
                 }
+            }
             }
         }
     }

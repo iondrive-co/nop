@@ -39,6 +39,22 @@ sealed class Tab {
     }
 
     /**
+     * nop's own record of what [file] has contained — every version it saved, plus the ones outside
+     * writers left behind while the file was open. The git-independent half of [History], and the
+     * only history a file that has never been committed has.
+     */
+    data class LocalHistory(val file: File) : Tab() {
+        override val id: String get() = "localhistory:${file.absolutePath}"
+        override val title: String get() = "⟲ ${file.name}"
+    }
+
+    /** Diff of one local-history revision of [file] against what the file holds now. */
+    data class LocalDiff(val file: File, val timestampMillis: Long) : Tab() {
+        override val id: String get() = "localdiff:${file.absolutePath}:$timestampMillis"
+        override val title: String get() = "${LocalHistoryFormat.time(timestampMillis)} ${file.name}"
+    }
+
+    /**
      * A live PTY-backed terminal — a launcher run or a plain shell. Each invocation is its own
      * tab (the nanoTime suffix keeps re-runs distinct), so it never collapses onto an existing one.
      */
@@ -370,16 +386,17 @@ class TabsState {
 }
 
 /**
- * The working file behind a diff tab — where F4 ("jump to source") lands. Both diff surfaces
- * resolve to a path in the working tree: a [Tab.Diff] shows changes against it directly, and a
- * [Tab.CommitDiff] shows a historic revision *of* it. Null for every other tab kind, and for either
- * diff when the file isn't in the working tree any more (reverted, deleted, renamed away, or removed
- * by the very commit being read) — there's nothing to open in that case.
+ * The working file behind a diff tab — where F4 ("jump to source") lands. Every diff surface
+ * resolves to a path in the working tree: a [Tab.Diff] shows changes against it directly, and a
+ * [Tab.CommitDiff] or [Tab.LocalDiff] shows an earlier revision *of* it. Null for every other tab
+ * kind, and for any diff whose file isn't in the working tree any more (reverted, deleted, renamed
+ * away, or removed by the very commit being read) — there's nothing to open in that case.
  */
 internal fun jumpToSourceTarget(tab: Tab?): File? {
     val file = when (tab) {
         is Tab.Diff -> File(tab.repoRoot, tab.change.path)
         is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
+        is Tab.LocalDiff -> tab.file
         else -> null
     }
     return file?.takeIf { it.isFile }

@@ -98,6 +98,34 @@ class TabsPersistenceTest {
     }
 
     @Test
+    fun `save then restore round-trips local history and local diff tabs`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val file = tmp.resolve("a.kt").toFile().apply { writeText("") }
+        val tabs = listOf<Tab>(Tab.LocalHistory(file), Tab.LocalDiff(file, 1_700_000_000_123L))
+        TabsPersistence.save(target, snapshotOf(tabs, selectedId = tabs[1].id))
+
+        val loaded = tabRows(TabsPersistence.load(target))
+        assertEquals(listOf("localhistory", "localdiff"), loaded.map { it.kind })
+
+        val state = TabsState()
+        // No repo: local history is nop's own record, so it restores in a project without git too.
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = null)
+        assertEquals(tabs, state.tabs)
+        assertEquals(tabs[1].id, state.selectedId)
+    }
+
+    @Test
+    fun `a local diff row without a timestamp is dropped`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val file = tmp.resolve("a.kt").toFile().apply { writeText("") }
+        Files.writeString(target, "localdiff\t${file.absolutePath}\t1\nfile\t${file.absolutePath}\t0")
+
+        // The timestamp is the revision's whole identity; without one the row names nothing.
+        val loaded = tabRows(TabsPersistence.load(target))
+        assertEquals(listOf("file"), loaded.map { it.kind })
+    }
+
+    @Test
     fun `a CommitDiff restores even when the file is gone from the working tree`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }

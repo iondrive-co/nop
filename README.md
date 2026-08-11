@@ -25,6 +25,16 @@ Download the latest installer for your platform from the
 	- `H` — open a tab showing its git history
 	- `B` — toggle the git blame column in the editor
 
+## Local history
+
+Right-click in the editor and choose **Show local history** for a log of what the open file has
+contained, independent of git: every version nop saved, plus the ones an agent, a checkout or
+another editor left behind while the file was open. Click a revision to diff it against the file as
+it is now, in the same read-only view a commit diff opens in.
+
+Snapshots live under `$XDG_CONFIG_HOME/nop/projects/<project>/localhistory` as plain files — nothing
+needs nop to read them back. They are kept for five days, up to 50 per file.
+
 ## Troubleshooting
 
 Check `$XDG_CONFIG_HOME/nop/nop.log` (default `~/.config/nop/nop.log`), and file an issue if necessary.

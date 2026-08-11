@@ -1,7 +1,7 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuDataProvider
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.VerticalScrollbar
@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.GitRepo
+import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +74,7 @@ import java.io.File
 import javax.swing.JPanel
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.ui.component.ContextMenuDivider
 import org.jetbrains.jewel.ui.component.HorizontalSplitLayout
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.rememberSplitLayoutState
@@ -97,6 +99,7 @@ fun TabbedViewerPanel(
     tabsState: TabsState,
     repo: GitRepo?,
     editStore: FileEditStore,
+    localHistory: LocalHistory,
     onFileSaved: () -> Unit = {},
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget? = { _, _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
@@ -157,6 +160,7 @@ fun TabbedViewerPanel(
                             findInFileTrigger = findInFileTrigger,
                             replaceInFileTrigger = replaceInFileTrigger,
                             saveTrigger = saveTrigger,
+                            onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
                         )
                     } else {
                         FileEditView(
@@ -174,6 +178,7 @@ fun TabbedViewerPanel(
                             saveTrigger = saveTrigger,
                             repo = repo,
                             blameEnabled = blameEnabled,
+                            onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
                             // A blame line resolves to the commit that last touched it; open that
                             // commit's diff for this file so the user can read the change in full.
                             onOpenBlameCommit = { sha ->
@@ -207,6 +212,21 @@ fun TabbedViewerPanel(
                     saveTrigger = saveTrigger,
                 )
                 is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState)
+                is Tab.LocalHistory -> LocalHistoryView(
+                    history = localHistory,
+                    tab = current,
+                    tabsState = tabsState,
+                    reloadKey = tabsState.reloadKey(current.id),
+                )
+                is Tab.LocalDiff -> LocalDiffView(
+                    history = localHistory,
+                    tab = current,
+                    splitRatio = diffSplitRatio,
+                    onSplitRatioChange = onDiffSplitRatioChange,
+                    onTopLine = onDiffTopLine,
+                    reloadKey = tabsState.reloadKey(current.id),
+                    findTrigger = findInFileTrigger,
+                )
                 is Tab.CommitDiff -> if (repo != null) CommitDiffView(
                     repo = repo,
                     tab = current,
@@ -241,6 +261,9 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
     is Tab.Diff -> saveMarker(editStore.peek(Tab.FileView(File(tab.repoRoot, tab.change.path)).id)) + tab.title
     is Tab.CommitDiff -> tab.title
     is Tab.History -> tab.title
+    // A local-history revision is a snapshot of a file that may well be open and dirty beside it,
+    // but the revision itself is fixed — no save marker, same as a commit diff.
+    is Tab.LocalHistory, is Tab.LocalDiff -> tab.title
     is Tab.Terminal -> tab.title
 }
 
@@ -269,6 +292,7 @@ private fun FileEditView(
     repo: GitRepo? = null,
     blameEnabled: Boolean = false,
     onOpenBlameCommit: (sha: String) -> Unit = {},
+    onShowLocalHistory: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
@@ -668,6 +692,12 @@ private fun FileEditView(
                 .fillMaxSize()
                 .then(if (wrap) Modifier else Modifier.horizontalScroll(hScroll)),
         ) {
+        // Appended to the text field's own right-click menu (cut/copy/paste/select all), which is
+        // where the file in front of the user is: "what did this look like before?" belongs beside
+        // the editing actions rather than behind a trip to the project tree.
+        ContextMenuDataProvider(items = {
+            listOf(ContextMenuDivider, ContextMenuItem("Show local history", onShowLocalHistory))
+        }) {
         BasicTextField(
             state = edit.state,
             // Runs only for genuine user input (typing, paste, IME) — never for programmatic
@@ -734,6 +764,7 @@ private fun FileEditView(
                 if (r != null) layout = r
             },
         )
+        }
         // Red wavy underline under syntax-error ranges (native YAML errors today). Aligned to the
         // text the same way BlameGutter is: layout positions are in document space, shifted up by the
         // scroll offset. Sized to the field rather than the viewport (matchParentSize) so it travels
@@ -823,6 +854,7 @@ private fun MarkdownEditWithPreview(
     findInFileTrigger: Int = 0,
     replaceInFileTrigger: Int = 0,
     saveTrigger: Int = 0,
+    onShowLocalHistory: () -> Unit = {},
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
     val previewText by remember(edit) {
@@ -841,6 +873,7 @@ private fun MarkdownEditWithPreview(
                 findInFileTrigger = findInFileTrigger,
                 replaceInFileTrigger = replaceInFileTrigger,
                 saveTrigger = saveTrigger,
+                onShowLocalHistory = onShowLocalHistory,
             )
         },
         second = {

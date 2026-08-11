@@ -2,6 +2,7 @@ package iondrive.nop.ui
 
 import androidx.compose.ui.text.TextRange
 import iondrive.nop.diff.ConflictParser
+import iondrive.nop.history.LocalHistory
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotSame
@@ -667,5 +668,52 @@ class FileEditStoreTest {
 
         assertFalse(edit.hasUserEdit)
         assertEquals("agent\n", edit.diskTextIfDivergedAndClean())
+    }
+
+    @Test
+    fun `a save records the version it replaced and the one it wrote`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val history = LocalHistory(tmp.resolve("localhistory"))
+        val edit = FileEditStore(history).edit(Tab.FileView(f))
+
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        assertEquals(SaveResult.Saved, edit.save())
+
+        // Both ends of the edit are recoverable: what the file held before the user touched it, and
+        // what nop put on disk. The baseline is only stored once, however many saves follow.
+        assertEquals(listOf("mine\n", "base\n"), history.revisions(f).map { history.read(it) })
+
+        edit.state.edit { replace(0, length, "mine again\n") }
+        edit.markUserEdit()
+        edit.save()
+        assertEquals(listOf("mine again\n", "mine\n", "base\n"), history.revisions(f).map { history.read(it) })
+    }
+
+    @Test
+    fun `an external write is recorded as it is adopted`(@TempDir tmp: Path) {
+        // The content an agent or a checkout replaced is exactly what someone comes to local history
+        // looking for, so it goes in on the way past — nop's own saves are not the only source.
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val history = LocalHistory(tmp.resolve("localhistory"))
+        val edit = FileEditStore(history).edit(Tab.FileView(f))
+
+        f.writeText("from an agent\n")
+        edit.adoptDiskText(edit.diskTextIfDivergedAndClean()!!)
+
+        assertEquals(listOf("from an agent\n"), history.revisions(f).map { history.read(it) })
+    }
+
+    @Test
+    fun `a failed save still records what the file held`(@TempDir tmp: Path) {
+        val dir = tmp.resolve("dir").toFile().apply { mkdirs() }
+        val history = LocalHistory(tmp.resolve("localhistory"))
+        // Writing over a directory throws, which is the "the write itself failed" path.
+        val edit = FileEdit("original\n", dir, history)
+        edit.state.edit { replace(0, length, "new\n") }
+        edit.markUserEdit()
+
+        assertTrue(edit.save() is SaveResult.Failed)
+        assertEquals(listOf("original\n"), history.revisions(dir).map { history.read(it) })
     }
 }

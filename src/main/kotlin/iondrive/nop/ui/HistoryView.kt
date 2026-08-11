@@ -40,8 +40,8 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-private val SHA_FG = Color(0xFFA9B6C3)
-private val META_FG = Color(0xFF7F8C9B)
+internal val SHA_FG = Color(0xFFA9B6C3)
+internal val META_FG = Color(0xFF7F8C9B)
 private val DATE_FMT: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault())
 

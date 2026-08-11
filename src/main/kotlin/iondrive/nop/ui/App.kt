@@ -25,6 +25,7 @@ import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.StashEntry
+import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.AccessFrequency
 import iondrive.nop.index.FileIndex
 import iondrive.nop.index.Indexer
@@ -138,7 +139,12 @@ fun App(
         val file = jumpToSourceTarget(tabsState.selectedTab) ?: return@LaunchedEffect
         tabsState.openAt(Tab.FileView(file), diffTopLine)
     }
-    val editStore = remember(projectPath) { FileEditStore() }
+    // nop's own record of what this project's files have held, kept beside the other per-project
+    // derived data. Every buffer the store hands out reports its saves into it — see [LocalHistory].
+    val localHistory = remember(projectPath) {
+        LocalHistory(Settings.projectDataDir(projectPath).resolve("localhistory"))
+    }
+    val editStore = remember(projectPath) { FileEditStore(localHistory) }
     val scope = rememberCoroutineScope()
 
     // Split ratios are persisted globally (not per-project): the layout preference is about the
@@ -472,6 +478,8 @@ fun App(
                 is Tab.Diff -> File(tab.repoRoot, tab.change.path)
                 is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
                 is Tab.History -> tab.file
+                is Tab.LocalHistory -> tab.file
+                is Tab.LocalDiff -> tab.file
                 is Tab.Terminal -> null
             }
             val p = tabFile?.absolutePath ?: return@filter false
@@ -568,6 +576,8 @@ fun App(
         is Tab.Diff -> File(t.repoRoot, t.change.path)
         is Tab.CommitDiff -> File(t.repoRoot, t.file.path)
         is Tab.History -> t.file
+        is Tab.LocalHistory -> t.file
+        is Tab.LocalDiff -> t.file
         is Tab.Terminal, null -> null
     }
 
@@ -633,6 +643,7 @@ fun App(
                                 tabsState = tabsState,
                                 repo = repo,
                                 editStore = editStore,
+                                localHistory = localHistory,
                                 onFileSaved = ::refresh,
                                 onResolveAt = { currentFile, text, offset ->
                                     JumpResolver.resolve(

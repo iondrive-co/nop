@@ -15,13 +15,16 @@ import java.nio.file.Path
  *   * [Tab.History]    — same; the repo root is implicit (we're inside a single project)
  *   * [Tab.CommitDiff] — a (sha, path, change type) triple; a commit's content is immutable, so
  *                        this rebuilds into exactly the diff that was on screen
+ *   * [Tab.LocalHistory] — an absolute path, like [Tab.History]
+ *   * [Tab.LocalDiff]  — an absolute path plus the revision's timestamp, which is how a local-history
+ *                        revision is named on disk (see [iondrive.nop.history.LocalHistory])
  *
  * Working-tree Diff tabs depend on the live [iondrive.nop.git.FileChange] blob which is recomputed
  * from git status, and Terminal tabs wrap a running PTY process — neither can be meaningfully
  * restored, so both are dropped at save time.
  *
  * Stored as TSV under the project's data dir: `kind<TAB>path<TAB>selected?`, plus
- * `<TAB>sha<TAB>changeType` for commit diffs. One tab per line; unparseable lines are skipped so a
+ * `<TAB>sha<TAB>changeType` for commit diffs and `<TAB>timestamp` for local ones. One tab per line; unparseable lines are skipped so a
  * partial corruption doesn't wipe the strip. [path] is absolute except for a commit diff, where it
  * is the repo-relative path git knows the file by.
  *
@@ -54,6 +57,8 @@ object TabsPersistence {
     private const val KIND_FILE = "file"
     private const val KIND_HISTORY = "history"
     private const val KIND_COMMITDIFF = "commitdiff"
+    private const val KIND_LOCALHISTORY = "localhistory"
+    private const val KIND_LOCALDIFF = "localdiff"
     private const val KIND_GROUP = "group"
 
     fun save(target: Path, snapshot: TabsSnapshot) {
@@ -89,6 +94,11 @@ object TabsPersistence {
         val (kind, file) = when (tab) {
             is Tab.FileView -> KIND_FILE to tab.file
             is Tab.History -> KIND_HISTORY to tab.file
+            is Tab.LocalHistory -> KIND_LOCALHISTORY to tab.file
+            // The timestamp *is* the revision's name in local history, so it restores by lookup.
+            is Tab.LocalDiff -> return listOf(
+                KIND_LOCALDIFF, tab.file.absolutePath, selected, tab.timestampMillis.toString(),
+            ).joinToString("\t")
             // Repo-relative path, and the two extra columns the diff can't be rebuilt without.
             is Tab.CommitDiff -> return listOf(
                 KIND_COMMITDIFF, tab.file.path, selected, tab.sha, tab.file.changeType.name,
@@ -110,7 +120,12 @@ object TabsPersistence {
             val path = parts[1]
             val selected = parts.getOrNull(2) == "1"
             when (kind) {
-                KIND_FILE, KIND_HISTORY -> out += SavedTab(kind, path, selected)
+                KIND_FILE, KIND_HISTORY, KIND_LOCALHISTORY -> out += SavedTab(kind, path, selected)
+                // The timestamp rides in the sha column; a row without one names no revision.
+                KIND_LOCALDIFF -> {
+                    val stamp = parts.getOrNull(3)?.takeIf { it.toLongOrNull() != null } ?: continue
+                    out += SavedTab(kind, path, selected, stamp)
+                }
                 // A group's "selected" column means "this is the group new tabs open into".
                 KIND_GROUP -> out += SavedTab(kind, path, selected, collapsed = parts.getOrNull(3) == "1")
                 KIND_COMMITDIFF -> {
@@ -163,6 +178,15 @@ object TabsPersistence {
                     val file = File(s.path).takeIf { it.exists() } ?: continue
                     if (repoRoot == null) continue
                     Tab.History(file, repoRoot)
+                }
+                // Local history needs no repo — it's nop's own record, and it's the only history an
+                // uncommitted (or untracked) file has.
+                KIND_LOCALHISTORY -> Tab.LocalHistory(File(s.path).takeIf { it.exists() } ?: continue)
+                // The revision may have been pruned since; the view says so rather than the tab
+                // silently not coming back, which is the same contract commit diffs restore under.
+                KIND_LOCALDIFF -> {
+                    val file = File(s.path).takeIf { it.isFile } ?: continue
+                    Tab.LocalDiff(file, s.sha?.toLongOrNull() ?: continue)
                 }
                 // Nothing to check on disk: the diff is read out of the commit, so it restores just
                 // as well for a file the commit deleted or that has since been renamed away.

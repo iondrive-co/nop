@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
 import iondrive.nop.diff.ThreeWayMerge
+import iondrive.nop.history.LocalHistory
 import java.io.File
 
 /** Outcome of a [FileEdit.save]. */
@@ -53,8 +54,14 @@ sealed interface SaveBlock {
     data class Failed(val message: String) : SaveBlock
 }
 
-/** Per-file editor state cached across tab switches. */
-class FileEdit(initialText: String, val file: File) {
+/**
+ * Per-file editor state cached across tab switches.
+ *
+ * [history], when present, is handed every version of the file this buffer puts on disk — and every
+ * version an outside writer puts there while the file is open — so nop keeps its own record of the
+ * content independently of git. See [LocalHistory].
+ */
+class FileEdit(initialText: String, val file: File, private val history: LocalHistory? = null) {
     val state: TextFieldState = TextFieldState(initialText)
 
     /**
@@ -187,12 +194,18 @@ class FileEdit(initialText: String, val file: File) {
      * good, silently. A failure is now just another [SaveBlock] the user can see and retry.
      */
     private fun writeBuffer(text: String): SaveResult {
+        // Snapshot the version about to be replaced before replacing it, then the one that lands.
+        // Offering the baseline on every save is what puts the file's *pre-edit* state in local
+        // history without a hook on the first keystroke: it stores something only the first time
+        // round, because LocalHistory ignores a text its newest revision already holds.
+        history?.record(file, savedText)
         val failure = runCatching { file.writeText(text) }.exceptionOrNull()
         if (failure != null) {
             val message = failure.message ?: failure::class.simpleName ?: "write failed"
             saveBlock = SaveBlock.Failed(message)
             return SaveResult.Failed(message)
         }
+        history?.record(file, text)
         markSaved(text)
         saveBlock = null
         return SaveResult.Saved
@@ -252,6 +265,10 @@ class FileEdit(initialText: String, val file: File) {
      * bottom of the file mid-sentence sends every keystroke after it to the wrong place.
      */
     fun adoptDiskText(diskText: String) {
+        // An outside writer — an agent, a checkout, another editor — just replaced this file. That
+        // is precisely the content people come to local history looking for, so it is recorded on
+        // the way in, alongside the versions nop writes itself.
+        history?.record(file, diskText)
         val caret = state.selection.start.coerceIn(0, diskText.length)
         state.edit {
             replace(0, length, diskText)
@@ -265,12 +282,12 @@ class FileEdit(initialText: String, val file: File) {
     }
 }
 
-class FileEditStore {
+class FileEditStore(private val history: LocalHistory? = null) {
     private val edits = mutableStateMapOf<String, FileEdit>()
 
     fun edit(tab: Tab.FileView): FileEdit = edits.getOrPut(tab.id) {
         val text = runCatching { tab.file.readText() }.getOrDefault("")
-        FileEdit(text, tab.file)
+        FileEdit(text, tab.file, history)
     }
 
     fun peek(id: String): FileEdit? = edits[id]
