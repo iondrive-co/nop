@@ -19,6 +19,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
+import iondrive.nop.Log
 import iondrive.nop.Settings
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
@@ -33,6 +34,7 @@ import iondrive.nop.launchers.Launcher
 import iondrive.nop.launchers.LauncherStore
 import iondrive.nop.launchers.discoverLaunchers
 import iondrive.nop.terminal.TerminalSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
@@ -109,6 +111,10 @@ fun App(
     // Whether the editor shows the git-blame annotate column. A global toggle (applies to whichever
     // file tab is active), driven by the gutter button in the project-tree header.
     var blameEnabled by remember(projectPath) { mutableStateOf(false) }
+    // Whether long lines wrap in file tabs and diffs, driven by the toggle beside the tab strip's
+    // "+". Deliberately *not* keyed on projectPath — it's a preference about reading code, so it
+    // stays put as the user moves between projects — and persisted so it survives a restart.
+    var wrapLines by remember { mutableStateOf(Settings.loadWrapLines()) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -335,11 +341,27 @@ fun App(
         refresh()
     }
 
+    // The background poll, and the one place that must never stop running: it is what keeps the
+    // commit list honest *and* what pulls external edits into open buffers (pollStatus reconciles
+    // before it looks at git). An exception escaping the loop body would end the coroutine, and with
+    // it every future poll for the life of this project's composition — git state and every open
+    // editor frozen together, silently, until the project is switched or nop is restarted. One
+    // failed tick is not worth that, so each is isolated and logged; cancellation still gets out,
+    // or switching projects would leak this loop.
     LaunchedEffect(repo) {
-        reloadStatus()
+        suspend fun tick(what: String, body: suspend () -> Unit) {
+            try {
+                body()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.error("git poll: $what failed", t)
+            }
+        }
+        tick("initial status load") { reloadStatus() }
         while (true) {
             delay(GIT_POLL_INTERVAL_MS)
-            pollStatus()
+            tick("poll") { pollStatus() }
         }
     }
 
@@ -630,6 +652,11 @@ fun App(
                                 replaceInFileTrigger = replaceInFileTrigger,
                                 saveTrigger = saveTrigger,
                                 blameEnabled = blameEnabled,
+                                wrapLines = wrapLines,
+                                onToggleWrap = {
+                                    wrapLines = !wrapLines
+                                    Settings.saveWrapLines(wrapLines)
+                                },
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },
                             )

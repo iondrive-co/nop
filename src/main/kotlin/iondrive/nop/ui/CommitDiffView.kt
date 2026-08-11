@@ -142,8 +142,13 @@ private fun ReadOnlyDiffList(
 @Composable
 private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
     val (oldBg, newBg) = backgroundsFor(row)
+    // One line is one row's height — unless wrapping is on, in which case the row is as tall as
+    // whichever half needed the most lines, and the tints behind both are painted by the row.
+    val wrap = LocalWrapLines.current
     Row(
-        modifier = Modifier.fillMaxWidth().height(rememberDiffLineHeight()),
+        modifier = Modifier.fillMaxWidth().then(
+            if (wrap) Modifier.wrappedRowChrome(oldBg, newBg) else Modifier.height(rememberDiffLineHeight()),
+        ),
         horizontalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         ReadOnlyDiffHalf(

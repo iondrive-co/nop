@@ -240,6 +240,20 @@ object Settings {
     }
 
     /**
+     * Whether long lines soft-wrap in the editor and in diffs. Global rather than per-project, like
+     * the theme: it's a preference about how the user reads code, not about a particular repo.
+     * Defaults to off (long lines run off the edge behind a horizontal scrollbar), which is what a
+     * diff has always done and what the line-numbered views are laid out for.
+     */
+    fun loadWrapLines(): Boolean = load()["wrap"]?.lowercase() == "true"
+
+    fun saveWrapLines(wrap: Boolean) {
+        val map = load()
+        map["wrap"] = wrap.toString()
+        save(map)
+    }
+
+    /**
      * Height of the commit-message text area in dp, persisted per-project. Returns null when
      * the user hasn't dragged the handle yet so the caller can fall back to a sensible default.
      */

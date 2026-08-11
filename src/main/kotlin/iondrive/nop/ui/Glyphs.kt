@@ -38,6 +38,25 @@ internal fun DrawScope.drawCloseIcon(tint: Color) {
     drawLine(tint, Offset(size.width - pad, pad), Offset(pad, size.height - pad), strokeWidth = 1.3f, cap = StrokeCap.Round)
 }
 
+/**
+ * The word-wrap mark: two full-width lines with a third that turns back on itself under an arrow —
+ * the "this line continues on the next one" symbol every editor uses for the setting.
+ */
+internal fun DrawScope.drawWrapIcon(tint: Color) {
+    val w = size.width
+    val h = size.height
+    val stroke = 1.3f
+    // Two plain lines above, standing for text that fits.
+    drawLine(tint, Offset(0f, h * 0.15f), Offset(w, h * 0.15f), strokeWidth = stroke, cap = StrokeCap.Round)
+    // The wrapping line: runs out to the right margin, hooks down and comes back left to the arrow.
+    drawLine(tint, Offset(0f, h * 0.45f), Offset(w * 0.85f, h * 0.45f), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(w * 0.85f, h * 0.45f), Offset(w * 0.85f, h * 0.8f), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(w * 0.85f, h * 0.8f), Offset(w * 0.2f, h * 0.8f), strokeWidth = stroke, cap = StrokeCap.Round)
+    // Arrowhead on the returning end, symmetric about the line it sits on.
+    drawLine(tint, Offset(w * 0.2f, h * 0.8f), Offset(w * 0.4f, h * 0.6f), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(w * 0.2f, h * 0.8f), Offset(w * 0.4f, h), strokeWidth = stroke, cap = StrokeCap.Round)
+}
+
 // A disclosure chevron: ">" (points right) when the group is collapsed, "v" (points down) when it's
 // expanded — the usual "click to reveal what's underneath" convention.
 internal fun DrawScope.drawDisclosure(tint: Color, collapsed: Boolean) {

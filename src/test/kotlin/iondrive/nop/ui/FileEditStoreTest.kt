@@ -589,4 +589,83 @@ class FileEditStoreTest {
         assertTrue(edit.saveBlock is SaveBlock.Failed, "and shown to the user")
         assertTrue(edit.hasUserEdit, "the edit is still pending, not marked saved")
     }
+
+    // ---- The silent-staleness bug: a buffer the user touched and then returned to its baseline
+    // ---- ignored every external write for the rest of the session, with no banner to explain it,
+    // ---- because nothing ever called save() and reconcile was gated on the bare edit latch.
+
+    @Test
+    fun `a keystroke undone inside the debounce no longer freezes the buffer`(@TempDir tmp: Path) {
+        val f = tmp.resolve("haproxy.cfg.j2").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        // Type a character and delete it again before the autosave debounce elapses.
+        edit.state.edit { replace(0, length, "base x\n") }
+        edit.markUserEdit()
+        edit.state.edit { replace(0, length, "base\n") }
+        edit.markUserEdit()
+
+        assertFalse(edit.hasUserEdit, "back at the baseline, so nothing is pending")
+        assertNull(autosaveTick(edit), "still nothing to write")
+
+        // An agent rewrites the file.
+        f.writeText("agent-changes\n")
+
+        // The buffer must now pick it up rather than sitting on stale content forever.
+        assertEquals("agent-changes\n", edit.diskTextIfDivergedAndClean())
+        edit.adoptDiskText("agent-changes\n")
+        assertEquals("agent-changes\n", edit.state.text.toString())
+    }
+
+    @Test
+    fun `a touched buffer that still differs is protected exactly as before`(@TempDir tmp: Path) {
+        // The other half of the guard: real pending work must still beat an external write.
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "my work\n") }
+        edit.markUserEdit()
+
+        f.writeText("agent\n")
+
+        assertTrue(edit.hasUserEdit)
+        assertNull(edit.diskTextIfDivergedAndClean(), "unsaved user work still wins")
+        assertTrue(autosaveTick(edit) is SaveResult.ExternalChange)
+        assertTrue(edit.saveBlock is SaveBlock.Conflict, "and now it says so")
+    }
+
+    @Test
+    fun `a programmatic drift still reloads — the writeback echo case is unchanged`(
+        @TempDir tmp: Path,
+    ) {
+        val f = tmp.resolve("vars").also { it.writeText("a\nb\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+
+        // Drift with no markUserEdit: isModified true, latch false.
+        edit.state.edit { replace(0, length, "a\nX\n") }
+        assertTrue(edit.isModified)
+        assertFalse(edit.hasUserEdit)
+
+        f.writeText("a\nb\nc\n")
+        assertEquals("a\nb\nc\n", edit.diskTextIfDivergedAndClean(), "drift is not work to protect")
+    }
+
+    @Test
+    fun `undoing back to the baseline releases a buffer that was already blocked`(
+        @TempDir tmp: Path,
+    ) {
+        val f = tmp.resolve("a.txt").also { it.writeText("base\n") }.toFile()
+        val edit = FileEditStore().edit(Tab.FileView(f))
+        edit.state.edit { replace(0, length, "mine\n") }
+        edit.markUserEdit()
+        f.writeText("agent\n")
+        edit.save()
+        assertTrue(edit.saveBlock is SaveBlock.Conflict)
+
+        // The user gives up on their edit and undoes it. There is no longer anything to protect,
+        // so the agent's version must be free to come in.
+        edit.state.edit { replace(0, length, "base\n") }
+
+        assertFalse(edit.hasUserEdit)
+        assertEquals("agent\n", edit.diskTextIfDivergedAndClean())
+    }
 }

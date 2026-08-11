@@ -3,13 +3,18 @@ package iondrive.nop.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollbarAdapter
@@ -18,6 +23,7 @@ import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.withFrameNanos
@@ -41,10 +47,12 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.text.input.OutputTransformation
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -73,6 +81,16 @@ import org.jetbrains.jewel.ui.theme.editorTabStyle
 /** How long to wait for the typing to settle before writing the buffer to disk. */
 private const val AUTOSAVE_DEBOUNCE_MS = 400L
 
+/** Characters measured in one go to derive the editor's monospace advance. */
+private const val ADVANCE_SAMPLE = 100
+
+/**
+ * Slack kept beyond the last character of the longest line, and the gap the caret is kept clear of
+ * either edge by while scrolling sideways — so the character being typed is never flush against the
+ * viewport's edge.
+ */
+private val CARET_MARGIN = 24.dp
+
 @OptIn(ExperimentalJewelApi::class)
 @Composable
 fun TabbedViewerPanel(
@@ -87,6 +105,8 @@ fun TabbedViewerPanel(
     replaceInFileTrigger: Int = 0,
     saveTrigger: Int = 0,
     blameEnabled: Boolean = false,
+    wrapLines: Boolean = false,
+    onToggleWrap: () -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
 ) {
@@ -105,6 +125,9 @@ fun TabbedViewerPanel(
     // outlive switches to non-terminal tabs.
     val terminalCards = remember { JPanel(CardLayout()) }
 
+    // One flag for every view under the strip, so the toggle in the strip means the same thing to a
+    // file tab and to either diff — see [LocalWrapLines].
+    CompositionLocalProvider(LocalWrapLines provides wrapLines) {
     Column(modifier = Modifier.fillMaxSize()) {
         // Drawn even with nothing open: the strip is where the tab groups live, so a project whose
         // tabs were all closed (or were terminals and diffs, which don't survive a restart) still
@@ -114,6 +137,8 @@ fun TabbedViewerPanel(
             style = JewelTheme.editorTabStyle,
             labelFor = { labelFor(it, editStore) },
             onTabsClosed = { closed -> closed.forEach(::cleanUp) },
+            wrapLines = wrapLines,
+            onToggleWrap = onToggleWrap,
         )
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = selected) {
@@ -200,6 +225,7 @@ fun TabbedViewerPanel(
                 }
             }
         }
+    }
     }
 }
 
@@ -370,6 +396,35 @@ private fun FileEditView(
     val isDark = JewelTheme.isDark
     val fg =if (isDark) androidx.compose.ui.graphics.Color(0xFFBCBEC4) else androidx.compose.ui.graphics.Color(0xFF000000)
     val palette = if (isDark) HighlightPalette.Dark else HighlightPalette.Light
+    // Word wrap, from the toggle in the tab strip. Off, the field is laid out at the width of the
+    // file's longest line and the viewport scrolls sideways over it; on, it takes the pane's width
+    // and the text engine folds what doesn't fit — which is what a multi-line field does by default.
+    val wrap = LocalWrapLines.current
+    val hScroll = edit.hScroll
+    val editorStyle = remember(fg) {
+        TextStyle(
+            fontFamily = NopFonts.Mono,
+            fontSize = 13.sp,
+            // Give each line room to breathe (~1.5x). A generous line height is a big part of
+            // why a modern IDE's editor reads as calm rather than cramped; the default (font
+            // intrinsic) leading packs lines together.
+            lineHeight = 20.sp,
+            color = fg,
+        )
+    }
+    // How wide the unwrapped text is, as a character count times the monospace advance — the same
+    // measurement the diff halves size themselves by, and for the same reason: a file whose longest
+    // line is a minified blob costs a scan of the text rather than a layout of it.
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val charWidth = remember(measurer, density, editorStyle) {
+        val sample = measurer.measure("0".repeat(ADVANCE_SAMPLE), editorStyle).size.width
+        with(density) { (sample / ADVANCE_SAMPLE.toFloat()).toDp() }
+    }
+    val longestLine by remember(tab.id) {
+        derivedStateOf { longestLineLength(edit.state.text.toString()) }
+    }
+    val contentWidth = charWidth * longestLine + CARET_MARGIN
     val tokenize = remember(tab.id) { tokenizerForExtension(tab.file.extension) }
     // Tokenize once per text change, not on every OutputTransformation invocation. The
     // transformation below is re-applied on each recomposition (every keystroke, every
@@ -406,6 +461,35 @@ private fun FileEditView(
     // We keep the text layout around so Ctrl-click can map mouse coordinates to text offsets,
     // and so an inbound jump request can scroll a target line to the top of the viewport.
     var layout by remember(tab.id) { mutableStateOf<TextLayoutResult?>(null) }
+
+    // Keep the caret in view sideways. The field scrolls itself vertically, but the horizontal
+    // scroll belongs to the box around it, so without this typing past the right edge — or a find
+    // hit landing there, since those move the selection too — would leave the caret off-screen with
+    // no sign of where it went.
+    LaunchedEffect(tab.id, wrap) {
+        if (wrap) return@LaunchedEffect
+        // Driven by the caret alone, with the layout read (not observed) as of each move: keying the
+        // flow on the layout too would compare one TextLayoutResult against another — a whole-text
+        // comparison — on every keystroke, to answer a question the caret has already answered.
+        snapshotFlow { edit.state.selection.end }
+            .distinctUntilChanged()
+            .collect { caret ->
+                val tl = layout ?: return@collect
+                val viewport = hScroll.viewportSize
+                if (viewport <= 0) return@collect
+                val margin = with(density) { CARET_MARGIN.toPx() }
+                val x = tl.getHorizontalPosition(
+                    caret.coerceIn(0, tl.layoutInput.text.length),
+                    usePrimaryDirection = true,
+                )
+                val left = hScroll.value
+                if (x < left + margin) {
+                    hScroll.scrollTo((x - margin).toInt().coerceIn(0, hScroll.maxValue))
+                } else if (x > left + viewport - margin) {
+                    hScroll.scrollTo((x - viewport + margin).toInt().coerceIn(0, hScroll.maxValue))
+                }
+            }
+    }
 
     // Per-line git blame for the gutter, lazily computed only while the annotate column is on.
     // null means "loading"; an empty list means "no blame available" (untracked, binary, no repo).
@@ -551,7 +635,7 @@ private fun FileEditView(
                 },
             )
         }
-    Row(modifier = Modifier.fillMaxSize()) {
+    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
         // IntelliJ-style annotate column, kept to the left of the text and aligned to it by sharing
         // the editor's scrollState + layout. The top padding mirrors the text Box's so line 0 of the
         // gutter sits level with line 0 of the file.
@@ -571,6 +655,19 @@ private fun FileEditView(
             .fillMaxSize()
             .padding(12.dp),
     ) {
+    // Everything that has to line up with the text — the field and the error squiggles over it —
+    // sits inside one box that is the width of the *content*, so the whole thing slides together
+    // under the horizontal scroll. Wrapping collapses that to the viewport width: there is nothing
+    // to the right to scroll to, and BoxWithConstraints hands us the width to fold the text into.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(end = 12.dp)) {
+        // At least the viewport wide, so clicking in the space beside a short line still lands in
+        // the field rather than on the panel behind it.
+        val fieldWidth = maxOf(contentWidth, maxWidth)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (wrap) Modifier else Modifier.horizontalScroll(hScroll)),
+        ) {
         BasicTextField(
             state = edit.state,
             // Runs only for genuine user input (typing, paste, IME) — never for programmatic
@@ -578,8 +675,7 @@ private fun FileEditView(
             // edit worth saving. Reconcile/adopt mutate the buffer without tripping this.
             inputTransformation = InputTransformation { edit.markUserEdit() },
             modifier = Modifier
-                .fillMaxSize()
-                .padding(end = 12.dp)
+                .then(if (wrap) Modifier.fillMaxSize() else Modifier.width(fieldWidth).fillMaxHeight())
                 .focusRequester(focusRequester)
                 // Ctrl-click → jump-to-source, and Ctrl-hover → underline the jumpable word so
                 // the user can see the click target before commiting. Both run on the Initial
@@ -628,15 +724,7 @@ private fun FileEditView(
                         }
                     }
                 },
-            textStyle = TextStyle(
-                fontFamily = NopFonts.Mono,
-                fontSize = 13.sp,
-                // Give each line room to breathe (~1.5x). A generous line height is a big part of
-                // why a modern IDE's editor reads as calm rather than cramped; the default (font
-                // intrinsic) leading packs lines together.
-                lineHeight = 20.sp,
-                color = fg,
-            ),
+            textStyle = editorStyle,
             cursorBrush = SolidColor(fg),
             lineLimits = TextFieldLineLimits.MultiLine(),
             scrollState = scrollState,
@@ -648,9 +736,11 @@ private fun FileEditView(
         )
         // Red wavy underline under syntax-error ranges (native YAML errors today). Aligned to the
         // text the same way BlameGutter is: layout positions are in document space, shifted up by the
-        // scroll offset. Decorative only — no pointerInput, so Ctrl-click still reaches the field.
+        // scroll offset. Sized to the field rather than the viewport (matchParentSize) so it travels
+        // with the text under the horizontal scroll instead of staying pinned to the pane.
+        // Decorative only — no pointerInput, so Ctrl-click still reaches the field.
         val errorColor = palette.error.color
-        Canvas(modifier = Modifier.fillMaxSize().padding(end = 12.dp)) {
+        Canvas(modifier = Modifier.matchParentSize()) {
             val tl = layout ?: return@Canvas
             val textLen = tl.layoutInput.text.length
             val scroll = scrollState.value.toFloat()
@@ -682,6 +772,8 @@ private fun FileEditView(
                 drawPath(path, errorColor, style = Stroke(width = strokeWidth))
             }
         }
+        }
+    }
         VerticalScrollbar(
             adapter = rememberScrollbarAdapter(scrollState),
             style = NopScrollbarStyle,
@@ -692,6 +784,15 @@ private fun FileEditView(
         )
     }
     }
+        // Only claimed when a line actually overruns the pane, so a file that fits keeps the full
+        // height — the same rule the diff's side scrollbars follow.
+        if (!wrap && hScroll.maxValue > 0) {
+            HorizontalScrollbar(
+                adapter = rememberScrollbarAdapter(hScroll),
+                style = NopScrollbarStyle,
+                modifier = Modifier.fillMaxWidth().height(8.dp).padding(start = 12.dp, end = 24.dp),
+            )
+        }
     }
 }
 
@@ -751,6 +852,25 @@ private fun MarkdownEditWithPreview(
         state = rememberSplitLayoutState(0.5f),
         modifier = Modifier.fillMaxSize(),
     )
+}
+
+/**
+ * Longest line of [text], in characters — the monospace stand-in for "widest", and so how wide the
+ * editor lays itself out when word wrap is off. Counted over a single pass rather than by splitting,
+ * because this runs on every keystroke and a large file would otherwise allocate its own line list
+ * each time. A trailing newline contributes a final empty line, which never wins.
+ */
+internal fun longestLineLength(text: String): Int {
+    var longest = 0
+    var lineStart = 0
+    for (i in text.indices) {
+        if (text[i] == '\n') {
+            if (i - lineStart > longest) longest = i - lineStart
+            lineStart = i + 1
+        }
+    }
+    if (text.length - lineStart > longest) longest = text.length - lineStart
+    return longest
 }
 
 /**

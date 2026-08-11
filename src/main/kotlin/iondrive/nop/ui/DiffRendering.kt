@@ -41,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -238,19 +239,22 @@ internal fun RowScope.diffHalf(side: DiffSide): Modifier {
     return if (side == DiffSide.OLD && layout != null) Modifier.width(layout.oldWidth) else Modifier.weight(1f)
 }
 
-/** Makes this line cell a viewport onto [side]'s shared horizontal scroll. */
+/** Makes this line cell a viewport onto [side]'s shared horizontal scroll. No-op while wrapping. */
 @Composable
 internal fun Modifier.diffHorizontalScroll(side: DiffSide): Modifier {
+    if (LocalWrapLines.current) return this
     val layout = LocalDiffLayout.current ?: return this
     return horizontalScroll(layout.scroll(side).state)
 }
 
 /**
  * Sizes a line cell to the longest line on its [side], so every row scrolls over the same extent —
- * short lines simply trail off into empty space instead of stopping the scroll early.
+ * short lines simply trail off into empty space instead of stopping the scroll early. While wrapping
+ * there is nothing to scroll over: the cell takes the width it's given and the text folds into it.
  */
 @Composable
 internal fun Modifier.diffLineWidth(side: DiffSide): Modifier {
+    if (LocalWrapLines.current) return fillMaxWidth()
     val layout = LocalDiffLayout.current ?: return fillMaxWidth()
     return width(layout.scroll(side).contentWidth)
 }
@@ -258,7 +262,38 @@ internal fun Modifier.diffLineWidth(side: DiffSide): Modifier {
 /** The hairline between the two halves. Its draggable hit area is overlaid by [DiffListScaffold]. */
 @Composable
 internal fun DiffDivider() {
-    Box(Modifier.width(DIVIDER_W).fillMaxSize().background(Color(0x33FFFFFF)))
+    // Wrapped rows have no height of their own to fill — they are as tall as their text came out —
+    // so there the hairline is painted by [wrappedRowChrome] and this only holds its place.
+    if (LocalWrapLines.current) {
+        Box(Modifier.width(DIVIDER_W))
+    } else {
+        Box(Modifier.width(DIVIDER_W).fillMaxSize().background(Color(0x33FFFFFF)))
+    }
+}
+
+/**
+ * The tints and centre hairline behind one wrapped row, painted across whatever height its two
+ * halves came to rather than a known number of line steps.
+ *
+ * With wrapping on, a row is as tall as the taller of its sides, and neither side knows that height
+ * while it lays itself out — so the halves stop painting their own background and the row paints
+ * both of them, split at the divider. That also fills the shorter half down to the row's full
+ * height, so a line that wraps on one side only doesn't leave a gap of untinted rows beside it.
+ */
+@Composable
+internal fun Modifier.wrappedRowChrome(oldBackground: Color, newBackground: Color): Modifier {
+    val split = LocalDiffLayout.current?.oldWidth
+    return drawBehind {
+        val x = split?.toPx() ?: (size.width / 2f)
+        val divider = DIVIDER_W.toPx()
+        drawRect(oldBackground, Offset.Zero, Size(x, size.height))
+        drawRect(Color(0x33FFFFFF), Offset(x, 0f), Size(divider, size.height))
+        drawRect(
+            newBackground,
+            Offset(x + divider, 0f),
+            Size((size.width - x - divider).coerceAtLeast(0f), size.height),
+        )
+    }
 }
 
 /**
@@ -481,8 +516,12 @@ internal fun ReadOnlyDiffHalf(
     val palette = diffPalette()
     val tokens = remember(displayText, tokenize) { tokenize?.invoke(displayText) ?: emptyList() }
     val find = findHitsFor(rowIndex, side)
+    val wrap = LocalWrapLines.current
     Row(
-        modifier = modifier.fillMaxSize().background(background),
+        // A wrapped row's tint is painted by the row itself (see [wrappedRowChrome]), across the
+        // full height both halves ended up sharing. Painting it here too would double the alpha
+        // over the half's own lines and leave the rest of the row bare.
+        modifier = modifier.fillMaxSize().then(if (wrap) Modifier else Modifier.background(background)),
         verticalAlignment = Alignment.Top,
     ) {
         GutterCell(lineNumber)
@@ -508,7 +547,7 @@ internal fun ReadOnlyDiffHalf(
                     find,
                 ),
                 style = DIFF_TEXT_STYLE.copy(color = textColor()),
-                softWrap = false,
+                softWrap = wrap,
                 onTextLayout = { layout = it },
                 modifier = Modifier.diffLineWidth(side).padding(end = LINE_END_PAD).then(jumpModifier),
             )
@@ -720,6 +759,9 @@ private fun BoxScope.DividerGrabBand(dividerX: Dp, onDrag: (Float) -> Unit) {
  */
 @Composable
 private fun SideScrollbars(oldWidth: Dp, old: DiffSideScroll, new: DiffSideScroll) {
+    // Nothing scrolls sideways while wrapping, and the states keep the extents they last measured —
+    // so this has to be asked outright rather than inferred from them.
+    if (LocalWrapLines.current) return
     val showOld = old.state.viewportSize > 0 && old.state.maxValue > 0
     val showNew = new.state.viewportSize > 0 && new.state.maxValue > 0
     if (!showOld && !showNew) return

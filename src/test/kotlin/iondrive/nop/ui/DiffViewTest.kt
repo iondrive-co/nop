@@ -149,6 +149,23 @@ class DiffViewTest {
     }
 
     @Test
+    fun `diffBlocks gives every row its own item when wrapping`() {
+        // Word wrap makes a row as tall as its text, so rows can't be placed a fixed step apart
+        // inside a shared block — each becomes its own item, free to size itself. Deleted rows still
+        // fall out as display-only, exactly as they do at the full block size.
+        val rows = listOf(equal("a", 1), change("b", "B", 2, 2), delete("c", 3), equal("d", 3))
+        assertEquals(
+            listOf(
+                DiffBlock(0..0, editable = true),
+                DiffBlock(1..1, editable = true),
+                DiffBlock(2..2, editable = false),
+                DiffBlock(3..3, editable = true),
+            ),
+            diffBlocks(rows, editable = true, maxLines = 1),
+        )
+    }
+
+    @Test
     fun `diffBlocks marks everything display-only when there is no buffer`() {
         // A removed file has no working copy to edit; the blocks still group, but none is editable.
         val rows = listOf(equal("a", 1), delete("b", 2))

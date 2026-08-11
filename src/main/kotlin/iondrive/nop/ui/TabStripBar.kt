@@ -77,6 +77,9 @@ private const val DRAG_EXPAND_MS = 600L
  *
  * [onTabsClosed] runs the per-tab teardown the strip itself knows nothing about (flushing edit
  * buffers, stopping launcher processes) for every tab any of these actions removes.
+ *
+ * The far end of the bar carries the two controls that apply to whatever is open rather than to one
+ * tab: the word-wrap toggle and the "+" that adds a group.
  */
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -85,6 +88,8 @@ fun TabStripBar(
     style: TabStyle,
     labelFor: @Composable (Tab) -> String,
     onTabsClosed: (List<Tab>) -> Unit,
+    wrapLines: Boolean = false,
+    onToggleWrap: () -> Unit = {},
 ) {
     val isDark = JewelTheme.isDark
     val items = state.strip
@@ -179,7 +184,8 @@ fun TabStripBar(
                 }
             }
         }
-        // Pinned outside the scroll area so a strip full of tabs can still gain a group.
+        // Pinned outside the scroll area so a strip full of tabs can still reach them.
+        WrapToggleButton(isDark = isDark, enabled = wrapLines, onClick = onToggleWrap)
         AddGroupButton(isDark = isDark, onClick = { state.addGroup() })
     }
 
@@ -485,6 +491,29 @@ private fun Modifier.underline(show: Boolean, color: Color, thickness: Dp): Modi
             size = Size(size.width, height),
         )
     }
+
+/**
+ * The word-wrap toggle, beside the "+". Applies to every file tab and every diff at once — it's a
+ * reading preference, not a per-tab one — and is remembered across restarts. Lit in the same accent
+ * the blame toggle uses when on, so the two on/off buttons in the chrome read alike.
+ */
+@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun WrapToggleButton(isDark: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val tint = when {
+        enabled -> if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)
+        isDark -> ProjectIconTintDark
+        else -> ProjectIconTintLight
+    }
+    Tooltip(tooltip = { Text(if (enabled) "Turn off word wrap" else "Wrap long lines in files and diffs") }) {
+        Box(
+            modifier = Modifier.fillMaxHeight().width(28.dp).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.size(13.dp)) { drawWrapIcon(tint) }
+        }
+    }
+}
 
 /** The "+" at the end of the bar: adds a group and arms it, so the next file opened lands there. */
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)

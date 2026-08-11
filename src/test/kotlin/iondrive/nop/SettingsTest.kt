@@ -322,6 +322,33 @@ class SettingsTest {
     }
 
     @Test
+    fun `word wrap defaults to off and round-trips once set`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        // Nothing saved yet: lines run off the edge, which is what the diffs' line grid assumes.
+        assertTrue(!Settings.loadWrapLines())
+
+        Settings.saveWrapLines(true)
+        assertTrue(Settings.loadWrapLines())
+
+        Settings.saveWrapLines(false)
+        assertTrue(!Settings.loadWrapLines())
+    }
+
+    @Test
+    fun `saving word wrap leaves the rest of the state alone`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val proj = tmp.resolve("project").also { Files.createDirectories(it) }
+        Settings.saveOpenProjects(listOf(proj))
+        Settings.saveDarkMode(false)
+
+        Settings.saveWrapLines(true)
+
+        assertEquals(listOf(proj.toAbsolutePath().normalize()), Settings.loadOpenProjects())
+        assertTrue(!Settings.loadDarkMode())
+        assertTrue(Settings.loadWrapLines())
+    }
+
+    @Test
     fun `saving recent projects does not clobber open projects or window geometry`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }

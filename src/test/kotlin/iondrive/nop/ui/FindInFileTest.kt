@@ -179,6 +179,34 @@ class FindInFileTest {
         replaceMatches(state, findAllMatches(state.state(), "foo"), "replaced")
         assertEquals(4, state.selection.start, "nothing before the caret changed, so it must not move")
     }
+
+    // longestLineLength decides how wide the editor lays itself out with word wrap off — get it
+    // short and the tail of the longest line is unreachable behind the horizontal scroll.
+
+    @Test
+    fun `longest line is measured without its newline`() {
+        assertEquals(6, longestLineLength("ab\nlonger\nc"))
+    }
+
+    @Test
+    fun `a file with no newline at all is one line`() {
+        assertEquals(11, longestLineLength("hello world"))
+        assertEquals(0, longestLineLength(""))
+    }
+
+    @Test
+    fun `the longest line counts wherever it sits`() {
+        assertEquals(7, longestLineLength("longest\na\nb"))
+        assertEquals(7, longestLineLength("a\nb\nlongest"))
+        assertEquals(7, longestLineLength("a\nlongest\nb"))
+    }
+
+    @Test
+    fun `a trailing newline does not add a longer line`() {
+        assertEquals(4, longestLineLength("abcd\n"))
+        // CRLF text keeps its \r, which really does occupy a column's worth of layout.
+        assertEquals(5, longestLineLength("abcd\r\nab"))
+    }
 }
 
 /** The buffer's text, spelled out once so the assertions above read as comparisons. */

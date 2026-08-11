@@ -67,21 +67,44 @@ class FileEdit(initialText: String, val file: File) {
      * with its query in your find bar. Keyed to the file and dropped when its tab closes.
      */
     val scroll: ScrollState = ScrollState(0)
+
+    /**
+     * How far this file is scrolled sideways, for the same reason [scroll] lives here. Only used
+     * while word wrap is off — with it on there is nothing off to the right to scroll to.
+     */
+    val hScroll: ScrollState = ScrollState(0)
     val findQuery: TextFieldState = TextFieldState()
     val replaceWith: TextFieldState = TextFieldState()
     var savedText: String by mutableStateOf(initialText)
         private set
 
+    /** Raw "the user has touched this buffer" latch. See [hasUserEdit], which qualifies it. */
+    private var userEditLatch: Boolean by mutableStateOf(false)
+
     /**
-     * True once the user changed the buffer *through the editor* (typed, pasted, resolved a conflict,
-     * reverted a hunk) since it was last in sync with disk. The autosave consults this so that buffer
-     * mutations nop makes on its own — adopting an externally-changed file, re-seeding the diff view's
-     * per-line cells after a re-diff — can never trigger a disk write. nop only ever writes back what
-     * the user actually edited; this is what stops it reverting a file after a checkout/pull/merge it
-     * didn't make. Cleared whenever the buffer is brought back in sync with disk (save / adopt).
+     * True when the user has unsaved work in this buffer: they changed it *through the editor*
+     * (typed, pasted, resolved a conflict, reverted a hunk) **and** it still differs from the
+     * baseline. The autosave consults it so that buffer mutations nop makes on its own — adopting
+     * an externally-changed file, re-seeding the diff view's per-line cells after a re-diff — can
+     * never trigger a disk write. nop only ever writes back what the user actually edited; this is
+     * what stops it reverting a file after a checkout/pull/merge it didn't make.
+     *
+     * Both halves are load-bearing, and the second was missing. As a bare latch this could only be
+     * cleared by a save or an adopt, and neither runs when the buffer already equals [savedText]:
+     * the autosave skips it (nothing to write) and reconcile is gated on this very flag. Typing a
+     * character and deleting it again inside the autosave debounce was enough to reach that state,
+     * and the buffer then ignored every external write for the rest of the session — no refresh,
+     * no save attempt, and so no [saveBlock] and nothing on screen to explain it. Closing the tab
+     * was the only way out.
+     *
+     * Qualifying the latch with [isModified] fixes that at the source and can't lose work: when the
+     * buffer matches the baseline there is, by definition, nothing unsaved to protect. A buffer that
+     * drifted *without* the user (the diff view's writeback echo) still reads false here, so it
+     * still reloads from disk, which is why this is [isModified] on top of the latch rather than
+     * instead of it.
      */
-    var hasUserEdit: Boolean by mutableStateOf(false)
-        private set
+    val hasUserEdit: Boolean
+        get() = userEditLatch && isModified
 
     /**
      * Why the last save didn't reach disk, or null if it did. Set and cleared by [save]; the
@@ -93,7 +116,7 @@ class FileEdit(initialText: String, val file: File) {
 
     /** Record that the user changed the buffer via the editor. Call on the UI thread. */
     fun markUserEdit() {
-        hasUserEdit = true
+        userEditLatch = true
     }
 
     val isModified: Boolean
@@ -152,7 +175,7 @@ class FileEdit(initialText: String, val file: File) {
             selection = TextRange(caret)
         }
         savedText = diskText
-        hasUserEdit = true
+        userEditLatch = true
         saveBlock = null
         return merged.conflicts
     }
@@ -181,7 +204,7 @@ class FileEdit(initialText: String, val file: File) {
      *
      * A save runs off the UI thread and takes a whole file read plus a write, so the user can type
      * between the snapshot [save] took and this bookkeeping. Those keystrokes are unsaved user work.
-     * Clearing [hasUserEdit] for them leaves a buffer that looks clean yet sits ahead of disk, which
+     * Clearing the edit latch for them leaves a buffer that looks clean yet sits ahead of disk, which
      * is precisely the state [diskTextIfDivergedAndClean] treats as programmatic drift: the very next
      * reconcile (a save triggers one, and the git poll runs another every few seconds) adopts the
      * disk copy over the buffer, silently dropping those characters and — because the adopt rewrites
@@ -193,7 +216,7 @@ class FileEdit(initialText: String, val file: File) {
      */
     internal fun markSaved(written: String) {
         savedText = written
-        if (state.text.toString() == written) hasUserEdit = false
+        if (state.text.toString() == written) userEditLatch = false
     }
 
     /**
@@ -203,12 +226,15 @@ class FileEdit(initialText: String, val file: File) {
      * is missing/unreadable (a vanished file must not blank the buffer). Pure read: safe off the UI
      * thread; hand the result to [adoptDiskText] on the UI thread.
      *
-     * The guard is [hasUserEdit], not [isModified], on purpose. A buffer can drift off its baseline
-     * without the user touching it — the diff view re-seeds its per-line cells into the shared buffer,
-     * a "writeback echo" that leaves [isModified] true but [hasUserEdit] false. That drift is not work
-     * to protect: gating reload on [isModified] would strand such a buffer, freezing the working side
-     * of the diff on stale content while the real on-disk change never shows. Comparing against the
-     * live [state] text (not [savedText]) also heals a pure drift with no external write.
+     * The guard is [hasUserEdit] — which is the user's edit latch *and* [isModified] — rather than
+     * either half alone, and both halves matter here. A buffer can drift off its baseline without the
+     * user touching it: the diff view re-seeds its per-line cells into the shared buffer, a "writeback
+     * echo" that leaves [isModified] true but the latch false. That drift is not work to protect, so
+     * gating on [isModified] alone would strand such a buffer, freezing the working side of the diff
+     * on stale content while the real on-disk change never shows. Equally, gating on the bare latch
+     * stranded a buffer the user had touched and then returned to its baseline — see [hasUserEdit].
+     * Comparing against the live [state] text (not [savedText]) also heals a pure drift with no
+     * external write.
      */
     fun diskTextIfDivergedAndClean(): String? {
         if (hasUserEdit) return null
@@ -232,7 +258,7 @@ class FileEdit(initialText: String, val file: File) {
             selection = TextRange(caret)
         }
         savedText = diskText
-        hasUserEdit = false
+        userEditLatch = false
         // Taking the disk copy resolves any conflict by definition — there is nothing left of ours
         // to be blocked on.
         saveBlock = null

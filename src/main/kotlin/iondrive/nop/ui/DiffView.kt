@@ -436,8 +436,12 @@ private fun DiffRowsList(
     val editable = edit != null
     // The working line the block holding the caret starts on — see [diffBlocks]' splitAtLine.
     var caretBlockStart by remember { mutableStateOf<Int?>(null) }
-    val blocks = remember(result, editable, caretBlockStart) {
-        diffBlocks(result.rows, editable, splitAtLine = caretBlockStart)
+    // Wrapping costs the grouping: a wrapped line is more than one row tall, so a block can no
+    // longer place its rows a fixed step apart and each row has to be its own item, free to be as
+    // tall as its text — see [DiffBlockView].
+    val maxBlockLines = if (LocalWrapLines.current) 1 else MAX_BLOCK_LINES
+    val blocks = remember(result, editable, caretBlockStart, maxBlockLines) {
+        diffBlocks(result.rows, editable, maxLines = maxBlockLines, splitAtLine = caretBlockStart)
     }
     val blockRows = remember(result, blocks) {
         blocks.map { result.rows.subList(it.range.first, it.range.last + 1) }
@@ -716,8 +720,13 @@ private fun MergeLineRow(
     onJump: (File, Int) -> Unit,
 ) {
     val (oldBg, newBg) = backgroundsFor(row)
+    // Fixed to one line step, or — while wrapping — as tall as the taller half, with the tints and
+    // the centre hairline painted behind the pair. Same shape as the commit diff's rows.
+    val wrap = LocalWrapLines.current
     Row(
-        modifier = Modifier.fillMaxWidth().height(rememberDiffLineHeight()),
+        modifier = Modifier.fillMaxWidth().then(
+            if (wrap) Modifier.wrappedRowChrome(oldBg, newBg) else Modifier.height(rememberDiffLineHeight()),
+        ),
         horizontalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         ReadOnlyDiffHalf(
@@ -760,6 +769,13 @@ private fun MergeLineRow(
  * line *i* is at the same *y* on both sides by construction, at any display scale. Everything drawn
  * beside the text — the row tints, the line numbers, a hunk's revert chip — is positioned off
  * [lineHeightPx], the step that layout actually uses.
+ *
+ * Wrapping breaks that construction — a line that folds into three on one side and two on the other
+ * puts every row under it out of step — so with wrapping on a block is a single row (see
+ * [diffBlocks]' maxLines) and takes its height from its text instead. The two sides then line up
+ * because each row is one flex Row: it is as tall as its taller half, and the next row starts below
+ * both. The cost is that the working side's field then spans one line rather than a run of them, so
+ * a selection or paste inside it reaches one line at a time.
  */
 @Composable
 private fun DiffBlockView(
@@ -773,10 +789,19 @@ private fun DiffBlockView(
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
 ) {
+    val wrap = LocalWrapLines.current
     val height = with(density) { (lineHeightPx * rows.size).toDp() }
+    // Only meaningful while wrapping, where a block is exactly one row; otherwise the tints are
+    // drawn per line by [BlockHalfFrame].
+    val (oldBg, newBg) = backgroundsFor(rows.first())
     // Fixed-height outer box so the (overlaid) revert chip can never grow a hunk-start block and
-    // throw the left/right line alignment off.
-    Box(modifier = Modifier.fillMaxWidth().height(height)) {
+    // throw the left/right line alignment off. A wrapped block has no height to fix — it is one row
+    // tall in *lines*, whatever that comes to in pixels — so there the box only carries the tints.
+    Box(
+        modifier = Modifier.fillMaxWidth().then(
+            if (wrap) Modifier.wrappedRowChrome(oldBg, newBg) else Modifier.height(height),
+        ),
+    ) {
         Row(
             modifier = Modifier.fillMaxSize(),
             horizontalArrangement = Arrangement.spacedBy(0.dp),
@@ -873,7 +898,7 @@ private fun ReadOnlyBlockHalf(
             BasicText(
                 text = text,
                 style = DIFF_TEXT_STYLE.copy(color = textColor()),
-                softWrap = false,
+                softWrap = LocalWrapLines.current,
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
@@ -1039,7 +1064,9 @@ private fun EditableBlockHalf(
                     // scroll. It also has to be *at least* that wide: a multi-line field soft-wraps
                     // whatever doesn't fit, and a wrapped line would put every row below it half a
                     // line out from the left half. The end padding the read-only half wears is left
-                    // off here so that slack stays inside the field.
+                    // off here so that slack stays inside the field. Wrapping is the case where that
+                    // is the point rather than the hazard: the field takes the half's width and folds
+                    // into it, and a block is one row so nothing below it can fall out of step.
                     .diffLineWidth(DiffSide.NEW)
                     .fillMaxHeight()
                     .focusRequester(focusRequester)
@@ -1122,10 +1149,13 @@ private fun BlockHalfFrame(
     val numbers = remember(rows, side) {
         rows.map { if (side == DiffSide.OLD) it.oldLineNumber else it.newLineNumber }
     }
+    // Per-line tints are placed a fixed step apart, which only holds while a line *is* a step tall.
+    // A wrapped block is a single row and the tint behind it belongs to the row (see [DiffBlockView]).
+    val wrap = LocalWrapLines.current
     Row(
         modifier = modifier
             .fillMaxSize()
-            .drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) },
+            .then(if (wrap) Modifier else Modifier.drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) }),
         verticalAlignment = Alignment.Top,
     ) {
         BlockGutter(numbers)
