@@ -57,6 +57,38 @@ internal fun DrawScope.drawWrapIcon(tint: Color) {
     drawLine(tint, Offset(w * 0.2f, h * 0.8f), Offset(w * 0.4f, h), strokeWidth = stroke, cap = StrokeCap.Round)
 }
 
+/**
+ * The spellcheck mark: a short line of "text" over the wavy underline the editor draws under a
+ * misspelling, which is the one part of the feature the user has actually seen.
+ */
+internal fun DrawScope.drawSpellcheckIcon(tint: Color) {
+    val w = size.width
+    val h = size.height
+    val stroke = 1.3f
+    // Two stubs of text above the squiggle, broken so they read as words rather than as rules.
+    drawLine(tint, Offset(0f, h * 0.2f), Offset(w * 0.45f, h * 0.2f), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(w * 0.6f, h * 0.2f), Offset(w, h * 0.2f), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(0f, h * 0.5f), Offset(w * 0.7f, h * 0.5f), strokeWidth = stroke, cap = StrokeCap.Round)
+    // The squiggle: four half-periods across the full width, drawn the same way the editor's is.
+    val top = h * 0.78f
+    val bottom = h
+    var x = 0f
+    var up = true
+    val step = w / 4f
+    while (x < w) {
+        val next = (x + step).coerceAtMost(w)
+        drawLine(
+            tint,
+            Offset(x, if (up) bottom else top),
+            Offset(next, if (up) top else bottom),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        x = next
+        up = !up
+    }
+}
+
 // A disclosure chevron: ">" (points right) when the group is collapsed, "v" (points down) when it's
 // expanded — the usual "click to reveal what's underneath" convention.
 internal fun DrawScope.drawDisclosure(tint: Color, collapsed: Boolean) {

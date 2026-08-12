@@ -1,6 +1,6 @@
 # nop
 
-Minimalist cross platform editor and change reviewer built on Jetbrains Compose
+Minimalist cross platform editor and change reviewer built on Jetbrains Compose.
 
 Download the latest installer for your platform from the
 [releases page](https://github.com/iondrive-co/nop/releases/latest):
@@ -24,16 +24,6 @@ Download the latest installer for your platform from the
 	- `Delete` — remove it from disk (asks for confirmation first)
 	- `H` — open a tab showing its git history
 	- `B` — toggle the git blame column in the editor
-
-## Local history
-
-Right-click in the editor and choose **Show local history** for a log of what the open file has
-contained, independent of git: every version nop saved, plus the ones an agent, a checkout or
-another editor left behind while the file was open. Click a revision to diff it against the file as
-it is now, in the same read-only view a commit diff opens in.
-
-Snapshots live under `$XDG_CONFIG_HOME/nop/projects/<project>/localhistory` as plain files — nothing
-needs nop to read them back. They are kept for five days, up to 50 per file.
 
 ## Troubleshooting
 

@@ -78,8 +78,8 @@ private const val DRAG_EXPAND_MS = 600L
  * [onTabsClosed] runs the per-tab teardown the strip itself knows nothing about (flushing edit
  * buffers, stopping launcher processes) for every tab any of these actions removes.
  *
- * The far end of the bar carries the two controls that apply to whatever is open rather than to one
- * tab: the word-wrap toggle and the "+" that adds a group.
+ * The far end of the bar carries the controls that apply to whatever is open rather than to one
+ * tab: the spellcheck and word-wrap toggles, and the "+" that adds a group.
  */
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -90,6 +90,8 @@ fun TabStripBar(
     onTabsClosed: (List<Tab>) -> Unit,
     wrapLines: Boolean = false,
     onToggleWrap: () -> Unit = {},
+    spellcheck: Boolean = true,
+    onToggleSpellcheck: () -> Unit = {},
 ) {
     val isDark = JewelTheme.isDark
     val items = state.strip
@@ -185,6 +187,7 @@ fun TabStripBar(
             }
         }
         // Pinned outside the scroll area so a strip full of tabs can still reach them.
+        SpellcheckToggleButton(isDark = isDark, enabled = spellcheck, onClick = onToggleSpellcheck)
         WrapToggleButton(isDark = isDark, enabled = wrapLines, onClick = onToggleWrap)
         AddGroupButton(isDark = isDark, onClick = { state.addGroup() })
     }
@@ -511,6 +514,28 @@ private fun WrapToggleButton(isDark: Boolean, enabled: Boolean, onClick: () -> U
             contentAlignment = Alignment.Center,
         ) {
             Canvas(Modifier.size(13.dp)) { drawWrapIcon(tint) }
+        }
+    }
+}
+
+/**
+ * The spellcheck toggle, beside the wrap one. Same scope and the same accent when lit: it applies
+ * to every file tab at once and is remembered across restarts.
+ */
+@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun SpellcheckToggleButton(isDark: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val tint = when {
+        enabled -> if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)
+        isDark -> ProjectIconTintDark
+        else -> ProjectIconTintLight
+    }
+    Tooltip(tooltip = { Text(if (enabled) "Turn off spellcheck" else "Underline misspelled words") }) {
+        Box(
+            modifier = Modifier.fillMaxHeight().width(28.dp).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.size(13.dp)) { drawSpellcheckIcon(tint) }
         }
     }
 }

@@ -39,12 +39,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.ui.platform.LocalDensity
@@ -62,6 +61,8 @@ import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
+import iondrive.nop.spell.Typo
+import iondrive.nop.spell.findTypos
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.launch
@@ -82,6 +83,14 @@ import org.jetbrains.jewel.ui.theme.editorTabStyle
 
 /** How long to wait for the typing to settle before writing the buffer to disk. */
 private const val AUTOSAVE_DEBOUNCE_MS = 400L
+
+/**
+ * How long the text must sit still before it is spellchecked — longer than the autosave debounce,
+ * because underlining a word the user is still halfway through typing is the one thing every
+ * spellchecker gets complained about. The first check of a file (and the one after a word is added
+ * to the dictionary) skips the wait; see the effect that uses this.
+ */
+private const val SPELLCHECK_DEBOUNCE_MS = 600L
 
 /** Characters measured in one go to derive the editor's monospace advance. */
 private const val ADVANCE_SAMPLE = 100
@@ -110,6 +119,8 @@ fun TabbedViewerPanel(
     blameEnabled: Boolean = false,
     wrapLines: Boolean = false,
     onToggleWrap: () -> Unit = {},
+    spellcheck: Boolean = true,
+    onToggleSpellcheck: () -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
 ) {
@@ -142,7 +153,14 @@ fun TabbedViewerPanel(
             onTabsClosed = { closed -> closed.forEach(::cleanUp) },
             wrapLines = wrapLines,
             onToggleWrap = onToggleWrap,
+            spellcheck = spellcheck,
+            onToggleSpellcheck = onToggleSpellcheck,
         )
+        // One answer per tab to "is this spellcheckable, and as what?", inherited by every text
+        // surface underneath — the editor, and both halves of whichever diff is open.
+        CompositionLocalProvider(
+            LocalSpellcheckExtension provides if (spellcheck) spellcheckExtensionOf(selected) else null,
+        ) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = selected) {
                 is Tab.FileView -> {
@@ -245,8 +263,22 @@ fun TabbedViewerPanel(
                 }
             }
         }
+        }
     }
     }
+}
+
+/**
+ * The file extension the spellchecker should treat [tab]'s content as, or null for a tab that shows
+ * no file. Every diff resolves to the file it is a diff *of*: a commit's version of `notes.md` is
+ * still markdown, so it gets checked as prose like the working copy beside it.
+ */
+private fun spellcheckExtensionOf(tab: Tab?): String? = when (tab) {
+    is Tab.FileView -> tab.file.extension
+    is Tab.Diff -> File(tab.change.path).extension
+    is Tab.CommitDiff -> File(tab.file.path).extension
+    is Tab.LocalDiff -> tab.file.extension
+    is Tab.History, is Tab.LocalHistory, is Tab.Terminal, null -> null
 }
 
 /**
@@ -460,10 +492,46 @@ private fun FileEditView(
         derivedStateOf { tokenize?.invoke(edit.state.text.toString()) ?: emptyList() }
     }
 
+    // Misspellings in this file's prose. Unlike the token list this deliberately does *not* live in
+    // a derivedStateOf: it walks the text and probes a 90k-word hash set for every word it finds,
+    // which is far too much to put on the keystroke path. Instead it runs on a background
+    // dispatcher once typing has settled, and the result is published as ordinary state for the
+    // squiggle layer to draw. A file with spellcheck off, or with nothing checkable in it, simply
+    // never gets a list.
+    var typos by remember(tab.id) { mutableStateOf<List<Typo>>(emptyList()) }
+    // Null means "not spellcheckable" — the toggle is off, or this isn't a file with prose in it.
+    // SpellcheckRevision restarts the effect when a word is added to the dictionary, so the word
+    // the user just accepted stops being underlined without waiting for the next edit.
+    val spellcheckExt = LocalSpellcheckExtension.current
+    LaunchedEffect(tab.id, spellcheckExt, SpellcheckRevision.value) {
+        if (spellcheckExt == null) {
+            typos = emptyList()
+            return@LaunchedEffect
+        }
+        // Opening a file — and accepting a word, which restarts this effect — checks straight away;
+        // only edits made afterwards wait for the typing to settle.
+        var immediate = true
+        snapshotFlow { edit.state.text.toString() }
+            .debounce { if (immediate) 0L.also { immediate = false } else SPELLCHECK_DEBOUNCE_MS }
+            .distinctUntilChanged()
+            .collect { text ->
+                // Regions are read here, on the composition's thread, so the token list and the
+                // text they index into are the same snapshot; only the scan itself moves off it.
+                val regions = spellcheckRegions(spellcheckExt, text, tokens)
+                typos = if (regions.isEmpty()) {
+                    emptyList()
+                } else {
+                    withContext(Dispatchers.Default) { findTypos(text, regions) }
+                }
+            }
+    }
+
     // Range of the word currently under the mouse pointer while Ctrl is held *and* the symbol
     // index resolves the word to a jump target. Drawn as an underline so the user knows the
     // click will hand them off to another file. Inclusive on both ends (matches JumpResolver).
     var hoverUnderline by remember(tab.id) { mutableStateOf<IntRange?>(null) }
+    // Where the last right-click landed, in document offsets — the word "Add to dictionary" acts on.
+    var rightClickOffset by remember(tab.id) { mutableStateOf<Int?>(null) }
     val matchHighlight = findMatchColor()
     val activeMatchHighlight = findActiveMatchColor()
     val transformation = remember(tokens, palette, hoverUnderline, matches, currentMatch, matchHighlight, activeMatchHighlight) {
@@ -694,9 +762,19 @@ private fun FileEditView(
         ) {
         // Appended to the text field's own right-click menu (cut/copy/paste/select all), which is
         // where the file in front of the user is: "what did this look like before?" belongs beside
-        // the editing actions rather than behind a trip to the project tree.
+        // the editing actions rather than behind a trip to the project tree. "Add to dictionary"
+        // joins them when the click landed on an underlined word — keyed off where the pointer was,
+        // not the caret, because a right-click in Compose's text field doesn't move the caret and
+        // an entry that silently accepted some *other* word would be worse than no entry at all.
         ContextMenuDataProvider(items = {
-            listOf(ContextMenuDivider, ContextMenuItem("Show local history", onShowLocalHistory))
+            spellingMenuItems(
+                typo = rightClickOffset?.let { offset ->
+                    typos.firstOrNull { offset in it.range.first..(it.range.last + 1) }
+                },
+                onReplace = { typo, replacement ->
+                    replaceTypo(edit.state, typo, replacement) { edit.markUserEdit() }
+                },
+            ) + listOf(ContextMenuDivider, ContextMenuItem("Show local history", onShowLocalHistory))
         }) {
         BasicTextField(
             state = edit.state,
@@ -743,6 +821,15 @@ private fun FileEditView(
                                 }
                             }
 
+                            // Remembered for the context menu, which is built after the press has
+                            // been and gone and has no idea where the pointer was.
+                            if (event.type == PointerEventType.Press &&
+                                event.buttons.isSecondaryPressed &&
+                                change != null && tl != null
+                            ) {
+                                rightClickOffset = docOffset(change.position)
+                            }
+
                             if (event.type == PointerEventType.Press && ctrl && change != null && tl != null) {
                                 val offset = docOffset(change.position)
                                 val target = resolveCallback(edit.state.text.toString(), offset)
@@ -765,42 +852,24 @@ private fun FileEditView(
             },
         )
         }
-        // Red wavy underline under syntax-error ranges (native YAML errors today). Aligned to the
-        // text the same way BlameGutter is: layout positions are in document space, shifted up by the
-        // scroll offset. Sized to the field rather than the viewport (matchParentSize) so it travels
-        // with the text under the horizontal scroll instead of staying pinned to the pane.
-        // Decorative only — no pointerInput, so Ctrl-click still reaches the field.
+        // Wavy underlines: red under syntax-error ranges (native YAML errors today), and the
+        // spellchecker's colour under misspelled words. Aligned to the text the same way BlameGutter
+        // is: layout positions are in document space, shifted up by the scroll offset. Sized to the
+        // field rather than the viewport (matchParentSize) so they travel with the text under the
+        // horizontal scroll instead of staying pinned to the pane. Decorative only — no
+        // pointerInput, so Ctrl-click still reaches the field.
         val errorColor = palette.error.color
+        val typoColor = typoSquiggleColor()
         Canvas(modifier = Modifier.matchParentSize()) {
             val tl = layout ?: return@Canvas
             val textLen = tl.layoutInput.text.length
             val scroll = scrollState.value.toFloat()
-            val amplitude = 1.2.dp.toPx()
-            val halfPeriod = 2.dp.toPx()
-            val strokeWidth = 1.dp.toPx()
             for (t in tokens) {
                 if (t.kind != TokenKind.ERROR) continue
-                val s = t.start.coerceIn(0, textLen)
-                val e = t.endExclusive.coerceIn(s, textLen)
-                if (s >= e) continue
-                val line = tl.getLineForOffset(s)
-                val y = tl.getLineBottom(line) - scroll - strokeWidth
-                if (y < -amplitude || y > size.height + amplitude) continue // off-screen
-                val left = tl.getHorizontalPosition(s, usePrimaryDirection = true)
-                val right = tl.getHorizontalPosition(e, usePrimaryDirection = true)
-                if (right <= left) continue
-                val path = Path().apply {
-                    moveTo(left, y)
-                    var x = left
-                    var up = true
-                    while (x < right) {
-                        val nextX = (x + halfPeriod).coerceAtMost(right)
-                        lineTo(nextX, if (up) y - amplitude else y + amplitude)
-                        x = nextX
-                        up = !up
-                    }
-                }
-                drawPath(path, errorColor, style = Stroke(width = strokeWidth))
+                drawSquiggle(tl, t.start, t.endExclusive, textLen, scroll, errorColor)
+            }
+            for (typo in typos) {
+                drawSquiggle(tl, typo.range.first, typo.range.last + 1, textLen, scroll, typoColor)
             }
         }
         }

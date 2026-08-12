@@ -116,6 +116,9 @@ fun App(
     // "+". Deliberately *not* keyed on projectPath — it's a preference about reading code, so it
     // stays put as the user moves between projects — and persisted so it survives a restart.
     var wrapLines by remember { mutableStateOf(Settings.loadWrapLines()) }
+    // Whether misspellings are underlined in file tabs. Global and persisted for the same reasons
+    // as word wrap, and toggled from the button beside it.
+    var spellcheck by remember { mutableStateOf(Settings.loadSpellcheck()) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -667,6 +670,11 @@ fun App(
                                 onToggleWrap = {
                                     wrapLines = !wrapLines
                                     Settings.saveWrapLines(wrapLines)
+                                },
+                                spellcheck = spellcheck,
+                                onToggleSpellcheck = {
+                                    spellcheck = !spellcheck
+                                    Settings.saveSpellcheck(spellcheck)
                                 },
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },

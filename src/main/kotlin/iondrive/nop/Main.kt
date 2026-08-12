@@ -35,6 +35,7 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import iondrive.nop.git.GitRepo
 import iondrive.nop.ipc.SingleInstance
+import iondrive.nop.spell.Dictionary
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
 import iondrive.nop.ui.EmptyProjectState
@@ -88,6 +89,11 @@ fun main(args: Array<String>) {
 
     val initial = resolveInitialProjects(args)
     if (initial.isEmpty()) exitProcess(0)
+
+    // Read the spellchecker's word lists while the window is still being built. They're wanted the
+    // moment a file or diff is on screen, and a diff checks its lines during composition — so
+    // without this the ~90k-word load would be the first thing the UI thread does after opening one.
+    Thread { Dictionary.warmUp() }.apply { isDaemon = true; name = "dictionary-warmup" }.start()
 
     application {
         // The persistent rail layout shown in the left rail: project tabs interleaved with named

@@ -531,7 +531,7 @@ fun tokenizeYaml(text: String): List<Token> {
     var flowDepth = 0                     // nesting depth inside [ ] / { } (which span lines freely)
     var flowOpenOffset = -1              // offset of the outermost flow bracket still open
     var blockScalarParent = -1          // indent of the key owning an active | / > scalar; -1 = none
-    var pendingQuote = ' '         // a quote opened on an earlier line and not yet closed
+    var pendingQuote = '\u0000'         // a quote opened on an earlier line and not yet closed
     var pendingQuoteOffset = -1
     var blockScalarOpenIndent = -1      // set by lexValue when it opens a block scalar on this line
 
@@ -669,13 +669,13 @@ fun tokenizeYaml(text: String): List<Token> {
 
         run line@{
             // 1) Continuation of a quoted scalar opened on an earlier line.
-            if (pendingQuote != ' ') {
+            if (pendingQuote != '\u0000') {
                 val end = readQuoteBody(text, lineStart, lineEnd, pendingQuote)
                 if (end < 0) {
                     add(lineStart, lineEnd, TokenKind.STRING)
                 } else {
                     add(lineStart, end, TokenKind.STRING)
-                    pendingQuote = ' '; pendingQuoteOffset = -1
+                    pendingQuote = '\u0000'; pendingQuoteOffset = -1
                     lexValue(end, lineEnd, 0)
                 }
                 return@line
@@ -793,7 +793,7 @@ fun tokenizeYaml(text: String): List<Token> {
     }
 
     // Anything left open at EOF is a real error: an unterminated quote or flow collection.
-    if (pendingQuote != ' ' && pendingQuoteOffset >= 0) {
+    if (pendingQuote != '\u0000' && pendingQuoteOffset >= 0) {
         add(pendingQuoteOffset, pendingQuoteOffset + 1, TokenKind.ERROR)
     }
     if (flowDepth > 0 && flowOpenOffset >= 0) add(flowOpenOffset, flowOpenOffset + 1, TokenKind.ERROR)

@@ -254,6 +254,19 @@ object Settings {
     }
 
     /**
+     * Whether the editor underlines misspelled words in comments, strings and prose. Global like
+     * the wrap and theme settings — it's a preference about how the user reads, not about a repo —
+     * and on by default, since a spellchecker nobody turned on catches nothing.
+     */
+    fun loadSpellcheck(): Boolean = load()["spellcheck"]?.lowercase() != "false"
+
+    fun saveSpellcheck(enabled: Boolean) {
+        val map = load()
+        map["spellcheck"] = enabled.toString()
+        save(map)
+    }
+
+    /**
      * Height of the commit-message text area in dp, persisted per-project. Returns null when
      * the user hasn't dragged the handle yet so the caller can fall back to a sensible default.
      */

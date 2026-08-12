@@ -14,8 +14,10 @@ import org.jetbrains.jewel.ui.component.ContextMenuDivider
 import org.jetbrains.jewel.ui.component.ContextMenuItemOption
 import org.jetbrains.jewel.ui.component.ContextMenuItemOptionAction
 import org.jetbrains.jewel.ui.component.styling.MenuColors
+import org.jetbrains.jewel.ui.component.styling.MenuIcons
 import org.jetbrains.jewel.ui.component.styling.MenuItemColors
 import org.jetbrains.jewel.ui.component.styling.MenuStyle
+import org.jetbrains.jewel.ui.icon.PathIconKey
 
 /**
  * The right-click menu inside a text field — cut/copy/paste/select all — built without icons.
@@ -68,12 +70,19 @@ object NopTextContextMenu : TextContextMenu {
         ContextMenuItemOption(null, action, true, label, onClick)
 }
 
+// The "there's a submenu here" chevron, which Jewel otherwise asks the IntelliJ platform for — and
+// standalone that lookup fails and draws a solid placeholder square, so "Replace With" in the
+// spelling menu looked broken. Same bundled SVG the project tree's disclosure arrows use.
+private object MenuIconsClass
+private val SubmenuChevronIconKey = PathIconKey("icons/chevron-right.svg", MenuIconsClass::class.java)
+
 /**
- * Jewel's menu styling with one change: the keyboard-shortcut hint beside an entry is legible.
+ * Jewel's menu styling with two changes: the keyboard-shortcut hint beside an entry is legible, and
+ * the submenu chevron is one nop actually ships.
  *
- * The default tint is close enough to the disabled-content colour that "Ctrl+V" beside an enabled
- * Paste reads as a greyed-out control rather than as the shortcut for it. These sit a couple of
- * steps brighter — still clearly secondary to the label, but plainly *on*.
+ * The default hint tint is close enough to the disabled-content colour that "Ctrl+V" beside an
+ * enabled Paste reads as a greyed-out control rather than as the shortcut for it. These sit a couple
+ * of steps brighter — still clearly secondary to the label, but plainly *on*.
  */
 fun nopMenuStyle(dark: Boolean): MenuStyle {
     val keybinding = if (dark) Color(0xFFA9B0BA) else Color(0xFF5C616B)
@@ -92,9 +101,10 @@ fun nopMenuStyle(dark: Boolean): MenuStyle {
             keybindingTintPressed = keybinding,
         )
     }
+    val icons = MenuIcons(submenuChevron = SubmenuChevronIconKey)
     return if (dark) {
-        MenuStyle.dark(colors = MenuColors.dark(itemColors = itemColors))
+        MenuStyle.dark(colors = MenuColors.dark(itemColors = itemColors), icons = icons)
     } else {
-        MenuStyle.light(colors = MenuColors.light(itemColors = itemColors))
+        MenuStyle.light(colors = MenuColors.light(itemColors = itemColors), icons = icons)
     }
 }

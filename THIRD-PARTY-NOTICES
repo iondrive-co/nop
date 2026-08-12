@@ -80,3 +80,29 @@ Local icon assets
 -----------------
 
 The SVG icons in src/main/resources/icons are original project assets.
+
+Spellchecker word list
+----------------------
+
+- SCOWL (Spell Checker Oriented Word Lists) and Friends
+  License: permissive, reproduced below
+  Source: http://wordlist.sourceforge.net/
+  src/main/resources/dictionary/words.txt.gz is generated from the SCOWL-derived aspell
+  en_US / en_GB / en_AU dictionaries by scripts/build-dictionary.sh. The list of programming
+  terms beside it (dictionary/tech.txt) is an original project asset.
+
+  The collective work is Copyright 2000-2011 by Kevin Atkinson as well as any of the
+  copyrights mentioned below:
+
+    Copyright 2000-2011 by Kevin Atkinson
+
+    Permission to use, copy, modify, distribute and sell these word lists, the associated
+    scripts, the output created from the scripts, and its documentation for any purpose is
+    hereby granted without fee, provided that the above copyright notice appears in all copies
+    and that both that copyright notice and this permission notice appear in supporting
+    documentation. Kevin Atkinson makes no representations about the suitability of this array
+    for any purpose. It is provided "as is" without express or implied warranty.
+
+  Portions of the word lists derive from the 12Dicts package (Alan Beale), the ENABLE word
+  list, and the DEC Word List; see the SCOWL README at the source above for the full set of
+  contributing copyrights, all of which permit redistribution of the derived lists.

@@ -1,5 +1,6 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.ContextMenuDataProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -882,6 +883,8 @@ private fun ReadOnlyBlockHalf(
     val tokenize = LocalDiffTokenizer.current
     val palette = diffPalette()
     val find = rememberFindHits(firstRowIndex, rows.size, side)
+    val typos = rememberTypos(rows.map { it.lineOn(side) ?: "" }, tokenize)
+    val typoColor = typoSquiggleColor()
     val text = remember(rows, side, tokenize, palette, find) {
         annotateBlock(
             rows.map { it.lineOn(side) },
@@ -903,6 +906,8 @@ private fun ReadOnlyBlockHalf(
                 modifier = Modifier
                     .diffLineWidth(side)
                     .padding(end = LINE_END_PAD)
+                    // After the padding, so the squiggles are placed in the text's own coordinates.
+                    .spellcheckSquiggles(typos, typoColor) { layout }
                     // Ctrl-click resolves against the whole block's text — JumpResolver reads the
                     // word straddling an offset, and a newline is as good a word boundary as any.
                     .ctrlClickJump(
@@ -1016,6 +1021,12 @@ private fun EditableBlockHalf(
             state.text.toString().split('\n').map(fn)
         }
     }
+    // Spellcheck reads the field's own text rather than the diff rows: this half is editable, so
+    // what it shows is whatever the user has typed since the diff was computed, and underlining the
+    // rows would lag a word behind every keystroke.
+    val blockText by remember(state) { derivedStateOf { state.text.toString() } }
+    val typos = rememberTypos(blockText.split('\n'), tokenize)
+    val typoColor = typoSquiggleColor()
     // Find hits are painted here rather than by annotateBlock, because an editable half renders
     // through an OutputTransformation instead of an AnnotatedString — same colours, same order
     // (last, so the highlight reads over the syntax colour and the inline word tint).
@@ -1048,10 +1059,26 @@ private fun EditableBlockHalf(
 
     val fg = textColor()
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    // Where the last right-click landed in this block, so the menu below can act on the word under
+    // the pointer — the same trick the file editor uses, and for the same reason: a right-click in
+    // a Compose text field doesn't move the caret.
+    var rightClickOffset by remember(state) { mutableStateOf<Int?>(null) }
     BlockHalfFrame(DiffSide.NEW, rows, lineHeightPx, modifier) {
         // The editable side keeps its own field selection/copy; DisableSelection stops the
         // list-wide SelectionContainer from also trying to select it.
         DisableSelection {
+        // The working side of a diff is a real editor, so a misspelling found here can be corrected
+        // here — same menu entries as the file editor, over the same buffer.
+        ContextMenuDataProvider(items = {
+            spellingMenuItems(
+                typo = rightClickOffset?.let { offset ->
+                    typos.firstOrNull { offset in it.range.first..(it.range.last + 1) }
+                },
+                onReplace = { typo, replacement ->
+                    replaceTypo(state, typo, replacement) { editor.edit.markUserEdit() }
+                },
+            )
+        }) {
             BasicTextField(
                 state = state,
                 // Genuine user input marks the shared buffer as user-edited so the autosave will
@@ -1080,7 +1107,9 @@ private fun EditableBlockHalf(
                         currentFile = currentFile,
                         onResolveAt = onResolveAt,
                         onJump = onJump,
-                    ),
+                    )
+                    .trackRightClick(layoutProvider = { layout }) { rightClickOffset = it }
+                    .spellcheckSquiggles(typos, typoColor) { layout },
                 textStyle = DIFF_TEXT_STYLE.copy(color = fg),
                 cursorBrush = SolidColor(fg),
                 lineLimits = TextFieldLineLimits.MultiLine(),
@@ -1090,6 +1119,7 @@ private fun EditableBlockHalf(
                     if (r != null) layout = r
                 },
             )
+        }
         }
     }
 }

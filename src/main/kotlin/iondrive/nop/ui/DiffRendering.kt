@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
@@ -515,6 +516,8 @@ internal fun ReadOnlyDiffHalf(
     val tokenize = LocalDiffTokenizer.current
     val palette = diffPalette()
     val tokens = remember(displayText, tokenize) { tokenize?.invoke(displayText) ?: emptyList() }
+    val typos = rememberTypos(listOf(displayText), tokenize)
+    val typoColor = typoSquiggleColor()
     val find = findHitsFor(rowIndex, side)
     val wrap = LocalWrapLines.current
     Row(
@@ -549,7 +552,12 @@ internal fun ReadOnlyDiffHalf(
                 style = DIFF_TEXT_STYLE.copy(color = textColor()),
                 softWrap = wrap,
                 onTextLayout = { layout = it },
-                modifier = Modifier.diffLineWidth(side).padding(end = LINE_END_PAD).then(jumpModifier),
+                modifier = Modifier
+                    .diffLineWidth(side)
+                    .padding(end = LINE_END_PAD)
+                    // After the padding, so the squiggles are placed in the text's own coordinates.
+                    .spellcheckSquiggles(typos, typoColor) { layout }
+                    .then(jumpModifier),
             )
         }
         Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
@@ -819,6 +827,29 @@ internal fun Modifier.ctrlClickJump(
                 change.consume()
                 onJump(target.file, target.line)
             }
+        }
+    }
+}
+
+/**
+ * Records where a right-click landed, as a text offset — what a context menu built afterwards needs
+ * in order to act on the word under the pointer rather than the one under the caret.
+ *
+ * Watches the Initial pass and never consumes, so the field's own right-click handling (opening the
+ * menu, keeping the selection) is untouched.
+ */
+internal fun Modifier.trackRightClick(
+    layoutProvider: () -> TextLayoutResult?,
+    onOffset: (Int) -> Unit,
+): Modifier = this.pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            if (event.type != PointerEventType.Press) continue
+            if (!event.buttons.isSecondaryPressed) continue
+            val change = event.changes.firstOrNull() ?: continue
+            val tl = layoutProvider() ?: continue
+            onOffset(tl.getOffsetForPosition(change.position))
         }
     }
 }
