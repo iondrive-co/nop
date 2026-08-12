@@ -335,33 +335,6 @@ class SettingsTest {
     }
 
     @Test
-    fun `spellcheck defaults to on and round-trips once set`(@TempDir tmp: Path) {
-        Settings.configRoot = tmp
-        // Nothing saved yet: a spellchecker nobody turned on catches nothing.
-        assertTrue(Settings.loadSpellcheck())
-
-        Settings.saveSpellcheck(false)
-        assertTrue(!Settings.loadSpellcheck())
-
-        Settings.saveSpellcheck(true)
-        assertTrue(Settings.loadSpellcheck())
-    }
-
-    @Test
-    fun `saving spellcheck leaves the rest of the state alone`(@TempDir tmp: Path) {
-        Settings.configRoot = tmp
-        val proj = tmp.resolve("project").also { Files.createDirectories(it) }
-        Settings.saveOpenProjects(listOf(proj))
-        Settings.saveWrapLines(true)
-
-        Settings.saveSpellcheck(false)
-
-        assertEquals(listOf(proj.toAbsolutePath().normalize()), Settings.loadOpenProjects())
-        assertTrue(Settings.loadWrapLines())
-        assertTrue(!Settings.loadSpellcheck())
-    }
-
-    @Test
     fun `saving word wrap leaves the rest of the state alone`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }

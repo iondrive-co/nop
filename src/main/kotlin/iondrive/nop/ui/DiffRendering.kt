@@ -455,19 +455,70 @@ internal fun DrawScope.drawLineBackgrounds(backgrounds: List<Color>, lineHeightP
     }
 }
 
-/** The line-number column beside a block: one right-aligned number per line, blanks for fillers. */
+/**
+ * The line-number column beside a block: one right-aligned number per line, blanks for fillers.
+ *
+ * [lineHeights] is how tall each of the block's lines actually came out, for the wrapping case where
+ * a line is more than one row tall and the numbers can no longer be a paragraph of their own — see
+ * [logicalLineHeights]. Null (the unwrapped case, or a layout that hasn't happened yet) renders them
+ * as one paragraph, which lands them on the same fixed step the text beside them uses.
+ */
 @Composable
-internal fun BlockGutter(numbers: List<Int?>) {
+internal fun BlockGutter(numbers: List<Int?>, lineHeights: List<Float>? = null) {
     // Line numbers sit inside the list-wide SelectionContainer; keep them out of selections so a
     // copied deletion is source text only, no gutter digits.
     DisableSelection {
-        BasicText(
-            text = numbers.joinToString("\n") { it?.toString()?.padStart(5) ?: "     " },
-            style = DIFF_TEXT_STYLE.copy(color = GUTTER_FG),
-            softWrap = false,
-            modifier = Modifier.padding(horizontal = 6.dp),
-        )
+        val style = DIFF_TEXT_STYLE.copy(color = GUTTER_FG)
+        if (lineHeights == null) {
+            BasicText(
+                text = numbers.joinToString("\n") { it?.toString()?.padStart(5) ?: "     " },
+                style = style,
+                softWrap = false,
+                modifier = Modifier.padding(horizontal = 6.dp),
+            )
+        } else {
+            val density = LocalDensity.current
+            Column(modifier = Modifier.padding(horizontal = 6.dp)) {
+                numbers.forEachIndexed { i, number ->
+                    val height = lineHeights.getOrNull(i) ?: return@forEachIndexed
+                    // The number rides the top of its line's band, so a line that folded into three
+                    // rows is numbered beside its first one rather than its middle.
+                    Box(modifier = Modifier.height(with(density) { height.toDp() })) {
+                        BasicText(
+                            text = number?.toString()?.padStart(5) ?: "     ",
+                            style = style,
+                            softWrap = false,
+                        )
+                    }
+                }
+            }
+        }
     }
+}
+
+/**
+ * How tall each of a block's [count] logical lines came out, in pixels, read back from the text's
+ * own layout — so a line that soft-wrapped into three rows measures three rows tall and the ones
+ * under it are known to have been pushed down.
+ *
+ * Null when there's nothing to measure from yet (the first frame, before [layout] arrives) or when
+ * [text] doesn't hold [count] lines — which happens for a frame after a keystroke changes the line
+ * count, before the re-diff catches up. Callers fall back to the fixed line step for that frame.
+ */
+internal fun logicalLineHeights(layout: TextLayoutResult?, text: String, count: Int): List<Float>? {
+    val result = layout ?: return null
+    if (count <= 0) return null
+    val tops = FloatArray(count)
+    var offset = 0
+    for (i in 0 until count) {
+        tops[i] = result.getLineTop(result.getLineForOffset(offset))
+        val newline = text.indexOf('\n', offset)
+        // Ran out of lines before the block's rows ran out: don't guess, let the caller fall back.
+        if (newline < 0 && i != count - 1) return null
+        offset = newline + 1
+    }
+    val total = result.size.height.toFloat()
+    return List(count) { i -> ((if (i + 1 < count) tops[i + 1] else total) - tops[i]).coerceAtLeast(0f) }
 }
 
 @Composable

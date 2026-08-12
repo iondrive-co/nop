@@ -119,8 +119,6 @@ fun TabbedViewerPanel(
     blameEnabled: Boolean = false,
     wrapLines: Boolean = false,
     onToggleWrap: () -> Unit = {},
-    spellcheck: Boolean = true,
-    onToggleSpellcheck: () -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
 ) {
@@ -153,14 +151,10 @@ fun TabbedViewerPanel(
             onTabsClosed = { closed -> closed.forEach(::cleanUp) },
             wrapLines = wrapLines,
             onToggleWrap = onToggleWrap,
-            spellcheck = spellcheck,
-            onToggleSpellcheck = onToggleSpellcheck,
         )
         // One answer per tab to "is this spellcheckable, and as what?", inherited by every text
         // surface underneath — the editor, and both halves of whichever diff is open.
-        CompositionLocalProvider(
-            LocalSpellcheckExtension provides if (spellcheck) spellcheckExtensionOf(selected) else null,
-        ) {
+        CompositionLocalProvider(LocalSpellcheckExtension provides spellcheckExtensionOf(selected)) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (val current = selected) {
                 is Tab.FileView -> {
@@ -496,10 +490,9 @@ private fun FileEditView(
     // a derivedStateOf: it walks the text and probes a 90k-word hash set for every word it finds,
     // which is far too much to put on the keystroke path. Instead it runs on a background
     // dispatcher once typing has settled, and the result is published as ordinary state for the
-    // squiggle layer to draw. A file with spellcheck off, or with nothing checkable in it, simply
-    // never gets a list.
+    // squiggle layer to draw. A file with nothing checkable in it never gets a list.
     var typos by remember(tab.id) { mutableStateOf<List<Typo>>(emptyList()) }
-    // Null means "not spellcheckable" — the toggle is off, or this isn't a file with prose in it.
+    // Null means "not spellcheckable": this isn't a file with any prose in it to check.
     // SpellcheckRevision restarts the effect when a word is added to the dictionary, so the word
     // the user just accepted stops being underlined without waiting for the next edit.
     val spellcheckExt = LocalSpellcheckExtension.current

@@ -149,19 +149,77 @@ class DiffViewTest {
     }
 
     @Test
-    fun `diffBlocks gives every row its own item when wrapping`() {
-        // Word wrap makes a row as tall as its text, so rows can't be placed a fixed step apart
-        // inside a shared block — each becomes its own item, free to size itself. Deleted rows still
-        // fall out as display-only, exactly as they do at the full block size.
-        val rows = listOf(equal("a", 1), change("b", "B", 2, 2), delete("c", 3), equal("d", 3))
+    fun `diffBlocks gives a two-sided row its own item when wrapping`() {
+        // Word wrap makes a row as tall as its text, so a row with text on both sides can't be
+        // placed a fixed step apart from its neighbours inside a shared block — each becomes its
+        // own item, free to size itself.
+        val rows = listOf(equal("a", 1), change("b", "B", 2, 2), equal("c", 3))
         assertEquals(
             listOf(
                 DiffBlock(0..0, editable = true),
                 DiffBlock(1..1, editable = true),
-                DiffBlock(2..2, editable = false),
+                DiffBlock(2..2, editable = true),
+            ),
+            diffBlocks(rows, editable = true, wrapped = true),
+        )
+    }
+
+    @Test
+    fun `diffBlocks still groups added lines when wrapping`() {
+        // A new file is all insertions: the old half is blank throughout, so there's no second grid
+        // to stay in step with and the run groups into one editable field — which is what makes it
+        // selectable and editable as text rather than a line at a time.
+        val rows = (1..4).map { insert("line $it", it) }
+        assertEquals(
+            listOf(DiffBlock(0..3, editable = true)),
+            diffBlocks(rows, editable = true, wrapped = true),
+        )
+    }
+
+    @Test
+    fun `diffBlocks groups a run of added lines inside a modified file when wrapping`() {
+        // The added run groups; the equal rows around it, which carry text on both sides, don't.
+        val rows = listOf(
+            equal("a", 1),
+            insert("new one", 2),
+            insert("new two", 3),
+            equal("b", 4),
+        )
+        assertEquals(
+            listOf(
+                DiffBlock(0..0, editable = true),
+                DiffBlock(1..2, editable = true),
                 DiffBlock(3..3, editable = true),
             ),
-            diffBlocks(rows, editable = true, maxLines = 1),
+            diffBlocks(rows, editable = true, wrapped = true),
+        )
+    }
+
+    @Test
+    fun `diffBlocks groups deleted lines when wrapping so they can be copied out`() {
+        // Deleted rows are blank down the working side, so the same reasoning applies to the half
+        // that is only displayed: the run is one paragraph and a drag can span it.
+        val rows = listOf(equal("a", 1), delete("b", 2), delete("c", 3), equal("d", 2))
+        assertEquals(
+            listOf(
+                DiffBlock(0..0, editable = true),
+                DiffBlock(1..2, editable = false),
+                DiffBlock(3..3, editable = true),
+            ),
+            diffBlocks(rows, editable = true, wrapped = true),
+        )
+    }
+
+    @Test
+    fun `diffBlocks still caps a wrapped run of added lines`() {
+        val rows = (1..7).map { insert("line $it", it) }
+        assertEquals(
+            listOf(
+                DiffBlock(0..2, editable = true),
+                DiffBlock(3..5, editable = true),
+                DiffBlock(6..6, editable = true),
+            ),
+            diffBlocks(rows, editable = true, maxLines = 3, wrapped = true),
         )
     }
 

@@ -1,7 +1,9 @@
 package iondrive.nop.ui
 
+import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
+import iondrive.nop.git.FileChange
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -18,15 +20,21 @@ import java.nio.file.Path
  *   * [Tab.LocalHistory] — an absolute path, like [Tab.History]
  *   * [Tab.LocalDiff]  — an absolute path plus the revision's timestamp, which is how a local-history
  *                        revision is named on disk (see [iondrive.nop.history.LocalHistory])
+ *   * [Tab.Diff]       — a working-tree diff: the repo-relative path plus the [ChangeKind] git saw,
+ *                        which is all [iondrive.nop.ui.DiffView] needs — both sides are re-read
+ *                        from HEAD and the working file when the tab is composed. The kind is a
+ *                        snapshot: if git's view of the file moved on while nop was elsewhere
+ *                        (committed, staged, deleted), the restored tab shows the file's state
+ *                        against HEAD as it is now, which is what a reopen would have shown anyway.
  *
- * Working-tree Diff tabs depend on the live [iondrive.nop.git.FileChange] blob which is recomputed
- * from git status, and Terminal tabs wrap a running PTY process — neither can be meaningfully
- * restored, so both are dropped at save time.
+ * Terminal tabs wrap a running PTY process, which dies with the session, so they are dropped at
+ * save time.
  *
  * Stored as TSV under the project's data dir: `kind<TAB>path<TAB>selected?`, plus
- * `<TAB>sha<TAB>changeType` for commit diffs and `<TAB>timestamp` for local ones. One tab per line; unparseable lines are skipped so a
- * partial corruption doesn't wipe the strip. [path] is absolute except for a commit diff, where it
- * is the repo-relative path git knows the file by.
+ * `<TAB>sha<TAB>changeType` for commit diffs, `<TAB>timestamp` for local ones and `<TAB>changeKind`
+ * for working-tree diffs. One tab per line; unparseable lines are skipped so a
+ * partial corruption doesn't wipe the strip. [path] is absolute except for the two diffs against
+ * git, where it is the repo-relative path git knows the file by.
  *
  * Tab groups are written as `group<TAB>name<TAB>active?<TAB>collapsed?` rows and own the tab rows
  * that follow them, the same way a group header owns the tabs to its right on screen. A file with no
@@ -59,6 +67,7 @@ object TabsPersistence {
     private const val KIND_COMMITDIFF = "commitdiff"
     private const val KIND_LOCALHISTORY = "localhistory"
     private const val KIND_LOCALDIFF = "localdiff"
+    private const val KIND_DIFF = "diff"
     private const val KIND_GROUP = "group"
 
     fun save(target: Path, snapshot: TabsSnapshot) {
@@ -103,7 +112,12 @@ object TabsPersistence {
             is Tab.CommitDiff -> return listOf(
                 KIND_COMMITDIFF, tab.file.path, selected, tab.sha, tab.file.changeType.name,
             ).joinToString("\t")
-            is Tab.Diff, is Tab.Terminal -> return null
+            // Repo-relative path plus the kind of change, in the same column the others use for
+            // their one extra field.
+            is Tab.Diff -> return listOf(
+                KIND_DIFF, tab.change.path, selected, tab.change.kind.name,
+            ).joinToString("\t")
+            is Tab.Terminal -> return null
         }
         return "$kind\t${file.absolutePath}\t$selected"
     }
@@ -126,6 +140,12 @@ object TabsPersistence {
                     val stamp = parts.getOrNull(3)?.takeIf { it.toLongOrNull() != null } ?: continue
                     out += SavedTab(kind, path, selected, stamp)
                 }
+                // The change kind rides in the sha column; without one the row can't say which
+                // sides the diff has (an untracked file has no HEAD side), so it names no diff.
+                KIND_DIFF -> {
+                    val changeKind = parts.getOrNull(3)?.takeIf { it.isNotBlank() } ?: continue
+                    out += SavedTab(kind, path, selected, changeKind)
+                }
                 // A group's "selected" column means "this is the group new tabs open into".
                 KIND_GROUP -> out += SavedTab(kind, path, selected, collapsed = parts.getOrNull(3) == "1")
                 KIND_COMMITDIFF -> {
@@ -144,7 +164,8 @@ object TabsPersistence {
     /**
      * Rebuilds a [TabsState] from the on-disk snapshot, filtering out anything whose working file
      * no longer exists (or is no longer a file) so a renamed/deleted file doesn't reopen as a broken
-     * tab. Commit diffs are exempt — they read out of history, not the working tree.
+     * tab. Commit diffs are exempt — they read out of history, not the working tree — as are the
+     * working-tree diffs whose change is the file's absence.
      * Falls back to whichever tab was selected when saving; if that one didn't survive the
      * filter, leaves the last remaining tab selected (matching [TabsState.open]'s contract).
      *
@@ -187,6 +208,16 @@ object TabsPersistence {
                 KIND_LOCALDIFF -> {
                     val file = File(s.path).takeIf { it.isFile } ?: continue
                     Tab.LocalDiff(file, s.sha?.toLongOrNull() ?: continue)
+                }
+                // A working-tree diff needs its repo to read HEAD from. The file itself only has to
+                // exist for the kinds that imply it does — a REMOVED/MISSING diff is precisely the
+                // one whose working file is gone.
+                KIND_DIFF -> {
+                    if (repoRoot == null) continue
+                    val kind = runCatching { ChangeKind.valueOf(s.sha ?: "") }.getOrNull() ?: continue
+                    val gone = kind == ChangeKind.REMOVED || kind == ChangeKind.MISSING
+                    if (!gone && !File(repoRoot, s.path).isFile) continue
+                    Tab.Diff(FileChange(s.path, kind), repoRoot)
                 }
                 // Nothing to check on disk: the diff is read out of the commit, so it restores just
                 // as well for a file the commit deleted or that has since been renamed away.

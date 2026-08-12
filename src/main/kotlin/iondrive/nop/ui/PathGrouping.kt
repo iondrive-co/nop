@@ -1,5 +1,7 @@
 package iondrive.nop.ui
 
+import iondrive.nop.PathOrder
+
 /**
  * A named column of related items, each sitting at a project-relative path. [paths] runs parallel
  * to [items] — the grouping keeps it so a column can size and label its rows without knowing what
@@ -30,6 +32,11 @@ data class PathGroup<T>(
  *
  * Several items may share a path (a search turning up many matches in one file); they stay together
  * in that path's group, and a group's count reflects items, not files.
+ *
+ * Within a group the members are ordered by [PathOrder] — by folder, then by file name — so a
+ * column that spans a deep tree (a docs repo's worth of pages, say) reads folder by folder instead
+ * of in whatever order the changes or hits arrived in. The sort is stable, so several items sharing
+ * a path keep the order they came in (a file's search hits stay in line order).
  */
 object PathGrouping {
 
@@ -82,7 +89,8 @@ object PathGrouping {
             out.getOrPut(title) { mutableListOf() } += members
         }
         return out.map { (title, members) ->
-            PathGroup(title, members.map { it.item }, members.map { it.path })
+            val ordered = members.sortedWith(compareBy(PathOrder) { it.path })
+            PathGroup(title, ordered.map { it.item }, ordered.map { it.path })
         }
     }
 

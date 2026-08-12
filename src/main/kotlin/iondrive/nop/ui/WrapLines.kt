@@ -13,8 +13,10 @@ import androidx.compose.runtime.compositionLocalOf
  *
  * Off — the default — every line is laid out at its full length and the view scrolls sideways:
  * one text line is one row, which is the invariant the diffs' line grid, line numbers and row tints
- * are built on. On, a line takes as many rows as it needs to fit the width it's given, so the two
- * halves of a diff can no longer be laid out a fixed step apart; [iondrive.nop.ui.diffBlocks] drops
- * to one row per list item so each row is free to be as tall as the taller of its two sides.
+ * are built on. On, a line takes as many rows as it needs to fit the width it's given, so two diff
+ * halves that both carry text can no longer be laid out a fixed step apart; [iondrive.nop.ui.diffBlocks]
+ * drops those rows to one per list item, each free to be as tall as the taller of its two sides.
+ * Runs that are blank down one side — added lines, deleted lines — keep their grouping either way,
+ * which is what keeps the working side of a diff editable as text rather than a line at a time.
  */
 internal val LocalWrapLines = compositionLocalOf { false }

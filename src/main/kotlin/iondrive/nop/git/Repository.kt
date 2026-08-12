@@ -1,5 +1,6 @@
 package iondrive.nop.git
 
+import iondrive.nop.PathOrder
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand
 import org.eclipse.jgit.diff.DiffEntry
@@ -136,6 +137,12 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             status.missing.forEach { add(FileChange(it, ChangeKind.MISSING)) }
             status.conflicting.forEach { add(FileChange(it, ChangeKind.CONFLICT)) }
         }.distinctBy { it.path }
+            // JGit returns each bucket as a hash set, so the order it hands paths back in is
+            // arbitrary and — worse — shifts as the sets are rebuilt: editing one file could send
+            // an unrelated one to the top of the change list. Sort so a file stays where the user
+            // last saw it, and so files in a folder stay together. distinctBy runs first: it keeps
+            // the earliest entry for a path, which is how modified/changed wins over the rest.
+            .sortedWith(compareBy(PathOrder) { it.path })
         val branch = repository.branch
         return GitStatus(branch = branch, changes = changes)
     }

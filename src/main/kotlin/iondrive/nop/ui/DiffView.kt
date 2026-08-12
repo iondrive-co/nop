@@ -437,12 +437,13 @@ private fun DiffRowsList(
     val editable = edit != null
     // The working line the block holding the caret starts on — see [diffBlocks]' splitAtLine.
     var caretBlockStart by remember { mutableStateOf<Int?>(null) }
-    // Wrapping costs the grouping: a wrapped line is more than one row tall, so a block can no
-    // longer place its rows a fixed step apart and each row has to be its own item, free to be as
-    // tall as its text — see [DiffBlockView].
-    val maxBlockLines = if (LocalWrapLines.current) 1 else MAX_BLOCK_LINES
-    val blocks = remember(result, editable, caretBlockStart, maxBlockLines) {
-        diffBlocks(result.rows, editable, maxLines = maxBlockLines, splitAtLine = caretBlockStart)
+    // Wrapping costs *some* of the grouping: a wrapped line is more than one row tall, so two halves
+    // that both carry text can no longer be laid out a fixed step apart. A run that is blank down
+    // one side — a stretch of added lines, or of deleted ones — has only one grid to keep, so it
+    // still groups, and that is where editing happens. See [diffBlocks].
+    val wrapped = LocalWrapLines.current
+    val blocks = remember(result, editable, caretBlockStart, wrapped) {
+        diffBlocks(result.rows, editable, splitAtLine = caretBlockStart, wrapped = wrapped)
     }
     val blockRows = remember(result, blocks) {
         blocks.map { result.rows.subList(it.range.first, it.range.last + 1) }
@@ -518,6 +519,10 @@ private fun DiffRowsList(
         onRatioChange = onSplitRatioChange,
         searchKey = searchKey,
         findTrigger = findTrigger,
+        // Where a row sits: which item holds it, and how far down. A wrapped line is more than one
+        // step tall, so inside a wrapped block this is a floor rather than the exact offset — find
+        // then scrolls to somewhere above the hit instead of onto it, which is the right way to be
+        // wrong: the match is below the fold, not above it.
         rowLocation = { row ->
             val item = itemOfRow.getOrElse(row) { 0 }
             val first = blocks.getOrNull(item)?.range?.first ?: row
@@ -771,12 +776,14 @@ private fun MergeLineRow(
  * beside the text — the row tints, the line numbers, a hunk's revert chip — is positioned off
  * [lineHeightPx], the step that layout actually uses.
  *
- * Wrapping breaks that construction — a line that folds into three on one side and two on the other
- * puts every row under it out of step — so with wrapping on a block is a single row (see
- * [diffBlocks]' maxLines) and takes its height from its text instead. The two sides then line up
- * because each row is one flex Row: it is as tall as its taller half, and the next row starts below
- * both. The cost is that the working side's field then spans one line rather than a run of them, so
- * a selection or paste inside it reaches one line at a time.
+ * Wrapping breaks that construction wherever both halves carry text — a line that folds into three
+ * on one side and two on the other puts every row under it out of step — so such a block is a single
+ * row (see [diffBlocks]' wrapped) and takes its height from its text instead. The two sides then
+ * line up because each row is one flex Row: it is as tall as its taller half, and the next row
+ * starts below both. A run that is blank down one side still groups while wrapping, since there is
+ * only one side's grid to keep; its line numbers are placed off the text's measured lines rather
+ * than the fixed step (see [BlockGutter]), and its tints are uniform over the whole block because
+ * every row in it is the same kind.
  */
 @Composable
 private fun DiffBlockView(
@@ -896,12 +903,18 @@ private fun ReadOnlyBlockHalf(
         )
     }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    BlockHalfFrame(side, rows, lineHeightPx, modifier) {
+    // Only a wrapped block can have lines taller than one step; everywhere else the gutter's own
+    // paragraph already lands on the same grid the text does.
+    val wrap = LocalWrapLines.current
+    val lineHeights = remember(layout, text, wrap) {
+        if (!wrap) null else logicalLineHeights(layout, text.text, rows.size)
+    }
+    BlockHalfFrame(side, rows, lineHeightPx, modifier, lineHeights) {
         val body = @Composable {
             BasicText(
                 text = text,
                 style = DIFF_TEXT_STYLE.copy(color = textColor()),
-                softWrap = LocalWrapLines.current,
+                softWrap = wrap,
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
@@ -1063,7 +1076,13 @@ private fun EditableBlockHalf(
     // the pointer — the same trick the file editor uses, and for the same reason: a right-click in
     // a Compose text field doesn't move the caret.
     var rightClickOffset by remember(state) { mutableStateOf<Int?>(null) }
-    BlockHalfFrame(DiffSide.NEW, rows, lineHeightPx, modifier) {
+    // See [ReadOnlyBlockHalf]: while wrapping, the line numbers follow the field's measured lines
+    // rather than a fixed step, since one line here can be several rows tall.
+    val wrap = LocalWrapLines.current
+    val lineHeights = remember(layout, blockText, wrap) {
+        if (!wrap) null else logicalLineHeights(layout, blockText, rows.size)
+    }
+    BlockHalfFrame(DiffSide.NEW, rows, lineHeightPx, modifier, lineHeights) {
         // The editable side keeps its own field selection/copy; DisableSelection stops the
         // list-wide SelectionContainer from also trying to select it.
         DisableSelection {
@@ -1164,13 +1183,20 @@ private fun onBlockKey(
     }
 }
 
-/** Gutter, row tints and the shared horizontal scroll — the frame both kinds of half render into. */
+/**
+ * Gutter, row tints and the shared horizontal scroll — the frame both kinds of half render into.
+ *
+ * [lineHeights] is how tall this half's lines actually came out; it is only supplied (and only
+ * needed) while wrapping, where a line can be several rows tall and the line numbers can't be laid
+ * out a fixed step apart — see [BlockGutter].
+ */
 @Composable
 private fun BlockHalfFrame(
     side: DiffSide,
     rows: List<DiffRow>,
     lineHeightPx: Float,
     modifier: Modifier,
+    lineHeights: List<Float>? = null,
     body: @Composable BoxScope.() -> Unit,
 ) {
     val backgrounds = remember(rows, side) {
@@ -1188,7 +1214,7 @@ private fun BlockHalfFrame(
             .then(if (wrap) Modifier else Modifier.drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) }),
         verticalAlignment = Alignment.Top,
     ) {
-        BlockGutter(numbers)
+        BlockGutter(numbers, lineHeights)
         Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
     }
 }
@@ -1236,6 +1262,14 @@ internal data class DiffBlock(val range: IntRange, val editable: Boolean)
  * places where that stretch ends. [editable] is false when there's no buffer to edit at all (the
  * file is gone), in which case every block is display-only.
  *
+ * [wrapped] says lines soft-wrap, and narrows what may be grouped. A wrapped line is as many rows
+ * tall as it folds into, so two halves that both carry text can't be laid out a fixed step apart:
+ * line *i* on the left and line *i* on the right would drift the moment either folded. A run that is
+ * blank down one side has no such pairing to keep — the blank half is a uniform tint with no line
+ * numbers of its own — so a stretch of added lines (or of deleted ones) still groups, which is what
+ * keeps a new file, or any run of added lines, editable as text rather than a line at a time. Rows
+ * with content on both sides stay one to an item and take their height from the taller half.
+ *
  * [splitAtLine] keeps a block starting on a given working line even when the gap that used to
  * separate it from the one above has closed. Editing moves those gaps around — a keystroke can make
  * a line pair up with HEAD where it didn't before — and without this the block being typed into
@@ -1248,14 +1282,20 @@ internal fun diffBlocks(
     editable: Boolean,
     maxLines: Int = MAX_BLOCK_LINES,
     splitAtLine: Int? = null,
+    wrapped: Boolean = false,
 ): List<DiffBlock> {
     val blocks = ArrayList<DiffBlock>()
     var start = 0
     while (start < rows.size) {
         val hasNewSide = rows[start].newLineNumber != null
+        val hasOldSide = rows[start].oldLineNumber != null
+        // While wrapping, only a run that is blank down one side can be grouped.
+        val groupable = !wrapped || hasNewSide != hasOldSide
         var end = start + 1
-        while (end < rows.size &&
+        while (groupable &&
+            end < rows.size &&
             (rows[end].newLineNumber != null) == hasNewSide &&
+            (!wrapped || (rows[end].oldLineNumber != null) == hasOldSide) &&
             end - start < maxLines &&
             !(splitAtLine != null && rows[end].newLineNumber == splitAtLine)
         ) {

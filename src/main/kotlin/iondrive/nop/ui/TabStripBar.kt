@@ -6,21 +6,21 @@ import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,8 +53,9 @@ import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.Tooltip
 import org.jetbrains.jewel.ui.component.styling.TabStyle
 
-// Tall enough to sit level with the editor tabs Jewel's metrics size, and fixed so a collapsed group
-// doesn't change the bar's height.
+// Tall enough to sit level with the editor tabs Jewel's metrics size, and fixed per row so a
+// collapsed group doesn't change the bar's height. The bar itself is as many of these tall as the
+// tabs need — see the FlowRow in [TabStripBar].
 private val STRIP_HEIGHT = 30.dp
 // Caps how wide a tab may grow, so one long file name can't push the rest off-screen.
 private val TAB_MAX_WIDTH = 220.dp
@@ -78,10 +79,18 @@ private const val DRAG_EXPAND_MS = 600L
  * [onTabsClosed] runs the per-tab teardown the strip itself knows nothing about (flushing edit
  * buffers, stopping launcher processes) for every tab any of these actions removes.
  *
+ * Tabs flow onto further rows rather than running off the end of the bar: a tab you can't see is a
+ * tab you've lost, and a strip that scrolls sideways hides them behind a gesture nobody makes. The
+ * bar grows downward by [STRIP_HEIGHT] a row instead, and the editor beneath it gives up the space.
+ *
  * The far end of the bar carries the controls that apply to whatever is open rather than to one
- * tab: the spellcheck and word-wrap toggles, and the "+" that adds a group.
+ * tab: the word-wrap toggle and the "+" that adds a group.
  */
-@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@OptIn(
+    ExperimentalJewelApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 @Composable
 fun TabStripBar(
     state: TabsState,
@@ -90,8 +99,6 @@ fun TabStripBar(
     onTabsClosed: (List<Tab>) -> Unit,
     wrapLines: Boolean = false,
     onToggleWrap: () -> Unit = {},
-    spellcheck: Boolean = true,
-    onToggleSpellcheck: () -> Unit = {},
 ) {
     val isDark = JewelTheme.isDark
     val items = state.strip
@@ -129,13 +136,10 @@ fun TabStripBar(
     }
 
     Row(
-        modifier = Modifier.fillMaxWidth().height(STRIP_HEIGHT).background(style.colors.background),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().heightIn(min = STRIP_HEIGHT).background(style.colors.background),
+        verticalAlignment = Alignment.Top,
     ) {
-        Row(
-            modifier = Modifier.weight(1f).fillMaxHeight().horizontalScroll(rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        FlowRow(modifier = Modifier.weight(1f)) {
             blocks.forEach { block ->
                 val item = items[block.start]
                 // Key by stable per-slot identity (not position) so a running drag's pointerInput
@@ -186,8 +190,7 @@ fun TabStripBar(
                 }
             }
         }
-        // Pinned outside the scroll area so a strip full of tabs can still reach them.
-        SpellcheckToggleButton(isDark = isDark, enabled = spellcheck, onClick = onToggleSpellcheck)
+        // Pinned outside the flowing tabs so a strip full of them can still reach these.
         WrapToggleButton(isDark = isDark, enabled = wrapLines, onClick = onToggleWrap)
         AddGroupButton(isDark = isDark, onClick = { state.addGroup() })
     }
@@ -264,8 +267,10 @@ private fun ReorderableSlot(
     val dragging = reorder.draggingKey == key
 
     Box(
+        // A fixed height rather than fillMaxHeight: the bar is as many rows tall as the tabs need,
+        // and a slot should be one row of it, not all of them.
         modifier = Modifier
-            .fillMaxHeight()
+            .height(STRIP_HEIGHT)
             .onSizeChanged { reorder.widths[key] = it.width }
             // zIndex/graphicsLayer are always present (not conditionally inserted) so the modifier
             // chain — and the pointerInput node below it — isn't rebuilt when a drag starts/ends.
@@ -510,32 +515,10 @@ private fun WrapToggleButton(isDark: Boolean, enabled: Boolean, onClick: () -> U
     }
     Tooltip(tooltip = { Text(if (enabled) "Turn off word wrap" else "Wrap long lines in files and diffs") }) {
         Box(
-            modifier = Modifier.fillMaxHeight().width(28.dp).clickable(onClick = onClick),
+            modifier = Modifier.height(STRIP_HEIGHT).width(28.dp).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Canvas(Modifier.size(13.dp)) { drawWrapIcon(tint) }
-        }
-    }
-}
-
-/**
- * The spellcheck toggle, beside the wrap one. Same scope and the same accent when lit: it applies
- * to every file tab at once and is remembered across restarts.
- */
-@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
-@Composable
-private fun SpellcheckToggleButton(isDark: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    val tint = when {
-        enabled -> if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)
-        isDark -> ProjectIconTintDark
-        else -> ProjectIconTintLight
-    }
-    Tooltip(tooltip = { Text(if (enabled) "Turn off spellcheck" else "Underline misspelled words") }) {
-        Box(
-            modifier = Modifier.fillMaxHeight().width(28.dp).clickable(onClick = onClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            Canvas(Modifier.size(13.dp)) { drawSpellcheckIcon(tint) }
         }
     }
 }
@@ -547,7 +530,7 @@ private fun AddGroupButton(isDark: Boolean, onClick: () -> Unit) {
     val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
     Tooltip(tooltip = { Text("New tab group") }) {
         Box(
-            modifier = Modifier.fillMaxHeight().width(28.dp).clickable(onClick = onClick),
+            modifier = Modifier.height(STRIP_HEIGHT).width(28.dp).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Canvas(Modifier.size(13.dp)) { drawPlusIcon(tint) }

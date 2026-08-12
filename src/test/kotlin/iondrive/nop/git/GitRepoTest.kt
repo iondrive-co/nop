@@ -265,6 +265,34 @@ class GitRepoTest {
     }
 
     @Test
+    fun `loadStatus returns changes in path order, and the order survives an edit`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        val paths = listOf(
+            "README.md",
+            "docs/api/endpoints.md",
+            "docs/api/overview.md",
+            "docs/ui/buttons.md",
+            "guides/start.md",
+        )
+        for (p in paths) {
+            (tmp / p).parent.createDirectories()
+            (tmp / p).writeText("v1\n")
+        }
+        runShell(tmp, "git add -A && git commit -q -m init")
+        for (p in paths) (tmp / p).writeText("v2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertEquals(paths, repo.loadStatus().changes.map { it.path }, "changes must come back in path order")
+
+        // Editing one file must not move it — or anything else — within the list. JGit hands its
+        // paths back out of hash sets, so without an explicit order this is exactly where a file
+        // would jump to the top.
+        (tmp / "docs/ui/buttons.md").writeText("v3\n")
+        assertEquals(paths, repo.loadStatus().changes.map { it.path }, "an edit must not reorder the list")
+        repo.close()
+    }
+
+    @Test
     fun `softResetHead un-commits the last commit but keeps its changes staged`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         (tmp / "a.txt").writeText("a\n")

@@ -176,5 +176,49 @@ class PathGroupingTest {
         assertEquals("tests · 1", group(groups, "tests").header)
     }
 
+    @Test
+    fun `a group's members are ordered by folder then file name`() {
+        // The shape a docs repo produces: one big "docs" column spanning a deep tree, arriving in
+        // whatever order git status listed it in.
+        val groups = group(
+            "adnuntius-advertising/admin-ui/inventory/sites.md",
+            "SUMMARY.md",
+            "adnuntius-advertising/admin-api/endpoints/lineitems.md",
+            "adnuntius-self-service/marketing-tips.md",
+            "adnuntius-advertising/admin-ui/advertising/line-items.md",
+            "adnuntius-advertising/admin-api/endpoints/adunits.md",
+            "README.md",
+            "adnuntius-advertising/admin-ui/advertising/advertisers.md",
+        )
+        assertEquals(
+            listOf(
+                // Root files first (no folder at all), then folder by folder, each folder's files
+                // together and alphabetical within it.
+                "README.md",
+                "SUMMARY.md",
+                "adnuntius-advertising/admin-api/endpoints/adunits.md",
+                "adnuntius-advertising/admin-api/endpoints/lineitems.md",
+                "adnuntius-advertising/admin-ui/advertising/advertisers.md",
+                "adnuntius-advertising/admin-ui/advertising/line-items.md",
+                "adnuntius-advertising/admin-ui/inventory/sites.md",
+                "adnuntius-self-service/marketing-tips.md",
+            ),
+            group(groups, "docs").paths,
+        )
+    }
+
+    @Test
+    fun `ordering is stable, so a file's search hits keep their line order`() {
+        val hits = listOf(
+            hit("src/main/kotlin/app/Util.kt", 7),
+            hit("src/main/kotlin/app/App.kt", 3),
+            hit("src/main/kotlin/app/Util.kt", 2),
+            hit("src/main/kotlin/app/Util.kt", 40),
+        )
+        val groups = PathGrouping.group(hits) { it.path }
+        // App.kt's hit sorts ahead of Util.kt's; within Util.kt the hits stay as the scan found them.
+        assertEquals(listOf(hits[1], hits[0], hits[2], hits[3]), group(groups, "app").items)
+    }
+
     private fun hit(path: String, line: Int) = SearchHit(path, line, "match on line $line", 0, 5)
 }

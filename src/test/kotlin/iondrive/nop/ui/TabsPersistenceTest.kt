@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -52,7 +53,7 @@ class TabsPersistenceTest {
     }
 
     @Test
-    fun `save drops Diff and Terminal tabs`(@TempDir tmp: Path) {
+    fun `save drops Terminal tabs`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
         val keep = tmp.resolve("keep.kt").toFile().apply { writeText("") }
@@ -60,7 +61,6 @@ class TabsPersistenceTest {
         // TerminalSession is lazy — constructing one starts no PTY, so this is safe headless.
         val tabs = listOf<Tab>(
             Tab.FileView(keep),
-            Tab.Diff(FileChange("foo.kt", ChangeKind.MODIFIED), repo),
             Tab.Terminal(TerminalSession.shell(repo)),
         )
         TabsPersistence.save(target, snapshotOf(tabs))
@@ -69,6 +69,69 @@ class TabsPersistenceTest {
         assertEquals(1, loaded.size)
         assertEquals("file", loaded[0].kind)
         assertEquals(keep.absolutePath, loaded[0].path)
+    }
+
+    @Test
+    fun `save then restore round-trips a working-tree Diff tab`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        File(repo, "docs").mkdirs()
+        File(repo, "docs/guide.md").writeText("hello")
+        // The tab a click in the commit panel opens — the kind of tab a docs project is mostly made
+        // of, and the one that used to vanish on every project switch.
+        val original = Tab.Diff(FileChange("docs/guide.md", ChangeKind.MODIFIED), repo)
+        TabsPersistence.save(target, snapshotOf(listOf(original), selectedId = original.id))
+
+        val loaded = tabRows(TabsPersistence.load(target))
+        assertEquals(listOf("diff"), loaded.map { it.kind })
+        assertEquals(true, loaded[0].selected)
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
+        assertEquals(listOf<Tab>(original), state.tabs)
+        assertEquals(original.id, state.selectedId)
+    }
+
+    @Test
+    fun `a working-tree diff of a deleted file restores, one of a vanished file does not`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        // REMOVED/MISSING diffs are about the file *not* being there, so absence is no reason to
+        // drop them; a MODIFIED diff of a path that has since disappeared has nothing to show.
+        val deleted = Tab.Diff(FileChange("gone.md", ChangeKind.MISSING), repo)
+        val stale = Tab.Diff(FileChange("also-gone.md", ChangeKind.MODIFIED), repo)
+        TabsPersistence.save(target, snapshotOf(listOf(deleted, stale)))
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
+        assertEquals(listOf<Tab>(deleted), state.tabs)
+    }
+
+    @Test
+    fun `working-tree diffs need a repoRoot and a change kind`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        File(repo, "a.md").writeText("")
+        File(repo, "b.md").writeText("")
+        Files.writeString(
+            target,
+            listOf(
+                "diff\ta.md\t0",           // no change kind
+                "diff\tb.md\t0\tNOPE",     // not a ChangeKind
+                "diff\tb.md\t0\tMODIFIED",
+            ).joinToString("\n"),
+        )
+
+        // The kindless row never becomes a SavedTab; the bogus one is dropped where the enum resolves.
+        assertEquals(listOf("b.md", "b.md"), TabsPersistence.load(target).map { it.path })
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
+        assertEquals(1, state.tabs.size)
+
+        // Without a repo there is no HEAD side to diff against.
+        val noRepo = TabsState()
+        TabsPersistence.restore(noRepo, TabsPersistence.load(target), repoRoot = null)
+        assertTrue(noRepo.tabs.isEmpty())
     }
 
     @Test
