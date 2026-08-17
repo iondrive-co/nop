@@ -9,7 +9,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -56,12 +55,14 @@ private val H_SCROLLBAR_RESERVE = 14.dp
 /**
  * Lays [columns] out side by side, each under its heading. Columns pack left to right at
  * [naturalColumnWidth] — the width that just covers the caller's longest row label, clamped by
- * [GroupGridMetrics]; rather than squeezing thinner when they run out of room they wrap to a new row
- * below, and only once the height is used up does the grid scroll horizontally.
+ * [GroupGridMetrics]; a row takes as many as fit before the next starts, and only once the height
+ * is used up does the grid scroll horizontally.
  *
- * The separator between two neighbouring columns can be dragged to hand width from one to the
- * other ([GroupColumnWidths]), and double-clicked to put the row back to even columns. The tweaks
- * are remembered per column key for as long as the grid is on screen.
+ * Every separator is draggable ([GroupTrackSizes]), and double-clicking one puts its row — or the
+ * stack of rows — back to even. The one between two columns hands width from one to the other; the
+ * one past the last column of a row widens the row itself, which is how a clipped name in the
+ * rightmost column gets read; the one between two rows trades height. The tweaks are remembered per
+ * column key (and per row) for as long as the grid is on screen.
  *
  * The caller measures its own natural width because only it knows the fonts and row chrome its rows
  * use; everything from there — packing, headings, wrapping, the scroller — is shared, so the commit
@@ -74,50 +75,90 @@ fun GroupColumnGrid(
     modifier: Modifier = Modifier,
 ) {
     if (columns.isEmpty()) return
-    // Width handed to a column by its separators, in dp, keyed by column so a group keeps the room
-    // it was given while its rows churn underneath it.
+    // Width handed to a column by the separators either side of it, in dp, keyed by column so a
+    // group keeps the room it was given while its rows churn underneath it.
     val widthOffsets = remember { mutableStateMapOf<String, Float>() }
+    // Width a row's trailing separator has added past the packed width, keyed by row index.
+    val rowOverhangs = remember { mutableStateMapOf<Int, Float>() }
+    // Height handed to a row by the separators above and below it, keyed by row index.
+    val heightOffsets = remember { mutableStateMapOf<Int, Float>() }
     BoxWithConstraints(modifier = modifier) {
-        var grid = GroupGridMetrics.layout(columns.size, naturalColumnWidth, maxWidth, maxHeight)
-        if (grid.scrollHorizontally) {
+        val density = LocalDensity.current
+        val colGap = GroupGridMetrics.COLUMN_GAP
+        // The trailing separator sits past the last column, so the packer gets the width left over
+        // once its band is reserved. Otherwise every row would overhang by the band's width and the
+        // grid would always think it had to scroll.
+        val packWidth = (maxWidth - colGap).coerceAtLeast(colGap)
+
+        var grid = GroupGridMetrics.layout(columns.size, naturalColumnWidth, packWidth, maxHeight)
+        var rows = rowsOf(columns, grid)
+        var widths = rows.mapIndexed { i, row -> rowWidths(grid, row, i, widthOffsets, rowOverhangs) }
+        var scroll = grid.scrollHorizontally || widths.any { rowWidth(it) > packWidth.value + 0.5f }
+        if (scroll) {
             // Leave a strip at the bottom for the scrollbar so it can't cover a row.
             grid = GroupGridMetrics.layout(
                 columns.size,
                 naturalColumnWidth,
-                maxWidth,
+                packWidth,
                 maxHeight - H_SCROLLBAR_RESERVE,
             )
+            rows = rowsOf(columns, grid)
+            widths = rows.mapIndexed { i, row -> rowWidths(grid, row, i, widthOffsets, rowOverhangs) }
+            scroll = true
         }
-        val density = LocalDensity.current
+        val heights = GroupTrackSizes.resolve(
+            baseSize = grid.rowHeight.value,
+            offsets = rows.indices.map { heightOffsets[it] ?: 0f },
+            min = GroupGridMetrics.MIN_ROW_HEIGHT.value,
+        )
+        // Rows can differ in width once one has been dragged out; the widest is what scrolls.
+        val contentWidth = (widths.maxOfOrNull { rowWidth(it) } ?: 0f).dp + colGap
+
         val gridContent: @Composable () -> Unit = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(GroupGridMetrics.ROW_GAP),
-                modifier = if (grid.scrollHorizontally) Modifier.width(grid.contentWidth) else Modifier.fillMaxWidth(),
-            ) {
-                for (rowIndex in 0 until grid.rows) {
-                    val first = rowIndex * grid.columnsPerRow
-                    val rowColumns = columns.subList(first, minOf(first + grid.columnsPerRow, columns.size))
-                    if (rowColumns.isEmpty()) continue
-                    val widths = GroupColumnWidths.resolve(
-                        baseWidth = grid.columnWidth.value,
-                        offsets = rowColumns.map { widthOffsets[it.key] ?: 0f },
-                    )
-                    Row(modifier = Modifier.height(grid.rowHeight)) {
+            Column(modifier = if (scroll) Modifier.width(contentWidth) else Modifier.fillMaxWidth()) {
+                rows.forEachIndexed { rowIndex, rowColumns ->
+                    if (rowIndex > 0) {
+                        GridSeparator(
+                            orientation = Orientation.Vertical,
+                            onDrag = { deltaPx ->
+                                val moved = GroupTrackSizes.drag(
+                                    heights,
+                                    rowIndex - 1,
+                                    with(density) { deltaPx.toDp() }.value,
+                                    GroupGridMetrics.MIN_ROW_HEIGHT.value,
+                                )
+                                rows.indices.forEach { heightOffsets[it] = moved[it] - grid.rowHeight.value }
+                            },
+                            onReset = { heightOffsets.clear() },
+                        )
+                    }
+                    val rowSizes = widths[rowIndex]
+                    // Write the whole row back after a drag, not just the tracks that moved: what's
+                    // on screen is the resolved sizes, which may already differ from the stored
+                    // offsets after a re-pack. The row's overhang is held separately, so it comes
+                    // back off the last column before the rest is stored as that column's offset.
+                    val storeWidths: (List<Float>) -> Unit = { moved ->
+                        val base = grid.columnWidthFor(rowColumns.size).value
+                        val overhang = rowOverhangs[rowIndex] ?: 0f
+                        rowColumns.forEachIndexed { i, c ->
+                            val own = if (i == rowColumns.lastIndex) moved[i] - overhang else moved[i]
+                            widthOffsets[c.key] = own - base
+                        }
+                    }
+                    Row(modifier = Modifier.height(heights[rowIndex].dp)) {
                         rowColumns.forEachIndexed { colIndex, column ->
                             if (colIndex > 0) {
-                                ColumnSeparator(
+                                GridSeparator(
+                                    orientation = Orientation.Horizontal,
                                     onDrag = { deltaPx ->
-                                        val moved = GroupColumnWidths.drag(
-                                            widths,
-                                            colIndex - 1,
-                                            with(density) { deltaPx.toDp() }.value,
+                                        storeWidths(
+                                            GroupTrackSizes.drag(
+                                                rowSizes,
+                                                colIndex - 1,
+                                                with(density) { deltaPx.toDp() }.value,
+                                                GroupGridMetrics.MIN_COLUMN_WIDTH.value,
+                                            )
                                         )
-                                        // Write the whole row back, not just the pair that moved:
-                                        // what's on screen is the resolved widths, which may
-                                        // already differ from the stored offsets after a re-pack.
-                                        rowColumns.forEachIndexed { i, c ->
-                                            widthOffsets[c.key] = moved[i] - grid.columnWidth.value
-                                        }
                                     },
                                     onReset = { rowColumns.forEach { widthOffsets.remove(it.key) } },
                                 )
@@ -125,16 +166,31 @@ fun GroupColumnGrid(
                             key(column.key) {
                                 HeadedColumn(
                                     header = column.header,
-                                    modifier = Modifier.width(widths[colIndex].dp).fillMaxHeight(),
+                                    modifier = Modifier.width(rowSizes[colIndex].dp).fillMaxHeight(),
                                     content = column.content,
                                 )
                             }
                         }
+                        // The row's own right edge: dragging it widens the row past the panel,
+                        // scrolling the grid, rather than taking width off a neighbour.
+                        GridSeparator(
+                            orientation = Orientation.Horizontal,
+                            onDrag = { deltaPx ->
+                                val moved = GroupTrackSizes.dragTrailing(
+                                    rowSizes,
+                                    with(density) { deltaPx.toDp() }.value,
+                                    GroupGridMetrics.MIN_COLUMN_WIDTH.value,
+                                )
+                                rowOverhangs[rowIndex] = moved.last() - rowSizes.last() +
+                                    (rowOverhangs[rowIndex] ?: 0f)
+                            },
+                            onReset = { rowOverhangs.remove(rowIndex) },
+                        )
                     }
                 }
             }
         }
-        if (grid.scrollHorizontally) {
+        if (scroll) {
             val hScroll = rememberScrollState()
             Box(modifier = Modifier.fillMaxSize().horizontalScroll(hScroll)) { gridContent() }
             HorizontalScrollbar(
@@ -148,43 +204,84 @@ fun GroupColumnGrid(
     }
 }
 
+/** The columns of each row, in order — the last row holding whatever the ones above didn't take. */
+private fun rowsOf(columns: List<GroupColumn>, grid: GroupGrid): List<List<GroupColumn>> =
+    (0 until grid.rows).mapNotNull { rowIndex ->
+        val first = rowIndex * grid.columnsPerRow
+        if (first >= columns.size) null
+        else columns.subList(first, minOf(first + grid.columnsPerRow, columns.size))
+    }
+
+/** The width of every column on one row: the packed width, plus what its separators have moved. */
+private fun rowWidths(
+    grid: GroupGrid,
+    rowColumns: List<GroupColumn>,
+    rowIndex: Int,
+    widthOffsets: Map<String, Float>,
+    rowOverhangs: Map<Int, Float>,
+): List<Float> {
+    val base = grid.columnWidthFor(rowColumns.size).value
+    val widths = GroupTrackSizes.resolve(
+        baseSize = base,
+        offsets = rowColumns.map { widthOffsets[it.key] ?: 0f },
+        min = GroupGridMetrics.MIN_COLUMN_WIDTH.value,
+    )
+    val overhang = rowOverhangs[rowIndex] ?: 0f
+    if (overhang == 0f) return widths
+    return GroupTrackSizes.dragTrailing(widths, overhang, GroupGridMetrics.MIN_COLUMN_WIDTH.value)
+}
+
+/** Total width of a row: its columns plus the separators between them. */
+private fun rowWidth(widths: List<Float>): Float =
+    widths.sum() + GroupGridMetrics.COLUMN_GAP.value * (widths.size - 1).coerceAtLeast(0)
+
 /** How far the pointer may wander during a press for it to still count as a click, in px. */
 private const val SEPARATOR_CLICK_SLOP = 3f
 
 /**
- * The draggable line between two columns. It fills the gap the packing left between them, so the
- * grab area is the full [GroupGridMetrics.COLUMN_GAP] even though the line drawn down it is a
- * hairline. Like [SplitPane]'s divider it starts dragging on the first press rather than after
- * Compose's drag slop, which the cursor would cover by leaving this narrow band.
+ * The draggable line between two tracks of the grid — two columns of a row, or two rows. It fills
+ * the gap the packing left between them, so the grab area is the full gap even though the line
+ * drawn down it is a hairline. Like [SplitPane]'s divider it starts dragging on the first press
+ * rather than after Compose's drag slop, which the cursor would cover by leaving this narrow band.
  *
  * Dragging from the press is also why the double-click that calls [onReset] is counted out of the
  * drag's own start/stop instead of a `clickable`: the drag has already claimed the press by the
  * time a click modifier would see it, so a stacked one never fires.
  */
 @Composable
-private fun ColumnSeparator(onDrag: (Float) -> Unit, onReset: () -> Unit) {
+private fun GridSeparator(orientation: Orientation, onDrag: (Float) -> Unit, onReset: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     var dragging by remember { mutableStateOf(false) }
     val doubleClickMs = LocalViewConfiguration.current.doubleTapTimeoutMillis
     val clicks = remember { SeparatorClicks() }
+    val across = orientation == Orientation.Horizontal
     val active = hovered || dragging
     val color = when {
         JewelTheme.isDark -> if (active) Color(0xFF6F737A) else Color(0xFF393B40)
         else -> if (active) Color(0xFF9BA0A8) else Color(0xFFD3D5DB)
     }
+    val thickness = if (active) 2.dp else 1.dp
+    val band = if (across) {
+        Modifier.width(GroupGridMetrics.COLUMN_GAP).fillMaxHeight()
+    } else {
+        Modifier.height(GroupGridMetrics.ROW_GAP).fillMaxWidth()
+    }
+    val line = if (across) {
+        Modifier.width(thickness).fillMaxHeight()
+    } else {
+        Modifier.height(thickness).fillMaxWidth()
+    }
     Box(
-        modifier = Modifier
-            .width(GroupGridMetrics.COLUMN_GAP)
-            .fillMaxHeight()
+        modifier = band
             .hoverable(interaction)
-            .pointerHoverIcon(HorizontalResizeCursor)
+            .pointerHoverIcon(if (across) HorizontalResizeCursor else VerticalResizeCursor)
             .draggable(
                 state = rememberDraggableState(onDelta = { delta ->
                     clicks.travelled += abs(delta)
                     onDrag(delta)
                 }),
-                orientation = Orientation.Horizontal,
+                orientation = orientation,
                 startDragImmediately = true,
                 onDragStarted = {
                     dragging = true
@@ -208,11 +305,11 @@ private fun ColumnSeparator(onDrag: (Float) -> Unit, onReset: () -> Unit) {
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.width(if (active) 2.dp else 1.dp).fillMaxHeight().background(color))
+        Box(line.background(color))
     }
 }
 
-/** Scratch state for [ColumnSeparator]'s click counting; nothing here drives recomposition. */
+/** Scratch state for [GridSeparator]'s click counting; nothing here drives recomposition. */
 private class SeparatorClicks {
     var travelled = 0f
     var lastClickAt = 0L

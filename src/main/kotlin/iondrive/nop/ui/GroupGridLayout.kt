@@ -9,11 +9,10 @@ import kotlin.math.floor
  * How a panel's group columns are packed into the available area. Both the commit panel's changes
  * and the find-in-files results lay out through this.
  *
- * Columns fill left to right at [columnWidth]. When another column won't fit at the width that
- * just covers the longest file name, the grid wraps to a new row *below* (splitting the panel
- * vertically) rather than squeezing the columns thinner. Only once the vertical space is used up —
- * [rows] is capped by the height — does the grid grow past the right edge, at which point
- * [scrollHorizontally] is set and the caller wraps the grid in a horizontal scroller.
+ * Every row takes as many columns as fit at the width that just covers the longest file name, so a
+ * group only drops to the row below once the row above is genuinely full. When the rows that need
+ * won't fit down the height, the grid grows past the right edge instead: [scrollHorizontally] is
+ * set and the caller wraps the grid in a horizontal scroller.
  */
 data class GroupGrid(
     val columnWidth: Dp,
@@ -21,10 +20,18 @@ data class GroupGrid(
     val columnsPerRow: Int,
     val rows: Int,
     val scrollHorizontally: Boolean,
+    val availableWidth: Dp,
 ) {
-    /** Total width the grid occupies — wider than the viewport exactly when [scrollHorizontally]. */
-    val contentWidth: Dp
-        get() = columnWidth * columnsPerRow + GroupGridMetrics.COLUMN_GAP * (columnsPerRow - 1).coerceAtLeast(0)
+    /**
+     * Width of each column on a row holding [count] of them. A short last row — the remainder left
+     * by filling the rows above — stretches its columns to fill the width rather than leaving a
+     * ragged empty band down the right of the panel.
+     */
+    fun columnWidthFor(count: Int): Dp {
+        if (count <= 0 || scrollHorizontally || count >= columnsPerRow) return columnWidth
+        val gaps = GroupGridMetrics.COLUMN_GAP.value * (count - 1)
+        return maxOf(columnWidth.value, (availableWidth.value - gaps) / count).dp
+    }
 }
 
 object GroupGridMetrics {
@@ -51,7 +58,7 @@ object GroupGridMetrics {
         availableWidth: Dp,
         availableHeight: Dp,
     ): GroupGrid {
-        if (groupCount <= 0) return GroupGrid(availableWidth, availableHeight, 0, 0, false)
+        if (groupCount <= 0) return GroupGrid(availableWidth, availableHeight, 0, 0, false, availableWidth)
 
         val colGap = COLUMN_GAP.value
         val rowGap = ROW_GAP.value
@@ -65,28 +72,14 @@ object GroupGridMetrics {
         val fitCols = maxOf(1, floor((availW + colGap) / (natural + colGap)).toInt())
         val fitRows = maxOf(1, floor((availH + rowGap) / (minRow + rowGap)).toInt())
 
-        val rows: Int
-        val columnsPerRow: Int
-        val scroll: Boolean
-        when {
-            groupCount <= fitCols -> {
-                // Everything fits on one row; stretch the columns to fill the width.
-                rows = 1
-                columnsPerRow = groupCount
-                scroll = false
-            }
-            ceil(groupCount.toDouble() / fitCols).toInt() <= fitRows -> {
-                // Wrap onto extra rows that still fit vertically; balance columns across them.
-                rows = ceil(groupCount.toDouble() / fitCols).toInt()
-                columnsPerRow = ceil(groupCount.toDouble() / rows).toInt()
-                scroll = false
-            }
-            else -> {
-                // Vertical space exhausted: keep the natural width and overflow to the right.
-                rows = fitRows
-                columnsPerRow = ceil(groupCount.toDouble() / rows).toInt()
-                scroll = true
-            }
+        // Fill each row up before starting the next, so no group sits a row lower than it needs to.
+        var columnsPerRow = minOf(groupCount, fitCols)
+        var rows = ceil(groupCount.toDouble() / columnsPerRow).toInt()
+        val scroll = rows > fitRows
+        if (scroll) {
+            // Vertical space exhausted: keep the natural width and overflow to the right.
+            rows = fitRows
+            columnsPerRow = ceil(groupCount.toDouble() / rows).toInt()
         }
 
         val columnWidth = if (scroll) {
@@ -96,75 +89,86 @@ object GroupGridMetrics {
             maxOf(natural, (availW - colGap * (columnsPerRow - 1)) / columnsPerRow)
         }
         val rowHeight = if (rows <= 1) availH else (availH - rowGap * (rows - 1)) / rows
-        return GroupGrid(columnWidth.dp, rowHeight.dp, columnsPerRow, rows, scroll)
+        return GroupGrid(columnWidth.dp, rowHeight.dp, columnsPerRow, rows, scroll, availW.dp)
     }
 }
 
 /**
- * The per-column width tweaks made by dragging the separators between a grid row's columns.
+ * The sizes of one axis of a grid row or column stack, after the user has dragged the separators
+ * between the tracks — the columns across a row, or the rows down the grid.
  *
- * A drag is zero-sum: it moves width from one column to its neighbour, leaving the row as wide as
- * [GroupGridMetrics.layout] made it, so nothing reflows or starts scrolling just because a
- * separator moved. Offsets are held per column (in dp, relative to the packed column width) rather
- * than as absolute widths, so a column keeps the extra room it was given as the window resizes and
- * the packed width underneath it changes.
+ * A drag is zero-sum: it moves space from one track to its neighbour, leaving the row (or the
+ * stack) the size the packer made it, so nothing reflows or starts scrolling just because a
+ * separator moved. Offsets are held per track (in dp, relative to the packed size) rather than as
+ * absolute sizes, so a track keeps the extra room it was given as the window resizes and the packed
+ * size underneath it changes.
  */
-object GroupColumnWidths {
+object GroupTrackSizes {
     /**
-     * The widths for one row of columns packed at [baseWidth] with the user's [offsets] applied.
-     * The offsets are re-centred on zero so the total is always `baseWidth * offsets.size`, and any
-     * column dragged under [GroupGridMetrics.MIN_COLUMN_WIDTH] is pulled back up at the expense of
-     * whichever columns still have slack.
+     * The sizes for tracks packed at [baseSize] with the user's [offsets] applied. The offsets are
+     * re-centred on zero so the total is always `baseSize * offsets.size`, and any track dragged
+     * under [min] is pulled back up at the expense of whichever tracks still have slack.
      */
-    fun resolve(baseWidth: Float, offsets: List<Float>): List<Float> {
+    fun resolve(baseSize: Float, offsets: List<Float>, min: Float): List<Float> {
         val n = offsets.size
         if (n == 0) return emptyList()
-        val min = GroupGridMetrics.MIN_COLUMN_WIDTH.value
-        val total = baseWidth * n
+        val total = baseSize * n
         // Too little room to honour the minimum everywhere: share what there is out evenly.
         if (total <= min * n) return List(n) { total / n }
 
         val mean = offsets.sum() / n
-        val widths = MutableList(n) { baseWidth + offsets[it] - mean }
-        // Each pass moves the shortfall of the too-narrow columns onto the ones above the minimum,
-        // in proportion to the slack each has; a column pinned at the minimum has none, so at most
-        // one column can be pinned per pass and n passes always settle it.
+        val sizes = MutableList(n) { baseSize + offsets[it] - mean }
+        // Each pass moves the shortfall of the too-small tracks onto the ones above the minimum, in
+        // proportion to the slack each has; a track pinned at the minimum has none, so at most one
+        // track can be pinned per pass and n passes always settle it.
         repeat(n) {
-            val deficit = widths.sumOf { maxOf(0f, min - it).toDouble() }.toFloat()
+            val deficit = sizes.sumOf { maxOf(0f, min - it).toDouble() }.toFloat()
             if (deficit <= 0.01f) return@repeat
-            val slack = widths.sumOf { maxOf(0f, it - min).toDouble() }.toFloat()
+            val slack = sizes.sumOf { maxOf(0f, it - min).toDouble() }.toFloat()
             if (slack <= 0f) return@repeat
             val moved = minOf(deficit, slack)
-            for (i in widths.indices) {
-                val over = widths[i] - min
-                if (over > 0f) widths[i] -= moved * (over / slack)
+            for (i in sizes.indices) {
+                val over = sizes[i] - min
+                if (over > 0f) sizes[i] -= moved * (over / slack)
             }
-            for (i in widths.indices) {
-                val under = min - widths[i]
-                if (under > 0f) widths[i] += under * (moved / deficit)
+            for (i in sizes.indices) {
+                val under = min - sizes[i]
+                if (under > 0f) sizes[i] += under * (moved / deficit)
             }
         }
-        return widths
+        return sizes
     }
 
     /**
-     * [widths] after the separator to the right of column [dividerIndex] is dragged [delta] dp,
-     * clamped so neither of the two columns it sits between drops below the minimum width.
+     * [sizes] after the separator following track [dividerIndex] is dragged [delta] dp, clamped so
+     * neither of the two tracks it sits between drops below [min].
      */
-    fun drag(widths: List<Float>, dividerIndex: Int, delta: Float): List<Float> {
-        if (dividerIndex < 0 || dividerIndex + 1 >= widths.size) return widths
-        val min = GroupGridMetrics.MIN_COLUMN_WIDTH.value
-        val left = widths[dividerIndex]
-        val right = widths[dividerIndex + 1]
-        val lower = min - left
-        val upper = right - min
+    fun drag(sizes: List<Float>, dividerIndex: Int, delta: Float, min: Float): List<Float> {
+        if (dividerIndex < 0 || dividerIndex + 1 >= sizes.size) return sizes
+        val before = sizes[dividerIndex]
+        val after = sizes[dividerIndex + 1]
+        val lower = min - before
+        val upper = after - min
         // Both sides are already at or under the minimum — there is nothing left to trade.
-        if (lower > upper) return widths
+        if (lower > upper) return sizes
         val applied = delta.coerceIn(lower, upper)
-        if (applied == 0f) return widths
-        return widths.toMutableList().also {
-            it[dividerIndex] = left + applied
-            it[dividerIndex + 1] = right - applied
+        if (applied == 0f) return sizes
+        return sizes.toMutableList().also {
+            it[dividerIndex] = before + applied
+            it[dividerIndex + 1] = after - applied
         }
+    }
+
+    /**
+     * [sizes] after the separator *past the last track* is dragged [delta] dp. Nothing is on the
+     * other side to trade with, so this one grows or shrinks the row itself — which is how a
+     * clipped file name in the rightmost column is read: drag its edge out and the grid scrolls.
+     */
+    fun dragTrailing(sizes: List<Float>, delta: Float, min: Float): List<Float> {
+        if (sizes.isEmpty()) return sizes
+        val last = sizes.last()
+        val applied = maxOf(delta, min - last)
+        if (applied == 0f) return sizes
+        return sizes.toMutableList().also { it[it.lastIndex] = last + applied }
     }
 }

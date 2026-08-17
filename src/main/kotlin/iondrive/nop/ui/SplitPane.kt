@@ -21,6 +21,7 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import java.awt.Cursor
 
 internal val HorizontalResizeCursor = PointerIcon(Cursor(Cursor.E_RESIZE_CURSOR))
+internal val VerticalResizeCursor = PointerIcon(Cursor(Cursor.N_RESIZE_CURSOR))
 
 /**
  * Two side-by-side panes split by a draggable vertical line. Replaces Jewel's

@@ -35,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -76,9 +77,7 @@ import javax.swing.JPanel
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.ContextMenuDivider
-import org.jetbrains.jewel.ui.component.HorizontalSplitLayout
 import org.jetbrains.jewel.ui.component.Text
-import org.jetbrains.jewel.ui.component.rememberSplitLayoutState
 import org.jetbrains.jewel.ui.theme.editorTabStyle
 
 /** How long to wait for the typing to settle before writing the buffer to disk. */
@@ -121,6 +120,8 @@ fun TabbedViewerPanel(
     onToggleWrap: () -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
+    previewSplitRatio: Float = 0.5f,
+    onPreviewSplitRatioChange: (Float) -> Unit = {},
 ) {
     val selected = tabsState.selectedTab
 
@@ -173,6 +174,8 @@ fun TabbedViewerPanel(
                             replaceInFileTrigger = replaceInFileTrigger,
                             saveTrigger = saveTrigger,
                             onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
+                            previewRatio = previewSplitRatio,
+                            onPreviewRatioChange = onPreviewSplitRatioChange,
                         )
                     } else {
                         FileEditView(
@@ -899,6 +902,10 @@ internal fun repoRelativePath(repo: GitRepo, file: File): String? = runCatching 
 /**
  * Markdown tab layout: editor on the left, live-rendered preview on the right.
  *
+ * The divider between them is [HorizontalSplit], not Jewel's HorizontalSplitLayout — the latter
+ * ignored drag deltas here just as it did in the app's other splits, which left the preview stuck
+ * at half the tab with no way to squeeze it down and give the source more room.
+ *
  * Everything the plain editor is given has to be forwarded to the editor half — a markdown file is
  * still a file, and dropping the inbound jump/search parameters here is what used to make a global
  * "Find in files" hit in a .md open the tab at the top with nothing highlighted (and leave the
@@ -917,12 +924,20 @@ private fun MarkdownEditWithPreview(
     replaceInFileTrigger: Int = 0,
     saveTrigger: Int = 0,
     onShowLocalHistory: () -> Unit = {},
+    previewRatio: Float = 0.5f,
+    onPreviewRatioChange: (Float) -> Unit = {},
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
     val previewText by remember(edit) {
         derivedStateOf { edit.state.text.toString() }
     }
-    HorizontalSplitLayout(
+    HorizontalSplit(
+        ratio = previewRatio,
+        onRatioChange = onPreviewRatioChange,
+        // The preview can be squeezed down to a sliver — the point of dragging it is usually to get
+        // it out of the way — while the editor keeps enough width to stay writable.
+        minFirstDp = 160.dp,
+        minSecondDp = 0.dp,
         first = {
             FileEditView(
                 tab = tab,
@@ -939,12 +954,15 @@ private fun MarkdownEditWithPreview(
             )
         },
         second = {
-            MarkdownPreview(
-                text = previewText,
-                modifier = Modifier.fillMaxSize(),
-            )
+            // Clipped: squeezed past the width its longest word needs, the rendered text lays out
+            // wider than the pane it was given and would otherwise spill over the panel beside it.
+            Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
+                MarkdownPreview(
+                    text = previewText,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         },
-        state = rememberSplitLayoutState(0.5f),
         modifier = Modifier.fillMaxSize(),
     )
 }

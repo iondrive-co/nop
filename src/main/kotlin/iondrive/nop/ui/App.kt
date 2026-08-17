@@ -158,11 +158,14 @@ fun App(
     // The divider between a diff's before/after halves — even by default, draggable to favour
     // whichever side is being read.
     var diffRatio by remember { mutableStateOf(savedRatios.diff ?: 0.5f) }
+    // The divider between a markdown file's source and its rendered preview — drag it right to
+    // shrink the preview (all the way out of the way, if that's what the file needs).
+    var previewRatio by remember { mutableStateOf(savedRatios.preview ?: 0.5f) }
     LaunchedEffect(Unit) {
-        snapshotFlow { Triple(hRatio, toolsRatio, diffRatio) }
+        snapshotFlow { listOf(hRatio, toolsRatio, diffRatio, previewRatio) }
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest { (h, t, d) -> Settings.saveSplitRatios(h, t, d) }
+            .collectLatest { (h, t, d, p) -> Settings.saveSplitRatios(h, t, d, p) }
     }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
@@ -670,6 +673,8 @@ fun App(
                                 },
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },
+                                previewSplitRatio = previewRatio,
+                                onPreviewSplitRatioChange = { previewRatio = it },
                             )
                         },
                         second = {

@@ -33,13 +33,38 @@ class GroupGridLayoutTest {
 
     @Test
     fun `columns wrap to a new row below before scrolling once they no longer fit across`() {
-        // 200dp columns fit 4 across 1000dp; a 5th wraps rather than squeezing thinner.
+        // 200dp columns fit 4 across 1000dp; the 5th and 6th wrap rather than squeezing thinner.
         val grid = GroupGridMetrics.layout(6, 200.dp, wide, tall)
         assertEquals(2, grid.rows)
-        assertEquals(3, grid.columnsPerRow)
+        assertEquals(4, grid.columnsPerRow)
         assertFalse(grid.scrollHorizontally)
         // Two rows split the height (minus the inter-row gap).
         assertEquals((400f - 12f) / 2f, grid.rowHeight.value, 0.01f)
+    }
+
+    @Test
+    fun `a row is filled before the next one starts, rather than balancing groups across rows`() {
+        // 4 fit across, so 5 groups go 4 + 1 — the 5th is the only one that has to drop a row.
+        val grid = GroupGridMetrics.layout(5, 200.dp, wide, tall)
+        assertEquals(2, grid.rows)
+        assertEquals(4, grid.columnsPerRow)
+        assertFalse(grid.scrollHorizontally)
+    }
+
+    @Test
+    fun `the short last row stretches its columns to fill the width`() {
+        val grid = GroupGridMetrics.layout(6, 200.dp, wide, tall)
+        // A full row of 4 keeps the packed width...
+        assertEquals(grid.columnWidth.value, grid.columnWidthFor(4).value, 0.01f)
+        // ...while the two left over on the last row share the whole width between them.
+        assertEquals((1000f - 12f) / 2f, grid.columnWidthFor(2).value, 0.01f)
+    }
+
+    @Test
+    fun `a scrolling grid keeps every row at the packed width`() {
+        val grid = GroupGridMetrics.layout(10, 200.dp, wide, 150.dp)
+        assertTrue(grid.scrollHorizontally)
+        assertEquals(200f, grid.columnWidthFor(3).value, 0.01f)
     }
 
     @Test
@@ -51,7 +76,7 @@ class GroupGridLayoutTest {
         assertTrue(grid.scrollHorizontally)
         // Scrolling columns keep their natural width so more fit before the scrollbar appears.
         assertEquals(200f, grid.columnWidth.value, 0.01f)
-        assertTrue(grid.contentWidth.value > wide.value)
+        assertTrue(grid.columnWidth.value * grid.columnsPerRow > wide.value, "the packed row must overflow the viewport")
     }
 
     @Test

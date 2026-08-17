@@ -12,7 +12,7 @@ data class WindowGeometry(
     val y: Int?,
 )
 
-data class SplitRatios(val horizontal: Float?, val tools: Float?, val diff: Float?)
+data class SplitRatios(val horizontal: Float?, val tools: Float?, val diff: Float?, val preview: Float?)
 
 /**
  * Tiny persistent settings stored at $XDG_CONFIG_HOME/nop/state (default ~/.config/nop/state)
@@ -216,14 +216,17 @@ object Settings {
             // right edge — a saved height fraction must not be reused as a width fraction.
             tools = map["split.tools"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
             diff = map["split.diff"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
+            // The markdown editor/preview divider, shared by every .md tab.
+            preview = map["split.preview"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
         )
     }
 
-    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float) {
+    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float, preview: Float) {
         val map = load()
         map["split.h"] = horizontal.toString()
         map["split.tools"] = tools.toString()
         map["split.diff"] = diff.toString()
+        map["split.preview"] = preview.toString()
         save(map)
     }
 

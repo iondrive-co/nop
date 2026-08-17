@@ -206,16 +206,18 @@ class SettingsTest {
         assertNull(r.horizontal)
         assertNull(r.tools)
         assertNull(r.diff)
+        assertNull(r.preview)
     }
 
     @Test
     fun `split ratios round-trip`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
-        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f)
+        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f, preview = 0.24f)
         val r = Settings.loadSplitRatios()
         assertEquals(0.31f, r.horizontal)
         assertEquals(0.42f, r.tools)
         assertEquals(0.63f, r.diff)
+        assertEquals(0.24f, r.preview)
     }
 
     @Test
@@ -223,12 +225,13 @@ class SettingsTest {
         Settings.configRoot = tmp
         val state = tmp.resolve("nop/state").also {
             Files.createDirectories(it.parent)
-            Files.writeString(it, "split.h=1.5\nsplit.tools=-0.2\nsplit.diff=2.0\n")
+            Files.writeString(it, "split.h=1.5\nsplit.tools=-0.2\nsplit.diff=2.0\nsplit.preview=-1\n")
         }
         val r = Settings.loadSplitRatios()
         assertNull(r.horizontal, "h=1.5 should be rejected")
         assertNull(r.tools, "tools=-0.2 should be rejected")
         assertNull(r.diff, "diff=2.0 should be rejected")
+        assertNull(r.preview, "preview=-1 should be rejected")
     }
 
     @Test
