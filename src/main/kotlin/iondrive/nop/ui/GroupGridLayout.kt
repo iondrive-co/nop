@@ -99,3 +99,72 @@ object GroupGridMetrics {
         return GroupGrid(columnWidth.dp, rowHeight.dp, columnsPerRow, rows, scroll)
     }
 }
+
+/**
+ * The per-column width tweaks made by dragging the separators between a grid row's columns.
+ *
+ * A drag is zero-sum: it moves width from one column to its neighbour, leaving the row as wide as
+ * [GroupGridMetrics.layout] made it, so nothing reflows or starts scrolling just because a
+ * separator moved. Offsets are held per column (in dp, relative to the packed column width) rather
+ * than as absolute widths, so a column keeps the extra room it was given as the window resizes and
+ * the packed width underneath it changes.
+ */
+object GroupColumnWidths {
+    /**
+     * The widths for one row of columns packed at [baseWidth] with the user's [offsets] applied.
+     * The offsets are re-centred on zero so the total is always `baseWidth * offsets.size`, and any
+     * column dragged under [GroupGridMetrics.MIN_COLUMN_WIDTH] is pulled back up at the expense of
+     * whichever columns still have slack.
+     */
+    fun resolve(baseWidth: Float, offsets: List<Float>): List<Float> {
+        val n = offsets.size
+        if (n == 0) return emptyList()
+        val min = GroupGridMetrics.MIN_COLUMN_WIDTH.value
+        val total = baseWidth * n
+        // Too little room to honour the minimum everywhere: share what there is out evenly.
+        if (total <= min * n) return List(n) { total / n }
+
+        val mean = offsets.sum() / n
+        val widths = MutableList(n) { baseWidth + offsets[it] - mean }
+        // Each pass moves the shortfall of the too-narrow columns onto the ones above the minimum,
+        // in proportion to the slack each has; a column pinned at the minimum has none, so at most
+        // one column can be pinned per pass and n passes always settle it.
+        repeat(n) {
+            val deficit = widths.sumOf { maxOf(0f, min - it).toDouble() }.toFloat()
+            if (deficit <= 0.01f) return@repeat
+            val slack = widths.sumOf { maxOf(0f, it - min).toDouble() }.toFloat()
+            if (slack <= 0f) return@repeat
+            val moved = minOf(deficit, slack)
+            for (i in widths.indices) {
+                val over = widths[i] - min
+                if (over > 0f) widths[i] -= moved * (over / slack)
+            }
+            for (i in widths.indices) {
+                val under = min - widths[i]
+                if (under > 0f) widths[i] += under * (moved / deficit)
+            }
+        }
+        return widths
+    }
+
+    /**
+     * [widths] after the separator to the right of column [dividerIndex] is dragged [delta] dp,
+     * clamped so neither of the two columns it sits between drops below the minimum width.
+     */
+    fun drag(widths: List<Float>, dividerIndex: Int, delta: Float): List<Float> {
+        if (dividerIndex < 0 || dividerIndex + 1 >= widths.size) return widths
+        val min = GroupGridMetrics.MIN_COLUMN_WIDTH.value
+        val left = widths[dividerIndex]
+        val right = widths[dividerIndex + 1]
+        val lower = min - left
+        val upper = right - min
+        // Both sides are already at or under the minimum — there is nothing left to trade.
+        if (lower > upper) return widths
+        val applied = delta.coerceIn(lower, upper)
+        if (applied == 0f) return widths
+        return widths.toMutableList().also {
+            it[dividerIndex] = left + applied
+            it[dividerIndex + 1] = right - applied
+        }
+    }
+}
