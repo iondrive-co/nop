@@ -33,7 +33,8 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import iondrive.nop.git.GitRepo
+import iondrive.nop.git.RailGitPoller
+import iondrive.nop.git.RepoWatcher
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.spell.Dictionary
 import iondrive.nop.ui.App
@@ -67,8 +68,9 @@ import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
 
-// How often the workspace re-checks every open project's working tree for uncommitted changes,
-// to keep the dirty dot on each rail tab current. The active project's own panel polls separately.
+// How often the workspace looks at whether each open project's dirty dot needs updating. A tick
+// where nothing has changed on disk costs a counter comparison per project, so this stays short;
+// what a tick may actually *walk* is bounded by RailGitPoller instead.
 private const val RAIL_GIT_POLL_MS = 3000L
 
 @OptIn(FlowPreview::class)
@@ -244,22 +246,37 @@ fun main(args: Array<String>) {
         }
         LaunchedEffect(darkMode) { Settings.saveDarkMode(darkMode) }
 
-        // Per-project "has uncommitted changes" flags backing the dirty dot on each rail tab. Only
-        // the active project has a running App polling its own git status, so the workspace polls
-        // every open project here — each tick is a cheap JGit status call per repo, off the UI
-        // thread. collectLatest restarts the loop when tabs open/close, dropping stale flags first.
+        // Per-project "has uncommitted changes" flags backing the dirty dot on each rail tab. The
+        // active project's flag is reported by its own App below, which already holds a fresh status;
+        // every other open project is kept current by [RailGitPoller], which watches working trees
+        // rather than re-walking them (see its docs for what that replaced, and why).
         val projectDirty = remember { mutableStateMapOf<Path, Boolean>() }
+        val repoWatcher = remember { RepoWatcher() }
+        val railPoller = remember { RailGitPoller(repoWatcher) }
+        // The watcher outlives the poller: the active project's panel reads it too, so it is closed
+        // second, after the poller has let go of its repositories.
+        DisposableEffect(Unit) {
+            onDispose {
+                railPoller.close()
+                repoWatcher.close()
+            }
+        }
+        // collectLatest restarts the loop when tabs open or close and when the active tab changes —
+        // the poller needs to know which project to leave alone — dropping stale flags first.
         LaunchedEffect(Unit) {
-            snapshotFlow { railItems.filterIsInstance<RailItem.Project>().map { it.path } }
+            snapshotFlow {
+                railItems.filterIsInstance<RailItem.Project>().map { it.path } to activeProject
+            }
                 .distinctUntilChanged()
-                .collectLatest { paths ->
+                .collectLatest { (paths, active) ->
                     projectDirty.keys.retainAll(paths.toSet())
+                    railPoller.retain(paths)
                     while (true) {
-                        for (path in paths) {
-                            projectDirty[path] = withContext(Dispatchers.IO) {
-                                runCatching { GitRepo.discover(path)?.use { !it.loadStatus().isClean } }
-                                    .getOrNull() ?: false
-                            }
+                        val swept = withContext(Dispatchers.IO) { railPoller.sweep(active) }
+                        // Only write flags that actually moved: a no-op write to snapshot state still
+                        // counts as a write, and would recompose the rail on every tick.
+                        for ((path, dirty) in swept) {
+                            if (projectDirty[path] != dirty) projectDirty[path] = dirty
                         }
                         delay(RAIL_GIT_POLL_MS)
                     }
@@ -270,6 +287,8 @@ fun main(args: Array<String>) {
             railItems = railItems.toList(),
             activeProject = activeProject,
             dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
+            repoWatcher = repoWatcher,
+            onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
             recentProjects = recentProjects.toList(),
             darkMode = darkMode,
             onSelectProject = { activeProject = it },
@@ -295,6 +314,8 @@ private fun ApplicationScope.WorkspaceWindow(
     railItems: List<RailItem>,
     activeProject: Path?,
     dirtyProjects: Set<Path>,
+    repoWatcher: RepoWatcher,
+    onProjectDirty: (Path, Boolean) -> Unit,
     recentProjects: List<Path>,
     darkMode: Boolean,
     onSelectProject: (Path) -> Unit,
@@ -467,6 +488,8 @@ private fun ApplicationScope.WorkspaceWindow(
                         androidx.compose.runtime.key(activeProject) {
                             App(
                                 projectPath = activeProject,
+                                repoWatcher = repoWatcher,
+                                onDirtyChange = { dirty -> onProjectDirty(activeProject, dirty) },
                                 onToggleTheme = onToggleTheme,
                                 fileSearchTrigger = fileSearchTrigger,
                                 findInFilesTrigger = findInFilesTrigger,

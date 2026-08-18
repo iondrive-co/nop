@@ -460,6 +460,61 @@ class GitRepoTest {
         repo.close()
     }
 
+    @Test
+    fun `workingTreeDirs lists non-ignored directories and never the git dir`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / ".gitignore").writeText("node_modules/\nbuild/\n")
+        (tmp / "src" / "main").createDirectories()
+        (tmp / "docs").createDirectories()
+        (tmp / "node_modules" / "dep" / "deep").createDirectories()
+        (tmp / "build" / "out").createDirectories()
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val dirs = repo.workingTreeDirs(limit = 100)!!.map { tmp.relativize(it).toString() }.toSet()
+
+        assertEquals(
+            setOf("", "src", "src/main", "docs"), dirs,
+            "the root and every non-ignored subdirectory, and nothing under node_modules/ or build/",
+        )
+        assertTrue(dirs.none { it.startsWith(".git") }, "the git directory is not part of the working tree")
+        repo.close()
+    }
+
+    @Test
+    fun `workingTreeDirs keeps an ignored directory holding a tracked file`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / ".gitignore").writeText("build/\n")
+        (tmp / "build").createDirectories()
+        (tmp / "build" / "keep.txt").writeText("tracked in spite of the rule\n")
+        runShell(tmp, "git add -f .gitignore build/keep.txt && git commit -q -m init")
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val dirs = repo.workingTreeDirs(limit = 100)!!.map { tmp.relativize(it).toString() }
+
+        assertTrue(
+            "build" in dirs,
+            "git goes on tracking what it already tracks, so an edit under build/ still moves " +
+                "status and the directory has to be watched: $dirs",
+        )
+        repo.close()
+    }
+
+    @Test
+    fun `workingTreeDirs gives up past its limit`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q")
+        repeat(5) { (tmp / "d$it").createDirectories() }
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+
+        assertNull(
+            repo.workingTreeDirs(limit = 3),
+            "a tree past the ceiling reports nothing rather than a truncated list — a partial " +
+                "answer would read as full coverage",
+        )
+        assertEquals(6, repo.workingTreeDirs(limit = 100)?.size, "the root plus five subdirectories")
+        repo.close()
+    }
+
     private operator fun Path.div(name: String): Path = resolve(name)
 
     private fun runShell(cwd: Path, cmd: String) {

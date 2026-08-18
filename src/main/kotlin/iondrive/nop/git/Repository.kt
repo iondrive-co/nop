@@ -10,7 +10,9 @@ import org.eclipse.jgit.revwalk.RevWalk
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder
 import org.eclipse.jgit.treewalk.EmptyTreeIterator
 import org.eclipse.jgit.treewalk.CanonicalTreeParser
+import org.eclipse.jgit.treewalk.FileTreeIterator
 import org.eclipse.jgit.treewalk.TreeWalk
+import org.eclipse.jgit.treewalk.WorkingTreeIterator
 import org.eclipse.jgit.util.io.DisabledOutputStream
 import java.io.File
 import java.nio.file.Path
@@ -248,6 +250,67 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         val file = File(rootDir.toFile(), relPath)
         if (!file.isFile) return null
         return runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
+    }
+
+    /** The repository's git directory — `.git` in an ordinary clone. */
+    val gitDir: Path get() = repository.directory.toPath()
+
+    /**
+     * Every working-tree directory a status walk looks inside: [rootDir] plus each subdirectory
+     * that isn't ignored. Meant for registering filesystem watches over the same ground
+     * [loadStatus] covers, so a caller can be *told* when to re-run it instead of re-running it to
+     * find out.
+     *
+     * Pruning ignored directories is what makes watching a whole rail of projects affordable: on
+     * this machine's 23, the 61.8k directories on disk came to 1.5k once virtualenvs and build
+     * output were dropped. Directories the index already holds an entry under are kept even when an
+     * ignore rule matches them — git goes on tracking what it already tracks, so changes there do
+     * move status, and pruning them would lose changes silently.
+     *
+     * Returns null as soon as the walk passes [limit] directories, which is the caller's signal
+     * that this tree is too big to watch and has to be polled instead. Walking the rest only to say
+     * how far over it went would be effort spent on a tree we have already given up on.
+     */
+    fun workingTreeDirs(limit: Int): List<Path>? {
+        val indexDirs = indexDirs()
+        val dirs = mutableListOf(rootDir)
+        TreeWalk(repository).use { walk ->
+            walk.addTree(FileTreeIterator(repository))
+            // Non-recursive plus an explicit enterSubtree() is what lets a directory be inspected
+            // *before* its contents are: an ignored tree is skipped whole, never descended into.
+            walk.isRecursive = false
+            while (walk.next()) {
+                if (!walk.isSubtree) continue
+                val entry = walk.getTree(0, WorkingTreeIterator::class.java) ?: continue
+                val path = walk.pathString
+                if (entry.isEntryIgnored && path !in indexDirs) continue
+                if (dirs.size >= limit) return null
+                dirs.add(rootDir.resolve(path))
+                walk.enterSubtree()
+            }
+        }
+        return dirs
+    }
+
+    /**
+     * Every directory the index holds an entry under, ancestors included, as repo-relative paths.
+     * Read straight from the index rather than walked: it is the cheap half of the question
+     * [workingTreeDirs] asks, and the answer is needed before the walk starts.
+     */
+    private fun indexDirs(): Set<String> {
+        val cache = runCatching { repository.readDirCache() }.getOrNull() ?: return emptySet()
+        val dirs = HashSet<String>()
+        for (i in 0 until cache.entryCount) {
+            val path = cache.getEntry(i).pathString
+            var slash = path.lastIndexOf('/')
+            // Walk the ancestors from the deepest up, stopping at the first one already recorded —
+            // everything above it went in with whichever entry recorded it.
+            while (slash > 0) {
+                if (!dirs.add(path.substring(0, slash))) break
+                slash = path.lastIndexOf('/', slash - 1)
+            }
+        }
+        return dirs
     }
 
     override fun close() {

@@ -24,6 +24,7 @@ import iondrive.nop.Settings
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
+import iondrive.nop.git.RepoWatcher
 import iondrive.nop.git.StashEntry
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.AccessFrequency
@@ -70,6 +71,12 @@ private sealed interface TreeEntryDialog {
 @Composable
 fun App(
     projectPath: Path,
+    // Borrowed from the workspace, which watches every open project's tree. Null means "no watcher"
+    // — every poll then walks the tree, which is what this panel did before there was one.
+    repoWatcher: RepoWatcher? = null,
+    // Reports this project's dirty state up to the rail, which is why the workspace poller leaves
+    // the active project alone: the status below is fresher than anything a re-walk would find.
+    onDirtyChange: (Boolean) -> Unit = {},
     onToggleTheme: () -> Unit = {},
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
@@ -83,6 +90,14 @@ fun App(
     DisposableEffect(repo) { onDispose { repo?.close() } }
 
     var status by remember(projectPath) { mutableStateOf(GitStatus.EMPTY) }
+    // The watcher generation the last status walk covered, so a poll can tell a quiet tree from one
+    // it simply hasn't looked at yet. UNKNOWN until the first walk, and never equal to a real count.
+    var polledGeneration by remember(projectPath) { mutableStateOf(RepoWatcher.UNKNOWN) }
+    // Whether [status] has been loaded yet, as opposed to still being the empty placeholder. Only
+    // reported dirtiness depends on this: switching to a project starts a fresh composition, and
+    // announcing the placeholder's "clean" to the rail would blink the tab's dot off and back on
+    // once the real status landed a moment later.
+    var statusLoaded by remember(projectPath) { mutableStateOf(false) }
     var stashes by remember(projectPath) { mutableStateOf<List<StashEntry>>(emptyList()) }
     var selectedPaths by remember(projectPath) { mutableStateOf(emptySet<String>()) }
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
@@ -197,6 +212,7 @@ fun App(
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
             }
             status = fresh
+            statusLoaded = true
             stashes = freshStashes
             canSoftReset = withContext(Dispatchers.IO) {
                 runCatching { repo.canSoftResetHead() }.getOrDefault(false)
@@ -207,6 +223,13 @@ fun App(
             // — re-walk the project tree so the sidebar matches the filesystem.
             fsRefreshKey += 1
         }
+    }
+
+    // Hand this project's dirty state to the rail. Cheap and always current — it is the status the
+    // panel has already loaded — which is what lets the workspace poller skip the active project
+    // instead of walking the same tree a second time on its own timer.
+    LaunchedEffect(status.isClean, statusLoaded, repo) {
+        if (repo != null && statusLoaded) onDirtyChange(!status.isClean)
     }
 
     fun refresh() {
@@ -241,9 +264,17 @@ fun App(
         if (repo == null || commitInFlight || stashInFlight || refreshing || revertInFlight) return
         // Reconcile before the git-state check below: an external edit to an already-modified file
         // leaves its git status unchanged, so the early return there would otherwise skip the reload.
+        // This stays outside the watcher gate too — it only stats the open tabs, and one of them can
+        // be a file the watcher never reports on, sitting in an ignored directory.
         reconcileEdits()
+        // Ask the watcher whether this tree has moved before walking it, and read the counter first
+        // so a change landing mid-walk is picked up on the next tick rather than being written off as
+        // covered. UNKNOWN means the watcher cannot vouch for the tree, so we walk.
+        val generation = repoWatcher?.generation(repo.rootDir) ?: RepoWatcher.UNKNOWN
+        if (generation != RepoWatcher.UNKNOWN && generation == polledGeneration) return
         val fresh = withContext(Dispatchers.IO) { runCatching { repo.loadStatus() }.getOrNull() } ?: return
         val freshStashes = withContext(Dispatchers.IO) { runCatching { repo.stashList() }.getOrDefault(stashes) }
+        polledGeneration = generation
         if (fresh == status && freshStashes == stashes) return
         val previousPaths = status.changes.map { it.path }.toSet()
         val freshPaths = fresh.changes.map { it.path }.toSet()
@@ -251,6 +282,7 @@ fun App(
         // Keep selections the user still cares about, drop vanished ones, default-select new ones.
         selectedPaths = (selectedPaths intersect freshPaths) + appeared
         status = fresh
+        statusLoaded = true
         stashes = freshStashes
         fsRefreshKey += 1
     }
