@@ -48,6 +48,17 @@ sealed class Tab {
         override val title: String get() = "⟲ ${file.name}"
     }
 
+    /**
+     * Diff of [file] as it stood at [sha] against what the working tree holds now — the
+     * "compare with revision" gesture, with the revision picked out of the file's git log. The
+     * git-side twin of [LocalDiff]: same shape, same read-only view, but the old side comes out
+     * of a commit rather than nop's own record.
+     */
+    data class RevisionDiff(val file: File, val sha: String, val shortSha: String, val repoRoot: File) : Tab() {
+        override val id: String get() = "revisiondiff:$sha:${file.absolutePath}"
+        override val title: String get() = "⇄ $shortSha ${file.name}"
+    }
+
     /** Diff of one local-history revision of [file] against what the file holds now. */
     data class LocalDiff(val file: File, val timestampMillis: Long) : Tab() {
         override val id: String get() = "localdiff:${file.absolutePath}:$timestampMillis"
@@ -139,6 +150,18 @@ class TabsState {
         tabGroups[tab.id]?.let { setCollapsed(it, collapsed = false) }
         selectedId = tab.id
         if (record && tab is Tab.FileView) onFileOpened?.invoke(tab.file)
+    }
+
+    /**
+     * Swaps the open tab sharing [tab]'s id for [tab], leaving the selection, the strip order and
+     * the group alone. For a tab whose identity is a path but whose data moves underneath it — a
+     * working-tree diff whose change goes from untracked to added — where [open] would also drag
+     * the selection onto a tab the user never asked to look at. Ignores an id that isn't open.
+     */
+    fun replace(tab: Tab) {
+        val idx = _tabs.indexOfFirst { it.id == tab.id }
+        if (idx < 0 || _tabs[idx] == tab) return
+        _tabs[idx] = tab
     }
 
     /** Where a tab joining [groupId] goes in [_tabs]: after that group's run, ahead of the next one's. */
@@ -388,7 +411,7 @@ class TabsState {
 /**
  * The working file behind a diff tab — where F4 ("jump to source") lands. Every diff surface
  * resolves to a path in the working tree: a [Tab.Diff] shows changes against it directly, and a
- * [Tab.CommitDiff] or [Tab.LocalDiff] shows an earlier revision *of* it. Null for every other tab
+ * [Tab.CommitDiff], [Tab.RevisionDiff] or [Tab.LocalDiff] shows an earlier revision *of* it. Null for every other tab
  * kind, and for any diff whose file isn't in the working tree any more (reverted, deleted, renamed
  * away, or removed by the very commit being read) — there's nothing to open in that case.
  */
@@ -396,6 +419,7 @@ internal fun jumpToSourceTarget(tab: Tab?): File? {
     val file = when (tab) {
         is Tab.Diff -> File(tab.repoRoot, tab.change.path)
         is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
+        is Tab.RevisionDiff -> tab.file
         is Tab.LocalDiff -> tab.file
         else -> null
     }

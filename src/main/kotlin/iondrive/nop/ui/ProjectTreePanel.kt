@@ -197,6 +197,11 @@ fun ProjectTreePanel(
     // even for the common single-file case.
     onDeleteRequest: (List<File>) -> Unit = {},
     onHistoryRequest: (File) -> Unit = {},
+    // Pick a commit to diff a file against — the context menu's "Compare with Revision…". Only
+    // offered when [gitEnabled], since there are no revisions to pick from otherwise.
+    onCompareWithRevision: (File) -> Unit = {},
+    // Whether this project is inside a git repo, i.e. whether the git actions are worth offering.
+    gitEnabled: Boolean = false,
     blameEnabled: Boolean = false,
     onToggleBlame: () -> Unit = {},
     onOpenInSystem: (File) -> Unit = ::openInSystem,
@@ -422,6 +427,15 @@ fun ProjectTreePanel(
                     add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
                     add(ContextMenuItem("New Package…") { onNewPackage(file) })
                     if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                    // The git pair the toolbar's history button and its H shortcut also reach —
+                    // here because the file the user wants them for is the one under the pointer.
+                    // "Compare" is file-only: a directory has revisions but no side-by-side.
+                    if (gitEnabled) {
+                        add(ContextMenuItem("Show History") { onHistoryRequest(file) })
+                        if (file.isFile) {
+                            add(ContextMenuItem("Compare with Revision…") { onCompareWithRevision(file) })
+                        }
+                    }
                     // Delete acts on the whole selection when the right-clicked row is part of it,
                     // else just that row. The project root has nowhere to go, so it's never deletable.
                     if (file.absolutePath != rootId) {

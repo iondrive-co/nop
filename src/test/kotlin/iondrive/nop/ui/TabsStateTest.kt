@@ -259,6 +259,32 @@ class TabsStateTest {
     }
 
     @Test
+    fun `replace swaps a tab's data without touching the selection`() {
+        val s = TabsState()
+        val diff = Tab.Diff(FileChange("a.txt", ChangeKind.UNTRACKED), File("/repo"))
+        val b = fileTab("/x/b.txt")
+        s.open(diff)
+        s.open(b)
+
+        val staged = Tab.Diff(FileChange("a.txt", ChangeKind.ADDED), File("/repo"))
+        s.replace(staged)
+
+        assertEquals(listOf(staged, b), s.tabs, "same slot, fresh data")
+        assertEquals(b.id, s.selectedId, "the user was looking at b.txt and still is")
+    }
+
+    @Test
+    fun `replace ignores a tab that isn't open`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+
+        s.replace(fileTab("/x/gone.txt"))
+
+        assertEquals(listOf(a), s.tabs)
+    }
+
+    @Test
     fun `select changes selection only if id exists`() {
         val s = TabsState()
         val a = fileTab("/x/a.txt")
@@ -513,7 +539,7 @@ class TabsStateTest {
     }
 
     @Test
-    fun `jump to source resolves the working file behind both diff kinds`(@TempDir tmp: Path) {
+    fun `jump to source resolves the working file behind every diff kind`(@TempDir tmp: Path) {
         val repo = tmp.toFile()
         val tracked = tmp.resolve("app.component.ts").toFile().apply { writeText("x") }
 
@@ -527,6 +553,10 @@ class TabsStateTest {
             repoRoot = repo,
         )
         assertEquals(tracked, jumpToSourceTarget(commitDiff))
+
+        // "Compare with revision" already names the working file directly — it *is* the right side.
+        val revisionDiff = Tab.RevisionDiff(tracked, "abc1234def", "abc1234", repo)
+        assertEquals(tracked, jumpToSourceTarget(revisionDiff))
     }
 
     @Test
@@ -540,6 +570,12 @@ class TabsStateTest {
         assertNull(
             jumpToSourceTarget(
                 Tab.CommitDiff("abc1234def", "abc1234", CommitFile("gone.ts", CommitFileChange.DELETED), repo),
+            ),
+        )
+        // A revision compared against a file that has since been deleted has nothing to open.
+        assertNull(
+            jumpToSourceTarget(
+                Tab.RevisionDiff(tmp.resolve("vanished.ts").toFile(), "abc1234def", "abc1234", repo),
             ),
         )
         // A directory is never a jump target either, even if a path collides with one.

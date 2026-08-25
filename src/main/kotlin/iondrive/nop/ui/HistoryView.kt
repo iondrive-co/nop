@@ -42,7 +42,9 @@ import java.time.format.DateTimeFormatter
 
 internal val SHA_FG = Color(0xFFA9B6C3)
 internal val META_FG = Color(0xFF7F8C9B)
-private val DATE_FMT: DateTimeFormatter =
+
+/** How a commit's time is written wherever one is listed — the log, and the revision picker. */
+internal val COMMIT_DATE_FMT: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault())
 
 @Composable
@@ -140,7 +142,7 @@ private fun CommitList(repo: GitRepo, tab: Tab.History, commits: List<CommitInfo
 
 @Composable
 private fun CommitRow(c: CommitInfo, expanded: Boolean, onToggle: () -> Unit) {
-    val date = DATE_FMT.format(Instant.ofEpochSecond(c.whenEpochSeconds))
+    val date = COMMIT_DATE_FMT.format(Instant.ofEpochSecond(c.whenEpochSeconds))
     Row(
         modifier = Modifier.fillMaxWidth().clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),

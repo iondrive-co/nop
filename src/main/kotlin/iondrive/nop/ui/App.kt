@@ -90,6 +90,11 @@ fun App(
     DisposableEffect(repo) { onDispose { repo?.close() } }
 
     var status by remember(projectPath) { mutableStateOf(GitStatus.EMPTY) }
+    // The commit HEAD points at, reloaded alongside [status]. A merge, pull, commit or reset moves
+    // it without necessarily changing which files are dirty, and that is exactly the case an open
+    // diff can't see for itself: its left-hand side is HEAD's copy of the file, read once when it
+    // loaded. Null on an unborn branch, and until the first status load.
+    var headSha by remember(projectPath) { mutableStateOf<String?>(null) }
     // The watcher generation the last status walk covered, so a poll can tell a quiet tree from one
     // it simply hasn't looked at yet. UNKNOWN until the first walk, and never equal to a real count.
     var polledGeneration by remember(projectPath) { mutableStateOf(RepoWatcher.UNKNOWN) }
@@ -118,6 +123,9 @@ fun App(
     var pendingDelete by remember(projectPath) { mutableStateOf<List<File>?>(null) }
     // The pending new-file/directory/package/copy dialog, or null when none is open.
     var pendingEntry by remember(projectPath) { mutableStateOf<TreeEntryDialog?>(null) }
+    // The file whose revisions the picker is currently offering ("Compare with Revision…"), or null
+    // when it's closed. Held here rather than in the tree or the editor because either can raise it.
+    var pendingCompare by remember(projectPath) { mutableStateOf<File?>(null) }
     // A just-created directory/package to expand and scroll to in the tree (new files reveal
     // themselves by opening as a tab instead).
     var treeReveal by remember(projectPath) { mutableStateOf<File?>(null) }
@@ -211,6 +219,7 @@ fun App(
             val freshStashes = withContext(Dispatchers.IO) {
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
             }
+            headSha = withContext(Dispatchers.IO) { runCatching { repo.headSha() }.getOrNull() }
             status = fresh
             statusLoaded = true
             stashes = freshStashes
@@ -274,8 +283,12 @@ fun App(
         if (generation != RepoWatcher.UNKNOWN && generation == polledGeneration) return
         val fresh = withContext(Dispatchers.IO) { runCatching { repo.loadStatus() }.getOrNull() } ?: return
         val freshStashes = withContext(Dispatchers.IO) { runCatching { repo.stashList() }.getOrDefault(stashes) }
+        // Read HEAD too: a merge or pull that leaves the same files dirty shows up nowhere in the
+        // status, and the open diffs are comparing against the commit it used to be.
+        val freshHead = withContext(Dispatchers.IO) { runCatching { repo.headSha() }.getOrNull() }
         polledGeneration = generation
-        if (fresh == status && freshStashes == stashes) return
+        if (fresh == status && freshStashes == stashes && freshHead == headSha) return
+        headSha = freshHead
         val previousPaths = status.changes.map { it.path }.toSet()
         val freshPaths = fresh.changes.map { it.path }.toSet()
         val appeared = freshPaths - previousPaths
@@ -503,6 +516,34 @@ fun App(
         onDispose { if (tabsRestored) TabsPersistence.save(tabsFile, tabsState.snapshot()) }
     }
 
+    // The HEAD the open diffs were last read against, so the sync below can tell "the same files
+    // are dirty" from "the same files are dirty against the same commit".
+    var diffsReadAtHead by remember(projectPath) { mutableStateOf<String?>(null) }
+    // Keep the open working-tree diffs pointed at the repository as it is now. A commit, merge,
+    // pull, stash or revert moves both of a diff's sides: HEAD gains commits, a change switches
+    // kind, or the change goes away entirely — and a tab whose change has gone is showing a diff
+    // the repository no longer has, with no fresher version of it to fall back to, so it closes.
+    // The rest re-read. Runs after the restore too (hence tabsRestored), so a diff reopened from
+    // last session's strip is checked against today's status rather than the one it was saved with.
+    LaunchedEffect(status, headSha, statusLoaded, tabsRestored) {
+        if (repo == null || !statusLoaded) return@LaunchedEffect
+        val headMoved = headSha != diffsReadAtHead
+        diffsReadAtHead = headSha
+        val sync = syncDiffTabs(tabsState.tabs, status, headMoved) { tab ->
+            // Unsaved work in the shared buffer outranks git's opinion that the file is clean:
+            // disk matching HEAD says nothing about what the user has typed since.
+            editStore.peek(Tab.FileView(File(tab.repoRoot, tab.change.path)).id)?.hasUserEdit == true
+        }
+        for (tab in sync.reload) {
+            tabsState.replace(tab)
+            tabsState.requestReload(tab.id)
+        }
+        for (tab in sync.close) {
+            editStore.close(tab.id)
+            tabsState.close(tab.id)
+        }
+    }
+
     // Close any open tabs that point at the given file or anything under it (when it's a dir).
     // Saves the user from typing into a buffer whose underlying file just got removed.
     fun closeTabsUnder(target: File) {
@@ -512,6 +553,7 @@ fun App(
                 is Tab.FileView -> tab.file
                 is Tab.Diff -> File(tab.repoRoot, tab.change.path)
                 is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
+                is Tab.RevisionDiff -> tab.file
                 is Tab.History -> tab.file
                 is Tab.LocalHistory -> tab.file
                 is Tab.LocalDiff -> tab.file
@@ -610,6 +652,7 @@ fun App(
         is Tab.FileView -> t.file
         is Tab.Diff -> File(t.repoRoot, t.change.path)
         is Tab.CommitDiff -> File(t.repoRoot, t.file.path)
+        is Tab.RevisionDiff -> t.file
         is Tab.History -> t.file
         is Tab.LocalHistory -> t.file
         is Tab.LocalDiff -> t.file
@@ -646,6 +689,8 @@ fun App(
                         onHistoryRequest = { file ->
                             if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
                         },
+                        onCompareWithRevision = { pendingCompare = it },
+                        gitEnabled = repo != null,
                         blameEnabled = blameEnabled,
                         onToggleBlame = { blameEnabled = !blameEnabled },
                         headerExtras = {
@@ -707,6 +752,7 @@ fun App(
                                 onDiffSplitRatioChange = { diffRatio = it },
                                 previewSplitRatio = previewRatio,
                                 onPreviewSplitRatioChange = { previewRatio = it },
+                                onCompareWithRevision = { pendingCompare = it },
                             )
                         },
                         second = {
@@ -968,6 +1014,23 @@ fun App(
                 onCancel = { pendingEntry = null },
             )
             null -> {}
+        }
+
+        // Drawn only with a repo to read the revisions out of. The actions that raise it are hidden
+        // without one, so this is belt-and-braces for a project that has no git at all.
+        val comparing = pendingCompare
+        if (comparing != null && repo != null) {
+            RevisionPickerDialog(
+                repo = repo,
+                file = comparing,
+                onPick = { commit ->
+                    pendingCompare = null
+                    tabsState.open(
+                        Tab.RevisionDiff(comparing, commit.sha, commit.shortSha, repo.rootDir.toFile()),
+                    )
+                },
+                onDismiss = { pendingCompare = null },
+            )
         }
 
         if (fileSearchOpen) {

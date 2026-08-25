@@ -93,9 +93,69 @@ fun CommitDiffView(
 }
 
 /**
- * The read-only side-by-side list both historic diffs are drawn with — a commit's revision of a file
- * (above) and a local-history revision of it (see [LocalDiffView]). Neither side is editable, so the
- * only thing either caller has to supply is the computed diff.
+ * A file as one commit left it, against what the working tree holds now — the view behind
+ * "Compare with Revision…". The revision is on the left, the file on disk is on the right, in the
+ * same read-only side-by-side every other historic diff uses.
+ *
+ * The right side comes off disk rather than out of the editor's buffer, matching [LocalDiffView]:
+ * a comparison is against the saved file, and an unsaved buffer is what the editor itself shows.
+ */
+@Composable
+fun RevisionDiffView(
+    repo: GitRepo,
+    tab: Tab.RevisionDiff,
+    splitRatio: Float = 0.5f,
+    onSplitRatioChange: (Float) -> Unit = {},
+    onTopLine: (Int) -> Unit = {},
+    reloadKey: Int = 0,
+    findTrigger: Int = 0,
+) {
+    var loading by remember(tab.id) { mutableStateOf(true) }
+    var error by remember(tab.id) { mutableStateOf<String?>(null) }
+    var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
+
+    // reloadKey re-reads both sides. The left one is fixed by its sha, but the right is the live
+    // file, so re-opening this tab (or F5) re-diffs the revision against work done since.
+    LaunchedEffect(tab.id, reloadKey) {
+        try {
+            val rel = repoRelativePath(repo, tab.file)
+            if (rel == null) {
+                error = "That file is outside this repository."
+                loading = false
+                return@LaunchedEffect
+            }
+            val (oldText, newText) = withContext(Dispatchers.IO) {
+                // Absent from that commit's tree means the file didn't exist yet (or the commit is
+                // the one that deleted it), so the whole of it reads as added — which is the truth.
+                val old = repo.readContentAt(tab.sha, rel) ?: ""
+                old to runCatching { tab.file.readText() }.getOrDefault("")
+            }
+            result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText) }
+            error = null
+            loading = false
+        } catch (t: Throwable) {
+            error = t.message ?: t::class.simpleName
+            loading = false
+        }
+    }
+
+    val tokenize = remember(tab.id) { tokenizerForExtension(tab.file.extension) }
+    CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
+        when {
+            loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
+            error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
+                Text("Could not load diff: $error")
+            }
+            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, onTopLine, tab.id, findTrigger)
+        }
+    }
+}
+
+/**
+ * The read-only side-by-side list every historic diff is drawn with — a commit's revision of a file
+ * (above), that revision against the working copy (see [RevisionDiffView]) and a local-history
+ * revision of it (see [LocalDiffView]). No side is editable, so the only thing a caller has to
+ * supply is the computed diff.
  */
 @Composable
 internal fun ReadOnlyDiffList(

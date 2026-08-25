@@ -122,6 +122,9 @@ fun TabbedViewerPanel(
     onDiffSplitRatioChange: (Float) -> Unit = {},
     previewSplitRatio: Float = 0.5f,
     onPreviewSplitRatioChange: (Float) -> Unit = {},
+    // Ask the app to put up the revision picker for this file; picking one opens a
+    // [Tab.RevisionDiff]. Handled up there because that's where the app's dialogs live.
+    onCompareWithRevision: (File) -> Unit = {},
 ) {
     val selected = tabsState.selectedTab
 
@@ -161,6 +164,13 @@ fun TabbedViewerPanel(
                 is Tab.FileView -> {
                     val pendingLine = tabsState.pendingJumpLine(current.id)
                     val pendingSearch = tabsState.pendingSearchQuery(current.id)
+                    // A file git knows about is one whose log and revisions the right-click menu can
+                    // offer; anything outside the repo (or a project with no repo at all) gets the
+                    // local-history entry alone.
+                    val gitTracked = repo != null && repoRelativePath(repo, current.file) != null
+                    val showHistory: () -> Unit = {
+                        if (repo != null) tabsState.open(Tab.History(current.file, repo.rootDir.toFile()))
+                    }
                     if (current.file.extension.equals("md", ignoreCase = true)) {
                         MarkdownEditWithPreview(
                             tab = current,
@@ -174,6 +184,9 @@ fun TabbedViewerPanel(
                             replaceInFileTrigger = replaceInFileTrigger,
                             saveTrigger = saveTrigger,
                             onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
+                            onShowHistory = showHistory,
+                            onCompareWithRevision = { onCompareWithRevision(current.file) },
+                            gitTracked = gitTracked,
                             previewRatio = previewSplitRatio,
                             onPreviewRatioChange = onPreviewSplitRatioChange,
                         )
@@ -194,6 +207,9 @@ fun TabbedViewerPanel(
                             repo = repo,
                             blameEnabled = blameEnabled,
                             onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
+                            onShowHistory = showHistory,
+                            onCompareWithRevision = { onCompareWithRevision(current.file) },
+                            gitTracked = gitTracked,
                             // A blame line resolves to the commit that last touched it; open that
                             // commit's diff for this file so the user can read the change in full.
                             onOpenBlameCommit = { sha ->
@@ -242,6 +258,15 @@ fun TabbedViewerPanel(
                     reloadKey = tabsState.reloadKey(current.id),
                     findTrigger = findInFileTrigger,
                 )
+                is Tab.RevisionDiff -> if (repo != null) RevisionDiffView(
+                    repo = repo,
+                    tab = current,
+                    splitRatio = diffSplitRatio,
+                    onSplitRatioChange = onDiffSplitRatioChange,
+                    onTopLine = onDiffTopLine,
+                    reloadKey = tabsState.reloadKey(current.id),
+                    findTrigger = findInFileTrigger,
+                )
                 is Tab.CommitDiff -> if (repo != null) CommitDiffView(
                     repo = repo,
                     tab = current,
@@ -274,6 +299,7 @@ private fun spellcheckExtensionOf(tab: Tab?): String? = when (tab) {
     is Tab.FileView -> tab.file.extension
     is Tab.Diff -> File(tab.change.path).extension
     is Tab.CommitDiff -> File(tab.file.path).extension
+    is Tab.RevisionDiff -> tab.file.extension
     is Tab.LocalDiff -> tab.file.extension
     is Tab.History, is Tab.LocalHistory, is Tab.Terminal, null -> null
 }
@@ -292,7 +318,7 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
     is Tab.History -> tab.title
     // A local-history revision is a snapshot of a file that may well be open and dirty beside it,
     // but the revision itself is fixed — no save marker, same as a commit diff.
-    is Tab.LocalHistory, is Tab.LocalDiff -> tab.title
+    is Tab.LocalHistory, is Tab.LocalDiff, is Tab.RevisionDiff -> tab.title
     is Tab.Terminal -> tab.title
 }
 
@@ -322,6 +348,11 @@ private fun FileEditView(
     blameEnabled: Boolean = false,
     onOpenBlameCommit: (sha: String) -> Unit = {},
     onShowLocalHistory: () -> Unit = {},
+    // The two git actions beside it in the right-click menu, drawn only when [gitTracked] — a file
+    // outside a repo has no log to show and no revision to compare against.
+    onShowHistory: () -> Unit = {},
+    onCompareWithRevision: () -> Unit = {},
+    gitTracked: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val edit = remember(tab.id) { store.edit(tab) }
@@ -770,7 +801,14 @@ private fun FileEditView(
                 onReplace = { typo, replacement ->
                     replaceTypo(edit.state, typo, replacement) { edit.markUserEdit() }
                 },
-            ) + listOf(ContextMenuDivider, ContextMenuItem("Show local history", onShowLocalHistory))
+            ) + buildList {
+                add(ContextMenuDivider)
+                add(ContextMenuItem("Show local history", onShowLocalHistory))
+                if (gitTracked) {
+                    add(ContextMenuItem("Show history", onShowHistory))
+                    add(ContextMenuItem("Compare with revision…", onCompareWithRevision))
+                }
+            }
         }) {
         BasicTextField(
             state = edit.state,
@@ -924,6 +962,9 @@ private fun MarkdownEditWithPreview(
     replaceInFileTrigger: Int = 0,
     saveTrigger: Int = 0,
     onShowLocalHistory: () -> Unit = {},
+    onShowHistory: () -> Unit = {},
+    onCompareWithRevision: () -> Unit = {},
+    gitTracked: Boolean = false,
     previewRatio: Float = 0.5f,
     onPreviewRatioChange: (Float) -> Unit = {},
 ) {
@@ -951,6 +992,9 @@ private fun MarkdownEditWithPreview(
                 replaceInFileTrigger = replaceInFileTrigger,
                 saveTrigger = saveTrigger,
                 onShowLocalHistory = onShowLocalHistory,
+                onShowHistory = onShowHistory,
+                onCompareWithRevision = onCompareWithRevision,
+                gitTracked = gitTracked,
             )
         },
         second = {

@@ -1,6 +1,7 @@
 package iondrive.nop.git
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -174,6 +175,53 @@ class GitRepoTest {
         assertEquals(listOf("tweak b", "tweak a", "init both"), all.map { it.shortMessage },
             "no-path history should include every commit")
         assertEquals(7, aLog[0].shortSha.length, "shortSha is the first 7 chars of the SHA")
+    }
+
+    @Test
+    fun `headSha follows the branch tip and is null before the first commit`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        val repo = GitRepo.discover(tmp)!!
+        assertNull(repo.headSha(), "an unborn branch points at no commit")
+
+        (tmp / "a.txt").writeText("one\n")
+        runShell(tmp, "git add -A && git commit -q -m 'first'")
+        val first = repo.headSha()
+        (tmp / "a.txt").writeText("one\ntwo\n")
+        runShell(tmp, "git add -A && git commit -q -m 'second'")
+        val second = repo.headSha()
+        // What tells an open diff its left-hand side has moved: the working tree looks identical
+        // either side of the commit, and only HEAD says otherwise.
+        val afterEdit = run { (tmp / "a.txt").writeText("one\ntwo\nthree\n"); repo.headSha() }
+        repo.close()
+
+        assertEquals(40, first?.length)
+        assertNotEquals(first, second, "the second commit moved HEAD")
+        assertEquals(second, afterEdit, "an uncommitted edit leaves HEAD where it was")
+    }
+
+    @Test
+    fun `readContentAt returns a file as an older commit left it`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("one\n")
+        runShell(tmp, "git add -A && git commit -q -m 'first'")
+        (tmp / "a.txt").writeText("one\ntwo\n")
+        (tmp / "later.txt").writeText("new file\n")
+        runShell(tmp, "git add -A && git commit -q -m 'second'")
+        (tmp / "a.txt").writeText("one\ntwo\nuncommitted\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val log = repo.history("a.txt")
+        // What "compare with revision" reads for its left-hand side: the file at the picked commit,
+        // untouched by anything committed (or saved) since.
+        val first = repo.readContentAt(log[1].sha, "a.txt")
+        val head = repo.readContentAt(log[0].sha, "a.txt")
+        // A file the picked revision predates isn't in that tree at all.
+        val absent = repo.readContentAt(log[1].sha, "later.txt")
+        repo.close()
+
+        assertEquals("one\n", first)
+        assertEquals("one\ntwo\n", head, "the commit's content, not the working tree's")
+        assertNull(absent, "later.txt did not exist at the first commit")
     }
 
     @Test

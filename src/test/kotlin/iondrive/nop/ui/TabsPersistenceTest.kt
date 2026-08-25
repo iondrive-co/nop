@@ -178,6 +178,56 @@ class TabsPersistenceTest {
     }
 
     @Test
+    fun `save then restore round-trips a RevisionDiff tab`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        val file = File(repo, "src/App.kt").apply { parentFile.mkdirs(); writeText("fun main() {}") }
+        val sha = "b09a25a656445718a494da86beba0f623e78ce56"
+        val original = Tab.RevisionDiff(file, sha, sha.take(7), repo)
+        TabsPersistence.save(target, snapshotOf(listOf(original), selectedId = original.id))
+
+        val loaded = tabRows(TabsPersistence.load(target))
+        assertEquals(listOf("revisiondiff"), loaded.map { it.kind })
+        assertEquals(sha, loaded[0].sha)
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
+        assertEquals(listOf<Tab>(original), state.tabs)
+        assertEquals(original.id, state.selectedId)
+    }
+
+    @Test
+    fun `a revision diff needs its sha, its repoRoot and a working file`(@TempDir tmp: Path) {
+        val target = tmp.resolve("tabs.tsv")
+        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
+        val file = File(repo, "App.kt").apply { writeText("") }
+        val gone = File(repo, "Gone.kt")
+        Files.writeString(
+            target,
+            listOf(
+                // No sha: nothing to read the left-hand side out of.
+                "revisiondiff	${file.absolutePath}	0",
+                // The right-hand side is the working file, so a vanished one names no diff.
+                "revisiondiff	${gone.absolutePath}	0	abc1234def",
+                "revisiondiff	${file.absolutePath}	0	abc1234def",
+            ).joinToString("\n"),
+        )
+
+        // The sha-less row is dropped at load; the other two both parse.
+        assertEquals(2, tabRows(TabsPersistence.load(target)).size)
+
+        // Without a repo there's no revision to read, so neither survives restore.
+        val noRepo = TabsState()
+        TabsPersistence.restore(noRepo, TabsPersistence.load(target), repoRoot = null)
+        assertTrue(noRepo.tabs.isEmpty())
+
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = repo)
+        assertEquals(1, state.tabs.size)
+        assertEquals(file, (state.tabs[0] as Tab.RevisionDiff).file)
+    }
+
+    @Test
     fun `a local diff row without a timestamp is dropped`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
         val file = tmp.resolve("a.kt").toFile().apply { writeText("") }

@@ -20,6 +20,8 @@ import java.nio.file.Path
  *   * [Tab.LocalHistory] — an absolute path, like [Tab.History]
  *   * [Tab.LocalDiff]  — an absolute path plus the revision's timestamp, which is how a local-history
  *                        revision is named on disk (see [iondrive.nop.history.LocalHistory])
+ *   * [Tab.RevisionDiff] — an absolute path plus the sha it is compared against; both sides are
+ *                        re-read (commit and working file) when the tab is composed
  *   * [Tab.Diff]       — a working-tree diff: the repo-relative path plus the [ChangeKind] git saw,
  *                        which is all [iondrive.nop.ui.DiffView] needs — both sides are re-read
  *                        from HEAD and the working file when the tab is composed. The kind is a
@@ -31,10 +33,10 @@ import java.nio.file.Path
  * save time.
  *
  * Stored as TSV under the project's data dir: `kind<TAB>path<TAB>selected?`, plus
- * `<TAB>sha<TAB>changeType` for commit diffs, `<TAB>timestamp` for local ones and `<TAB>changeKind`
- * for working-tree diffs. One tab per line; unparseable lines are skipped so a
- * partial corruption doesn't wipe the strip. [path] is absolute except for the two diffs against
- * git, where it is the repo-relative path git knows the file by.
+ * `<TAB>sha<TAB>changeType` for commit diffs, `<TAB>timestamp` for local ones, `<TAB>sha` for
+ * revision diffs and `<TAB>changeKind` for working-tree diffs. One tab per line; unparseable lines
+ * are skipped so a partial corruption doesn't wipe the strip. [path] is absolute except for the
+ * commit and working-tree diffs, where it is the repo-relative path git knows the file by.
  *
  * Tab groups are written as `group<TAB>name<TAB>active?<TAB>collapsed?` rows and own the tab rows
  * that follow them, the same way a group header owns the tabs to its right on screen. A file with no
@@ -67,6 +69,7 @@ object TabsPersistence {
     private const val KIND_COMMITDIFF = "commitdiff"
     private const val KIND_LOCALHISTORY = "localhistory"
     private const val KIND_LOCALDIFF = "localdiff"
+    private const val KIND_REVISIONDIFF = "revisiondiff"
     private const val KIND_DIFF = "diff"
     private const val KIND_GROUP = "group"
 
@@ -108,6 +111,11 @@ object TabsPersistence {
             is Tab.LocalDiff -> return listOf(
                 KIND_LOCALDIFF, tab.file.absolutePath, selected, tab.timestampMillis.toString(),
             ).joinToString("\t")
+            // An absolute path (the working file is the diff's right-hand side) plus the sha its
+            // left-hand side is read out of.
+            is Tab.RevisionDiff -> return listOf(
+                KIND_REVISIONDIFF, tab.file.absolutePath, selected, tab.sha,
+            ).joinToString("\t")
             // Repo-relative path, and the two extra columns the diff can't be rebuilt without.
             is Tab.CommitDiff -> return listOf(
                 KIND_COMMITDIFF, tab.file.path, selected, tab.sha, tab.file.changeType.name,
@@ -139,6 +147,11 @@ object TabsPersistence {
                 KIND_LOCALDIFF -> {
                     val stamp = parts.getOrNull(3)?.takeIf { it.toLongOrNull() != null } ?: continue
                     out += SavedTab(kind, path, selected, stamp)
+                }
+                // The sha column carries an actual sha here; without one the row names no revision.
+                KIND_REVISIONDIFF -> {
+                    val sha = parts.getOrNull(3)?.takeIf { it.isNotBlank() } ?: continue
+                    out += SavedTab(kind, path, selected, sha)
                 }
                 // The change kind rides in the sha column; without one the row can't say which
                 // sides the diff has (an untracked file has no HEAD side), so it names no diff.
@@ -208,6 +221,14 @@ object TabsPersistence {
                 KIND_LOCALDIFF -> {
                     val file = File(s.path).takeIf { it.isFile } ?: continue
                     Tab.LocalDiff(file, s.sha?.toLongOrNull() ?: continue)
+                }
+                // A revision diff needs its repo (the sha is read out of it) and its working file,
+                // which is the side it compares that revision against.
+                KIND_REVISIONDIFF -> {
+                    if (repoRoot == null) continue
+                    val file = File(s.path).takeIf { it.isFile } ?: continue
+                    val sha = s.sha ?: continue
+                    Tab.RevisionDiff(file, sha, sha.take(7), repoRoot)
                 }
                 // A working-tree diff needs its repo to read HEAD from. The file itself only has to
                 // exist for the kinds that imply it does — a REMOVED/MISSING diff is precisely the

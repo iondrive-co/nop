@@ -55,6 +55,14 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     fun canSoftResetHead(): Boolean = repository.resolve("HEAD~1") != null
 
     /**
+     * SHA of the commit HEAD points at, or null on an unborn branch with no commits yet. A ref
+     * read rather than a walk, so it is cheap enough for the poll to take on every tick: it is how
+     * a commit, merge, pull or reset — each of which moves what an open diff's left-hand side
+     * should say — is noticed even when the set of dirty files comes back identical.
+     */
+    fun headSha(): String? = repository.resolve("HEAD")?.name
+
+    /**
      * Discards local changes to a single file, restoring it to its last committed state — the
      * per-file counterpart to a rollback:
      *  - a modified, deleted, or conflicted tracked file is reset to its HEAD content, overwriting
