@@ -4,7 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ContextMenuDataProvider
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.HorizontalScrollbar
-import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
@@ -581,6 +580,22 @@ private fun FileEditView(
     // and so an inbound jump request can scroll a target line to the top of the viewport.
     var layout by remember(tab.id) { mutableStateOf<TextLayoutResult?>(null) }
 
+    // Where each hit sits down the whole document, 0..1 — what the scrollbar's marker lane draws its
+    // stripes from. Measured off the text layout rather than the offsets alone, so a wrapped line
+    // counts for the rows it really occupies, and divided by the *scrollable* height (viewport plus
+    // everything below the fold) so a stripe lines up with where the thumb has to be to reach it.
+    val markerFractions by remember(tab.id) {
+        derivedStateOf {
+            val tl = layout
+            if (tl == null || matches.isEmpty()) return@derivedStateOf emptyList<Float>()
+            val scrollable = (scrollState.maxValue + scrollState.viewportSize).toFloat()
+            val content = if (scrollable > 0f) scrollable else tl.size.height.toFloat()
+            if (content <= 0f) return@derivedStateOf emptyList<Float>()
+            val len = tl.layoutInput.text.length
+            matches.map { m -> tl.getLineTop(tl.getLineForOffset(m.first.coerceIn(0, len))) / content }
+        }
+    }
+
     // Keep the caret in view sideways. The field scrolls itself vertically, but the horizontal
     // scroll belongs to the box around it, so without this typing past the right edge — or a find
     // hit landing there, since those move the selection too — would leave the caret off-screen with
@@ -908,14 +923,7 @@ private fun FileEditView(
         }
         }
     }
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scrollState),
-            style = NopScrollbarStyle,
-            modifier = Modifier
-                .align(androidx.compose.ui.Alignment.CenterEnd)
-                .width(8.dp)
-                .fillMaxHeight(),
-        )
+        FindMarkerScrollbar(scrollState, markerFractions, currentMatch)
     }
     }
         // Only claimed when a line actually overruns the pane, so a file that fits keeps the full

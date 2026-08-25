@@ -1,10 +1,17 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.InputTransformation
 import androidx.compose.foundation.text.input.TextFieldLineLimits
@@ -14,6 +21,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -25,6 +34,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -50,6 +60,87 @@ internal fun findMatchColor(): Color =
 @Composable
 internal fun findActiveMatchColor(): Color =
     if (JewelTheme.isDark) Color(0xFF8A6D1A) else Color(0xFFFFB74D)
+
+// Saturated lane colours for the find markers, chosen like the diff's change marks: the tints used
+// behind the text itself are too washed out to read as a 3px stripe, so the lane gets its own,
+// louder pair. Amber for a hit, a hotter orange for the one Next/Prev is parked on, so the user can
+// pick their position out of a column of hits. Fixed rather than per-theme — both read against the
+// light and the dark editor background, and the lane is chrome, not content.
+internal val FIND_MARK = Color(0xFFD9A441)
+internal val FIND_ACTIVE_MARK = Color(0xFFFF7A1A)
+
+/** How tall one hit's stripe is drawn in the lane, whatever share of the file the line really is. */
+private val FIND_MARK_H = 3.dp
+
+/** A find marker as drawn in the scrollbar lane: how far down it starts, and how tall it is (px). */
+internal data class MarkerBar(val top: Float, val height: Float)
+
+/**
+ * Places one stripe per hit down a lane [laneHeight] px tall. [fractions] are where each hit sits in
+ * the document as a share of its full height, in document order.
+ *
+ * [markerHeight] is a floor as much as a size: one line's true share of a long file is a fraction of
+ * a pixel, so a marker scaled to the text it points at would be invisible. Bars are clamped to the
+ * lane, so the last hit in a file lands inside the track instead of half off the bottom, and hits
+ * that round onto the same pixel row collapse to one — a 5000-hit query would otherwise redraw
+ * thousands of identical rects every frame to no visible effect.
+ */
+internal fun markerBars(fractions: List<Float>, laneHeight: Float, markerHeight: Float): List<MarkerBar> {
+    if (laneHeight <= 0f || fractions.isEmpty()) return emptyList()
+    val h = markerHeight.coerceIn(1f, laneHeight)
+    val out = mutableListOf<MarkerBar>()
+    var lastTop = 0f
+    for (f in fractions) {
+        val top = (f.coerceIn(0f, 1f) * laneHeight).coerceIn(0f, laneHeight - h)
+        if (out.isNotEmpty() && top - lastTop < 1f) continue
+        out += MarkerBar(top, h)
+        lastTop = top
+    }
+    return out
+}
+
+/**
+ * The vertical scrollbar for a searchable text surface, with a find-marker lane down its left the
+ * way the diff views carry their change markers: every hit of the current query gets a stripe at the
+ * point in the file it sits at, so a query's spread through the document reads at a glance instead
+ * of only through the "n of m" chip.
+ *
+ * [fractions] is one 0..1 document position per hit and [current] indexes the active one, which is
+ * drawn last (and in the louder colour) so it is never buried under the hits around it.
+ *
+ * The lane is [MARKER_LANE_W] wide and the scrollbar [SCROLLBAR_W], matching the diff's lane exactly
+ * — together they fit the gap the editor already leaves to the right of its text, so markers appear
+ * and disappear with the find bar without ever moving the text or the scrollbar.
+ */
+@Composable
+internal fun BoxScope.FindMarkerScrollbar(
+    scrollState: ScrollState,
+    fractions: List<Float>,
+    current: Int,
+) {
+    val markerH = with(LocalDensity.current) { FIND_MARK_H.toPx() }
+    Row(
+        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Canvas(Modifier.width(MARKER_LANE_W).fillMaxHeight()) {
+            if (fractions.isEmpty()) return@Canvas
+            for (bar in markerBars(fractions, size.height, markerH)) {
+                drawRect(FIND_MARK, Offset(0f, bar.top), Size(size.width, bar.height))
+            }
+            // Drawn on its own rather than picked out of the deduped list above: the active hit has
+            // to show even when a neighbouring one rounds onto the same pixel row and swallowed it.
+            val active = fractions.getOrNull(current) ?: return@Canvas
+            val activeBar = markerBars(listOf(active), size.height, markerH).firstOrNull() ?: return@Canvas
+            drawRect(FIND_ACTIVE_MARK, Offset(0f, activeBar.top), Size(size.width, activeBar.height))
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            style = NopScrollbarStyle,
+            modifier = Modifier.width(SCROLLBAR_W).fillMaxHeight(),
+        )
+    }
+}
 
 /**
  * The replace half of the bar, or null for a find-only bar.
