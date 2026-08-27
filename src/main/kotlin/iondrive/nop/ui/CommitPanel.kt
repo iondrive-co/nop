@@ -12,6 +12,8 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -58,7 +60,7 @@ import org.jetbrains.jewel.ui.component.TextArea
 import org.jetbrains.jewel.ui.component.Tooltip
 import java.awt.Cursor
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalJewelApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalJewelApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun CommitPanel(
     status: GitStatus,
@@ -66,6 +68,7 @@ fun CommitPanel(
     onToggle: (String) -> Unit,
     onChangeClick: (FileChange) -> Unit,
     onRevert: (FileChange) -> Unit,
+    onRevertAll: () -> Unit,
     onCommit: (message: String, included: List<FileChange>) -> Unit,
     onStash: (message: String) -> Unit,
     commitInFlight: Boolean,
@@ -78,6 +81,7 @@ fun CommitPanel(
     canSoftReset: Boolean = false,
     resetInFlight: Boolean = false,
     onSoftReset: () -> Unit = {},
+    revertInFlight: Boolean = false,
 ) {
     val messageState = remember { TextFieldState() }
     val inRepo = status.branch != null
@@ -93,10 +97,13 @@ fun CommitPanel(
         // The tool panel is a narrow column on the window's right edge, so the header sits on
         // its own line instead of competing with the action buttons for row width.
         Text(header, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp))
-        Row(
+        // A FlowRow, not a Row: the tool panel is user-resizable down to a narrow column, and a
+        // fixed row would squeeze the buttons until their labels truncated to single letters.
+        // Wrapping onto a second line keeps every action readable at any panel width.
+        FlowRow(
             modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (inRepo) {
                 Tooltip(tooltip = { Text("Undo the last commit, keeping its changes (git reset --soft HEAD~1)") }) {
@@ -105,6 +112,17 @@ fun CommitPanel(
                         enabled = canSoftReset && !resetInFlight && !commitInFlight,
                     ) {
                         Text(if (resetInFlight) "Resetting…" else "Soft reset")
+                    }
+                }
+                // Sits beside the soft reset because both are whole-repo undo actions, but this one
+                // recovers nothing — hence the ellipsis, which (as on the per-row "Revert…" menu
+                // item) says a confirmation dialog stands between the click and the damage.
+                Tooltip(tooltip = { Text("Discard every uncommitted change in the working tree") }) {
+                    OutlinedButton(
+                        onClick = onRevertAll,
+                        enabled = anyChanges && !revertInFlight && !commitInFlight && !stashInFlight,
+                    ) {
+                        Text(if (revertInFlight) "Reverting…" else "Revert all…")
                     }
                 }
             }

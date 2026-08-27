@@ -115,6 +115,8 @@ fun App(
     var revertInFlight by remember(projectPath) { mutableStateOf(false) }
     // The change pending a "Revert file?" confirmation, or null when no dialog is open.
     var pendingRevert by remember(projectPath) { mutableStateOf<FileChange?>(null) }
+    // The whole change list pending a "Revert all?" confirmation, or null when no dialog is open.
+    var pendingRevertAll by remember(projectPath) { mutableStateOf<List<FileChange>?>(null) }
     // A failed git mutation (commit/stash) to show in an error dialog, or null when none. Without
     // this the exception would escape the launched coroutine and crash the window (see runGitOp).
     var gitOpError by remember(projectPath) { mutableStateOf<GitOpError?>(null) }
@@ -611,6 +613,38 @@ fun App(
         }
     }
 
+    // Discard every uncommitted change at once. Same reconciliation as performRevert, applied to
+    // the whole set: buffers for files that survive adopt their restored disk content, and tabs on
+    // files that no longer exist (the new ones, now deleted) are closed.
+    fun performRevertAll(changes: List<FileChange>) {
+        if (repo == null || revertInFlight || changes.isEmpty()) return
+        scope.launch {
+            revertInFlight = true
+            try {
+                gitOpError = runGitOp("Revert all failed") {
+                    withContext(Dispatchers.IO) { repo.revertFiles(changes) }
+                    for (change in changes) {
+                        val reverted = File(repo.rootDir.toFile(), change.path)
+                        if (reverted.isFile) {
+                            // Read the file only when a buffer is actually open on it — see
+                            // performRevert: an unconditional read of a large binary OOM-crashed the app.
+                            val editors = editStore.editorsFor(reverted)
+                            if (editors.isNotEmpty()) {
+                                val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
+                                if (disk != null) editors.forEach { it.adoptDiskText(disk) }
+                            }
+                        } else {
+                            closeTabsUnder(reverted)
+                        }
+                    }
+                    reloadStatus()
+                }
+            } finally {
+                revertInFlight = false
+            }
+        }
+    }
+
     // After a tree mutation (new file/dir/package, copy): rescan the tree from disk immediately
     // and reload git status so the new entry shows up with the right colour. fsRefreshKey is
     // bumped directly (not only via reloadStatus) so the tree still refreshes in a non-git dir.
@@ -772,6 +806,7 @@ fun App(
                                             }
                                         },
                                         onRevert = { change -> pendingRevert = change },
+                                        onRevertAll = { pendingRevertAll = status.changes },
                                         onCommit = { message, included ->
                                             if (repo != null && !commitInFlight) {
                                                 scope.launch {
@@ -837,6 +872,7 @@ fun App(
                                             .take(COMMIT_MESSAGE_HISTORY_CAP),
                                         canSoftReset = canSoftReset,
                                         resetInFlight = resetInFlight,
+                                        revertInFlight = revertInFlight,
                                         onSoftReset = {
                                             if (repo != null && !resetInFlight && !commitInFlight) {
                                                 scope.launch {
@@ -939,6 +975,17 @@ fun App(
                     pendingRevert = null
                 },
                 onCancel = { pendingRevert = null },
+            )
+        }
+
+        pendingRevertAll?.let { changes ->
+            ConfirmRevertAllDialog(
+                changes = changes,
+                onConfirm = {
+                    performRevertAll(changes)
+                    pendingRevertAll = null
+                },
+                onCancel = { pendingRevertAll = null },
             )
         }
 

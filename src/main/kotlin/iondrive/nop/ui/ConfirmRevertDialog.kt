@@ -43,6 +43,75 @@ fun ConfirmRevertDialog(change: FileChange, onConfirm: () -> Unit, onCancel: () 
         ChangeKind.MODIFIED, ChangeKind.CONFLICT ->
             "Local changes will be discarded and the file restored to the last commit."
     }
+    RevertDialogShell(title = "Revert file?", onConfirm = onConfirm, onCancel = onCancel) {
+        Text(change.path, color = ChangeColors.UNTRACKED)
+        Text(detail, color = ChangeColors.REMOVED)
+    }
+}
+
+/**
+ * Confirms reverting the whole change list ("Revert all"). This throws away every uncommitted
+ * change in the working tree at once, so the summary counts the two outcomes separately — files
+ * rolled back to their committed state, and brand-new files that get deleted outright with nothing
+ * to restore them from — and then lists the paths so the scope is unambiguous.
+ */
+@Composable
+fun ConfirmRevertAllDialog(changes: List<FileChange>, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    if (changes.isEmpty()) return
+    RevertDialogShell(
+        title = revertAllTitle(changes.size),
+        confirmLabel = "Revert all",
+        onConfirm = onConfirm,
+        onCancel = onCancel,
+    ) {
+        for (line in revertAllSummary(changes)) Text(line, color = ChangeColors.REMOVED)
+        // List the paths, capped so a big change set can't grow the dialog past the screen; the
+        // count in the title still conveys the full scope.
+        val shown = changes.take(MaxListedChanges)
+        for (change in shown) Text(change.path, color = ChangeColors.UNTRACKED)
+        if (changes.size > shown.size) {
+            Text("…and ${changes.size - shown.size} more", color = ChangeColors.UNTRACKED)
+        }
+    }
+}
+
+internal fun revertAllTitle(count: Int) = "Revert all ${plural(count, "change")}?"
+
+/**
+ * The one or two sentences describing what "Revert all" is about to do: the tracked files rolled
+ * back to their committed state, and the new files deleted outright. Kept separate from the
+ * composable — and each outcome dropped when its count is zero — so the dialog never claims a
+ * consequence that doesn't apply to the change set in hand.
+ */
+internal fun revertAllSummary(changes: List<FileChange>): List<String> {
+    val fresh = changes.count { it.kind == ChangeKind.UNTRACKED || it.kind == ChangeKind.ADDED }
+    val tracked = changes.size - fresh
+    return buildList {
+        if (tracked > 0) {
+            add("${plural(tracked, "file")} will be restored to the last commit — local changes discarded.")
+        }
+        if (fresh > 0) {
+            add(
+                "${plural(fresh, "new file")} will be deleted from disk. They aren't in any commit, " +
+                    "so that can't be undone."
+            )
+        }
+    }
+}
+
+private fun plural(count: Int, noun: String) = if (count == 1) "1 $noun" else "$count ${noun}s"
+
+private const val MaxListedChanges = 12
+
+/** The shared frame both revert confirmations sit in: centred popup, body, Cancel/confirm row. */
+@Composable
+private fun RevertDialogShell(
+    title: String,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+    confirmLabel: String = "Revert",
+    body: @Composable () -> Unit,
+) {
     Popup(
         popupPositionProvider = RevertCenteredPositionProvider,
         onDismissRequest = onCancel,
@@ -56,15 +125,14 @@ fun ConfirmRevertDialog(change: FileChange, onConfirm: () -> Unit, onCancel: () 
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Revert file?")
-            Text(change.path, color = ChangeColors.UNTRACKED)
-            Text(detail, color = ChangeColors.REMOVED)
+            Text(title)
+            body()
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
             ) {
                 OutlinedButton(onClick = onCancel) { Text("Cancel") }
-                DefaultButton(onClick = onConfirm) { Text("Revert") }
+                DefaultButton(onClick = onConfirm) { Text(confirmLabel) }
             }
         }
     }

@@ -509,6 +509,68 @@ class GitRepoTest {
     }
 
     @Test
+    fun `revertFiles discards every kind of change in one pass`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "modified.txt").writeText("v1\n")
+        (tmp / "staged-rm.txt").writeText("keep me\n")
+        (tmp / "deleted.txt").writeText("also keep me\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        (tmp / "modified.txt").writeText("v2-local\n")       // MODIFIED
+        runShell(tmp, "git rm -q staged-rm.txt")             // REMOVED
+        (tmp / "deleted.txt").toFile().delete()              // MISSING
+        (tmp / "added.txt").writeText("staged new\n")
+        runShell(tmp, "git add added.txt")                   // ADDED
+        (tmp / "junk.txt").writeText("scratch\n")            // UNTRACKED
+
+        val repo = GitRepo.discover(tmp)!!
+        val changes = repo.loadStatus().changes
+        assertEquals(5, changes.size, "all five kinds pending before revert: $changes")
+
+        repo.revertFiles(changes)
+
+        assertEquals("v1\n", (tmp / "modified.txt").toFile().readText(), "modification rolled back")
+        assertEquals("keep me\n", (tmp / "staged-rm.txt").toFile().readText(), "staged removal restored")
+        assertEquals("also keep me\n", (tmp / "deleted.txt").toFile().readText(), "deleted file restored")
+        assertTrue(!(tmp / "added.txt").toFile().exists(), "staged new file deleted")
+        assertTrue(!(tmp / "junk.txt").toFile().exists(), "untracked file deleted")
+        assertTrue(repo.loadStatus().isClean, "working tree clean after reverting everything")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFiles reverts only the changes it is given`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a1\n")
+        (tmp / "b.txt").writeText("b1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "a.txt").writeText("a2\n")
+        (tmp / "b.txt").writeText("b2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        repo.revertFiles(listOf(FileChange("a.txt", ChangeKind.MODIFIED)))
+
+        assertEquals("a1\n", (tmp / "a.txt").toFile().readText(), "listed file reverted")
+        assertEquals("b2\n", (tmp / "b.txt").toFile().readText(), "unlisted file untouched")
+        assertEquals(ChangeKind.MODIFIED, repo.loadStatus().byPath["b.txt"], "b.txt still pending")
+        repo.close()
+    }
+
+    @Test
+    fun `revertFiles on an empty list is a no-op`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "a.txt").writeText("a2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        repo.revertFiles(emptyList())
+
+        assertEquals("a2\n", (tmp / "a.txt").toFile().readText(), "nothing listed, so nothing discarded")
+        repo.close()
+    }
+
+    @Test
     fun `workingTreeDirs lists non-ignored directories and never the git dir`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         (tmp / ".gitignore").writeText("node_modules/\nbuild/\n")

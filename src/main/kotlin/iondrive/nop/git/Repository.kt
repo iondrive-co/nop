@@ -91,6 +91,38 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     }
 
     /**
+     * Discards local changes to every one of [changes] at once — the whole-working-tree
+     * counterpart to [revertFile], as raised by the commit panel's "Revert all".
+     *
+     * Tracked paths are reset and checked out in one command apiece rather than a pair per file,
+     * so reverting a large change set costs a couple of git operations instead of hundreds; new
+     * files are unstaged (if staged) and deleted. Destructive in exactly the same way as
+     * [revertFile]: nothing discarded here can be recovered.
+     */
+    fun revertFiles(changes: Collection<FileChange>) {
+        val (fresh, tracked) = changes.partition {
+            it.kind == ChangeKind.UNTRACKED || it.kind == ChangeKind.ADDED
+        }
+        if (tracked.isNotEmpty()) {
+            val reset = git.reset().setRef("HEAD")
+            tracked.forEach { reset.addPath(it.path) }
+            reset.call()
+            val checkout = git.checkout()
+            tracked.forEach { checkout.addPath(it.path) }
+            checkout.call()
+        }
+        // Staged additions must leave the index before their file goes; untracked ones only exist
+        // on disk. rm --cached mirrors revertFile and works on an unborn branch with no HEAD.
+        val staged = fresh.filter { it.kind == ChangeKind.ADDED }
+        if (staged.isNotEmpty()) {
+            val rm = git.rm().setCached(true)
+            staged.forEach { rm.addFilepattern(it.path) }
+            runCatching { rm.call() }
+        }
+        fresh.forEach { File(rootDir.toFile(), it.path).delete() }
+    }
+
+    /**
      * The most recent commit messages (full bodies, trimmed), newest first and de-duplicated, for
      * offering as reusable commit messages. Walks at most [limit] commits. Returns empty for an
      * unborn branch with no commits yet.
