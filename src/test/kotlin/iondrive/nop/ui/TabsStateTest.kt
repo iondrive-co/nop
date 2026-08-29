@@ -285,6 +285,70 @@ class TabsStateTest {
     }
 
     @Test
+    fun `rekey re-points a tab at its new id, keeping slot, group and selection`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        s.open(a)
+        val second = s.addGroup()
+        s.open(b)
+        s.selectGroup(s.groups[0].id)
+        s.select(a.id)
+
+        val renamed = fileTab("/x/renamed.txt")
+        s.rekey(a.id, renamed)
+
+        assertEquals(listOf(renamed, b), s.tabs, "the renamed tab keeps its slot ahead of MR2's")
+        assertEquals(s.groups[0].id, s.groupOf(renamed.id), "and stays in the group it was in")
+        assertNull(s.groupOf(a.id))
+        assertEquals(renamed.id, s.selectedId)
+        assertEquals(listOf(b), s.tabsIn(second.id))
+    }
+
+    @Test
+    fun `rekey carries the reload count and pending search across`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.openAt(a, line = 12, searchQuery = "needle")
+        s.requestReload(a.id)
+        val before = s.reloadKey(a.id)
+
+        val renamed = fileTab("/x/renamed.txt")
+        s.rekey(a.id, renamed)
+
+        assertEquals(before, s.reloadKey(renamed.id))
+        assertEquals(0, s.reloadKey(a.id))
+        assertEquals("needle", s.pendingSearchQuery(renamed.id))
+        assertEquals(12, s.pendingJumpLine(renamed.id))
+        assertNull(s.pendingSearchQuery(a.id))
+        assertNull(s.pendingJumpLine(a.id))
+    }
+
+    @Test
+    fun `rekey ignores an id that isn't open`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        s.open(a)
+
+        s.rekey("file:/x/gone.txt", fileTab("/x/new.txt"))
+
+        assertEquals(listOf(a), s.tabs)
+    }
+
+    @Test
+    fun `rekey onto an already-open id closes the stale tab rather than duplicating it`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        s.open(a)
+        s.open(b)
+
+        s.rekey(a.id, fileTab("/x/b.txt"))
+
+        assertEquals(listOf(b), s.tabs)
+    }
+
+    @Test
     fun `select changes selection only if id exists`() {
         val s = TabsState()
         val a = fileTab("/x/a.txt")

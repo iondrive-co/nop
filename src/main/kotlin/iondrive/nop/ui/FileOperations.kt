@@ -5,8 +5,8 @@ import java.io.IOException
 
 /**
  * Filesystem mutations behind the project-tree context menu: new file, new directory, new
- * package, and copy-file-to-new. Kept free of Compose so the path-resolution and validation
- * rules can be unit-tested directly.
+ * package, copy-file-to-new, rename, drag-to-move, and clipboard paste. Kept free of Compose so the
+ * path-resolution and validation rules can be unit-tested directly.
  *
  * Each call returns the File it created — for the nested cases (a/b/c, com.example.app) that's
  * the deepest entry, so the caller can reveal or open it. Failures surface as
@@ -60,6 +60,92 @@ object FileOperations {
     }
 
     /**
+     * Copy [source] (a file or a whole directory) into [targetDir] — the paste half of the
+     * project tree's Ctrl+C / Ctrl+V. Never overwrites: a name already taken at the destination
+     * gets a " (copy)" suffix, which is the usual case since pasting into the source's own
+     * directory is how you duplicate an entry. Refuses to copy a directory into its own subtree,
+     * which would recurse forever.
+     */
+    fun copyInto(source: File, targetDir: File): File {
+        val resolvedSource = source.absoluteFile
+        val resolvedTargetDir = targetDir.absoluteFile
+        require(resolvedSource.exists()) { "\"${resolvedSource.name}\" no longer exists" }
+        require(resolvedTargetDir.isDirectory) { "\"${resolvedTargetDir.name}\" is not a directory" }
+        require(!isSelfOrDescendant(resolvedTargetDir, resolvedSource)) {
+            "Cannot copy \"${resolvedSource.name}\" into itself"
+        }
+        val dest = File(resolvedTargetDir, copyName(resolvedSource.name) { File(resolvedTargetDir, it).exists() })
+        if (resolvedSource.isDirectory) resolvedSource.copyRecursively(dest) else resolvedSource.copyTo(dest)
+        return dest
+    }
+
+    /**
+     * The name a pasted copy of [name] should take, given [taken] — whether a name is already
+     * used at the destination. Free when nothing collides (pasting elsewhere keeps the original
+     * name); otherwise " (copy)" goes before the extension ("Main.kt" → "Main (copy).kt"), and
+     * repeated pastes number upwards ("Main (copy 2).kt"). A leading dot is part of the name, not
+     * an extension, so ".gitignore" becomes ".gitignore (copy)".
+     */
+    internal fun copyName(name: String, taken: (String) -> Boolean): String {
+        if (!taken(name)) return name
+        val dot = name.lastIndexOf('.')
+        val stem = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var candidate = "$stem (copy)$ext"
+        var n = 2
+        while (taken(candidate)) {
+            candidate = "$stem (copy $n)$ext"
+            n++
+        }
+        return candidate
+    }
+
+    /**
+     * Rename [target] in place, keeping it in its own directory — the F2 / "Rename…" action.
+     * Unlike the create actions this is a pure rename, so separators are rejected rather than
+     * treated as a move. Never overwrites a sibling, but does allow a change of case only
+     * ("readme.md" → "README.md"), which on a case-insensitive filesystem looks like a collision
+     * with the file itself.
+     */
+    fun rename(target: File, rawName: String): File {
+        val source = target.absoluteFile
+        require(source.exists()) { "\"${source.name}\" no longer exists" }
+        val parent = source.parentFile ?: throw IOException("\"${source.name}\" has nowhere to be renamed")
+        val name = rawName.trim()
+        require(name.isNotEmpty()) { "Enter a name" }
+        require(name != "." && name != "..") { "\"$name\" is not a valid name" }
+        require(!name.contains('/') && !name.contains('\\')) {
+            "A name cannot contain a path separator — drag the row to move it instead"
+        }
+        val dest = File(parent, name)
+        if (dest.path == source.path) return source
+        // equals-ignoring-case means dest *is* source on a case-insensitive filesystem, which is
+        // the one existing entry a rename is allowed to land on.
+        if (dest.exists() && !dest.path.equals(source.path, ignoreCase = true)) {
+            throw IOException("\"$name\" already exists")
+        }
+        if (!source.renameTo(dest)) throw IOException("Could not rename \"${source.name}\"")
+        return dest
+    }
+
+    /**
+     * Where [file] ends up when [oldRoot] is renamed to [newRoot] — [newRoot] itself for the
+     * renamed entry, the same relative position beneath it for anything nested inside a renamed
+     * directory, and null for a path that wasn't affected. Lets the caller carry open tabs across
+     * a rename instead of closing them.
+     */
+    internal fun remapPath(file: File, oldRoot: File, newRoot: File): File? {
+        val path = file.absolutePath
+        val old = oldRoot.absolutePath
+        return when {
+            path == old -> newRoot.absoluteFile
+            path.startsWith(old + File.separator) ->
+                File(newRoot.absoluteFile, path.substring(old.length + 1))
+            else -> null
+        }
+    }
+
+    /**
      * Move [source] into [targetDir], keeping its name — the filesystem side of a project-tree
      * drag-and-drop. Refuses to move a directory into itself or one of its own descendants, and
      * never overwrites an existing entry at the destination. Dropping back onto the item's own
@@ -83,12 +169,16 @@ object FileOperations {
         return dest
     }
 
-    // True when [candidate] is [ancestor] itself or nested inside it — the destinations that
-    // would move a directory into its own subtree.
-    private fun isSelfOrDescendant(candidate: File, ancestor: File): Boolean {
-        var cur: File? = candidate
+    /**
+     * True when [candidate] is [ancestor] itself or nested inside it. Names both the destinations
+     * that would move or copy a directory into its own subtree, and the files a rename of
+     * [ancestor] carries with it.
+     */
+    internal fun isSelfOrDescendant(candidate: File, ancestor: File): Boolean {
+        var cur: File? = candidate.absoluteFile
+        val root = ancestor.absolutePath
         while (cur != null) {
-            if (cur.path == ancestor.path) return true
+            if (cur.path == root) return true
             cur = cur.parentFile
         }
         return false

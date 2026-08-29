@@ -10,6 +10,7 @@ import kotlin.io.path.createFile
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class FileOperationsTest {
@@ -160,5 +161,144 @@ class FileOperationsTest {
         val source = tmp.resolve("orig.txt").createFile().toFile()
         val notADir = tmp.resolve("other.txt").createFile().toFile()
         assertThrows<IllegalArgumentException> { FileOperations.moveFile(source, notADir) }
+    }
+
+    @Test fun `copyInto keeps the name when pasting into a different directory`(@TempDir tmp: Path) {
+        val source = tmp.resolve("Main.kt").apply { writeText("hi") }.toFile()
+        val target = tmp.resolve("sub").createDirectories().toFile()
+
+        val copy = FileOperations.copyInto(source, target)
+
+        assertEquals("Main.kt", copy.name)
+        assertEquals("hi", copy.readText())
+        assertTrue(source.isFile)
+    }
+
+    @Test fun `copyInto adds a copy suffix when pasting into the source's own directory`(@TempDir tmp: Path) {
+        val source = tmp.resolve("Main.kt").apply { writeText("hi") }.toFile()
+
+        val first = FileOperations.copyInto(source, tmp.toFile())
+        val second = FileOperations.copyInto(source, tmp.toFile())
+
+        assertEquals("Main (copy).kt", first.name)
+        assertEquals("Main (copy 2).kt", second.name)
+        assertEquals("hi", first.readText())
+    }
+
+    @Test fun `copyInto copies a directory recursively`(@TempDir tmp: Path) {
+        tmp.resolve("pkg/inner").createDirectories()
+        tmp.resolve("pkg/inner/a.txt").writeText("deep")
+        val source = tmp.resolve("pkg").toFile()
+
+        val copy = FileOperations.copyInto(source, tmp.toFile())
+
+        assertEquals("pkg (copy)", copy.name)
+        assertEquals("deep", tmp.resolve("pkg (copy)/inner/a.txt").toFile().readText())
+    }
+
+    @Test fun `copyInto refuses a directory into its own subtree`(@TempDir tmp: Path) {
+        val source = tmp.resolve("pkg").createDirectories().toFile()
+        val inner = tmp.resolve("pkg/inner").createDirectories().toFile()
+
+        assertThrows<IllegalArgumentException> { FileOperations.copyInto(source, inner) }
+        assertThrows<IllegalArgumentException> { FileOperations.copyInto(source, source) }
+    }
+
+    @Test fun `copyInto rejects a source that no longer exists`(@TempDir tmp: Path) {
+        val gone = tmp.resolve("gone.txt").toFile()
+        assertThrows<IllegalArgumentException> { FileOperations.copyInto(gone, tmp.toFile()) }
+    }
+
+    @Test fun `copyName leaves a free name alone`() {
+        assertEquals("Main.kt", FileOperations.copyName("Main.kt") { false })
+    }
+
+    @Test fun `copyName suffixes an extensionless name at the end`() {
+        assertEquals("README (copy)", FileOperations.copyName("README") { it == "README" })
+    }
+
+    @Test fun `copyName treats a leading dot as part of the name`() {
+        assertEquals(".gitignore (copy)", FileOperations.copyName(".gitignore") { it == ".gitignore" })
+    }
+
+    @Test fun `copyName numbers past a taken copy name`() {
+        val taken = setOf("a.txt", "a (copy).txt", "a (copy 2).txt")
+        assertEquals("a (copy 3).txt", FileOperations.copyName("a.txt") { it in taken })
+    }
+
+    @Test fun `rename changes the name in place`(@TempDir tmp: Path) {
+        val file = tmp.resolve("Old.kt").apply { writeText("body") }.toFile()
+
+        val renamed = FileOperations.rename(file, "New.kt")
+
+        assertEquals(tmp.resolve("New.kt").toFile(), renamed)
+        assertEquals("body", renamed.readText())
+        assertFalse(file.exists())
+    }
+
+    @Test fun `rename moves a directory's contents with it`(@TempDir tmp: Path) {
+        tmp.resolve("pkg/inner").createDirectories()
+        tmp.resolve("pkg/inner/a.txt").writeText("deep")
+
+        val renamed = FileOperations.rename(tmp.resolve("pkg").toFile(), "renamed")
+
+        assertEquals("renamed", renamed.name)
+        assertEquals("deep", tmp.resolve("renamed/inner/a.txt").toFile().readText())
+    }
+
+    @Test fun `rename to the same name is a no-op`(@TempDir tmp: Path) {
+        val file = tmp.resolve("Same.kt").createFile().toFile()
+        assertEquals(file.absoluteFile, FileOperations.rename(file, "Same.kt"))
+        assertTrue(file.exists())
+    }
+
+    @Test fun `rename trims surrounding whitespace`(@TempDir tmp: Path) {
+        val file = tmp.resolve("Old.kt").createFile().toFile()
+        assertEquals("New.kt", FileOperations.rename(file, "  New.kt  ").name)
+    }
+
+    @Test fun `rename rejects an existing sibling`(@TempDir tmp: Path) {
+        val file = tmp.resolve("Old.kt").createFile().toFile()
+        tmp.resolve("Taken.kt").createFile()
+        assertThrows<IOException> { FileOperations.rename(file, "Taken.kt") }
+        assertTrue(file.exists())
+    }
+
+    @Test fun `rename rejects a path separator`(@TempDir tmp: Path) {
+        val file = tmp.resolve("Old.kt").createFile().toFile()
+        assertThrows<IllegalArgumentException> { FileOperations.rename(file, "sub/New.kt") }
+        assertThrows<IllegalArgumentException> { FileOperations.rename(file, "sub\\New.kt") }
+    }
+
+    @Test fun `rename rejects a blank or traversing name`(@TempDir tmp: Path) {
+        val file = tmp.resolve("Old.kt").createFile().toFile()
+        assertThrows<IllegalArgumentException> { FileOperations.rename(file, "   ") }
+        assertThrows<IllegalArgumentException> { FileOperations.rename(file, "..") }
+    }
+
+    @Test fun `rename rejects a target that no longer exists`(@TempDir tmp: Path) {
+        assertThrows<IllegalArgumentException> { FileOperations.rename(tmp.resolve("gone.txt").toFile(), "New.txt") }
+    }
+
+    @Test fun `remapPath moves the renamed entry itself`(@TempDir tmp: Path) {
+        val old = tmp.resolve("old").toFile()
+        val new = tmp.resolve("new").toFile()
+        assertEquals(new.absoluteFile, FileOperations.remapPath(old, old, new))
+    }
+
+    @Test fun `remapPath keeps the relative position under a renamed directory`(@TempDir tmp: Path) {
+        val old = tmp.resolve("old").toFile()
+        val new = tmp.resolve("new").toFile()
+        val nested = tmp.resolve("old/inner/a.txt").toFile()
+
+        assertEquals(tmp.resolve("new/inner/a.txt").toFile(), FileOperations.remapPath(nested, old, new))
+    }
+
+    @Test fun `remapPath ignores an unrelated path`(@TempDir tmp: Path) {
+        val old = tmp.resolve("old").toFile()
+        val new = tmp.resolve("new").toFile()
+        assertNull(FileOperations.remapPath(tmp.resolve("elsewhere/a.txt").toFile(), old, new))
+        // A sibling that merely shares the prefix isn't inside the renamed directory.
+        assertNull(FileOperations.remapPath(tmp.resolve("oldish").toFile(), old, new))
     }
 }

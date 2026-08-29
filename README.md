@@ -22,6 +22,10 @@ Download the latest installer for your platform from the
 - F5 to reload git status and re-read the active tab from disk
 - Select a file or directory in the project tree, then:
 	- `Delete` — remove it from disk (asks for confirmation first)
+	- `Ctrl C` — copy it (and the rest of the selection) to the clipboard
+	- `Ctrl V` — paste the clipboard into the selected directory, or beside the selected file.
+	  Pasting into the entry's own directory names the copy `Main (copy).kt`
+	- `F2` — rename it in place; an open editor tab follows the file to its new name
 	- `H` — open a tab showing its git history
 	- `B` — toggle the git blame column in the editor
 

@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
@@ -83,6 +85,80 @@ class GitRepoTest {
         val headContent = repo.readHeadContent("a.txt")
         assertEquals("a-modified\n", headContent)
         repo.close()
+    }
+
+    @Test
+    fun `stageAndCommit commits additions and removals together`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "keep.txt").writeText("keep\n")
+        (tmp / "edit.txt").writeText("v1\n")
+        (tmp / "staged-delete.txt").writeText("bye\n")
+        (tmp / "disk-delete.txt").writeText("also bye\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // One of every kind that reaches stageAndCommit, so the add half and the rm half both carry
+        // several paths — the two are staged as one command apiece, no longer interleaved per file.
+        (tmp / "edit.txt").writeText("v2\n")                  // MODIFIED
+        (tmp / "fresh.txt").writeText("fresh\n")              // UNTRACKED
+        runShell(tmp, "git rm -q staged-delete.txt")          // REMOVED
+        (tmp / "disk-delete.txt").toFile().delete()           // MISSING
+
+        val repo = GitRepo.discover(tmp)!!
+        val before = repo.loadStatus()
+        assertEquals(4, before.changes.size, "expected four pending changes, got ${before.changes}")
+
+        val sha = repo.stageAndCommit("mixed", before.changes)
+        assertTrue(sha.isNotEmpty(), "expected commit sha")
+
+        val after = repo.loadStatus()
+        assertTrue(after.isClean, "working tree should be clean, still pending: ${after.changes}")
+        assertEquals("v2\n", repo.readHeadContent("edit.txt"), "the edit should be committed")
+        assertEquals("fresh\n", repo.readHeadContent("fresh.txt"), "the new file should be committed")
+        assertNull(repo.readHeadContent("staged-delete.txt"), "the staged deletion should be committed")
+        assertNull(repo.readHeadContent("disk-delete.txt"), "the on-disk deletion should be committed")
+        assertEquals("keep\n", repo.readHeadContent("keep.txt"), "an untouched file should survive")
+        repo.close()
+    }
+
+    @Test
+    fun `stageAndCommit leaves the index untouched when one path cannot be staged`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "seed.txt").writeText("seed\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // A file JGit's walk lists but cannot open stands in for the race that actually bites: a
+        // file still there when the tree is enumerated and gone by the time its content is read,
+        // because something outside the editor is writing into the same tree. Both surface as the
+        // same "Exception caught during execution of add command" / FileNotFoundException.
+        // It sits between two healthy paths, so a per-file staging loop would already have
+        // published the first one by the time the second throws.
+        (tmp / "a-one.txt").writeText("one\n")
+        (tmp / "m-locked.txt").writeText("nope\n")
+        (tmp / "z-two.txt").writeText("two\n")
+        val locked = (tmp / "m-locked.txt").toFile()
+        locked.setReadable(false)
+        assumeTrue(!locked.canRead(), "cannot make a file unreadable (running as root?)")
+
+        val repo = GitRepo.discover(tmp)!!
+        try {
+            val pending = repo.loadStatus().changes
+            assertEquals(3, pending.size, "expected three untracked files, got $pending")
+            val head = repo.headSha()
+
+            assertThrows(Exception::class.java) { repo.stageAndCommit("should fail", pending) }
+
+            assertEquals(head, repo.headSha(), "a failed staging pass must not move HEAD")
+            val after = repo.loadStatus()
+            assertEquals(
+                listOf(ChangeKind.UNTRACKED, ChangeKind.UNTRACKED, ChangeKind.UNTRACKED),
+                listOf("a-one.txt", "m-locked.txt", "z-two.txt").map { after.byPath[it] },
+                "staging is one command, so a path that cannot be read leaves the whole index " +
+                    "untouched — none of its neighbours may be left staged for the user to unpick",
+            )
+        } finally {
+            locked.setReadable(true)
+            repo.close()
+        }
     }
 
     @Test

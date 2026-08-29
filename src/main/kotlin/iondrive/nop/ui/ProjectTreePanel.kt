@@ -34,6 +34,8 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -166,11 +168,12 @@ internal fun selectedFilesOf(selectedKeys: Set<Any?>, rootId: String): List<File
         .toList()
 
 /**
- * Which rows a delete action triggered from [clicked] should remove: the whole [selection] when the
- * clicked row is part of it, otherwise just the clicked row. Mirrors the file-manager convention
- * where right-clicking a row outside the current selection acts only on that row.
+ * Which rows a context-menu action (delete, copy) triggered from [clicked] should act on: the whole
+ * [selection] when the clicked row is part of it, otherwise just the clicked row. Mirrors the
+ * file-manager convention where right-clicking a row outside the current selection acts only on
+ * that row.
  */
-internal fun deleteTargetsFor(clicked: File, selection: List<File>): List<File> =
+internal fun menuTargetsFor(clicked: File, selection: List<File>): List<File> =
     if (selection.any { it.absolutePath == clicked.absolutePath }) selection else listOf(clicked)
 
 private fun File.relativePathTo(repoRoot: Path): String? = runCatching {
@@ -211,6 +214,16 @@ fun ProjectTreePanel(
     onNewDirectory: (File) -> Unit = {},
     onNewPackage: (File) -> Unit = {},
     onCopyFile: (File) -> Unit = {},
+    // F2 / "Rename…": rename the given row in place. Always a single row — unlike delete and copy,
+    // renaming a whole multi-selection isn't a thing.
+    onRenameRequest: (File) -> Unit = {},
+    // Ctrl+C: put these rows on the clipboard. Ctrl+V: copy whatever is on the clipboard into
+    // [targetDir], which is the selected directory (or the selected file's parent, or the project
+    // root when nothing is selected). [canPaste] says whether the clipboard holds anything, so the
+    // context menu only offers "Paste" when it would do something.
+    onClipboardCopy: (List<File>) -> Unit = {},
+    onPasteRequest: (targetDir: File) -> Unit = {},
+    canPaste: () -> Boolean = { false },
     // Drag-and-drop move: fired when the user drops [source] onto the directory row [targetDir].
     onMoveRequest: (source: File, targetDir: File) -> Unit = { _, _ -> },
     headerExtras: @Composable () -> Unit = {},
@@ -310,6 +323,10 @@ fun ProjectTreePanel(
     // that operate on all of it rather than a single target.
     fun selectedFiles(): List<File> = selectedFilesOf(treeState.selectedKeys, rootId)
 
+    // Where a paste lands: inside the selected directory, alongside the selected file, or at the
+    // project root when the selection is empty (or is the root itself).
+    fun pasteTarget(): File = selectedFile()?.let(FileOperations::parentDirFor) ?: projectPath.toFile()
+
     // History falls back to the project root so the button can show whole-repo log
     // when nothing (or the root itself) is selected.
     fun historyTarget(): File = selectedFile() ?: projectPath.toFile()
@@ -394,9 +411,18 @@ fun ProjectTreePanel(
                 }
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    val copyModifier = event.isCtrlPressed || event.isMetaPressed
                     when (event.key) {
                         Key.Delete -> selectedFiles().takeIf { it.isNotEmpty() }
                             ?.let { onDeleteRequest(it); true } ?: false
+                        // Ctrl/Cmd+C and Ctrl/Cmd+V. Guarded on the modifier so a bare C or V
+                        // stays free (unlike H/B, which are the tree's own single-key shortcuts).
+                        Key.C -> if (copyModifier) {
+                            selectedFiles().takeIf { it.isNotEmpty() }?.let { onClipboardCopy(it) }
+                            true
+                        } else false
+                        Key.V -> if (copyModifier) { onPasteRequest(pasteTarget()); true } else false
+                        Key.F2 -> selectedFile()?.let { onRenameRequest(it); true } ?: false
                         Key.H -> { onHistoryRequest(historyTarget()); true }
                         Key.B -> { onToggleBlame(); true }
                         else -> false
@@ -427,6 +453,17 @@ fun ProjectTreePanel(
                     add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
                     add(ContextMenuItem("New Package…") { onNewPackage(file) })
                     if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                    // Clipboard copy/paste, the menu route to the Ctrl+C / Ctrl+V shortcuts.
+                    // Copy takes the whole selection when the clicked row is part of it; paste
+                    // lands inside a clicked directory, or beside a clicked file.
+                    add(ContextMenuItem("Copy") { onClipboardCopy(menuTargetsFor(file, selectionBeforeSecondaryPress)) })
+                    if (canPaste()) {
+                        add(ContextMenuItem("Paste") { onPasteRequest(FileOperations.parentDirFor(file)) })
+                    }
+                    // The project root's name is the project itself, not a row the tree owns.
+                    if (file.absolutePath != rootId) {
+                        add(ContextMenuItem("Rename…") { onRenameRequest(file) })
+                    }
                     // The git pair the toolbar's history button and its H shortcut also reach —
                     // here because the file the user wants them for is the one under the pointer.
                     // "Compare" is file-only: a directory has revisions but no side-by-side.
@@ -439,7 +476,7 @@ fun ProjectTreePanel(
                     // Delete acts on the whole selection when the right-clicked row is part of it,
                     // else just that row. The project root has nowhere to go, so it's never deletable.
                     if (file.absolutePath != rootId) {
-                        val targets = deleteTargetsFor(file, selectionBeforeSecondaryPress)
+                        val targets = menuTargetsFor(file, selectionBeforeSecondaryPress)
                         // The right-click already collapsed the highlight to this one row; when it was
                         // part of a multi-selection, restore the highlight so the menu visibly acts on
                         // every row it will delete.

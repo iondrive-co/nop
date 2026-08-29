@@ -164,6 +164,31 @@ class TabsState {
         _tabs[idx] = tab
     }
 
+    /**
+     * Re-points the tab currently open as [oldId] at [tab], whose id has changed because its file
+     * moved — the tree's rename. [replace] can't do this (it matches on the id that just changed)
+     * and close-then-[open] would drop the tab to the end of the *active* group, so a rename would
+     * shuffle the strip and could move the tab to a group the user wasn't even looking at. Everything
+     * keyed on the old id comes across with it, and the selection follows.
+     *
+     * No-op for an id that isn't open. If the new id is somehow already open, the stale tab is just
+     * closed — two tabs on one file is the one outcome worse than either.
+     */
+    fun rekey(oldId: String, tab: Tab) {
+        val idx = _tabs.indexOfFirst { it.id == oldId }
+        if (idx < 0 || oldId == tab.id) return
+        if (_tabs.any { it.id == tab.id }) {
+            close(oldId)
+            return
+        }
+        _tabs[idx] = tab
+        tabGroups.remove(oldId)?.let { tabGroups[tab.id] = it }
+        pendingJumpLines.remove(oldId)?.let { pendingJumpLines[tab.id] = it }
+        pendingSearchQueries.remove(oldId)?.let { pendingSearchQueries[tab.id] = it }
+        reloadCounts.remove(oldId)?.let { reloadCounts[tab.id] = it }
+        if (selectedId == oldId) selectedId = tab.id
+    }
+
     /** Where a tab joining [groupId] goes in [_tabs]: after that group's run, ahead of the next one's. */
     private fun insertionIndex(groupId: Long): Int {
         val rank = _groups.indexOfFirst { it.id == groupId }

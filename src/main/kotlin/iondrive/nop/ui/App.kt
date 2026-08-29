@@ -65,6 +65,7 @@ private sealed interface TreeEntryDialog {
     data class NewDirectory(val parentDir: File) : TreeEntryDialog
     data class NewPackage(val parentDir: File) : TreeEntryDialog
     data class CopyFile(val source: File) : TreeEntryDialog
+    data class Rename(val target: File) : TreeEntryDialog
 }
 
 @OptIn(FlowPreview::class)
@@ -672,6 +673,57 @@ fun App(
         }
     }
 
+    // Ctrl+V in the project tree: copy everything on the clipboard into [targetDir]. Each source
+    // is attempted independently so one failure (a vanished file, a directory dropped into itself)
+    // doesn't lose the rest; the first error is what the user is told about.
+    fun performPaste(targetDir: File) {
+        val sources = FileClipboard.files()
+        if (sources.isEmpty()) return
+        scope.launch {
+            val results = withContext(Dispatchers.IO) {
+                sources.map { source -> runCatching { FileOperations.copyInto(source, targetDir) } }
+            }
+            val created = results.mapNotNull { it.getOrNull() }
+            if (created.isNotEmpty()) {
+                afterTreeMutation()
+                treeReveal = created.last()
+            }
+            results.firstNotNullOfOrNull { it.exceptionOrNull() }?.let { e ->
+                gitOpError = GitOpError("Could not paste", e.userMessage())
+            }
+        }
+    }
+
+    // F2 / "Rename…" from the project tree. Runs on the calling (UI) thread like the other dialog
+    // actions so a bad name can be reported back into the still-open dialog; the work is a single
+    // rename() syscall either way.
+    //
+    // Tabs are carried across rather than closed: a rename is usually done *to* the file you have
+    // open, so its editor follows to the new path, keeping its place in the strip (a renamed
+    // directory takes every editor beneath it along). Buffers are flushed first — the buffer itself
+    // can't come across, and the autosave debounce means "unsaved" is the normal state for a second
+    // or two after typing. Tabs that aren't plain editors (diffs, history) are pinned to a path the
+    // rename invalidates, so those still close.
+    fun performRename(target: File, rawName: String): File {
+        for (edit in editStore.snapshot()) {
+            if (FileOperations.isSelfOrDescendant(edit.file, target)) runCatching { edit.save() }
+        }
+        val dest = FileOperations.rename(target, rawName)
+        for (tab in tabsState.tabs.toList()) {
+            if (tab !is Tab.FileView) continue
+            val moved = FileOperations.remapPath(tab.file, target, dest) ?: continue
+            // The buffer is keyed on the old tab id and points at a path that no longer exists;
+            // left behind it would be reconciled — and eventually written — back into place.
+            editStore.close(tab.id)
+            tabsState.rekey(tab.id, Tab.FileView(moved))
+        }
+        // Whatever is left on the old path is pinned to it (diffs, history), so it closes.
+        closeTabsUnder(target)
+        afterTreeMutation()
+        treeReveal = dest
+        return dest
+    }
+
     // Where a tree action targeting [target] should create its entry, shown to the user in the
     // dialog as a path relative to the project root ("" → the root itself).
     fun relativeLabel(dir: File): String = runCatching {
@@ -719,6 +771,10 @@ fun App(
                         onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },
                         onNewPackage = { pendingEntry = TreeEntryDialog.NewPackage(FileOperations.parentDirFor(it)) },
                         onCopyFile = { pendingEntry = TreeEntryDialog.CopyFile(it) },
+                        onRenameRequest = { pendingEntry = TreeEntryDialog.Rename(it) },
+                        onClipboardCopy = FileClipboard::copy,
+                        onPasteRequest = ::performPaste,
+                        canPaste = FileClipboard::hasFiles,
                         onMoveRequest = ::performMove,
                         onHistoryRequest = { file ->
                             if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
@@ -1056,6 +1112,23 @@ fun App(
                             null
                         },
                         onFailure = { it.message ?: "Could not copy file" },
+                    )
+                },
+                onCancel = { pendingEntry = null },
+            )
+            is TreeEntryDialog.Rename -> NewEntryDialog(
+                title = if (entry.target.isDirectory) "Rename Directory" else "Rename File",
+                description = "Rename \"${entry.target.name}\" — it stays in " +
+                    relativeLabel(entry.target.absoluteFile.parentFile ?: rootPath.toFile()) + "/",
+                initialText = entry.target.name,
+                confirmLabel = "Rename",
+                onSubmit = { name ->
+                    runCatching { performRename(entry.target, name) }.fold(
+                        onSuccess = {
+                            pendingEntry = null
+                            null
+                        },
+                        onFailure = { it.message ?: "Could not rename" },
                     )
                 },
                 onCancel = { pendingEntry = null },

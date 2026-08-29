@@ -91,22 +91,22 @@ class ProjectTreePanelTest {
         assertEquals(emptyList(), selectedFilesOf(setOf(root.absolutePath), root.absolutePath))
     }
 
-    @Test fun `deleteTargetsFor returns the whole selection when the clicked row is in it`(@TempDir tmp: Path) {
+    @Test fun `menuTargetsFor returns the whole selection when the clicked row is in it`(@TempDir tmp: Path) {
         val a = tmp.resolve("a.txt").toFile()
         val b = tmp.resolve("b.txt").toFile()
         val selection = listOf(a, b)
-        assertEquals(selection, deleteTargetsFor(a, selection))
+        assertEquals(selection, menuTargetsFor(a, selection))
     }
 
-    @Test fun `deleteTargetsFor targets only the clicked row when it is outside the selection`(@TempDir tmp: Path) {
+    @Test fun `menuTargetsFor targets only the clicked row when it is outside the selection`(@TempDir tmp: Path) {
         val a = tmp.resolve("a.txt").toFile()
         val b = tmp.resolve("b.txt").toFile()
         val c = tmp.resolve("c.txt").toFile()
-        assertEquals(listOf(c), deleteTargetsFor(c, listOf(a, b)))
+        assertEquals(listOf(c), menuTargetsFor(c, listOf(a, b)))
     }
 
-    @Test fun `deleteTargetsFor falls back to the clicked row when nothing is selected`(@TempDir tmp: Path) {
+    @Test fun `menuTargetsFor falls back to the clicked row when nothing is selected`(@TempDir tmp: Path) {
         val a = tmp.resolve("a.txt").toFile()
-        assertEquals(listOf(a), deleteTargetsFor(a, emptyList()))
+        assertEquals(listOf(a), menuTargetsFor(a, emptyList()))
     }
 }
