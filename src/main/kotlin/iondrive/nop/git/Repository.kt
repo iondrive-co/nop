@@ -12,10 +12,29 @@ import org.eclipse.jgit.treewalk.EmptyTreeIterator
 import org.eclipse.jgit.treewalk.CanonicalTreeParser
 import org.eclipse.jgit.treewalk.FileTreeIterator
 import org.eclipse.jgit.treewalk.TreeWalk
+import org.eclipse.jgit.treewalk.filter.PathFilterGroup
+import org.eclipse.jgit.diff.RawText
 import org.eclipse.jgit.treewalk.WorkingTreeIterator
 import org.eclipse.jgit.util.io.DisabledOutputStream
+import org.eclipse.jgit.dircache.DirCacheEditor
+import org.eclipse.jgit.dircache.DirCacheEntry
+import org.eclipse.jgit.lib.ConfigConstants
+import org.eclipse.jgit.lib.Constants
+import org.eclipse.jgit.lib.CoreConfig
+import org.eclipse.jgit.lib.FileMode
+import org.eclipse.jgit.lib.ObjectId
 import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
+import java.time.Instant
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 
 class GitRepo(val rootDir: Path, private val repository: Repository) : AutoCloseable {
     private val git: Git = Git.wrap(repository)
@@ -38,7 +57,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         val (removed, staged) = changes.partition {
             it.kind == ChangeKind.REMOVED || it.kind == ChangeKind.MISSING
         }
-        if (staged.isNotEmpty()) {
+        if (staged.isNotEmpty() && !stageBlobsInParallel(staged)) {
             val add = git.add()
             staged.forEach { add.addFilepattern(it.path) }
             add.call()
@@ -51,6 +70,186 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         val commit = git.commit().setMessage(message).call()
         return commit.name
     }
+
+    /**
+     * Stages [staged] by deflating its blobs across every core, returning false if it declines the
+     * job so [stageAndCommit] falls back to JGit's [org.eclipse.jgit.api.AddCommand].
+     *
+     * AddCommand walks and inserts on one thread, and writing a blob is zlib deflate — pure CPU.
+     * On a change set of already-compressed files that is the entire cost of a commit: 400 real
+     * .npz totalling 1.9 GB measured 63.5s of a 63.7s commit, at user=59.4s against real=61.8s,
+     * i.e. exactly one core of sixteen while deflate bought nothing (the object store came back
+     * byte-identical with compression off). Files are independent, so they are handed to a worker
+     * apiece, each with its own [ObjectInserter] — inserters are not thread-safe, but a
+     * FileRepository's loose objects are written to per-insert temp files and renamed, so parallel
+     * inserters do not contend.
+     *
+     * The index is still built on one thread once every blob is in, and only then published, so
+     * this keeps the atomicity [stageAndCommit] relies on: a file that vanishes mid-run makes its
+     * own insert throw, and the DirCache is unlocked without ever being written.
+     *
+     * It declines whenever the bytes on disk might not be the bytes git should record, because it
+     * reads files directly instead of through a [org.eclipse.jgit.treewalk.WorkingTreeIterator] and
+     * so applies none of git's content filters. That means CRLF conversion, clean filters (Git LFS
+     * among them), any .gitattributes that could turn one into play, and symlinks all go back to
+     * AddCommand, as does a change set too small for the threads to pay for themselves.
+     */
+    private fun stageBlobsInParallel(staged: List<FileChange>): Boolean {
+        if (staged.size < PARALLEL_STAGE_MIN_FILES) return false
+        val plan = planStaging(staged)
+        if (plan.fast.size < PARALLEL_STAGE_MIN_FILES) return false
+        if (plan.fast.sumOf { it.file.length() } < PARALLEL_STAGE_MIN_BYTES &&
+            plan.fast.size < PARALLEL_STAGE_ALWAYS_FILES
+        ) return false
+
+        // Anything needing conversion goes through AddCommand first. It takes and releases the
+        // index lock itself, so it has to finish before the fast half locks the index in turn.
+        if (plan.slow.isNotEmpty()) {
+            val add = git.add()
+            plan.slow.forEach { add.addFilepattern(it.path) }
+            add.call()
+        }
+
+        val workers = Runtime.getRuntime().availableProcessors().coerceIn(2, 16)
+        val queue = ConcurrentLinkedQueue(plan.fast)
+        val done = ConcurrentLinkedQueue<StagedBlob>()
+        val pool = Executors.newFixedThreadPool(workers) { r ->
+            Thread(r, "nop-stage").apply { isDaemon = true }
+        }
+        val dirCache = repository.lockDirCache()
+        try {
+            val tasks = (1..workers).map {
+                Callable {
+                    repository.newObjectInserter().use { inserter ->
+                        while (true) {
+                            val entry = queue.poll() ?: break
+                            // If the file is being rewritten underneath us the stream runs short and
+                            // insert throws — better a failed commit than one recording a length
+                            // that never existed.
+                            val length = entry.file.length()
+                            val id = FileInputStream(entry.file).use { input ->
+                                inserter.insert(Constants.OBJ_BLOB, length, input)
+                            }
+                            done.add(
+                                StagedBlob(
+                                    path = entry.path,
+                                    id = id,
+                                    length = length,
+                                    lastModified = Files.getLastModifiedTime(entry.file.toPath()).toInstant(),
+                                    executable = entry.executable,
+                                )
+                            )
+                        }
+                        inserter.flush()
+                    }
+                }
+            }
+            // invokeAll waits for every worker, so no insert is still running when we unwind.
+            pool.invokeAll(tasks).forEach { it.get() }
+
+            val editor = dirCache.editor()
+            for (blob in done) {
+                editor.add(object : DirCacheEditor.PathEdit(blob.path) {
+                    override fun apply(ent: DirCacheEntry) {
+                        ent.fileMode = if (blob.executable) FileMode.EXECUTABLE_FILE else FileMode.REGULAR_FILE
+                        ent.setLength(blob.length)
+                        ent.setLastModified(blob.lastModified)
+                        ent.setObjectId(blob.id)
+                    }
+                })
+            }
+            if (!editor.commit()) throw IOException("could not write $gitDir/index")
+            return true
+        } catch (t: Throwable) {
+            dirCache.unlock()
+            throw (t as? ExecutionException)?.cause ?: t
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    /** One file's blob, inserted by a worker and waiting to go into the index. */
+    private data class StagedBlob(
+        val path: String,
+        val id: ObjectId,
+        val length: Long,
+        val lastModified: Instant,
+        val executable: Boolean,
+    )
+
+    /** A file whose bytes on disk are exactly the bytes git should record. */
+    private class FastEntry(val path: String, val file: File, val executable: Boolean)
+
+    /** [fast] can be read straight off disk in parallel; [slow] must go through AddCommand. */
+    private class StagePlan(val fast: List<FastEntry>, val slow: List<FileChange>)
+
+    /**
+     * Sorts [staged] into the paths that can be read raw and the paths that cannot.
+     *
+     * The decision is per file, not per repository, and that distinction is the whole point: this
+     * machine has `core.autocrlf=input` set globally and git-lfs registered in ~/.gitconfig, and
+     * hermes carries a .gitattributes — so a repo-wide "might a filter apply?" test says yes
+     * everywhere and the fast path never runs. Asking JGit per path instead is what lets a commit
+     * of binary data go fast in a repo that also holds filtered text.
+     *
+     * The walk itself is stat-only and costs about what one status pass costs; it is the content
+     * reads it *avoids* doing sequentially that matter. For each entry it takes JGit's own answers
+     * — [WorkingTreeIterator.getCleanFilterCommand] and [WorkingTreeIterator.getEolStreamType] —
+     * rather than re-deriving them, so a clean filter (Git LFS) or an unconditional text=/eol=
+     * conversion sends that path back to AddCommand. Under autocrlf the type comes back AUTO_LF,
+     * which converts text but passes binary through untouched, so binary content is still safe to
+     * read raw; that is decided with git's own rule, a NUL byte in the first 8k
+     * ([org.eclipse.jgit.diff.RawText.isBinary]).
+     */
+    private fun planStaging(staged: List<FileChange>): StagePlan {
+        val wanted = staged.associateBy { it.path }
+        val fast = ArrayList<FastEntry>()
+        val slow = ArrayList<FileChange>()
+        val seen = HashSet<String>()
+        runCatching {
+            TreeWalk(repository).use { walk ->
+                walk.addTree(FileTreeIterator(repository))
+                walk.isRecursive = true
+                walk.filter = PathFilterGroup.createFromStrings(wanted.keys)
+                while (walk.next()) {
+                    val change = wanted[walk.pathString] ?: continue
+                    seen.add(change.path)
+                    val f = walk.getTree(0, WorkingTreeIterator::class.java)
+                    val mode = f?.entryFileMode
+                    val plain = mode == FileMode.REGULAR_FILE || mode == FileMode.EXECUTABLE_FILE
+                    if (f == null || !plain || f.cleanFilterCommand != null || !passesThrough(f, change)) {
+                        slow.add(change)
+                    } else {
+                        fast.add(
+                            FastEntry(
+                                path = change.path,
+                                file = File(rootDir.toFile(), change.path),
+                                executable = mode == FileMode.EXECUTABLE_FILE,
+                            )
+                        )
+                    }
+                }
+            }
+        }.onFailure {
+            // A walk that cannot complete tells us nothing about any path, so nothing is fast.
+            return StagePlan(emptyList(), staged)
+        }
+        // Paths the walk never yielded are gone from disk (or ignored); AddCommand knows what to
+        // do with those, and it is the same thing it does today.
+        staged.filterTo(slow) { it.path !in seen }
+        return StagePlan(fast, slow)
+    }
+
+    /** True when check-in would copy this file's bytes through unchanged. */
+    private fun passesThrough(f: WorkingTreeIterator, change: FileChange): Boolean =
+        when (f.eolStreamType) {
+            CoreConfig.EolStreamType.DIRECT -> true
+            CoreConfig.EolStreamType.AUTO_LF, CoreConfig.EolStreamType.AUTO_CRLF ->
+                runCatching {
+                    FileInputStream(File(rootDir.toFile(), change.path)).use { RawText.isBinary(it) }
+                }.getOrDefault(false)
+            else -> false
+        }
 
     /**
      * Soft-resets the current branch back one commit (`git reset --soft HEAD~1`). The last commit
@@ -372,6 +571,13 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     }
 
     companion object {
+        /** Below this many files the worker threads cost more than the deflate they save. */
+        private const val PARALLEL_STAGE_MIN_FILES = 8
+        /** ...unless the change set is small in count but heavy in bytes, where they still pay. */
+        private const val PARALLEL_STAGE_MIN_BYTES = 8L * 1024 * 1024
+        /** ...or large in count, where per-file overhead dominates however small the files are. */
+        private const val PARALLEL_STAGE_ALWAYS_FILES = 64
+
         fun discover(path: Path, ceiling: Path? = null): GitRepo? {
             val gitDir = findGitDir(path.toFile(), ceiling?.toFile()) ?: return null
             val repository = FileRepositoryBuilder()

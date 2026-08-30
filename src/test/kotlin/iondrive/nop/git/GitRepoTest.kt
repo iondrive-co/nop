@@ -161,6 +161,153 @@ class GitRepoTest {
         }
     }
 
+    // The parallel staging path only engages past GitRepo's size thresholds, so these fixtures are
+    // deliberately over 64 files rather than the two or three the other tests get by with.
+    private fun seedBulkTree(tmp: Path, count: Int = 70) {
+        (tmp / "data").createDirectories()
+        repeat(count) { i ->
+            // Mixed shapes on purpose: git records content and mode, and an encoder that is subtly
+            // wrong about either shows up as a different tree hash below.
+            val body = when (i % 4) {
+                0 -> "plain line $i\n"
+                1 -> "no trailing newline $i"
+                2 -> "multi\nline\r\nmixed endings $i\n"
+                else -> buildString { repeat(200) { append("padding $i ") } }
+            }
+            (tmp / "data" / "f$i.dat").writeText(body)
+        }
+        (tmp / "data" / "empty.dat").writeText("")
+        (tmp / "data" / "binary.dat").toFile().writeBytes(ByteArray(4096) { (it % 256).toByte() })
+    }
+
+    @Test
+    fun `parallel staging records the same tree as git itself`(@TempDir tmp: Path) {
+        // Two identical working trees: one staged by GitRepo (which goes parallel at this size),
+        // one by the real git binary. The tree hash covers every path, blob and mode, so equal
+        // hashes mean the hand-rolled encoder agrees with git exactly.
+        val mine = (tmp / "mine").also { it.createDirectories() }
+        val reference = (tmp / "reference").also { it.createDirectories() }
+        for (dir in listOf(mine, reference)) {
+            runShell(dir, "git init -q && git config user.email t@x && git config user.name T")
+            seedBulkTree(dir)
+        }
+
+        val repo = GitRepo.discover(mine, ceiling = tmp)!!
+        repo.stageAndCommit("bulk", repo.loadStatus().changes)
+        repo.close()
+        runShell(reference, "git add -A && git commit -q -m bulk")
+
+        assertEquals(
+            gitOutput(reference, "git rev-parse HEAD^{tree}"),
+            gitOutput(mine, "git rev-parse HEAD^{tree}"),
+            "staging in parallel must produce byte-for-byte what git would have staged",
+        )
+        assertTrue(gitOutput(mine, "git status --porcelain").isEmpty(), "everything should be committed")
+    }
+
+    @Test
+    fun `parallel staging matches git for binary files under autocrlf and gitattributes`(@TempDir tmp: Path) {
+        // The conditions that actually hold on a developer box, and that a repo-wide filter check
+        // gets wrong: autocrlf converting text on check-in, a .gitattributes present, and a mix of
+        // binary blobs (which convert to nothing and may be read raw) with text that must not be.
+        val mine = (tmp / "mine").also { it.createDirectories() }
+        val reference = (tmp / "reference").also { it.createDirectories() }
+        for (dir in listOf(mine, reference)) {
+            runShell(dir, "git init -q && git config user.email t@x && git config user.name T && git config core.autocrlf input")
+            (dir / ".gitattributes").writeText("*.md text\n*.bin -text\n")
+            (dir / "data").createDirectories()
+            repeat(80) { i ->
+                // NUL in the first bytes is git's own binary test, so these take the fast path.
+                (dir / "data" / "b$i.bin").toFile()
+                    .writeBytes(ByteArray(2048) { j -> ((i + j) % 256).toByte() })
+            }
+            // ...while CRLF text must still be normalised by git's filter, not copied raw.
+            repeat(5) { i -> (dir / "data" / "t$i.md").writeText("alpha\r\nbeta $i\r\n") }
+        }
+
+        val repo = GitRepo.discover(mine, ceiling = tmp)!!
+        repo.stageAndCommit("mixed", repo.loadStatus().changes)
+        val text = repo.readHeadContent("data/t0.md")
+        repo.close()
+        runShell(reference, "git add -A && git commit -q -m mixed")
+
+        assertEquals(
+            gitOutput(reference, "git rev-parse HEAD^{tree}"),
+            gitOutput(mine, "git rev-parse HEAD^{tree}"),
+            "binary read raw and text put through git's filter must together rebuild git's own tree",
+        )
+        assertEquals("alpha\nbeta 0\n", text, "CRLF text must not be copied raw by the fast path")
+    }
+
+    @Test
+    fun `parallel staging preserves the executable bit`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        seedBulkTree(tmp)
+        val script = (tmp / "data" / "run.sh").also { it.writeText("#!/bin/sh\necho hi\n") }
+        script.toFile().setExecutable(true)
+        assumeTrue(script.toFile().canExecute(), "filesystem does not carry the exec bit")
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        repo.stageAndCommit("bulk", repo.loadStatus().changes)
+        repo.close()
+
+        assertEquals(
+            "100755",
+            gitOutput(tmp, "git ls-tree HEAD data/run.sh").split(Regex("\\s+")).firstOrNull(),
+            "an executable file must be staged as mode 100755, not 100644",
+        )
+    }
+
+    @Test
+    fun `staging honours gitattributes eol conversion instead of copying raw bytes`(@TempDir tmp: Path) {
+        // Reading files directly would put the CRLFs straight into the blob. GitRepo must spot the
+        // .gitattributes and hand the whole set back to JGit's AddCommand, which applies the filter.
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / ".gitattributes").writeText("*.dat text eol=lf\n")
+        (tmp / "data").createDirectories()
+        repeat(70) { i -> (tmp / "data" / "f$i.dat").writeText("alpha\r\nbeta\r\ngamma $i\r\n") }
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        repo.stageAndCommit("crlf", repo.loadStatus().changes)
+        val committed = repo.readHeadContent("data/f0.dat")
+        repo.close()
+
+        assertEquals(
+            "alpha\nbeta\ngamma 0\n", committed,
+            "text=/eol= must still normalise line endings — the fast path has to decline here",
+        )
+    }
+
+    @Test
+    fun `parallel staging leaves the index untouched when one path cannot be staged`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "seed.txt").writeText("seed\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        seedBulkTree(tmp)
+
+        val locked = (tmp / "data" / "f13.dat").toFile()
+        locked.setReadable(false)
+        assumeTrue(!locked.canRead(), "cannot make a file unreadable (running as root?)")
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        try {
+            val head = repo.headSha()
+            val pending = repo.loadStatus().changes
+            assertThrows(Exception::class.java) { repo.stageAndCommit("should fail", pending) }
+
+            assertEquals(head, repo.headSha(), "a failed staging pass must not move HEAD")
+            // Blobs may well have been written by the workers that did succeed; unreferenced objects
+            // are harmless and `git gc` collects them. What must not happen is a published index.
+            assertTrue(
+                gitOutput(tmp, "git diff --cached --name-only").isEmpty(),
+                "no path may be left staged after a failed parallel staging pass",
+            )
+        } finally {
+            locked.setReadable(true)
+            repo.close()
+        }
+    }
+
     @Test
     fun `readHeadContent returns null for path not in HEAD`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
@@ -702,6 +849,17 @@ class GitRepoTest {
     }
 
     private operator fun Path.div(name: String): Path = resolve(name)
+
+    /** Runs [cmd] in [cwd] and returns its trimmed stdout, for asserting against real git. */
+    private fun gitOutput(cwd: Path, cmd: String): String {
+        val proc = ProcessBuilder("sh", "-c", cmd)
+            .directory(cwd.toFile())
+            .redirectErrorStream(true)
+            .start()
+        val out = proc.inputStream.bufferedReader().readText().trim()
+        check(proc.waitFor() == 0) { "Command failed: $cmd\n$out" }
+        return out
+    }
 
     private fun runShell(cwd: Path, cmd: String) {
         cwd.createDirectories()
