@@ -1,5 +1,8 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,8 +50,22 @@ internal val META_FG = Color(0xFF7F8C9B)
 internal val COMMIT_DATE_FMT: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault())
 
+/**
+ * Git log for one path, newest first: click a commit to see what it touched, click one of those
+ * files to read that commit's diff of it, and right-click a commit to back its changes out of the
+ * working tree ([onRevertCommit]).
+ *
+ * The revert is left to the caller to carry out: it raises a confirmation, has to reconcile open
+ * buffers against the files it rewrites, and needs the commit's file list, which this panel only
+ * holds for a commit the user has expanded.
+ */
 @Composable
-fun HistoryView(repo: GitRepo, tab: Tab.History, tabsState: TabsState) {
+fun HistoryView(
+    repo: GitRepo,
+    tab: Tab.History,
+    tabsState: TabsState,
+    onRevertCommit: (CommitInfo) -> Unit = {},
+) {
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var commits by remember(tab.id) { mutableStateOf<List<CommitInfo>>(emptyList()) }
@@ -69,8 +86,13 @@ fun HistoryView(repo: GitRepo, tab: Tab.History, tabsState: TabsState) {
     }
 
     Column(modifier = Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
-        Box(modifier = Modifier.fillMaxWidth().padding(12.dp, 10.dp, 12.dp, 4.dp)) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp, 10.dp, 12.dp, 4.dp)) {
             Text("History — ${tab.file.name}")
+            // A right-click menu is the only way to reach the revert, so the header says so —
+            // there's no button on the rows to notice, and an action nobody finds is no feature.
+            if (commits.isNotEmpty()) {
+                Text("Right click a commit to undo its changes on disk", color = META_FG, fontSize = 11.sp)
+            }
         }
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading log…") }
@@ -80,13 +102,19 @@ fun HistoryView(repo: GitRepo, tab: Tab.History, tabsState: TabsState) {
             commits.isEmpty() -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
                 Text("No commits touch this path.")
             }
-            else -> CommitList(repo, tab, commits, tabsState)
+            else -> CommitList(repo, tab, commits, tabsState, onRevertCommit)
         }
     }
 }
 
 @Composable
-private fun CommitList(repo: GitRepo, tab: Tab.History, commits: List<CommitInfo>, tabsState: TabsState) {
+private fun CommitList(
+    repo: GitRepo,
+    tab: Tab.History,
+    commits: List<CommitInfo>,
+    tabsState: TabsState,
+    onRevertCommit: (CommitInfo) -> Unit,
+) {
     val listState = rememberLazyListState()
     val expandedSha = tab.expandedSha
     var expandedFiles by remember(expandedSha) { mutableStateOf<List<CommitFile>>(emptyList()) }
@@ -115,6 +143,7 @@ private fun CommitList(repo: GitRepo, tab: Tab.History, commits: List<CommitInfo
                         c = c,
                         expanded = c.sha == expandedSha,
                         onToggle = { tab.expandedSha = if (expandedSha == c.sha) null else c.sha },
+                        onRevert = { onRevertCommit(c) },
                     )
                 }
                 if (c.sha == expandedSha) {
@@ -140,17 +169,23 @@ private fun CommitList(repo: GitRepo, tab: Tab.History, commits: List<CommitInfo
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun CommitRow(c: CommitInfo, expanded: Boolean, onToggle: () -> Unit) {
+private fun CommitRow(c: CommitInfo, expanded: Boolean, onToggle: () -> Unit, onRevert: () -> Unit) {
     val date = COMMIT_DATE_FMT.format(Instant.ofEpochSecond(c.whenEpochSeconds))
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text(c.shortSha, color = SHA_FG, fontFamily = NopFonts.Mono, fontSize = 12.sp)
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(c.shortMessage, fontSize = 13.sp)
-            Text("$date · ${c.author}", color = META_FG, fontSize = 11.sp)
+    // Right-click to undo this commit — the same idiom the change list and the project tree use for
+    // their git actions, kept off the row itself so a long log stays a log. The ellipsis signals the
+    // confirmation that follows.
+    ContextMenuArea(items = { listOf(ContextMenuItem("Revert commit…") { onRevert() }) }) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable { onToggle() }.padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(c.shortSha, color = SHA_FG, fontFamily = NopFonts.Mono, fontSize = 12.sp)
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(c.shortMessage, fontSize = 13.sp)
+                Text("$date · ${c.author}", color = META_FG, fontSize = 11.sp)
+            }
         }
     }
 }

@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
+import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
@@ -124,6 +125,10 @@ fun TabbedViewerPanel(
     // Ask the app to put up the revision picker for this file; picking one opens a
     // [Tab.RevisionDiff]. Handled up there because that's where the app's dialogs live.
     onCompareWithRevision: (File) -> Unit = {},
+    // Ask the app to back a commit's changes out of the working tree, from a history tab. Handled
+    // up there for the same reason: it raises a confirmation dialog, and it has to reconcile open
+    // buffers against the files the reversal rewrites.
+    onRevertCommit: (CommitInfo) -> Unit = {},
 ) {
     val selected = tabsState.selectedTab
 
@@ -241,7 +246,7 @@ fun TabbedViewerPanel(
                     findTrigger = findInFileTrigger,
                     saveTrigger = saveTrigger,
                 )
-                is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState)
+                is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState, onRevertCommit)
                 is Tab.LocalHistory -> LocalHistoryView(
                     history = localHistory,
                     tab = current,

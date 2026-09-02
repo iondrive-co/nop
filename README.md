@@ -28,6 +28,9 @@ Download the latest installer for your platform from the
 	- `F2` — rename it in place; an open editor tab follows the file to its new name
 	- `H` — open a tab showing its git history
 	- `B` — toggle the git blame column in the editor
+- In a git history tab, right click a commit to revert it — its changes are backed out of the
+  files on disk and left there uncommitted, so you can look them over before committing. HEAD
+  doesn't move, and work done after the reverted commit is kept.
 
 ## Troubleshooting
 

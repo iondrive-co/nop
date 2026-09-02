@@ -848,6 +848,190 @@ class GitRepoTest {
         repo.close()
     }
 
+    @Test
+    fun `revertCommit undoes the last commit and leaves it uncommitted`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        (tmp / "a.txt").writeText("v2\n")
+        runShell(tmp, "git add -A && git commit -q -m two")
+        val head = gitOutput(tmp, "git rev-parse HEAD")
+
+        val repo = GitRepo.discover(tmp)!!
+        val outcome = repo.revertCommit(head)
+
+        assertEquals(listOf("a.txt"), outcome.updated, "the path was rewritten, not removed")
+        assertEquals("v1\n", (tmp / "a.txt").toFile().readText(), "the second commit's change is undone")
+        assertEquals(head, gitOutput(tmp, "git rev-parse HEAD"), "HEAD does not move")
+        assertEquals(ChangeKind.MODIFIED, repo.loadStatus().byPath["a.txt"], "lands as a pending change")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit keeps work done after the commit it reverses`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("keep me\n")
+        (tmp / "b.txt").writeText("b-v1\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        // The middle commit — the one to reverse — touches b.txt only.
+        (tmp / "b.txt").writeText("b-v2-unwanted\n")
+        runShell(tmp, "git add -A && git commit -q -m two")
+        val middle = gitOutput(tmp, "git rev-parse HEAD")
+        // Later work on a *different* file must survive: this is what separates a revert from
+        // rolling the tree back to an old revision.
+        (tmp / "a.txt").writeText("later work\n")
+        runShell(tmp, "git add -A && git commit -q -m three")
+
+        val repo = GitRepo.discover(tmp)!!
+        repo.revertCommit(middle)
+
+        assertEquals("b-v1\n", (tmp / "b.txt").toFile().readText(), "the middle commit is undone")
+        assertEquals("later work\n", (tmp / "a.txt").toFile().readText(), "the third commit's work is kept")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit deletes a file the commit added`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "kept.txt").writeText("kept\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        (tmp / "added.txt").writeText("added by the commit\n")
+        runShell(tmp, "git add -A && git commit -q -m two")
+
+        val repo = GitRepo.discover(tmp)!!
+        val outcome = repo.revertCommit(gitOutput(tmp, "git rev-parse HEAD"))
+
+        assertEquals(listOf("added.txt"), outcome.removed, "undoing an addition removes the file")
+        assertTrue(!(tmp / "added.txt").toFile().exists(), "file is off disk")
+        assertEquals(ChangeKind.REMOVED, repo.loadStatus().byPath["added.txt"], "staged as a deletion")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit brings back a file the commit deleted`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "gone.txt").writeText("still here\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        runShell(tmp, "git rm -q gone.txt && git commit -q -m two")
+
+        val repo = GitRepo.discover(tmp)!!
+        val outcome = repo.revertCommit(gitOutput(tmp, "git rev-parse HEAD"))
+
+        assertEquals(listOf("gone.txt"), outcome.updated)
+        assertEquals("still here\n", (tmp / "gone.txt").toFile().readText(), "the deletion is undone")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit reverses a merge against its first parent`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("base\n")
+        runShell(tmp, "git add -A && git commit -q -m base")
+        runShell(tmp, "git checkout -q -b side")
+        (tmp / "side.txt").writeText("from the branch\n")
+        runShell(tmp, "git add -A && git commit -q -m side")
+        runShell(tmp, "git checkout -q -")
+        runShell(tmp, "git merge -q --no-ff -m merge side")
+        val merge = gitOutput(tmp, "git rev-parse HEAD")
+
+        val repo = GitRepo.discover(tmp)!!
+        // git's `-m 1`: what the merge brought in goes away, the mainline stays.
+        val outcome = repo.revertCommit(merge)
+
+        assertEquals(listOf("side.txt"), outcome.removed, "the merged branch's file goes")
+        assertTrue(!(tmp / "side.txt").toFile().exists())
+        assertEquals("base\n", (tmp / "a.txt").toFile().readText(), "the mainline is untouched")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit refuses when the change cannot be backed out cleanly`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        (tmp / "a.txt").writeText("v2\n")
+        runShell(tmp, "git add -A && git commit -q -m two")
+        val second = gitOutput(tmp, "git rev-parse HEAD")
+        // A third commit rewrites the same line, so backing out the second no longer applies.
+        (tmp / "a.txt").writeText("v3-rewritten\n")
+        runShell(tmp, "git add -A && git commit -q -m three")
+
+        val repo = GitRepo.discover(tmp)!!
+        val failure = assertThrows(java.io.IOException::class.java) { repo.revertCommit(second) }
+
+        assertTrue(failure.message!!.contains("a.txt"), "the blocking path is named: ${failure.message}")
+        assertEquals("v3-rewritten\n", (tmp / "a.txt").toFile().readText(), "working tree left alone")
+        assertTrue(repo.loadStatus().isClean, "a refused revert leaves nothing half-applied")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit refuses rather than overwrite uncommitted edits`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        (tmp / "a.txt").writeText("v2\n")
+        runShell(tmp, "git add -A && git commit -q -m two")
+        val head = gitOutput(tmp, "git rev-parse HEAD")
+        // Work git has no copy of. Losing it is the one outcome the revert must never produce.
+        (tmp / "a.txt").writeText("v2 plus work in progress\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertThrows(java.io.IOException::class.java) { repo.revertCommit(head) }
+
+        assertEquals(
+            "v2 plus work in progress\n", (tmp / "a.txt").toFile().readText(),
+            "the uncommitted edit survives untouched",
+        )
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit reports an already reverted commit as nothing to do`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+        (tmp / "a.txt").writeText("v2\n")
+        runShell(tmp, "git add -A && git commit -q -m two")
+        val second = gitOutput(tmp, "git rev-parse HEAD")
+        // Already backed out and committed, so there is nothing of it left in the tree.
+        runShell(tmp, "git revert --no-edit $second")
+
+        val repo = GitRepo.discover(tmp)!!
+        val outcome = repo.revertCommit(second)
+
+        assertTrue(outcome.isEmpty, "nothing left to reverse: $outcome")
+        assertTrue(repo.loadStatus().isClean, "and nothing written")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit undoes a root commit`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("the very first file\n")
+        runShell(tmp, "git add -A && git commit -q -m root")
+
+        val repo = GitRepo.discover(tmp)!!
+        // A root commit started from nothing, so undoing it removes everything it introduced.
+        val outcome = repo.revertCommit(gitOutput(tmp, "git rev-parse HEAD"))
+
+        assertEquals(listOf("a.txt"), outcome.removed)
+        assertTrue(!(tmp / "a.txt").toFile().exists(), "the first commit's file is gone")
+        repo.close()
+    }
+
+    @Test
+    fun `revertCommit rejects a revision the repository does not have`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m one")
+
+        val repo = GitRepo.discover(tmp)!!
+        assertThrows(java.io.IOException::class.java) { repo.revertCommit("0".repeat(40)) }
+        assertEquals("v1\n", (tmp / "a.txt").toFile().readText(), "working tree untouched")
+        repo.close()
+    }
+
     private operator fun Path.div(name: String): Path = resolve(name)
 
     /** Runs [cmd] in [cwd] and returns its trimmed stdout, for asserting against real git. */

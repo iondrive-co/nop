@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
@@ -118,6 +119,9 @@ fun App(
     var pendingRevert by remember(projectPath) { mutableStateOf<FileChange?>(null) }
     // The whole change list pending a "Revert all?" confirmation, or null when no dialog is open.
     var pendingRevertAll by remember(projectPath) { mutableStateOf<List<FileChange>?>(null) }
+    // The commit pending a "Revert commit?" confirmation, or null when no dialog is open. Raised
+    // from a git history tab; see [askRevertCommit].
+    var pendingRevertCommit by remember(projectPath) { mutableStateOf<RevertCommitRequest?>(null) }
     // A failed git mutation (commit/stash) to show in an error dialog, or null when none. Without
     // this the exception would escape the launched coroutine and crash the window (see runGitOp).
     var gitOpError by remember(projectPath) { mutableStateOf<GitOpError?>(null) }
@@ -549,7 +553,10 @@ fun App(
 
     // Close any open tabs that point at the given file or anything under it (when it's a dir).
     // Saves the user from typing into a buffer whose underlying file just got removed.
-    fun closeTabsUnder(target: File) {
+    // [includeHistoryTabs] false spares the two log panels, whose subject is a *path* rather than
+    // its content: a history tab reads fine for a file that has just stopped existing, and closing
+    // the one the user is acting from (see performRestore) would yank the panel out from under them.
+    fun closeTabsUnder(target: File, includeHistoryTabs: Boolean = true) {
         val targetPath = target.absolutePath
         val toClose = tabsState.tabs.filter { tab ->
             val tabFile: File? = when (tab) {
@@ -557,8 +564,8 @@ fun App(
                 is Tab.Diff -> File(tab.repoRoot, tab.change.path)
                 is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
                 is Tab.RevisionDiff -> tab.file
-                is Tab.History -> tab.file
-                is Tab.LocalHistory -> tab.file
+                is Tab.History -> tab.file.takeIf { includeHistoryTabs }
+                is Tab.LocalHistory -> tab.file.takeIf { includeHistoryTabs }
                 is Tab.LocalDiff -> tab.file
                 is Tab.Terminal -> null
             }
@@ -639,6 +646,71 @@ fun App(
                         }
                     }
                     reloadStatus()
+                }
+            } finally {
+                revertInFlight = false
+            }
+        }
+    }
+
+    // Raised by a git history tab: load what the commit touched so the confirmation can show it,
+    // then put the dialog up. The file list is only for the user to read — the reversal itself is
+    // defined by the commit — so a list we fail to load still gets a dialog rather than nothing.
+    fun askRevertCommit(commit: CommitInfo) {
+        if (repo == null || revertInFlight) return
+        scope.launch {
+            val files = withContext(Dispatchers.IO) {
+                runCatching { repo.commitFiles(commit.sha) }.getOrDefault(emptyList())
+            }
+            pendingRevertCommit = RevertCommitRequest(
+                sha = commit.sha,
+                shortSha = commit.shortSha,
+                message = commit.shortMessage,
+                files = files,
+            )
+        }
+    }
+
+    // Back a commit's changes out of the working tree, leaving them uncommitted — the log's
+    // "Revert commit". Same reconciliation as performRevert, split the way the reversal itself
+    // splits: paths it rewrote are pushed into any open editor buffer, so a later autosave can't
+    // undo the reversal; paths it removed have their tabs closed. History tabs are kept — the log
+    // the user right-clicked in must not vanish under them.
+    fun performRevertCommit(request: RevertCommitRequest) {
+        if (repo == null || revertInFlight) return
+        scope.launch {
+            revertInFlight = true
+            try {
+                // Held across the block so the "nothing happened" case can be reported *after*
+                // runGitOp has returned — assigning gitOpError inside it would be overwritten by
+                // the null it returns on success.
+                var revertedNothing = false
+                gitOpError = runGitOp("Revert of ${request.shortSha} failed") {
+                    val outcome = withContext(Dispatchers.IO) { repo.revertCommit(request.sha) }
+                    revertedNothing = outcome.isEmpty
+                    for (path in outcome.updated) {
+                        val file = File(repo.rootDir.toFile(), path)
+                        // Read the file only when a buffer is actually open on it — see
+                        // performRevert: an unconditional read of a large binary OOM-crashed the app.
+                        val editors = editStore.editorsFor(file)
+                        if (editors.isNotEmpty()) {
+                            val disk = withContext(Dispatchers.IO) { runCatching { file.readText() }.getOrNull() }
+                            if (disk != null) editors.forEach { it.adoptDiskText(disk) }
+                        }
+                    }
+                    for (path in outcome.removed) {
+                        closeTabsUnder(File(repo.rootDir.toFile(), path), includeHistoryTabs = false)
+                    }
+                    reloadStatus()
+                }
+                // A commit already backed out leaves the tree untouched. Saying so beats a silent
+                // no-op the user reads as "the revert didn't work".
+                if (gitOpError == null && revertedNothing) {
+                    gitOpError = GitOpError(
+                        "Nothing to revert",
+                        "${request.shortSha} has already been backed out — the working tree holds " +
+                            "none of its changes.",
+                    )
                 }
             } finally {
                 revertInFlight = false
@@ -843,6 +915,7 @@ fun App(
                                 previewSplitRatio = previewRatio,
                                 onPreviewSplitRatioChange = { previewRatio = it },
                                 onCompareWithRevision = { pendingCompare = it },
+                                onRevertCommit = ::askRevertCommit,
                             )
                         },
                         second = {
@@ -1042,6 +1115,17 @@ fun App(
                     pendingRevertAll = null
                 },
                 onCancel = { pendingRevertAll = null },
+            )
+        }
+
+        pendingRevertCommit?.let { request ->
+            ConfirmRevertCommitDialog(
+                request = request,
+                onConfirm = {
+                    performRevertCommit(request)
+                    pendingRevertCommit = null
+                },
+                onCancel = { pendingRevertCommit = null },
             )
         }
 

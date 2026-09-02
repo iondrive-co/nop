@@ -43,7 +43,7 @@ fun ConfirmRevertDialog(change: FileChange, onConfirm: () -> Unit, onCancel: () 
         ChangeKind.MODIFIED, ChangeKind.CONFLICT ->
             "Local changes will be discarded and the file restored to the last commit."
     }
-    RevertDialogShell(title = "Revert file?", onConfirm = onConfirm, onCancel = onCancel) {
+    ConfirmGitActionDialog(title = "Revert file?", onConfirm = onConfirm, onCancel = onCancel) {
         Text(change.path, color = ChangeColors.UNTRACKED)
         Text(detail, color = ChangeColors.REMOVED)
     }
@@ -58,7 +58,7 @@ fun ConfirmRevertDialog(change: FileChange, onConfirm: () -> Unit, onCancel: () 
 @Composable
 fun ConfirmRevertAllDialog(changes: List<FileChange>, onConfirm: () -> Unit, onCancel: () -> Unit) {
     if (changes.isEmpty()) return
-    RevertDialogShell(
+    ConfirmGitActionDialog(
         title = revertAllTitle(changes.size),
         confirmLabel = "Revert all",
         onConfirm = onConfirm,
@@ -99,13 +99,18 @@ internal fun revertAllSummary(changes: List<FileChange>): List<String> {
     }
 }
 
-private fun plural(count: Int, noun: String) = if (count == 1) "1 $noun" else "$count ${noun}s"
+/** "1 file" / "3 files" — shared by every confirmation that counts what it is about to change. */
+internal fun plural(count: Int, noun: String) = if (count == 1) "1 $noun" else "$count ${noun}s"
 
 private const val MaxListedChanges = 12
 
-/** The shared frame both revert confirmations sit in: centred popup, body, Cancel/confirm row. */
+/**
+ * The shared frame the destructive-git confirmations sit in — centred popup, body, Cancel/confirm
+ * row. Used by both revert dialogs here and by the history log's restore ([ConfirmRestoreDialog]),
+ * so a warning about losing uncommitted work looks the same wherever it is raised from.
+ */
 @Composable
-private fun RevertDialogShell(
+internal fun ConfirmGitActionDialog(
     title: String,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
@@ -113,7 +118,7 @@ private fun RevertDialogShell(
     body: @Composable () -> Unit,
 ) {
     Popup(
-        popupPositionProvider = RevertCenteredPositionProvider,
+        popupPositionProvider = ConfirmCenteredPositionProvider,
         onDismissRequest = onCancel,
         properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
     ) {
@@ -138,7 +143,7 @@ private fun RevertDialogShell(
     }
 }
 
-private val RevertCenteredPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
+internal val ConfirmCenteredPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
         windowSize: IntSize,

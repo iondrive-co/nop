@@ -64,3 +64,14 @@ data class BlameLine(
     val shortSha: String? get() = sha?.take(7)
     val committed: Boolean get() = sha != null
 }
+
+/**
+ * What [GitRepo.revertCommit] did to the working tree: [updated] paths were rewritten, and
+ * [removed] paths were taken off disk (undoing a commit that added them). The two need opposite
+ * treatment from a caller reconciling open editors and tabs, which is why they come back apart
+ * rather than as one list of touched paths. Both empty means the commit's changes were already
+ * undone — there was nothing left to reverse.
+ */
+data class RevertCommitOutcome(val updated: List<String>, val removed: List<String>) {
+    val isEmpty: Boolean get() = updated.isEmpty() && removed.isEmpty()
+}

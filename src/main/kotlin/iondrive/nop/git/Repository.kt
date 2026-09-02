@@ -3,6 +3,7 @@ package iondrive.nop.git
 import iondrive.nop.PathOrder
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand
+import org.eclipse.jgit.api.errors.CheckoutConflictException
 import org.eclipse.jgit.diff.DiffEntry
 import org.eclipse.jgit.diff.DiffFormatter
 import org.eclipse.jgit.lib.Repository
@@ -16,6 +17,7 @@ import org.eclipse.jgit.treewalk.filter.PathFilterGroup
 import org.eclipse.jgit.diff.RawText
 import org.eclipse.jgit.treewalk.WorkingTreeIterator
 import org.eclipse.jgit.util.io.DisabledOutputStream
+import org.eclipse.jgit.dircache.DirCacheCheckout
 import org.eclipse.jgit.dircache.DirCacheEditor
 import org.eclipse.jgit.dircache.DirCacheEntry
 import org.eclipse.jgit.lib.ConfigConstants
@@ -23,6 +25,9 @@ import org.eclipse.jgit.lib.Constants
 import org.eclipse.jgit.lib.CoreConfig
 import org.eclipse.jgit.lib.FileMode
 import org.eclipse.jgit.lib.ObjectId
+import org.eclipse.jgit.lib.TreeFormatter
+import org.eclipse.jgit.merge.MergeStrategy
+import org.eclipse.jgit.merge.ResolveMerger
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
@@ -333,6 +338,112 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             runCatching { rm.call() }
         }
         fresh.forEach { File(rootDir.toFile(), it.path).delete() }
+    }
+
+    /**
+     * Undoes what [sha] changed, in the working tree and the index, leaving the reversal as
+     * uncommitted changes — `git revert --no-commit <sha>`. HEAD does not move and no commit is
+     * made, so the reversal arrives as ordinary pending changes the user can inspect, amend or
+     * throw away like any other. This is the gesture IntelliJ's log calls "Revert Commit", and it
+     * is not the same as rolling files back to how the commit left them: reverting the middle of
+     * three commits keeps the third one's work.
+     *
+     * Reverting is a three-way merge — base is the commit's own tree, "ours" is HEAD, "theirs" is
+     * what the commit started from — which is why later work on the same files survives, and why
+     * the reversal can fail to apply. It fails as a unit: a commit whose changes can't be reversed
+     * cleanly, or whose paths carry uncommitted edits that would be overwritten, throws with those
+     * paths named and leaves the working tree exactly as it was. Nothing is half-applied.
+     *
+     * A merge commit is reversed against its first parent (git's `-m 1`): the changes the merge
+     * brought in go away, and the mainline is what stays. Returns which paths the reversal
+     * rewrote and which it removed, so the caller can reconcile open editors and tabs.
+     */
+    fun revertCommit(sha: String): RevertCommitOutcome {
+        val commitId = repository.resolve(sha) ?: throw IOException("No such revision: $sha")
+        val headId = repository.resolve(Constants.HEAD)
+            ?: throw IOException("This branch has no commits yet, so there is nothing to revert onto.")
+        RevWalk(repository).use { walk ->
+            val commit = walk.parseCommit(commitId)
+            val head = walk.parseCommit(headId)
+            // "Theirs" is the state the commit started from. A root commit started from nothing, so
+            // its reversal is measured against the empty tree — inserted rather than assumed
+            // present, since a repository need never have stored it.
+            val before: ObjectId = if (commit.parentCount > 0) {
+                walk.parseCommit(commit.getParent(0)).id
+            } else {
+                emptyTreeId()
+            }
+
+            // In-core deliberately: a working-tree merger writes conflict markers into the files as
+            // it goes and only then reports failure, which would leave the user holding a corrupted
+            // tree *and* an error. Computing the result tree in memory means a reversal that can't
+            // be applied changes nothing at all, and the checkout below is the only thing that ever
+            // touches disk.
+            val merger = MergeStrategy.RECURSIVE.newMerger(repository, true) as ResolveMerger
+            merger.setBase(commit.tree)
+            merger.setCommitNames(arrayOf("BASE", "HEAD", sha))
+            if (!merger.merge(head, before)) {
+                // Nothing has been written, so the message is the whole of the outcome: naming the
+                // paths is what tells the user which files to look at.
+                // getFailingPaths() is null unless the merge hit a hard failure, so it can only be
+                // read defensively; the unmerged paths are the usual answer.
+                val paths = (merger.unmergedPaths.orEmpty() + merger.failingPaths?.keys.orEmpty()).distinct()
+                throw IOException(conflictMessage(sha, paths))
+            }
+            // Already reversed — by an earlier revert, or by later work that happened to undo it.
+            // Checking out an unchanged tree would be a no-op that still reported success.
+            if (head.tree.id == merger.resultTreeId) return RevertCommitOutcome(emptyList(), emptyList())
+
+            val checkout = DirCacheCheckout(repository, head.tree.id, repository.lockDirCache(), merger.resultTreeId)
+            // Refuse rather than overwrite: uncommitted edits to a path the reversal touches are
+            // work git has no copy of, and losing them is the one outcome this must never produce.
+            checkout.setFailOnConflict(true)
+            try {
+                checkout.checkout()
+            } catch (e: CheckoutConflictException) {
+                throw IOException(conflictMessage(sha, checkout.conflicts.ifEmpty { listOf(e.message.orEmpty()) }))
+            }
+            // What changed is read off the two trees rather than out of the checkout: the merger
+            // writes most of the working-tree updates itself before DirCacheCheckout runs, so the
+            // checkout's own lists see only the remainder. The trees are the whole answer.
+            return changedPaths(head.tree.id, merger.resultTreeId)
+        }
+    }
+
+    /**
+     * How [to] differs from [from], split the way a caller reconciling open files needs it: paths
+     * the new tree drops are [RevertCommitOutcome.removed], everything else it touches is
+     * [RevertCommitOutcome.updated].
+     */
+    private fun changedPaths(from: ObjectId, to: ObjectId): RevertCommitOutcome {
+        val reader = repository.newObjectReader()
+        val oldTree = CanonicalTreeParser().apply { reset(reader, from) }
+        val newTree = CanonicalTreeParser().apply { reset(reader, to) }
+        val formatter = DiffFormatter(DisabledOutputStream.INSTANCE)
+        formatter.setRepository(repository)
+        val updated = ArrayList<String>()
+        val removed = ArrayList<String>()
+        for (entry in formatter.scan(oldTree, newTree)) {
+            if (entry.changeType == DiffEntry.ChangeType.DELETE) removed.add(entry.oldPath)
+            else updated.add(entry.newPath)
+        }
+        return RevertCommitOutcome(updated = updated, removed = removed)
+    }
+
+    /** The empty tree, stored if this repository has never had cause to hold it. */
+    private fun emptyTreeId(): ObjectId = repository.newObjectInserter().use { inserter ->
+        val id = inserter.insert(TreeFormatter())
+        inserter.flush()
+        id
+    }
+
+    /** Why a revert couldn't be applied, with the paths that stopped it — capped so it stays readable. */
+    private fun conflictMessage(sha: String, paths: List<String>): String {
+        val shown = paths.filter { it.isNotEmpty() }.take(10)
+        val more = paths.size - shown.size
+        val list = shown.joinToString("\n") + if (more > 0) "\n…and $more more" else ""
+        return "Reverting ${sha.take(7)} would conflict with what is on disk. " +
+            "Commit or revert your changes to these paths first, then try again:\n$list"
     }
 
     /**
