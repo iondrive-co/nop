@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitStatus
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -82,8 +84,24 @@ fun CommitPanel(
     resetInFlight: Boolean = false,
     onSoftReset: () -> Unit = {},
     revertInFlight: Boolean = false,
+    // How far the running commit has got, or null when nothing is known yet — the commit button's
+    // readout. See [CommitProgressBar].
+    commitProgress: CommitProgress? = null,
+    // Bumped by the caller each time a commit or stash lands, which empties the message field.
+    messageClearTrigger: Int = 0,
 ) {
     val messageState = remember { TextFieldState() }
+    // Emptied when a commit or stash has actually landed, never on the click that starts one.
+    // Clearing on click cost the user their message whenever the commit didn't run — and because
+    // the Commit button needs a non-blank message, it also left the button greyed out on an empty
+    // field, which reads exactly like a commit still in flight. A counter rather than a flag: two
+    // commits in a row must clear twice, and a flag would need a reset handshake to do that.
+    LaunchedEffect(messageClearTrigger) {
+        if (messageClearTrigger > 0) messageState.clearText()
+    }
+    // Ticks only while a commit runs, so the elapsed time and ETA in the button keep moving
+    // between progress reports.
+    val now = rememberTickingClock(running = commitInFlight)
     val inRepo = status.branch != null
     val anyChanges = !status.isClean
     val density = LocalDensity.current
@@ -150,24 +168,32 @@ fun CommitPanel(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    DefaultButton(
-                        onClick = {
-                            val msg = messageState.text.toString().trim()
-                            if (msg.isNotEmpty()) {
-                                val included = status.changes.filter { it.path in selectedPaths }
-                                onCommit(msg, included)
-                                messageState.clearText()
-                            }
-                        },
-                        enabled = !commitInFlight && messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
-                    ) {
-                        Text(if (commitInFlight) "Committing…" else "Commit")
+                    val commitButton: @Composable () -> Unit = {
+                        DefaultButton(
+                            onClick = {
+                                val msg = messageState.text.toString().trim()
+                                if (msg.isNotEmpty()) {
+                                    val included = status.changes.filter { it.path in selectedPaths }
+                                    onCommit(msg, included)
+                                }
+                            },
+                            enabled = !commitInFlight && messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
+                        ) {
+                            // A disabled button is all a commit of a large change set used to show
+                            // for minutes at a time, so while one runs the label becomes a progress
+                            // bar with the percentage and an ETA in it.
+                            if (commitInFlight) CommitProgressBar(commitProgress, now) else Text("Commit")
+                        }
+                    }
+                    if (commitInFlight) {
+                        Tooltip(tooltip = { Text(commitProgressDetail(commitProgress, now)) }) { commitButton() }
+                    } else {
+                        commitButton()
                     }
                     OutlinedButton(
                         onClick = {
                             val msg = messageState.text.toString().trim()
                             onStash(msg)
-                            messageState.clearText()
                         },
                         enabled = !stashInFlight,
                     ) {

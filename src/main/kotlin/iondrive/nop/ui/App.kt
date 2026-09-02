@@ -10,6 +10,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +23,7 @@ import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
 import iondrive.nop.Settings
 import iondrive.nop.git.CommitInfo
+import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
@@ -44,6 +46,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -108,6 +111,15 @@ fun App(
     var stashes by remember(projectPath) { mutableStateOf<List<StashEntry>>(emptyList()) }
     var selectedPaths by remember(projectPath) { mutableStateOf(emptySet<String>()) }
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
+    // How far the running commit has got, for the commit button's progress bar. A StateFlow and
+    // not snapshot state because GitRepo reports it from its staging worker threads, which have no
+    // business touching composition state; collecting it hands the updates back on this thread.
+    val commitProgressFlow = remember(projectPath) { MutableStateFlow<CommitProgress?>(null) }
+    val commitProgress by commitProgressFlow.collectAsState()
+    // Bumped when a commit or stash lands, which is the commit panel's cue to empty the message
+    // field. See CommitPanel: it must not clear on the click, because the click does not always
+    // end in a commit.
+    var messageClearTrigger by remember(projectPath) { mutableStateOf(0) }
     var stashInFlight by remember(projectPath) { mutableStateOf(false) }
     var refreshing by remember(projectPath) { mutableStateOf(false) }
     // Whether HEAD has a parent to soft-reset back onto, and whether a soft reset is in flight.
@@ -940,7 +952,20 @@ fun App(
                                             if (repo != null && !commitInFlight) {
                                                 scope.launch {
                                                     commitInFlight = true
+                                                    // Timed from the click, not from the staging call:
+                                                    // the status check below is part of the wait the
+                                                    // user is sitting through.
+                                                    val startedAt = System.currentTimeMillis()
+                                                    commitProgressFlow.value =
+                                                        CommitProgress(CommitProgress.Phase.CHECKING, startedAtMillis = startedAt)
                                                     try {
+                                                        // Held across the block so the "nothing was
+                                                        // committed" case can be reported after
+                                                        // runGitOp returns — assigning gitOpError
+                                                        // inside it would be overwritten by the null
+                                                        // it returns on success (cf.
+                                                        // performRevertCommit).
+                                                        var movedPaths = emptySet<String>()
                                                         gitOpError = runGitOp("Commit failed") {
                                                             // Refresh before committing: if new unreviewed
                                                             // changes appeared since the last load, show them
@@ -953,16 +978,39 @@ fun App(
                                                                 status = fresh
                                                                 selectedPaths = fresh.changes.map { it.path }.toSet()
                                                                 fsRefreshKey += 1
+                                                                movedPaths = newPaths
                                                             } else {
                                                                 withContext(Dispatchers.IO) {
-                                                                    repo.stageAndCommit(message, included)
+                                                                    repo.stageAndCommit(
+                                                                        message,
+                                                                        included,
+                                                                        startedAtMillis = startedAt,
+                                                                        onProgress = { commitProgressFlow.value = it },
+                                                                    )
                                                                 }
                                                                 rememberMessage(message)
+                                                                messageClearTrigger += 1
+                                                                // The button stays disabled through the
+                                                                // reload, so it keeps reporting: on a big
+                                                                // repo this walk is seconds of its own.
+                                                                commitProgressFlow.value = CommitProgress(
+                                                                    CommitProgress.Phase.REFRESHING,
+                                                                    startedAtMillis = startedAt,
+                                                                )
                                                                 reloadStatus()
                                                             }
                                                         }
+                                                        // A click that stood the commit down looks
+                                                        // no different from one that started a ten
+                                                        // minute commit, so say what happened. The
+                                                        // message field keeps its text, ready for
+                                                        // the second click.
+                                                        if (gitOpError == null && movedPaths.isNotEmpty()) {
+                                                            gitOpError = changeListMovedNotice(movedPaths)
+                                                        }
                                                     } finally {
                                                         commitInFlight = false
+                                                        commitProgressFlow.value = null
                                                     }
                                                 }
                                             }
@@ -977,6 +1025,7 @@ fun App(
                                                                 repo.stashCreate(message.ifBlank { null })
                                                             }
                                                             rememberMessage(message)
+                                                            messageClearTrigger += 1
                                                             reloadStatus()
                                                         }
                                                     } finally {
@@ -986,6 +1035,8 @@ fun App(
                                             }
                                         },
                                         commitInFlight = commitInFlight,
+                                        commitProgress = commitProgress,
+                                        messageClearTrigger = messageClearTrigger,
                                         messageHeight = commitMessageHeight,
                                         onMessageHeightChange = { commitMessageHeight = it },
                                         stashInFlight = stashInFlight,

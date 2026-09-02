@@ -40,6 +40,8 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 class GitRepo(val rootDir: Path, private val repository: Repository) : AutoCloseable {
     private val git: Git = Git.wrap(repository)
@@ -57,12 +59,27 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * it throws, so a file that vanishes mid-walk (a build or download still writing into the tree)
      * now leaves the index untouched instead of stranding the paths that happened to be staged
      * before the failure, half-committed and needing an unstage by hand.
+     *
+     * [onProgress] is called as the commit advances, for the commit button's readout. It is
+     * invoked from the staging worker threads as well as this one, so it must be cheap and
+     * thread-safe; snapshots arrive in order and never go backwards. [startedAtMillis] is the
+     * clock the reported elapsed time and ETA run from — pass the moment the *user* asked for the
+     * commit, which is earlier than this call by however long the pre-commit status check took.
      */
-    fun stageAndCommit(message: String, changes: Collection<FileChange>): String {
+    fun stageAndCommit(
+        message: String,
+        changes: Collection<FileChange>,
+        startedAtMillis: Long = System.currentTimeMillis(),
+        onProgress: (CommitProgress) -> Unit = {},
+    ): String {
         val (removed, staged) = changes.partition {
             it.kind == ChangeKind.REMOVED || it.kind == ChangeKind.MISSING
         }
-        if (staged.isNotEmpty() && !stageBlobsInParallel(staged)) {
+        val progress = ProgressEmitter(onProgress, startedAtMillis, filesTotal = staged.size)
+        progress.enter(CommitProgress.Phase.STAGING)
+        if (staged.isNotEmpty() && !stageBlobsInParallel(staged, progress)) {
+            // AddCommand reports nothing as it walks, so this path stays on elapsed time only:
+            // the emitter's byte total is still 0 and the button shows "Staging… 1m 20s".
             val add = git.add()
             staged.forEach { add.addFilepattern(it.path) }
             add.call()
@@ -72,8 +89,89 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             removed.forEach { rm.addFilepattern(it.path) }
             rm.call()
         }
+        progress.enter(CommitProgress.Phase.COMMITTING)
         val commit = git.commit().setMessage(message).call()
         return commit.name
+    }
+
+    /**
+     * Collects the byte and file counts a commit reports back through
+     * [stageAndCommit]'s `onProgress`, and delivers snapshots of them.
+     *
+     * Every worker in [stageBlobsInParallel] calls [advance] as it finishes a blob, so the counters
+     * are atomics; delivery is throttled to [MIN_EMIT_INTERVAL_NANOS] because a change set of
+     * thousands of small files would otherwise emit thousands of times a second for a readout that
+     * a user reads once a second. Phase changes bypass the throttle — they are rare and each one
+     * changes what the button says.
+     *
+     * Reading the counters and calling the sink happens under a lock so the delivered snapshot is
+     * self-consistent (a fraction can't be built from one worker's byte count and another's file
+     * count) and monotone, which is what lets the UI trust the numbers to only ever go up.
+     */
+    private class ProgressEmitter(
+        private val sink: (CommitProgress) -> Unit,
+        private val startedAtMillis: Long,
+        private val filesTotal: Int,
+    ) {
+        private val bytesDone = AtomicLong()
+        private val bytesTotal = AtomicLong()
+        private val filesDone = AtomicInteger()
+        private val lastEmitNanos = AtomicLong(Long.MIN_VALUE)
+        private val lock = Any()
+
+        @Volatile
+        private var phase = CommitProgress.Phase.STAGING
+
+        /** Switches to [next] and reports it immediately. */
+        fun enter(next: CommitProgress.Phase) {
+            phase = next
+            emit(force = true)
+        }
+
+        /** Declares how many bytes the whole staging pass covers, once the plan is known. */
+        fun expect(bytes: Long) {
+            bytesTotal.set(bytes)
+            emit(force = true)
+        }
+
+        /** Records [files] files totalling [bytes] as staged. */
+        fun advance(bytes: Long, files: Int) {
+            bytesDone.addAndGet(bytes)
+            filesDone.addAndGet(files)
+            emit(force = false)
+        }
+
+        private fun emit(force: Boolean) {
+            val now = System.nanoTime()
+            if (!force) {
+                val last = lastEmitNanos.get()
+                if (now - last < MIN_EMIT_INTERVAL_NANOS) return
+                // A worker that loses this race just skips its emit; the next one covers it, and
+                // the phase change at the end of the pass reports the final counts regardless.
+                if (!lastEmitNanos.compareAndSet(last, now)) return
+            } else {
+                lastEmitNanos.set(now)
+            }
+            // The sink runs under the lock too: reading the counters and delivering them has to be
+            // one step, or a worker holding an older snapshot could deliver it after a newer one.
+            synchronized(lock) {
+                sink(
+                    CommitProgress(
+                        phase = phase,
+                        bytesDone = bytesDone.get(),
+                        bytesTotal = bytesTotal.get(),
+                        filesDone = filesDone.get(),
+                        filesTotal = filesTotal,
+                        startedAtMillis = startedAtMillis,
+                    )
+                )
+            }
+        }
+
+        private companion object {
+            /** ~8 snapshots a second: finer than anyone reads, coarser than a per-file storm. */
+            const val MIN_EMIT_INTERVAL_NANOS = 120_000_000L
+        }
     }
 
     /**
@@ -99,13 +197,20 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * among them), any .gitattributes that could turn one into play, and symlinks all go back to
      * AddCommand, as does a change set too small for the threads to pay for themselves.
      */
-    private fun stageBlobsInParallel(staged: List<FileChange>): Boolean {
+    private fun stageBlobsInParallel(staged: List<FileChange>, progress: ProgressEmitter): Boolean {
         if (staged.size < PARALLEL_STAGE_MIN_FILES) return false
         val plan = planStaging(staged)
         if (plan.fast.size < PARALLEL_STAGE_MIN_FILES) return false
-        if (plan.fast.sumOf { it.file.length() } < PARALLEL_STAGE_MIN_BYTES &&
-            plan.fast.size < PARALLEL_STAGE_ALWAYS_FILES
-        ) return false
+        val fastBytes = plan.fast.sumOf { it.file.length() }
+        if (fastBytes < PARALLEL_STAGE_MIN_BYTES && plan.fast.size < PARALLEL_STAGE_ALWAYS_FILES) return false
+
+        // The plan is what makes progress measurable, and this is the earliest point it exists: now
+        // the total is known, the button can switch from an elapsed clock to a percentage and ETA.
+        // The filtered half counts towards the total even though AddCommand won't report as it
+        // goes — it lands as one step below — so the percentage covers the whole change set rather
+        // than jumping backwards when the parallel half starts.
+        val slowBytes = plan.slow.sumOf { File(rootDir.toFile(), it.path).length() }
+        progress.expect(fastBytes + slowBytes)
 
         // Anything needing conversion goes through AddCommand first. It takes and releases the
         // index lock itself, so it has to finish before the fast half locks the index in turn.
@@ -113,7 +218,9 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             val add = git.add()
             plan.slow.forEach { add.addFilepattern(it.path) }
             add.call()
+            progress.advance(slowBytes, plan.slow.size)
         }
+        progress.enter(CommitProgress.Phase.WRITING)
 
         val workers = Runtime.getRuntime().availableProcessors().coerceIn(2, 16)
         val queue = ConcurrentLinkedQueue(plan.fast)
@@ -144,6 +251,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
                                     executable = entry.executable,
                                 )
                             )
+                            progress.advance(length, 1)
                         }
                         inserter.flush()
                     }
@@ -152,6 +260,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             // invokeAll waits for every worker, so no insert is still running when we unwind.
             pool.invokeAll(tasks).forEach { it.get() }
 
+            progress.enter(CommitProgress.Phase.COMMITTING)
             val editor = dirCache.editor()
             for (blob in done) {
                 editor.add(object : DirCacheEditor.PathEdit(blob.path) {

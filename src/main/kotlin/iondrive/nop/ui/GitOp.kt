@@ -40,3 +40,30 @@ internal fun Throwable.userMessage(): String {
         .toList()
     return messages.joinToString("\n").ifEmpty { this::class.java.simpleName }
 }
+
+/**
+ * The notice for a commit abandoned because the change list moved under it: paths appeared in the
+ * working tree between the panel's last load and the click, so committing would have recorded a
+ * snapshot the user never reviewed.
+ *
+ * Reported rather than left silent. Standing the commit down is the right call — but a click that
+ * quietly does nothing is indistinguishable from one that started a long commit, which is exactly
+ * how a commit that never ran comes to look like a commit that has been running for ten minutes.
+ * (Rendered by [GitErrorDialog], which is the app's one notice surface; cf. "Nothing to revert".)
+ */
+internal fun changeListMovedNotice(newPaths: Collection<String>): GitOpError {
+    val listed = newPaths.sorted()
+    val shown = listed.take(NOTICE_PATH_CAP)
+    val rest = listed.size - shown.size
+    return GitOpError(
+        "Nothing committed — the change list moved",
+        "${plural(listed.size, "change")} appeared in the working tree since the list was loaded, " +
+            "so nothing was committed. They are now listed and selected — check them, then commit " +
+            "again.\n\n" +
+            shown.joinToString("\n") +
+            if (rest > 0) "\n…and $rest more" else "",
+    )
+}
+
+/** Enough paths to recognise what turned up, without a dialog the size of the change list. */
+private const val NOTICE_PATH_CAP = 12

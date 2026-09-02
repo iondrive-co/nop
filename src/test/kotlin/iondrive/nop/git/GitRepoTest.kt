@@ -278,6 +278,79 @@ class GitRepoTest {
         )
     }
 
+    /**
+     * Files the fast path is guaranteed to take, whatever the machine's git config says. A NUL in
+     * the first 8k is git's own binary test, and binary content converts to nothing under
+     * autocrlf — which this box sets globally, and which sends plain text to AddCommand instead.
+     */
+    private fun seedBinaryTree(tmp: Path, count: Int = 70): Long {
+        (tmp / "data").createDirectories()
+        var total = 0L
+        repeat(count) { i ->
+            val body = ByteArray(512 + i) { (it % 251).toByte() }
+            body[0] = 0
+            (tmp / "data" / "b$i.bin").toFile().writeBytes(body)
+            total += body.size
+        }
+        return total
+    }
+
+    @Test
+    fun `parallel staging reports progress that ends on the whole change set`(@TempDir tmp: Path) {
+        // What the commit button's bar is drawn from. The guarantees it relies on are that the
+        // reported total covers every staged byte, that the counters only ever climb, and that the
+        // last word is a phase past the writing — otherwise a finished commit leaves a bar short
+        // of its end.
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        val expectedBytes = seedBinaryTree(tmp)
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val seen = java.util.Collections.synchronizedList(mutableListOf<CommitProgress>())
+        val changes = repo.loadStatus().changes
+        repo.stageAndCommit("bulk", changes, startedAtMillis = 1234L) { seen.add(it) }
+        repo.close()
+
+        val reports = seen.toList()
+        assertTrue(
+            reports.any { it.phase == CommitProgress.Phase.WRITING },
+            "this change set must go down the parallel path, or there is no progress to report",
+        )
+        val last = reports.last()
+        assertEquals(CommitProgress.Phase.COMMITTING, last.phase, "the last report is the commit itself")
+        assertEquals(expectedBytes, last.bytesTotal, "the total must cover every byte staged")
+        assertEquals(expectedBytes, last.bytesDone, "every staged byte must be reported as done")
+        assertEquals(changes.size, last.filesDone, "every staged file must be reported as done")
+        assertEquals(changes.size, last.filesTotal)
+        assertEquals(1f, last.fraction, "a finished staging pass must read as a full bar")
+        assertTrue(reports.all { it.startedAtMillis == 1234L }, "the caller's clock is carried through")
+
+        for ((before, after) in reports.zipWithNext()) {
+            assertTrue(after.bytesDone >= before.bytesDone, "bytes must not go backwards: $before then $after")
+            assertTrue(after.filesDone >= before.filesDone, "files must not go backwards: $before then $after")
+        }
+    }
+
+    @Test
+    fun `a commit too small to go parallel reports phases without a byte total`(@TempDir tmp: Path) {
+        // AddCommand reports nothing as it walks, so there is no honest total to quote here. The
+        // button falls back to elapsed time, which needs the phases to still arrive.
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "one.txt").writeText("hello\n")
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val seen = mutableListOf<CommitProgress>()
+        repo.stageAndCommit("small", repo.loadStatus().changes) { seen.add(it) }
+        repo.close()
+
+        assertEquals(
+            listOf(CommitProgress.Phase.STAGING, CommitProgress.Phase.COMMITTING),
+            seen.map { it.phase },
+        )
+        assertTrue(seen.all { it.bytesTotal == 0L }, "nothing measurable ran, so nothing may be quoted")
+        assertTrue(seen.all { it.fraction == null }, "a bar cannot be drawn from an unknown total")
+        assertEquals(1, seen.last().filesTotal)
+    }
+
     @Test
     fun `parallel staging leaves the index untouched when one path cannot be staged`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
