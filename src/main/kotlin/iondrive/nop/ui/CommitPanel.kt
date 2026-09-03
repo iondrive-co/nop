@@ -72,7 +72,7 @@ fun CommitPanel(
     onRevert: (FileChange) -> Unit,
     onRevertAll: () -> Unit,
     onCommit: (message: String, included: List<FileChange>) -> Unit,
-    onStash: (message: String) -> Unit,
+    onStash: (message: String, included: List<FileChange>) -> Unit,
     commitInFlight: Boolean,
     messageHeight: Dp,
     onMessageHeightChange: (Dp) -> Unit,
@@ -177,7 +177,8 @@ fun CommitPanel(
                                     onCommit(msg, included)
                                 }
                             },
-                            enabled = !commitInFlight && messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
+                            enabled = !commitInFlight && !stashInFlight && !revertInFlight &&
+                                messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
                         ) {
                             // A disabled button is all a commit of a large change set used to show
                             // for minutes at a time, so while one runs the label becomes a progress
@@ -190,14 +191,20 @@ fun CommitPanel(
                     } else {
                         commitButton()
                     }
-                    OutlinedButton(
-                        onClick = {
-                            val msg = messageState.text.toString().trim()
-                            onStash(msg)
-                        },
-                        enabled = !stashInFlight,
-                    ) {
-                        Text(if (stashInFlight) "Stashing…" else "Stash all")
+                    // Takes the same tick marks as Commit — the shelf is where a change goes
+                    // when it isn't ready to be committed, so choosing what goes on it is the same
+                    // choice. The tooltip says so, since the label no longer can.
+                    Tooltip(tooltip = { Text("Move the selected files' changes onto the shelf, leaving the rest alone") }) {
+                        OutlinedButton(
+                            onClick = {
+                                val msg = messageState.text.toString().trim()
+                                onStash(msg, status.changes.filter { it.path in selectedPaths })
+                            },
+                            enabled = !stashInFlight && !commitInFlight && !revertInFlight &&
+                                selectedPaths.isNotEmpty(),
+                        ) {
+                            Text(if (stashInFlight) "Stashing…" else "Stash")
+                        }
                     }
                 }
             }

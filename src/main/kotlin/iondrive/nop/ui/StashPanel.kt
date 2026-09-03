@@ -20,8 +20,8 @@ import org.jetbrains.jewel.ui.component.Text
 /**
  * The Stash bottom tab: the shelf of stashed working-tree snapshots, each with Pop/Drop actions.
  * Lives in its own tab (rather than inline in the commit panel) so a long shelf doesn't crowd out
- * the change list. Creating a stash still happens from the commit panel's "Stash all" button —
- * this view manages the stashes that already exist.
+ * the change list. Creating a stash still happens from the commit panel's "Stash" button, over the
+ * files ticked there — this view manages the stashes that already exist.
  */
 @Composable
 fun StashPanel(
@@ -33,7 +33,7 @@ fun StashPanel(
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         if (stashes.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No stashes — use \"Stash all\" in the Commit tab to shelve your changes")
+                Text("No stashes — use \"Stash\" in the Commit tab to shelve the files you tick there")
             }
             return
         }

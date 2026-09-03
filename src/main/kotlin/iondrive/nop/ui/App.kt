@@ -1175,6 +1175,10 @@ fun App(
                                                                     repo.stageAndCommit(
                                                                         message,
                                                                         included,
+                                                                        // Unticked paths are held out
+                                                                        // of the commit, not merely
+                                                                        // left unstaged.
+                                                                        partial = included.size != status.changes.size,
                                                                         startedAtMillis = startedAt,
                                                                         onProgress = { commitProgressFlow.value = it },
                                                                     )
@@ -1206,14 +1210,14 @@ fun App(
                                                 }
                                             }
                                         },
-                                        onStash = { message ->
+                                        onStash = { message, included ->
                                             if (repo != null && !stashInFlight) {
                                                 scope.launch {
                                                     stashInFlight = true
                                                     try {
                                                         gitOpError = runGitOp("Stash failed") {
                                                             withContext(Dispatchers.IO) {
-                                                                repo.stashCreate(message.ifBlank { null })
+                                                                repo.stashCreate(message.ifBlank { null }, included)
                                                             }
                                                             rememberMessage(message)
                                                             messageClearTrigger += 1

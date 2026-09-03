@@ -9,22 +9,31 @@ import org.eclipse.jgit.diff.DiffFormatter
 import org.eclipse.jgit.lib.Repository
 import org.eclipse.jgit.revwalk.RevWalk
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder
+import org.eclipse.jgit.treewalk.AbstractTreeIterator
 import org.eclipse.jgit.treewalk.EmptyTreeIterator
 import org.eclipse.jgit.treewalk.CanonicalTreeParser
 import org.eclipse.jgit.treewalk.FileTreeIterator
 import org.eclipse.jgit.treewalk.TreeWalk
+import org.eclipse.jgit.treewalk.filter.AndTreeFilter
+import org.eclipse.jgit.treewalk.filter.IndexDiffFilter
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup
+import org.eclipse.jgit.treewalk.filter.SkipWorkTreeFilter
 import org.eclipse.jgit.diff.RawText
 import org.eclipse.jgit.treewalk.WorkingTreeIterator
 import org.eclipse.jgit.util.io.DisabledOutputStream
+import org.eclipse.jgit.dircache.DirCache
 import org.eclipse.jgit.dircache.DirCacheCheckout
 import org.eclipse.jgit.dircache.DirCacheEditor
 import org.eclipse.jgit.dircache.DirCacheEntry
+import org.eclipse.jgit.dircache.DirCacheIterator
+import org.eclipse.jgit.lib.CommitBuilder
 import org.eclipse.jgit.lib.ConfigConstants
 import org.eclipse.jgit.lib.Constants
 import org.eclipse.jgit.lib.CoreConfig
 import org.eclipse.jgit.lib.FileMode
 import org.eclipse.jgit.lib.ObjectId
+import org.eclipse.jgit.lib.ObjectInserter
+import org.eclipse.jgit.lib.PersonIdent
 import org.eclipse.jgit.lib.TreeFormatter
 import org.eclipse.jgit.merge.MergeStrategy
 import org.eclipse.jgit.merge.ResolveMerger
@@ -60,6 +69,16 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * now leaves the index untouched instead of stranding the paths that happened to be staged
      * before the failure, half-committed and needing an unstage by hand.
      *
+     * Pass [partial] when [changes] deliberately leaves some of the working tree's pending changes
+     * out, which makes the commit path-limited (`git commit -- <paths>`) instead of a commit of the
+     * index as it stands. It matters because the index is not always nop's alone: a path staged
+     * from a terminal shows up as a pending change like any other, and unticking it has to keep it
+     * out of the commit rather than merely decline to re-stage it. The whole-working-tree case
+     * skips the pathspec because it cannot arise there — every index entry that differs from HEAD
+     * is a pending change, so a commit of them all is a commit of the index — and because a
+     * pathspec makes JGit rebuild the commit's tree from disk, re-reading every file the staging
+     * above has just read.
+     *
      * [onProgress] is called as the commit advances, for the commit button's readout. It is
      * invoked from the staging worker threads as well as this one, so it must be cheap and
      * thread-safe; snapshots arrive in order and never go backwards. [startedAtMillis] is the
@@ -69,6 +88,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     fun stageAndCommit(
         message: String,
         changes: Collection<FileChange>,
+        partial: Boolean = false,
         startedAtMillis: Long = System.currentTimeMillis(),
         onProgress: (CommitProgress) -> Unit = {},
     ): String {
@@ -90,7 +110,15 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             rm.call()
         }
         progress.enter(CommitProgress.Phase.COMMITTING)
-        val commit = git.commit().setMessage(message).call()
+        val commit = git.commit().setMessage(message).apply {
+            if (partial) {
+                changes.forEach { setOnly(it.path) }
+                // JGit refuses an empty commit once a pathspec is set, where a commit of the whole
+                // index allows one. Keep the looser rule: a change set that races to a no-op is not
+                // worth an error dialog, and never was on the other path.
+                setAllowEmpty(true)
+            }
+        }.call()
         return commit.name
     }
 
@@ -569,14 +597,204 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         }.getOrDefault(emptyList())
 
     /**
-     * Stash all uncommitted changes (including untracked) to the shelf.
-     * Returns the new stash SHA, or null if the working tree had nothing to stash.
+     * Moves [changes] onto the shelf and restores just those paths to their committed state —
+     * `git stash push -- <paths>`. Pending changes the caller left out stay in the working tree,
+     * and stay out of the shelf entry. Returns the new stash SHA, or null when nothing selected
+     * turned out to have anything to stash.
+     *
+     * JGit's StashCreateCommand takes no pathspec, so this is its algorithm — a HEAD / index /
+     * working-tree walk building the two or three commits a shelf entry is made of — with the two
+     * changes a partial stash needs. A path the caller didn't select is pinned to its HEAD state in
+     * both trees the entry carries, so applying it later can neither resurrect that path's change
+     * nor revert it; and the whole-tree hard reset the command finishes with narrows to
+     * [revertFiles] over the selected paths, the only part of the working tree allowed to move.
+     *
+     * The index is locked for the walk but never written: the edits below exist only to shape the
+     * trees the stash commits point at, and the real index is put back by [revertFiles] once the
+     * entry is safely on the shelf.
      */
-    fun stashCreate(message: String? = null): String? {
-        val cmd = git.stashCreate().setIncludeUntracked(true)
-        if (!message.isNullOrBlank()) cmd.setWorkingDirectoryMessage(message)
-        val commit = cmd.call() ?: return null
-        return commit.name
+    fun stashCreate(message: String? = null, changes: Collection<FileChange>): String? {
+        if (changes.isEmpty()) return null
+        val wanted = changes.mapTo(HashSet()) { it.path }
+        val head = repository.exactRef(Constants.HEAD)?.takeIf { it.objectId != null }
+            ?: throw IOException("This branch has no commits yet, so there is nothing to stash against.")
+        val person = PersonIdent(repository)
+        val stashId: ObjectId
+        val shelved = HashSet<String>()
+        repository.newObjectReader().use { reader ->
+            val headCommit = RevWalk(reader).use { it.parseCommit(head.objectId) }
+            val cache = repository.lockDirCache()
+            try {
+                repository.newObjectInserter().use { inserter ->
+                    // Paths the caller didn't select, to be pinned back to HEAD before either tree
+                    // is written; the selected paths' working-tree state, as edits over the index;
+                    // and the selected untracked files, which a stash carries in a third parent.
+                    val heldOut = ArrayList<DirCacheEditor.PathEdit>()
+                    val wtEdits = ArrayList<DirCacheEditor.PathEdit>()
+                    val wtDeletes = ArrayList<String>()
+                    val untracked = ArrayList<DirCacheEntry>()
+                    // [shelved] collects the selected paths this walk actually accounted for,
+                    // which is what gets reverted at the end. Not simply [changes]: a path the walk
+                    // never yielded is not in the entry — it is clean by now, or ignored — and
+                    // reverting it would throw away a change nothing has a copy of.
+                    TreeWalk(repository, reader).use { walk ->
+                        walk.isRecursive = true
+                        walk.addTree(headCommit.tree)
+                        walk.addTree(DirCacheIterator(cache))
+                        walk.addTree(FileTreeIterator(repository))
+                        walk.getTree(2, FileTreeIterator::class.java).setDirCacheIterator(walk, 1)
+                        walk.filter = AndTreeFilter.create(SkipWorkTreeFilter(1), IndexDiffFilter(1, 2))
+                        while (walk.next()) {
+                            val headIter = walk.getTree(0, AbstractTreeIterator::class.java)
+                            val indexIter = walk.getTree(1, DirCacheIterator::class.java)
+                            val wtIter = walk.getTree(2, WorkingTreeIterator::class.java)
+                            val path = walk.pathString
+                            // A tree can't hold a conflicted entry, so nothing can be stashed while
+                            // a merge is unresolved anywhere — the refusal JGit's own stash makes.
+                            if (indexIter != null && !indexIter.dirCacheEntry.isMerged) {
+                                throw IOException(
+                                    "$path has unresolved merge conflicts, so nothing can be " +
+                                        "stashed until they are dealt with."
+                                )
+                            }
+                            if (path !in wanted) {
+                                heldOut.add(
+                                    if (headIter == null) DirCacheEditor.DeletePath(path)
+                                    else SetBlob(path, headIter.entryFileMode, walk.getObjectId(0))
+                                )
+                                continue
+                            }
+                            if (wtIter != null) {
+                                shelved.add(path)
+                                // Where the index already holds these bytes the cache needs no edit.
+                                if (indexIter != null && wtIter.idEqual(indexIter)) continue
+                                if (headIter != null && wtIter.idEqual(headIter)) continue
+                                val entry = workingTreeEntry(walk, wtIter, inserter)
+                                if (indexIter == null && headIter == null) {
+                                    // Untracked, so it belongs in the third parent and nowhere near
+                                    // the working tree's own tree — where a tracked addition would
+                                    // put it, and where applying the entry would stage it.
+                                    untracked.add(entry)
+                                } else {
+                                    wtEdits.add(object : DirCacheEditor.PathEdit(entry) {
+                                        override fun apply(ent: DirCacheEntry) = ent.copyMetaData(entry)
+                                    })
+                                }
+                                continue
+                            }
+                            shelved.add(path)
+                            if (headIter != null) wtDeletes.add(path)
+                        }
+                    }
+                    // Nothing selected was actually dirty — no entry, and the working tree is left
+                    // alone. The cache edits above are discarded with the lock.
+                    if (shelved.isEmpty()) return null
+
+                    val branch = Repository.shortenRefName(head.target.name)
+                    val onHead = "$branch: ${headCommit.abbreviate(Constants.OBJECT_ID_ABBREV_STRING_LENGTH).name()} " +
+                        headCommit.shortMessage
+                    val builder = CommitBuilder()
+                    builder.author = person
+                    builder.committer = person
+
+                    if (heldOut.isNotEmpty()) {
+                        val editor = cache.editor()
+                        heldOut.forEach { editor.add(it) }
+                        editor.finish()
+                    }
+                    builder.setParentId(headCommit)
+                    builder.setTreeId(cache.writeTree(inserter))
+                    builder.message = "index on $onHead"
+                    val indexCommit = inserter.insert(builder)
+
+                    var untrackedCommit: ObjectId? = null
+                    if (untracked.isNotEmpty()) {
+                        val untrackedCache = DirCache.newInCore()
+                        val untrackedBuilder = untrackedCache.builder()
+                        untracked.forEach { untrackedBuilder.add(it) }
+                        untrackedBuilder.finish()
+                        builder.setParentIds(emptyList<ObjectId>())
+                        builder.setTreeId(untrackedCache.writeTree(inserter))
+                        builder.message = "untracked files on $onHead"
+                        untrackedCommit = inserter.insert(builder)
+                    }
+
+                    if (wtEdits.isNotEmpty() || wtDeletes.isNotEmpty()) {
+                        val editor = cache.editor()
+                        wtEdits.forEach { editor.add(it) }
+                        wtDeletes.forEach { editor.add(DirCacheEditor.DeletePath(it)) }
+                        editor.finish()
+                    }
+                    builder.setParentId(headCommit)
+                    builder.addParentId(indexCommit)
+                    untrackedCommit?.let { builder.addParentId(it) }
+                    val stashMessage = message?.trim()?.takeIf { it.isNotEmpty() } ?: "WIP on $onHead"
+                    builder.message = stashMessage
+                    builder.setTreeId(cache.writeTree(inserter))
+                    stashId = inserter.insert(builder)
+                    inserter.flush()
+                    updateStashRef(stashId, person, stashMessage)
+                }
+            } finally {
+                cache.unlock()
+            }
+        }
+        // Only now that the entry is on the shelf does the working tree move, and only over the
+        // paths that went onto it.
+        revertFiles(changes.filter { it.path in shelved })
+        return stashId.name
+    }
+
+    /**
+     * The [DirCacheEntry] for a path's current on-disk content, with the blob inserted. Content is
+     * read through [WorkingTreeIterator.openEntryStream], so a check-in filter (autocrlf, git-lfs)
+     * applies here exactly as it would to a commit of the same file.
+     */
+    private fun workingTreeEntry(
+        walk: TreeWalk,
+        wtIter: WorkingTreeIterator,
+        inserter: ObjectInserter,
+    ): DirCacheEntry {
+        val entry = DirCacheEntry(walk.rawPath)
+        entry.setLength(wtIter.entryLength)
+        entry.setLastModified(wtIter.entryLastModifiedInstant)
+        entry.fileMode = wtIter.entryFileMode
+        wtIter.openEntryStream().use { content ->
+            entry.setObjectId(inserter.insert(Constants.OBJ_BLOB, wtIter.entryContentLength, content))
+        }
+        return entry
+    }
+
+    /**
+     * Points one index entry at a given blob. Mode and object id are all it sets: the caches
+     * [stashCreate] edits are written out as trees and then dropped with the lock, so the stat data
+     * an existing entry carries is never read back and doesn't need correcting.
+     */
+    private class SetBlob(
+        path: String,
+        private val mode: FileMode,
+        private val blob: ObjectId,
+    ) : DirCacheEditor.PathEdit(path) {
+        override fun apply(ent: DirCacheEntry) {
+            ent.fileMode = mode
+            ent.setObjectId(blob)
+        }
+    }
+
+    /**
+     * Moves `refs/stash` to a newly written stash commit, pushing the previous tip down the
+     * reflog — which is the shelf: `git stash list` and [stashList] both read the entries out of
+     * `refs/stash`'s reflog rather than off a ref apiece.
+     */
+    private fun updateStashRef(commitId: ObjectId, refLogIdent: PersonIdent, refLogMessage: String) {
+        val current = repository.findRef(Constants.R_STASH)
+        val update = repository.updateRef(Constants.R_STASH)
+        update.setNewObjectId(commitId)
+        update.setRefLogIdent(refLogIdent)
+        update.setRefLogMessage(refLogMessage, false)
+        update.setForceRefLog(true)
+        update.setExpectedOldObjectId(current?.objectId ?: ObjectId.zeroId())
+        update.forceUpdate()
     }
 
     fun stashList(): List<StashEntry> =

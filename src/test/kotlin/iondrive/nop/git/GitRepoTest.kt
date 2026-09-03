@@ -405,7 +405,7 @@ class GitRepoTest {
 
         val repo = GitRepo.discover(tmp)!!
         assertEquals(2, repo.loadStatus().changes.size, "dirty before stash")
-        val sha = repo.stashCreate("wip — local edit")
+        val sha = repo.stashCreate("wip — local edit", repo.loadStatus().changes)
         assertNotNull(sha)
         assertTrue(repo.loadStatus().isClean, "clean after stash")
 
@@ -426,7 +426,7 @@ class GitRepoTest {
         runShell(tmp, "git add -A && git commit -q -m init")
 
         val repo = GitRepo.discover(tmp)!!
-        assertEquals(null, repo.stashCreate("nothing"), "no changes -> no stash")
+        assertEquals(null, repo.stashCreate("nothing", repo.loadStatus().changes), "no changes -> no stash")
         repo.close()
     }
 
@@ -438,13 +438,194 @@ class GitRepoTest {
         (tmp / "a.txt").writeText("v2\n")
 
         val repo = GitRepo.discover(tmp)!!
-        repo.stashCreate("toss me")
+        repo.stashCreate("toss me", repo.loadStatus().changes)
         val shelf = repo.stashList()
         assertEquals(1, shelf.size)
 
         repo.stashDrop(shelf[0])
         assertTrue(repo.stashList().isEmpty(), "shelf empty after drop")
         assertEquals("v1\n", (tmp / "a.txt").toFile().readText(), "drop should not restore the working tree")
+        repo.close()
+    }
+
+    @Test
+    fun `stash create shelves only the changes it is given`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "picked.txt").writeText("v1\n")
+        (tmp / "left.txt").writeText("v1\n")
+        (tmp / "goes-away.txt").writeText("bye\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // One of each kind on the shelf, one of each kind left behind, so neither the tracked nor
+        // the untracked nor the deleted half of the walk can be taking the whole working tree.
+        (tmp / "picked.txt").writeText("v2\n")
+        (tmp / "picked-new.txt").writeText("fresh\n")
+        (tmp / "goes-away.txt").toFile().delete()
+        (tmp / "left.txt").writeText("v2\n")
+        (tmp / "left-new.txt").writeText("also fresh\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val pending = repo.loadStatus().changes
+        assertEquals(5, pending.size, "expected five pending changes, got $pending")
+        val picked = setOf("picked.txt", "picked-new.txt", "goes-away.txt")
+        val sha = repo.stashCreate("just these three", pending.filter { it.path in picked })
+        assertNotNull(sha)
+
+        val after = repo.loadStatus()
+        assertEquals(
+            setOf("left.txt", "left-new.txt"), after.changes.map { it.path }.toSet(),
+            "only the unselected changes should still be pending",
+        )
+        assertEquals(ChangeKind.MODIFIED, after.byPath["left.txt"])
+        assertEquals(ChangeKind.UNTRACKED, after.byPath["left-new.txt"])
+        assertEquals("v1\n", (tmp / "picked.txt").toFile().readText(), "the stashed edit should be undone")
+        assertEquals("v2\n", (tmp / "left.txt").toFile().readText(), "the edit left behind should survive")
+        assertTrue((tmp / "goes-away.txt").toFile().exists(), "the stashed deletion should be undone")
+        assertTrue(!(tmp / "picked-new.txt").toFile().exists(), "the stashed new file should be off disk")
+        assertTrue((tmp / "left-new.txt").toFile().exists(), "the new file left behind should stay on disk")
+
+        // Real git has to agree about what is on the shelf, both that the entry is well formed
+        // enough to list and that it carries the three paths and nothing else.
+        assertTrue(
+            gitOutput(tmp, "git stash list").contains("just these three"),
+            "git stash list should show the entry: ${gitOutput(tmp, "git stash list")}",
+        )
+        assertEquals(
+            listOf("goes-away.txt", "picked-new.txt", "picked.txt"),
+            gitOutput(tmp, "git stash show --include-untracked --name-only stash@{0}").lines().sorted(),
+            "the entry should carry exactly the selected paths",
+        )
+        repo.close()
+    }
+
+    @Test
+    fun `stash pop restores a partial stash alongside what stayed behind`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "picked.txt").writeText("v1\n")
+        (tmp / "left.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "picked.txt").writeText("v2\n")
+        (tmp / "picked-new.txt").writeText("fresh\n")
+        (tmp / "left.txt").writeText("v2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val pending = repo.loadStatus().changes
+        repo.stashCreate("half of it", pending.filter { it.path != "left.txt" })
+
+        repo.stashPop(repo.stashList().single())
+        assertTrue(repo.stashList().isEmpty(), "shelf empty after pop")
+        assertEquals("v2\n", (tmp / "picked.txt").toFile().readText(), "the stashed edit should come back")
+        assertEquals("fresh\n", (tmp / "picked-new.txt").toFile().readText(), "the stashed new file should come back")
+        assertEquals("v2\n", (tmp / "left.txt").toFile().readText(), "the change left behind should be untouched")
+        assertEquals(
+            pending.map { it.path }.toSet(), repo.loadStatus().changes.map { it.path }.toSet(),
+            "popping should put the working tree back where it started",
+        )
+        repo.close()
+    }
+
+    @Test
+    fun `stash create leaves a staged path it was not given out of the shelf`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "picked.txt").writeText("v1\n")
+        (tmp / "staged.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // staged.txt is staged from outside nop, so it differs from HEAD in the index as well as on
+        // disk — the case where a stash built from the index as it stands would swallow it.
+        (tmp / "picked.txt").writeText("v2\n")
+        (tmp / "staged.txt").writeText("v2\n")
+        runShell(tmp, "git add staged.txt")
+
+        val repo = GitRepo.discover(tmp)!!
+        val pending = repo.loadStatus().changes
+        repo.stashCreate("only picked", pending.filter { it.path == "picked.txt" })
+
+        assertEquals(
+            listOf("picked.txt"),
+            gitOutput(tmp, "git stash show --name-only stash@{0}").lines(),
+            "the shelved entry should not mention the staged path",
+        )
+        assertEquals("v2\n", (tmp / "staged.txt").toFile().readText(), "the staged edit should still be on disk")
+        assertEquals(
+            "v2\n", gitOutput(tmp, "git show :staged.txt") + "\n",
+            "the staged edit should still be staged",
+        )
+        assertEquals(listOf("staged.txt"), repo.loadStatus().changes.map { it.path })
+        repo.close()
+    }
+
+    @Test
+    fun `stash create returns null when nothing it was given is dirty`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "clean.txt").writeText("v1\n")
+        (tmp / "dirty.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "dirty.txt").writeText("v2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        // A stale change list — the panel's copy of a path that has since been reverted. Nothing to
+        // shelve, so there must be no entry, and the dirty file must be left where it is.
+        val stale = listOf(FileChange("clean.txt", ChangeKind.MODIFIED))
+        assertEquals(null, repo.stashCreate("stale", stale), "nothing selected was dirty -> no entry")
+        assertTrue(repo.stashList().isEmpty(), "no entry on the shelf")
+        assertEquals("v2\n", (tmp / "dirty.txt").toFile().readText(), "the unselected change should be untouched")
+        repo.close()
+    }
+
+    @Test
+    fun `stash create does not delete a selected file it could not shelve`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "tracked.txt").writeText("v1\n")
+        (tmp / ".gitignore").writeText("secret.txt\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "tracked.txt").writeText("v2\n")
+        (tmp / "secret.txt").writeText("do not lose me\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        // An ignored path can't reach a stash — the walk never yields it — so a change list naming
+        // one (a stale panel copy, from before a .gitignore rule caught up) must not get its file
+        // deleted as though it had been shelved.
+        val stale = repo.loadStatus().changes + FileChange("secret.txt", ChangeKind.UNTRACKED)
+        assertNotNull(repo.stashCreate("tracked only", stale))
+
+        assertEquals("v1\n", (tmp / "tracked.txt").toFile().readText(), "the tracked edit should be shelved")
+        assertEquals(
+            "do not lose me\n", (tmp / "secret.txt").toFile().readText(),
+            "an ignored file that never reached the shelf must still be on disk",
+        )
+        repo.close()
+    }
+
+    @Test
+    fun `stageAndCommit holds back a staged path the change set leaves out`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "picked.txt").writeText("v1\n")
+        (tmp / "staged.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // Staged outside nop, then unticked in the panel: the commit has to leave it out rather
+        // than take the index whole.
+        (tmp / "picked.txt").writeText("v2\n")
+        (tmp / "staged.txt").writeText("v2\n")
+        runShell(tmp, "git add staged.txt")
+
+        val repo = GitRepo.discover(tmp)!!
+        val pending = repo.loadStatus().changes
+        assertEquals(2, pending.size, "expected two pending changes, got $pending")
+        repo.stageAndCommit("only picked", pending.filter { it.path == "picked.txt" }, partial = true)
+
+        assertEquals("v2\n", repo.readHeadContent("picked.txt"), "the selected edit should be committed")
+        assertEquals("v1\n", repo.readHeadContent("staged.txt"), "the unticked edit should not be")
+        assertEquals(
+            listOf("staged.txt"), repo.loadStatus().changes.map { it.path },
+            "the unticked edit should still be pending",
+        )
+        assertEquals(
+            "v2\n", gitOutput(tmp, "git show :staged.txt") + "\n",
+            "and should still be staged, exactly as the user left it",
+        )
+        assertEquals(listOf("picked.txt"), gitOutput(tmp, "git show --name-only --format= HEAD").lines())
         repo.close()
     }
 
