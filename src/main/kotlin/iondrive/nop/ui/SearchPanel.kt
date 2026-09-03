@@ -105,121 +105,17 @@ fun SearchPanel(
                 query.isEmpty() -> StatusText("Type to search across project files")
                 searching -> StatusText("Searching…")
                 results.isEmpty() -> StatusText("No matches")
-                else -> ResultsList(
+                else -> HitResultsGrid(
                     results = results,
-                    query = query,
-                    truncated = truncated,
                     onPick = onPick,
+                    footer = if (truncated) {
+                        "(showing first ${SearchEngine.MAX_TOTAL_HITS} matches for \"$query\")"
+                    } else {
+                        null
+                    },
                 )
             }
         }
     }
 }
 
-@Composable
-private fun StatusText(text: String) {
-    val muted =if (JewelTheme.isDark) Color(0xFF6F737A) else Color(0xFF7A7E87)
-    Text(text, color = muted)
-}
-
-/** Row chrome around a hit's text: the row padding plus the column's list scrollbar. */
-private val HIT_ROW_CHROME = 28.dp
-
-@Composable
-private fun ResultsList(
-    results: List<SearchHit>,
-    query: String,
-    truncated: Boolean,
-    onPick: (path: String, line: Int) -> Unit,
-) {
-    val groups = remember(results) { PathGrouping.group(results) { it.path } }
-    val measurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    // Widest row text across the columns, so the grid can size them to fit the matched code. Both
-    // row lines are monospaced, so the longest string by character count is also the widest — one
-    // measure per line style per column instead of one per hit.
-    val naturalTextPx = remember(groups) {
-        var widest = 0
-        for (group in groups) {
-            val label = group.paths.maxByOrNull { it.length }?.let { "${group.labelFor(it)}:0000" }
-            val code = group.items.maxByOrNull { it.lineText.length }?.lineText
-            if (label != null) widest = maxOf(widest, measurer.measure(label, LOCATION_STYLE).size.width)
-            if (code != null) widest = maxOf(widest, measurer.measure(code, CODE_STYLE).size.width)
-        }
-        widest
-    }
-    Column(modifier = Modifier.fillMaxSize()) {
-        GroupColumnGrid(
-            columns = groups.map { group ->
-                GroupColumn(key = group.title, header = group.header) {
-                    HitRows(group = group, onPick = onPick)
-                }
-            },
-            naturalColumnWidth = with(density) { naturalTextPx.toDp() } + HIT_ROW_CHROME,
-            modifier = Modifier.fillMaxWidth().weight(1f),
-        )
-        if (truncated) {
-            val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
-            Text(
-                "(showing first ${SearchEngine.MAX_TOTAL_HITS} matches for \"$query\")",
-                color = muted,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
-    }
-}
-
-/** The hit rows filling one column of the grid, under the heading [GroupColumnGrid] draws. */
-@Composable
-private fun HitRows(group: PathGroup<SearchHit>, onPick: (path: String, line: Int) -> Unit) {
-    val listState = rememberLazyListState()
-    ScrollableColumn(listState = listState, modifier = Modifier.fillMaxSize()) {
-        items(group.items) { hit ->
-            HitRow(
-                hit = hit,
-                label = group.labelFor(hit.path),
-                onClick = { onPick(hit.path, hit.line) },
-            )
-        }
-    }
-}
-
-private val LOCATION_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 11.sp)
-private val CODE_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp)
-
-@Composable
-private fun HitRow(hit: SearchHit, label: String, onClick: () -> Unit) {
-    val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
-    val highlight = if (JewelTheme.isDark) Color(0x66629755) else Color(0x66629755)
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Text("$label:${hit.line}", color = muted, style = LOCATION_STYLE)
-        Text(
-            annotateLine(hit.lineText, hit.matchStart, hit.matchEnd, highlight),
-            style = CODE_STYLE,
-            softWrap = false,
-        )
-    }
-}
-
-private fun annotateLine(
-    text: String,
-    matchStart: Int,
-    matchEnd: Int,
-    highlight: Color,
-): AnnotatedString {
-    val start = matchStart.coerceIn(0, text.length)
-    val end = matchEnd.coerceIn(start, text.length)
-    if (end == start) return AnnotatedString(text)
-    return buildAnnotatedString {
-        append(text.substring(0, start))
-        withStyle(SpanStyle(background = highlight)) {
-            append(text.substring(start, end))
-        }
-        append(text.substring(end))
-    }
-}

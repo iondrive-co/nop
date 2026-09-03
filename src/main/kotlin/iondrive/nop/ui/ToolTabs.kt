@@ -11,13 +11,13 @@ import org.jetbrains.jewel.ui.component.TabData
 import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.theme.defaultTabStyle
 
-enum class ToolTab { Commit, Search, Stash }
+enum class ToolTab { Commit, Search, Usages, Stash }
 
 /**
- * Three persistent tabs in the tool panel on the window's right edge — Commit, Search and Stash.
- * None is closeable; the strip is part of the chrome, not a user-managed tab collection. Selection
- * state lives in [App] so external triggers (e.g. Ctrl+Shift+F) can flip to Search without poking
- * the panel.
+ * The persistent tabs in the tool panel on the window's right edge — Commit, Search, Usages and
+ * Stash. None is closeable; the strip is part of the chrome, not a user-managed tab collection.
+ * Selection state lives in [App] so external triggers (Ctrl+Shift+F for Search, Alt+F7 for Usages)
+ * can flip to a tab without poking the panel.
  */
 @Composable
 fun ToolTabs(
@@ -25,6 +25,7 @@ fun ToolTabs(
     onSelect: (ToolTab) -> Unit,
     commit: @Composable () -> Unit,
     search: @Composable () -> Unit,
+    usages: @Composable () -> Unit,
     stash: @Composable () -> Unit,
 ) {
     val tabs = listOf(
@@ -43,6 +44,13 @@ fun ToolTabs(
             content = { state -> SimpleTabContent(label = "Search", state = state) },
         ),
         TabData.Default(
+            selected = selected == ToolTab.Usages,
+            closable = false,
+            onClose = {},
+            onClick = { onSelect(ToolTab.Usages) },
+            content = { state -> SimpleTabContent(label = "Usages", state = state) },
+        ),
+        TabData.Default(
             selected = selected == ToolTab.Stash,
             closable = false,
             onClose = {},
@@ -57,6 +65,7 @@ fun ToolTabs(
             when (selected) {
                 ToolTab.Commit -> commit()
                 ToolTab.Search -> search()
+                ToolTab.Usages -> usages()
                 ToolTab.Stash -> stash()
             }
         }

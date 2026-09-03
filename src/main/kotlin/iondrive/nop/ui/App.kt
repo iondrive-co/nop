@@ -35,6 +35,11 @@ import iondrive.nop.index.FileIndex
 import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.SymbolIndex
+import iondrive.nop.lang.JavaParse
+import iondrive.nop.lang.JavaRename
+import iondrive.nop.lang.JavaUsages
+import iondrive.nop.lang.RenamePlan
+import iondrive.nop.lang.UsageResult
 import iondrive.nop.launchers.Launcher
 import iondrive.nop.launchers.LauncherStore
 import iondrive.nop.launchers.discoverLaunchers
@@ -52,6 +57,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -64,6 +70,21 @@ private const val COMMIT_MESSAGE_HISTORY_CAP = 20
 
 // A pending project-tree creation/copy dialog. NewX carry the parent directory the entry will be
 // created in; CopyFile carries the source file being duplicated.
+/**
+ * A rename waiting on the user's confirmation: the usages that would be rewritten, and the source
+ * they were found from.
+ *
+ * The declaring file's text is carried along because the dialog re-checks for collisions on every
+ * keystroke, and re-reading the file for each character typed would be absurd. It is the text as of
+ * the moment the usages were found — which is also the text the offsets index into, so holding the
+ * two together is what keeps them in step.
+ */
+private data class RenameRequest(
+    val usages: UsageResult,
+    val declaringPath: String?,
+    val declaringText: String?,
+)
+
 private sealed interface TreeEntryDialog {
     data class NewFile(val parentDir: File) : TreeEntryDialog
     data class NewDirectory(val parentDir: File) : TreeEntryDialog
@@ -90,6 +111,8 @@ fun App(
     jumpToSourceTrigger: Int = 0,
     refreshTrigger: Int = 0,
     saveTrigger: Int = 0,
+    findUsagesTrigger: Int = 0,
+    renameSymbolTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -142,6 +165,14 @@ fun App(
     var pendingDelete by remember(projectPath) { mutableStateOf<List<File>?>(null) }
     // The pending new-file/directory/package/copy dialog, or null when none is open.
     var pendingEntry by remember(projectPath) { mutableStateOf<TreeEntryDialog?>(null) }
+    // What the Usages tab is showing. Set by Alt+F7 and never cleared on its own: a usage list is
+    // something the user works through row by row, so it outlives the caret that produced it.
+    var usagesView by remember(projectPath) { mutableStateOf(UsagesView()) }
+    // The rename in progress: the usages it will rewrite, plus where they came from. Null when no
+    // rename dialog is open.
+    var pendingRename by remember(projectPath) { mutableStateOf<RenameRequest?>(null) }
+    var renameFailure by remember(projectPath) { mutableStateOf<String?>(null) }
+    var renameInFlight by remember(projectPath) { mutableStateOf(false) }
     // The file whose revisions the picker is currently offering ("Compare with Revision…"), or null
     // when it's closed. Held here rather than in the tree or the editor because either can raise it.
     var pendingCompare by remember(projectPath) { mutableStateOf<File?>(null) }
@@ -351,6 +382,12 @@ fun App(
     // Seed the on-disk cache into memory only once per project; later re-runs (driven by
     // fsRefreshKey) already hold the index and shouldn't re-read a cache that can be large.
     var indexCacheSeeded by remember(rootPath) { mutableStateOf(false) }
+    // Whether the symbol cache on disk is one this nop can read. A cache written by an older
+    // version means something different line by line, so [SymbolIndex.load] rejects it outright —
+    // and that has to force a rebuild, because the freshness probe below asks only whether the
+    // *project* has changed. Without this an upgrade would leave every existing project with an
+    // empty jump index and no event that would ever refill it.
+    var symbolCacheUsable by remember(rootPath) { mutableStateOf(false) }
     // Re-key on fsRefreshKey so files added/removed while nop stays open show up in the
     // double-shift search and jump-to-source. fsRefreshKey bumps on manual Refresh and whenever
     // the git poll sees the working tree change (e.g. a new untracked file) — exactly the moments
@@ -361,7 +398,10 @@ fun App(
         val filesIndexFile = Settings.projectDataDir(rootPath).resolve("files.txt")
         if (!indexCacheSeeded) {
             val cachedSymbols = withContext(Dispatchers.IO) { SymbolIndex.load(indexFile) }
-            if (cachedSymbols.size > 0) symbolIndex = cachedSymbols
+            if (cachedSymbols != null) {
+                symbolCacheUsable = true
+                if (cachedSymbols.size > 0) symbolIndex = cachedSymbols
+            }
             val cachedFiles = withContext(Dispatchers.IO) { FileIndex.load(filesIndexFile) }
             if (cachedFiles.files.isNotEmpty()) fileIndex = cachedFiles
             // Set only after the load completes: if a refresh cancels this effect mid-seed, the
@@ -375,7 +415,7 @@ fun App(
         // hasn't changed since the last index pays almost nothing per refresh. Gated on the file
         // index alone (not symbols): files.txt and index.tsv are written together, so a populated
         // file cache implies the symbol cache is as current as the project allows.
-        val cacheReady = fileIndex.files.isNotEmpty()
+        val cacheReady = fileIndex.files.isNotEmpty() && symbolCacheUsable
         val cacheStamp = withContext(Dispatchers.IO) {
             runCatching { Files.getLastModifiedTime(filesIndexFile).toMillis() }.getOrDefault(0L)
         }
@@ -392,6 +432,8 @@ fun App(
             SymbolIndex.save(indexFile, freshSymbols)
             FileIndex.save(filesIndexFile, freshFiles)
         }
+        // What we just wrote is by definition current, so later refreshes can trust the probe again.
+        symbolCacheUsable = true
     }
     val launcherStore = remember(rootPath) { LauncherStore(rootPath) }
     var stored by remember(rootPath) { mutableStateOf<List<Launcher>>(emptyList()) }
@@ -808,6 +850,155 @@ fun App(
         return dest
     }
 
+    // ---- Java: find usages and rename ---------------------------------------------------------
+
+    /** The active tab's Java editor, or null when the front tab isn't one. */
+    fun activeJavaEditor(): Triple<File, String, FileEdit>? {
+        val tab = tabsState.selectedTab as? Tab.FileView ?: return null
+        if (!tab.file.extension.equals("java", ignoreCase = true)) return null
+        val edit = editStore.peek(tab.id) ?: return null
+        val rel = runCatching {
+            rootPath.toAbsolutePath().normalize()
+                .relativize(tab.file.toPath().toAbsolutePath().normalize())
+                .toString().replace(File.separatorChar, '/')
+        }.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") } ?: return null
+        return Triple(tab.file, rel, edit)
+    }
+
+    /**
+     * Writes out every buffer with unsaved work before a project-wide read.
+     *
+     * Both features below find their occurrences by reading files from disk, and a rename then
+     * rewrites the characters at the offsets it found. If a buffer held unsaved edits, disk and
+     * screen would disagree about where those characters are, and the rewrite would land in the
+     * wrong place — so disk is made the single version of the truth first. A buffer that can't be
+     * saved (something else wrote the file) stops the whole operation rather than proceeding on
+     * text nop knows is stale.
+     */
+    suspend fun flushBuffersForAnalysis(): String? {
+        for (edit in editStore.snapshot()) {
+            if (!edit.hasUserEdit) continue
+            when (val result = withContext(Dispatchers.IO) { edit.save() }) {
+                is SaveResult.ExternalChange ->
+                    return "${edit.file.name} changed on disk while you were editing it — resolve that first."
+                is SaveResult.Failed -> return "Could not save ${edit.file.name}: ${result.message}"
+                else -> Unit
+            }
+        }
+        return null
+    }
+
+    /**
+     * Resolves what the caret is on and finds every usage of it.
+     *
+     * Returns null having already set [usagesView] to something explaining why, so both callers —
+     * the panel and the rename dialog — get the same diagnosis for the same non-answer.
+     */
+    suspend fun resolveUsagesAtCaret(): Pair<UsageResult, Triple<File, String, FileEdit>>? {
+        val active = activeJavaEditor()
+        if (active == null) {
+            usagesView = UsagesView(message = "Open a Java file and put the caret on a name first")
+            return null
+        }
+        if (!JavaParse.available) {
+            usagesView = UsagesView(message = "This build has no Java compiler in its runtime, so Java analysis is off")
+            return null
+        }
+        val (file, rel, edit) = active
+        val blocked = flushBuffersForAnalysis()
+        if (blocked != null) {
+            usagesView = UsagesView(message = blocked)
+            return null
+        }
+        val text = edit.state.text.toString()
+        val caret = edit.state.selection.start
+        val target = withContext(Dispatchers.Default) {
+            JavaParse.parse(text, file.name)?.let { JavaUsages.targetAt(it, caret) }
+        }
+        if (target == null) {
+            usagesView = UsagesView(
+                message = "No Java declaration under the caret — nop can only search for something it " +
+                    "can see declared or imported here",
+            )
+            return null
+        }
+        usagesView = UsagesView(title = target.description, searching = true)
+        val result = JavaUsages.find(rootPath.toFile(), fileIndex.files, target, rel)
+        usagesView = UsagesView(title = target.description, result = result)
+        return result to active
+    }
+
+    /** Rewrites every planned occurrence, then brings tabs and the tree back into line. */
+    suspend fun applyRename(plan: RenamePlan): String? {
+        val root = rootPath.toFile()
+        val rewritten = withContext(Dispatchers.IO) {
+            val done = mutableListOf<Pair<File, String>>()
+            for ((rel, ranges) in plan.edits) {
+                val file = File(root, rel)
+                val before = runCatching { file.readText() }.getOrNull()
+                    ?: return@withContext Result.failure(IOException("Could not read $rel"))
+                val after = JavaRename.applyEdits(before, ranges, plan.newName)
+                if (after == before) continue
+                // The pre-edit version goes into local history first, so a rename that turns out to
+                // be wrong is recoverable from inside nop — the same safety net an edit gets.
+                localHistory.record(file, before)
+                val failure = runCatching { file.writeText(after) }.exceptionOrNull()
+                if (failure != null) {
+                    return@withContext Result.failure(IOException("Could not write $rel: ${failure.message}"))
+                }
+                localHistory.record(file, after)
+                done += file to after
+            }
+            Result.success(done)
+        }
+        val files = rewritten.getOrElse { return it.message ?: "Rename failed" }
+        // Back on the UI thread: every open buffer on a rewritten file takes the new text, exactly
+        // as it does after a revert. adoptDiskText carries the caret over and leaves the buffer
+        // clean, because what it now holds is what is on disk.
+        for ((file, text) in files) {
+            editStore.editorsFor(file).forEach { it.adoptDiskText(text) }
+        }
+        // A public type has to live in a file of its own name, so the file follows the class.
+        plan.fileRename?.let { rename ->
+            val target = File(root, rename.path)
+            if (target.isFile) {
+                val failure = runCatching { performRename(target, rename.newFileName) }.exceptionOrNull()
+                if (failure != null) return failure.message ?: "Renamed the code but not the file"
+            }
+        }
+        refresh()
+        return null
+    }
+
+    // Alt+F7. Baselined like the other window-level triggers so switching back to a project after
+    // the session's first press doesn't re-run the search.
+    val findUsagesBaseline = remember(projectPath) { findUsagesTrigger }
+    LaunchedEffect(findUsagesTrigger) {
+        if (findUsagesTrigger <= findUsagesBaseline) return@LaunchedEffect
+        toolTab = ToolTab.Usages
+        resolveUsagesAtCaret()
+    }
+
+    // Shift+F6. Shares every step with Alt+F7 up to the point the answer arrives, then puts it in
+    // front of the user as something to change rather than something to read.
+    val renameBaseline = remember(projectPath) { renameSymbolTrigger }
+    LaunchedEffect(renameSymbolTrigger) {
+        if (renameSymbolTrigger <= renameBaseline) return@LaunchedEffect
+        renameFailure = null
+        val resolved = resolveUsagesAtCaret()
+        if (resolved == null) {
+            // The panel already carries the explanation; show it rather than a silent no-op.
+            toolTab = ToolTab.Usages
+            return@LaunchedEffect
+        }
+        val (result, active) = resolved
+        pendingRename = RenameRequest(
+            usages = result,
+            declaringPath = active.second,
+            declaringText = active.third.state.text.toString(),
+        )
+    }
+
     // Where a tree action targeting [target] should create its entry, shown to the user in the
     // dialog as a path relative to the project root ("" → the root itself).
     fun relativeLabel(dir: File): String = runCatching {
@@ -1088,6 +1279,15 @@ fun App(
                                         },
                                     )
                                 },
+                                usages = {
+                                    UsagesPanel(
+                                        view = usagesView,
+                                        onPick = { relPath, line ->
+                                            val absolute = File(rootPath.toFile(), relPath)
+                                            if (absolute.isFile) tabsState.openAt(Tab.FileView(absolute), line)
+                                        },
+                                    )
+                                },
                                 stash = {
                                     StashPanel(
                                         stashes = stashes,
@@ -1269,6 +1469,49 @@ fun App(
                 onCancel = { pendingEntry = null },
             )
             null -> {}
+        }
+
+        // The rename prompt, raised by Shift+F6 once its usage search has come back. Applying runs
+        // off the dialog and reports back into it, so a write that fails leaves the user where they
+        // were — with the name they typed still in the field — rather than closing on an error.
+        pendingRename?.let { request ->
+            RenameSymbolDialog(
+                usages = request.usages,
+                declaringPath = request.declaringPath,
+                declaringText = request.declaringText,
+                pathExists = { rel -> File(rootPath.toFile(), rel).exists() },
+                busy = renameInFlight,
+                failure = renameFailure,
+                onRename = { plan ->
+                    if (!renameInFlight) {
+                        scope.launch {
+                            renameInFlight = true
+                            try {
+                                val failure = applyRename(plan)
+                                renameFailure = failure
+                                if (failure == null) {
+                                    pendingRename = null
+                                    // The usage list was measured against the old name and the old
+                                    // offsets; leaving it up would hand the user rows that no longer
+                                    // point at anything.
+                                    usagesView = UsagesView(
+                                        message = "Renamed ${plan.oldName} to ${plan.newName} — " +
+                                            "${plan.occurrenceCount} occurrences in ${plan.fileCount} files",
+                                    )
+                                }
+                            } finally {
+                                renameInFlight = false
+                            }
+                        }
+                    }
+                },
+                onCancel = {
+                    if (!renameInFlight) {
+                        pendingRename = null
+                        renameFailure = null
+                    }
+                },
+            )
         }
 
         // Drawn only with a repo to read the revisions out of. The actions that raise it are hidden

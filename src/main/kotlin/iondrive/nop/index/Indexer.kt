@@ -1,5 +1,8 @@
 package iondrive.nop.index
 
+import iondrive.nop.lang.JavaDeclKind
+import iondrive.nop.lang.JavaParse
+import iondrive.nop.lang.JavaSymbols
 import java.io.File
 import java.nio.file.Path
 
@@ -18,14 +21,63 @@ object Indexer {
 
     private val YAML_EXT = setOf("yml", "yaml")
     private val TS_EXT = setOf("ts", "tsx", "js", "jsx", "mjs", "cjs")
-    private val KOTLIN_EXT = setOf("kt", "kts", "java")
+    private val KOTLIN_EXT = setOf("kt", "kts")
 
     fun build(projectRoot: Path): SymbolIndex {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return SymbolIndex()
         val out = mutableListOf<IndexEntry>()
-        walk(rootFile, rootFile, out)
+        val javaFiles = mutableListOf<File>()
+        walk(rootFile, rootFile, out, javaFiles)
+        out += indexJavaFiles(rootFile, javaFiles)
         return SymbolIndex(out)
+    }
+
+    /**
+     * Parses the project's Java files and turns each one's declarations into index entries.
+     *
+     * Held back from the walk and done in one parallel batch because this is the one part of an
+     * index build that costs real work: every other rule here is a regex over a line, where a Java
+     * file gets a full javac parse. Serially that is the difference between a fast index and one the
+     * user waits on, and the walk itself has nothing to gain from threads — it is bound by the
+     * filesystem, not the CPU.
+     *
+     * Parallelism is the common pool's, so it scales with the machine without nop having to own a
+     * thread pool. Only one file's tree is alive per worker: the declarations are extracted and the
+     * tree dropped before the next file is read, which is what keeps a whole-project index inside a
+     * 512 MB heap.
+     */
+    private fun indexJavaFiles(root: File, files: List<File>): List<IndexEntry> {
+        if (files.isEmpty()) return emptyList()
+        if (!JavaParse.available) return emptyList()
+        return files.parallelStream()
+            .map { file -> javaEntries(root, file) }
+            .collect(java.util.stream.Collectors.toList())
+            .flatten()
+            // The walk visits directories in whatever order the filesystem hands them over, and the
+            // parallel batch adds a second source of nondeterminism on top. Sorting makes a rebuild
+            // produce a byte-identical cache file for an unchanged project, which is worth having
+            // when the cache is something a person may end up diffing.
+            .sortedWith(compareBy({ it.file }, { it.line }, { it.name }))
+    }
+
+    private fun javaEntries(root: File, file: File): List<IndexEntry> {
+        val text = readSafely(file) ?: return emptyList()
+        val parsed = JavaParse.parse(text, file.name) ?: return emptyList()
+        val rel = relPath(root, file)
+        return JavaSymbols.declarations(parsed).map { decl ->
+            IndexEntry(
+                name = decl.name,
+                file = rel,
+                line = decl.line,
+                kind = when (decl.kind) {
+                    JavaDeclKind.TYPE -> SymbolKind.JAVA_TYPE
+                    JavaDeclKind.METHOD -> SymbolKind.JAVA_METHOD
+                    JavaDeclKind.FIELD -> SymbolKind.JAVA_FIELD
+                },
+                owner = decl.owner,
+            )
+        }
     }
 
     /**
@@ -66,15 +118,15 @@ object Indexer {
         return count != cachedFileCount
     }
 
-    private fun walk(root: File, dir: File, out: MutableList<IndexEntry>) {
+    private fun walk(root: File, dir: File, out: MutableList<IndexEntry>, javaFiles: MutableList<File>) {
         val files = dir.listFiles() ?: return
         for (f in files) {
             if (f.name in IGNORED_DIR_NAMES) continue
             if (f.isDirectory) {
                 indexDirectory(root, f, out)
-                walk(root, f, out)
+                walk(root, f, out, javaFiles)
             } else if (f.isFile) {
-                indexFile(root, f, out)
+                if (f.extension.equals("java", ignoreCase = true)) javaFiles += f else indexFile(root, f, out)
             }
         }
     }
@@ -143,8 +195,9 @@ object Indexer {
             }
         }
 
-        // Kotlin / Java top-level declarations — handy in nop's own codebase even if the user's
-        // target projects don't need them.
+        // Kotlin top-level declarations. Java used to come through here too, on the same line
+        // regex; it now gets a real parse (see [indexJavaFiles]), which is what gives it methods,
+        // fields and owners rather than just the handful of declarations a regex can recognise.
         if (ext in KOTLIN_EXT) {
             extractKotlinDefs(file).forEach { (name, ln) ->
                 out += IndexEntry(name, rel, ln, SymbolKind.KOTLIN_SYMBOL)

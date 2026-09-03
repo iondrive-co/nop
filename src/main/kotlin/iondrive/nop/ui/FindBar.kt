@@ -69,6 +69,13 @@ internal fun findActiveMatchColor(): Color =
 internal val FIND_MARK = Color(0xFFD9A441)
 internal val FIND_ACTIVE_MARK = Color(0xFFFF7A1A)
 
+/**
+ * The lane colour for a syntax error, picked to sit clearly apart from the amber find marks — a
+ * stripe here means "this file is broken here", which is a different question from "this is what you
+ * searched for". Fixed across themes for the same reason the pair above is.
+ */
+internal val PROBLEM_MARK = Color(0xFFE05252)
+
 /** How tall one hit's stripe is drawn in the lane, whatever share of the file the line really is. */
 private val FIND_MARK_H = 3.dp
 
@@ -117,6 +124,12 @@ internal fun BoxScope.FindMarkerScrollbar(
     scrollState: ScrollState,
     fractions: List<Float>,
     current: Int,
+    /**
+     * Where the file's syntax errors sit down the document, 0..1 — drawn in the error colour beside
+     * the find marks. This is what makes a broken line below the fold visible: without it, the only
+     * evidence of an error twelve screens down is that the file doesn't compile.
+     */
+    problemFractions: List<Float> = emptyList(),
 ) {
     val markerH = with(LocalDensity.current) { FIND_MARK_H.toPx() }
     Row(
@@ -124,6 +137,11 @@ internal fun BoxScope.FindMarkerScrollbar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Canvas(Modifier.width(MARKER_LANE_W).fillMaxHeight()) {
+            // Errors first, so a find hit landing on the same pixel row still reads as a hit —
+            // the user is actively looking for those, and the error isn't going anywhere.
+            for (bar in markerBars(problemFractions, size.height, markerH)) {
+                drawRect(PROBLEM_MARK, Offset(0f, bar.top), Size(size.width, bar.height))
+            }
             if (fractions.isEmpty()) return@Canvas
             for (bar in markerBars(fractions, size.height, markerH)) {
                 drawRect(FIND_MARK, Offset(0f, bar.top), Size(size.width, bar.height))

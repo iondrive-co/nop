@@ -119,7 +119,8 @@ fun NewEntryDialog(
     }
 }
 
-private val NewEntryPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
+/** Centres a dialog horizontally, a third of the way down — shared by every centred prompt. */
+internal val NewEntryPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
         windowSize: IntSize,

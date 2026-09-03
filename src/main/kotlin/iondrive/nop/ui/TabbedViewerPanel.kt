@@ -62,6 +62,8 @@ import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
+import iondrive.nop.lang.JavaParse
+import iondrive.nop.lang.JavaProblem
 import iondrive.nop.spell.Typo
 import iondrive.nop.spell.findTypos
 import kotlinx.coroutines.Dispatchers
@@ -90,6 +92,14 @@ private const val AUTOSAVE_DEBOUNCE_MS = 400L
  * to the dictionary) skips the wait; see the effect that uses this.
  */
 private const val SPELLCHECK_DEBOUNCE_MS = 600L
+
+/**
+ * How long a Java buffer must sit still before it is re-parsed for syntax errors. Shorter than the
+ * spellcheck wait: a red squiggle under half-typed code is expected — every IDE does it — where a
+ * red squiggle under a half-typed *word* is not. Long enough that a fast typist doesn't pay for a
+ * parse per keystroke.
+ */
+private const val JAVA_PARSE_DEBOUNCE_MS = 300L
 
 /** Characters measured in one go to derive the editor's monospace advance. */
 private const val ADVANCE_SAMPLE = 100
@@ -557,6 +567,34 @@ private fun FileEditView(
             }
     }
 
+    // Java syntax errors in this file, from a real parse rather than the regex the highlighter uses.
+    // Same shape as the spellcheck effect above and for the same reason: parsing is far too much
+    // work to put on the keystroke path, so it runs on a background dispatcher once typing settles
+    // and publishes its answer as state for the squiggle layer and the problem bar to read.
+    //
+    // Parse-only, so this sees exactly the errors that need no classpath — a missing brace, a stray
+    // token, an unclosed string. It will never claim a symbol doesn't resolve, because without the
+    // project's dependencies it has no way to know, and a file underlined end to end because its
+    // imports weren't on a classpath is worse than no analysis at all.
+    var javaProblems by remember(tab.id) { mutableStateOf<List<JavaProblem>>(emptyList()) }
+    val isJava = remember(tab.id) { tab.file.extension.equals("java", ignoreCase = true) }
+    LaunchedEffect(tab.id, isJava) {
+        if (!isJava) {
+            javaProblems = emptyList()
+            return@LaunchedEffect
+        }
+        // Opening a file checks straight away; only edits made afterwards wait for typing to settle.
+        var immediate = true
+        snapshotFlow { edit.state.text.toString() }
+            .debounce { if (immediate) 0L.also { immediate = false } else JAVA_PARSE_DEBOUNCE_MS }
+            .distinctUntilChanged()
+            .collect { text ->
+                javaProblems = withContext(Dispatchers.Default) {
+                    JavaParse.parse(text, tab.file.name)?.problems ?: emptyList()
+                }
+            }
+    }
+
     // Range of the word currently under the mouse pointer while Ctrl is held *and* the symbol
     // index resolves the word to a jump target. Drawn as an underline so the user knows the
     // click will hand them off to another file. Inclusive on both ends (matches JumpResolver).
@@ -598,6 +636,20 @@ private fun FileEditView(
             if (content <= 0f) return@derivedStateOf emptyList<Float>()
             val len = tl.layoutInput.text.length
             matches.map { m -> tl.getLineTop(tl.getLineForOffset(m.first.coerceIn(0, len))) / content }
+        }
+    }
+
+    // Where the file's syntax errors sit down the document, measured the same way [markerFractions]
+    // measures find hits, so the two lanes line up with each other and with the thumb.
+    val problemFractions by remember(tab.id) {
+        derivedStateOf {
+            val tl = layout
+            if (tl == null || javaProblems.isEmpty()) return@derivedStateOf emptyList<Float>()
+            val scrollable = (scrollState.maxValue + scrollState.viewportSize).toFloat()
+            val content = if (scrollable > 0f) scrollable else tl.size.height.toFloat()
+            if (content <= 0f) return@derivedStateOf emptyList<Float>()
+            val len = tl.layoutInput.text.length
+            javaProblems.map { p -> tl.getLineTop(tl.getLineForOffset(p.start.coerceIn(0, len))) / content }
         }
     }
 
@@ -653,15 +705,15 @@ private fun FileEditView(
     // Keeping match-navigation imperative makes that entire class of cursor-stealing bug impossible
     // by construction. The highlights still track the text reactively via the transformation above.
     val searchScope = rememberCoroutineScope()
-    suspend fun jumpToMatch(index: Int) {
-        val m = matches.getOrNull(index) ?: return
-        // The find field holds focus while searching, so the editor is unfocused and its built-in
-        // scroll-to-cursor won't fire — set the selection (for when focus returns) and scroll the
-        // viewport ourselves, the way an inbound jump does. Only scroll when the match is off-screen
-        // so stepping between two on-screen matches doesn't jolt the page.
-        edit.state.edit { selection = TextRange(m.first) }
+    // Put the caret on [offset] and bring it on screen. Shared by the find bar and the problem bar:
+    // both point at a place in the file the user isn't necessarily looking at, and both are clicked
+    // from chrome that holds focus itself, so the editor's own scroll-to-cursor won't fire for them.
+    // Only scrolls when the target is off-screen, so stepping between two visible hits doesn't jolt
+    // the page.
+    suspend fun revealOffset(offset: Int) {
+        edit.state.edit { selection = TextRange(offset.coerceIn(0, length)) }
         val tl = layout ?: return
-        val line = tl.getLineForOffset(m.first.coerceIn(0, tl.layoutInput.text.length))
+        val line = tl.getLineForOffset(offset.coerceIn(0, tl.layoutInput.text.length))
         val lineTop = tl.getLineTop(line)
         val lineBottom = tl.getLineBottom(line)
         val viewTop = scrollState.value
@@ -671,6 +723,11 @@ private fun FileEditView(
             val target = (lineTop - lineHeight * 3).toInt().coerceIn(0, scrollState.maxValue)
             scrollState.scrollTo(target)
         }
+    }
+
+    suspend fun jumpToMatch(index: Int) {
+        val m = matches.getOrNull(index) ?: return
+        revealOffset(m.first)
     }
 
     // Swap the hit the user is parked on for the replacement text, then step onto the next one so
@@ -740,6 +797,11 @@ private fun FileEditView(
 
     Column(modifier = modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
         SaveStatusStrip(edit, onSaved = savedCallback)
+        JavaProblemBar(
+            problems = javaProblems,
+            onGoTo = { offset -> searchScope.launch { revealOffset(offset) } },
+            lineOf = { offset -> lineNumberAt(edit.state.text.toString(), offset) },
+        )
         if (searchOpen) {
             FindBar(
                 state = searchState,
@@ -906,7 +968,8 @@ private fun FileEditView(
             },
         )
         }
-        // Wavy underlines: red under syntax-error ranges (native YAML errors today), and the
+        // Wavy underlines: red under syntax-error ranges (the highlighters' own, plus javac's for a
+        // Java file), and the
         // spellchecker's colour under misspelled words. Aligned to the text the same way BlameGutter
         // is: layout positions are in document space, shifted up by the scroll offset. Sized to the
         // field rather than the viewport (matchParentSize) so they travel with the text under the
@@ -925,10 +988,13 @@ private fun FileEditView(
             for (typo in typos) {
                 drawSquiggle(tl, typo.range.first, typo.range.last + 1, textLen, scroll, typoColor)
             }
+            for (problem in javaProblems) {
+                drawSquiggle(tl, problem.start, problem.endExclusive, textLen, scroll, errorColor)
+            }
         }
         }
     }
-        FindMarkerScrollbar(scrollState, markerFractions, currentMatch)
+        FindMarkerScrollbar(scrollState, markerFractions, currentMatch, problemFractions)
     }
     }
         // Only claimed when a line actually overruns the pane, so a file that fits keeps the full

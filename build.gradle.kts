@@ -75,7 +75,11 @@ compose.desktop {
             targetFormats(TargetFormat.AppImage, TargetFormat.Deb, TargetFormat.Dmg, TargetFormat.Msi)
             // JGit's WindowCache publishes a JMX MBean on first use, so the jlinked runtime
             // must include java.management or opening any repo throws NoClassDefFoundError.
-            modules("java.management")
+            // java.compiler + jdk.compiler carry the javac that iondrive.nop.lang.JavaParse parses
+            // Java sources with; without them ToolProvider.getSystemJavaCompiler() returns null in
+            // the packaged app and every Java feature silently switches itself off. Costs ~18 MB
+            // in the jlinked image (88 MB -> 106 MB), which is the whole price of the Java support.
+            modules("java.management", "java.compiler", "jdk.compiler")
             packageName = "nop"
             packageVersion = "0.58.0"
             description = "Desktop editor and change reviewer"

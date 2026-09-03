@@ -140,8 +140,61 @@ class IndexerTest {
         val built = Indexer.build(tmp)
         val tsv = tmp.resolve("index.tsv")
         SymbolIndex.save(tsv, built)
-        val loaded = SymbolIndex.load(tsv)
+        val loaded = assertNotNull(SymbolIndex.load(tsv), "a cache we just wrote must load back")
         assertEquals(built.all().toSet(), loaded.all().toSet())
+    }
+
+    @Test fun `a cache from an older format is rejected rather than half-read`(@TempDir tmp: Path) {
+        // The v1 shape: four columns, no header. Reading it as current would leave the project with
+        // a plausible-looking empty index and a freshness probe with no reason to rebuild.
+        val tsv = tmp.resolve("index.tsv")
+        tsv.writeText("greet\tsrc/App.kt\t7\tKOTLIN_SYMBOL\n")
+        assertNull(SymbolIndex.load(tsv))
+    }
+
+    @Test fun `a missing cache reads as absent`(@TempDir tmp: Path) {
+        assertNull(SymbolIndex.load(tmp.resolve("nothing-here.tsv")))
+    }
+
+    @Test fun `java files are indexed down to their members`(@TempDir tmp: Path) {
+        val src = tmp.resolve("src/com/example/Greeter.java")
+        src.parent.createDirectories()
+        src.writeText(
+            """
+            package com.example;
+            public class Greeter {
+                private String name;
+                public String greet() { return name; }
+            }
+            """.trimIndent(),
+        )
+
+        val index = Indexer.build(tmp)
+        // The members are the point: the line regex Java used to share with Kotlin saw the class
+        // and nothing inside it, so Ctrl-clicking a method name resolved to nothing.
+        assertEquals(SymbolKind.JAVA_TYPE, index.lookup("Greeter").single().kind)
+        assertEquals(SymbolKind.JAVA_METHOD, index.lookup("greet").single().kind)
+        assertEquals(SymbolKind.JAVA_FIELD, index.lookup("name").single().kind)
+        assertEquals("com.example.Greeter", index.lookup("greet").single().owner)
+        assertEquals(4, index.lookup("greet").single().line)
+    }
+
+    @Test fun `java entries survive the tsv round trip with their owners`(@TempDir tmp: Path) {
+        val src = tmp.resolve("A.java")
+        src.writeText("package p; class A { void m() {} }")
+        val built = Indexer.build(tmp)
+        val tsv = tmp.resolve("index.tsv")
+        SymbolIndex.save(tsv, built)
+        val loaded = assertNotNull(SymbolIndex.load(tsv))
+        assertEquals("p.A", loaded.lookup("m").single().owner)
+    }
+
+    @Test fun `an unparseable java file costs only itself`(@TempDir tmp: Path) {
+        tmp.resolve("Broken.java").writeText("class Broken { void x( { }")
+        tmp.resolve("Fine.java").writeText("class Fine { void y() {} }")
+        val index = Indexer.build(tmp)
+        assertEquals(1, index.lookup("Fine").size)
+        assertEquals(1, index.lookup("y").size)
     }
 
     @Test fun `wordAt picks the word straddling the cursor`() {

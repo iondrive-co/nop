@@ -382,6 +382,10 @@ private fun ApplicationScope.WorkspaceWindow(
     var refreshTrigger by remember { mutableStateOf(0) }
     // Ctrl+S writes the active editor's buffer now, rather than waiting out the autosave debounce.
     var saveTrigger by remember { mutableStateOf(0) }
+    // Alt+F7 lists where the Java name under the caret is used; Shift+F6 renames it everywhere.
+    // Both are IntelliJ's bindings, which is the muscle memory anyone arriving at this feature has.
+    var findUsagesTrigger by remember { mutableStateOf(0) }
+    var renameSymbolTrigger by remember { mutableStateOf(0) }
 
     Window(
         state = windowState,
@@ -430,6 +434,22 @@ private fun ApplicationScope.WorkspaceWindow(
                 event.key == Key.S
             ) {
                 saveTrigger += 1
+                return@Window true
+            }
+            // Alt+F7 — find usages of the name under the caret. Consumed so the editor beneath
+            // never sees it; F7 alone is unbound, so only the Alt combination is claimed.
+            if (event.type == KeyEventType.KeyDown && event.key == Key.F7 &&
+                event.isAltPressed && !event.isCtrlPressed && !event.isShiftPressed
+            ) {
+                findUsagesTrigger += 1
+                return@Window true
+            }
+            // Shift+F6 — rename it. Consumed for the same reason, and gated on Shift alone so a
+            // bare F6 stays free.
+            if (event.type == KeyEventType.KeyDown && event.key == Key.F6 &&
+                event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed
+            ) {
+                renameSymbolTrigger += 1
                 return@Window true
             }
             // Plain F4 jumps from the active diff to its working file. Exclude Alt so Alt+F4
@@ -498,6 +518,8 @@ private fun ApplicationScope.WorkspaceWindow(
                                 jumpToSourceTrigger = jumpToSourceTrigger,
                                 refreshTrigger = refreshTrigger,
                                 saveTrigger = saveTrigger,
+                                findUsagesTrigger = findUsagesTrigger,
+                                renameSymbolTrigger = renameSymbolTrigger,
                             )
                         }
                     } else {
