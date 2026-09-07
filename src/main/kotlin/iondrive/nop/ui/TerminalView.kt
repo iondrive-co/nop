@@ -37,8 +37,11 @@ fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
     val isDark = JewelTheme.isDark
     val bg = JewelTheme.globalColors.panelBackground
     val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
+    // Same link blues the markdown preview uses, so a URL looks the same wherever nop shows one.
+    val link = if (isDark) Color(0xFF6897BB) else Color(0xFF1750EB)
     val awtBg = bg.toAwt()
     val awtFg = fg.toAwt()
+    val awtLink = link.toAwt()
 
     Column(modifier = Modifier.fillMaxSize().background(bg)) {
         if (tab.session.isLauncher) {
@@ -62,19 +65,19 @@ fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
         SwingPanel(
             background = bg,
             factory = {
-                ensureCard(cards, tab, awtBg, awtFg)
+                ensureCard(cards, tab, awtBg, awtFg, awtLink)
                 cards
             },
             update = {
-                ensureCard(cards, tab, awtBg, awtFg)
-                tab.session.applyColors(awtBg, awtFg)
+                ensureCard(cards, tab, awtBg, awtFg, awtLink)
+                tab.session.applyColors(awtBg, awtFg, awtLink)
                 cards.background = awtBg
                 // Only flip the visible card (and steal focus) when the selected terminal actually
                 // changes — not on every recomposition, which would fight terminal text selection.
                 if (cards.getClientProperty(SHOWN_ID) != tab.id) {
                     (cards.layout as CardLayout).show(cards, tab.id)
                     cards.putClientProperty(SHOWN_ID, tab.id)
-                    tab.session.getOrCreateWidget(awtBg, awtFg).requestFocusInWindow()
+                    tab.session.getOrCreateWidget(awtBg, awtFg, awtLink).requestFocusInWindow()
                 }
             },
             modifier = Modifier.fillMaxSize(),
@@ -85,8 +88,14 @@ fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
 private const val SHOWN_ID = "nop.shownTerminalId"
 
 /** Lazily create the session's widget and add it to the shared card panel under the tab id. */
-private fun ensureCard(cards: JPanel, tab: Tab.Terminal, bg: java.awt.Color, fg: java.awt.Color) {
-    val w = tab.session.getOrCreateWidget(bg, fg)
+private fun ensureCard(
+    cards: JPanel,
+    tab: Tab.Terminal,
+    bg: java.awt.Color,
+    fg: java.awt.Color,
+    link: java.awt.Color,
+) {
+    val w = tab.session.getOrCreateWidget(bg, fg, link)
     if (w.parent !== cards) cards.add(w, tab.id)
 }
 

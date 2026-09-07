@@ -47,10 +47,14 @@ class TerminalSession private constructor(
      * Builds the widget + starts the PTY on first call, returning the same widget thereafter (so
      * the host can re-attach it to its card without respawning). Must run on the AWT EDT.
      */
-    fun getOrCreateWidget(bg: Color, fg: Color): JediTermWidget {
+    fun getOrCreateWidget(bg: Color, fg: Color, link: Color): JediTermWidget {
         widget?.let { return it }
-        val s = NopTerminalSettings(bg, fg)
+        val s = NopTerminalSettings(bg, fg, link)
         val w = JediTermWidget(INITIAL_COLUMNS, INITIAL_ROWS, s)
+        // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
+        // Must be installed before the process starts writing, or early output misses out: JediTerm
+        // only runs the filters over a line as it is written.
+        w.addHyperlinkFilter(UrlHyperlinkFilter())
         settings = s
         widget = w
         attach(w, startProcess())
@@ -58,11 +62,12 @@ class TerminalSession private constructor(
     }
 
     /** Repaints the terminal in new theme colours; no-op if nothing changed or not yet created. */
-    fun applyColors(bg: Color, fg: Color) {
+    fun applyColors(bg: Color, fg: Color, link: Color) {
         val s = settings ?: return
-        if (s.bg == bg && s.fg == fg) return
+        if (s.bg == bg && s.fg == fg && s.link == link) return
         s.bg = bg
         s.fg = fg
+        s.link = link
         widget?.let { w ->
             w.background = bg
             w.terminalPanel.background = bg
