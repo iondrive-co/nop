@@ -108,9 +108,9 @@ fun main(args: Array<String>) {
         // [Settings.loadWorkspaces]) and saved back on every change. A window the user closes stays
         // on this list with `open = false`, so its tabs are still there to come back to.
         val workspaces = remember { mutableStateListOf<Workspace>().apply { addAll(startup.workspaces) } }
-        // Most-recently-used projects, newest first, backing every window's "+" dropdown. Seeded from
-        // disk unioned with whatever's open now, so even a first run (before this list was tracked)
-        // offers the current projects once they're closed.
+        // Most-recently-used projects, newest first, backing the "Project" menu over every window's
+        // file tree. Seeded from disk unioned with whatever's open now, so even a first run (before
+        // this list was tracked) offers the current projects once they're closed.
         val recentProjects = remember {
             mutableStateListOf<Path>().apply {
                 val open = Workspaces.allProjects(startup.workspaces)
@@ -156,41 +156,73 @@ fun main(args: Array<String>) {
         }
 
         /**
-         * Opens [path] as a tab of the window with id [into], unless another window already holds it
-         * — a project belongs to one window, so a second copy would mean two editors over one
-         * working tree. That window is raised and switched to the project instead.
+         * Opens [path] as a new tab of the window with id [into], and shows it. A project that
+         * already has a tab — in this window or another — gets a second one rather than the first
+         * being reused: two tabs on one project are two places to work in it, and every gesture that
+         * comes through here (the project menu, the browse dialog, the bar's "+") is the user asking
+         * for a tab outright.
          */
         fun openProject(into: Long, path: Path) {
             val norm = path.toAbsolutePath().normalize()
-            val existing = Workspaces.containing(workspaces, norm)
-            val target = existing?.id ?: into
-            Log.info("open project $norm in window $target")
-            mutate(target) {
-                // `+ listOf(norm)`, never `+ norm`: a Path is an Iterable of its own name elements,
-                // so the bare form would append "home", "miles", … instead of the path.
-                val projects = if (norm in it.projects) it.projects else it.projects + listOf(norm)
-                it.copy(projects = projects, active = norm, open = true, closedAt = null)
+            Log.info("open project $norm in window $into")
+            val tabId = Workspaces.nextTabId(workspaces)
+            mutate(into) { ws ->
+                // At the end of the bar, where the "+" that opened it is: a new tab appearing in the
+                // middle of the row shunts the rest along, and the tab you just made is then not
+                // where you were looking. Dragging puts it wherever the user wants it.
+                ws.copy(tabs = ws.tabs + ProjectTab(tabId, norm), active = tabId, open = true, closedAt = null)
             }
-            focusedId = target
+            focusedId = into
             bumpRecent(norm)
-            if (existing != null) SwingUtilities.invokeLater { raiseWindow(target) }
         }
 
-        fun closeProject(id: Long, path: Path) {
+        /** Renames a tab, or — on a blank name — hands it back to its project's directory name. */
+        fun renameTab(id: Long, tabId: Long, name: String) {
+            mutate(id) { ws ->
+                ws.copy(tabs = ws.tabs.map { if (it.id == tabId) it.copy(name = name.trim()) else it })
+            }
+        }
+
+        /** Another tab on the project the window with [id] is showing — the bar's "+". */
+        fun newTab(id: Long) {
+            val path = Workspaces.byId(workspaces, id)?.activeTab?.path ?: return
+            openProject(id, path)
+        }
+
+        /**
+         * Brings [path] into view in whichever window already has a tab on it, opening one in [into]
+         * when none does, and raises that window. How a project arriving from outside lands —
+         * `nop /some/dir`, or another instance forwarding its arguments: that asks to *see* a
+         * project, where opening one by hand asks for a tab.
+         */
+        fun revealProject(into: Long, path: Path) {
             val norm = path.toAbsolutePath().normalize()
-            mutate(id) {
-                if (norm !in it.projects) {
-                    it
-                } else {
-                    it.copy(
-                        // The next active tab is read off the order as it stood before the removal.
-                        active = ProjectTabs.activeAfterClose(it.projects, norm, it.active),
-                        projects = it.projects.filter { p -> p != norm },
-                    )
-                }
+            val holder = Workspaces.containing(workspaces, norm)
+            if (holder == null) {
+                openProject(into, norm)
+                SwingUtilities.invokeLater { raiseWindow(into) }
+                return
+            }
+            val tab = holder.tabs.first { it.path == norm }
+            mutate(holder.id) { it.copy(active = tab.id, open = true, closedAt = null) }
+            focusedId = holder.id
+            bumpRecent(norm)
+            SwingUtilities.invokeLater { raiseWindow(holder.id) }
+        }
+
+        fun closeTab(id: Long, tabId: Long) {
+            var closed: Path? = null
+            mutate(id) { ws ->
+                val tab = ws.tabs.firstOrNull { it.id == tabId } ?: return@mutate ws
+                closed = tab.path
+                ws.copy(
+                    // The next active tab is read off the order as it stood before the removal.
+                    active = ProjectTabs.activeAfterClose(ws.tabs, tabId, ws.active),
+                    tabs = ws.tabs.filter { it.id != tabId },
+                )
             }
             // Keep the just-closed project at the top of recents so it's one click to reopen.
-            bumpRecent(norm)
+            closed?.let { bumpRecent(it) }
         }
 
         /** A new, empty window, placed one cascade step off the window it was created from. */
@@ -201,7 +233,7 @@ fun main(args: Array<String>) {
                 Workspace(
                     id = id,
                     name = Workspaces.uniqueName(name, taken),
-                    projects = emptyList(),
+                    tabs = emptyList(),
                     geometry = Workspaces.cascade(Workspaces.byId(workspaces, from)?.geometry, 1),
                 ),
             )
@@ -225,8 +257,8 @@ fun main(args: Array<String>) {
          * windows are written back row by row rather than cleared and refilled: the list is what
          * gets persisted, and an emptied-then-rebuilt one can be seen — and saved — half done.
          */
-        fun moveProject(path: Path, toId: Long) {
-            val moved = Workspaces.moveProject(workspaces.toList(), path, toId)
+        fun moveTab(tabId: Long, toId: Long) {
+            val moved = Workspaces.moveTab(workspaces.toList(), tabId, toId)
             if (moved.size != workspaces.size) return
             moved.forEachIndexed { i, ws -> if (workspaces[i] != ws) workspaces[i] = ws }
             showWindow(toId)
@@ -234,7 +266,7 @@ fun main(args: Array<String>) {
 
         /**
          * Closing a window puts it away rather than throwing it out: the workspace keeps its tabs and
-         * comes back from any other window's "+" menu. The last window on screen is different — there
+         * comes back from any other window's picker. The last window on screen is different — there
          * is nowhere left to reopen it from, so closing that one quits nop, and it stays marked open
          * so the next launch starts where this one left off.
          */
@@ -266,8 +298,7 @@ fun main(args: Array<String>) {
                         val into = focusedId.takeIf { id -> workspaces.any { it.id == id && it.open } }
                             ?: workspaces.firstOrNull { it.open }?.id
                             ?: focusedId
-                        openProject(into, path)
-                        raiseWindow(into)
+                        revealProject(into, path)
                     }
                 },
                 onFocus = { SwingUtilities.invokeLater { raiseWindow(focusedId) } },
@@ -291,7 +322,7 @@ fun main(args: Array<String>) {
         // The active project of the focused window, kept as the single "what was in front last"
         // marker: it is what decides which window to open when a restored layout has none.
         LaunchedEffect(Unit) {
-            snapshotFlow { workspaces.firstOrNull { it.id == focusedId }?.active }
+            snapshotFlow { workspaces.firstOrNull { it.id == focusedId }?.activeTab?.path }
                 .distinctUntilChanged()
                 .collectLatest { Settings.saveActiveProject(it) }
         }
@@ -357,21 +388,23 @@ fun main(args: Array<String>) {
                     recentProjects = recentProjects.toList(),
                     darkMode = darkMode,
                     onFocused = { focusedId = workspace.id },
-                    onSelectProject = { path -> mutate(workspace.id) { it.copy(active = path) } },
-                    onCloseProject = { path -> closeProject(workspace.id, path) },
-                    onOpenRecent = { path -> openProject(workspace.id, path) },
+                    onSelectTab = { tab -> mutate(workspace.id) { it.copy(active = tab) } },
+                    onCloseTab = { tab -> closeTab(workspace.id, tab) },
+                    onNewTab = { newTab(workspace.id) },
+                    onRenameTab = { tab, name -> renameTab(workspace.id, tab, name) },
+                    onOpenProject = { path -> openProject(workspace.id, path) },
                     onOpenOther = {
-                        pickProjectDir(initial = workspace.active?.toFile())
+                        pickProjectDir(initial = workspace.activeTab?.path?.toFile())
                             ?.let { openProject(workspace.id, it) }
                     },
-                    onReorder = { projects -> mutate(workspace.id) { it.copy(projects = projects) } },
+                    onReorder = { tabs -> mutate(workspace.id) { it.copy(tabs = tabs) } },
                     onNewWindow = { name -> newWindow(name, workspace.id) },
                     onRenameWindow = { name -> renameWindow(workspace.id, name) },
                     onRenameOtherWindow = ::renameWindow,
                     onShowWindow = ::showWindow,
                     onDiscardWindow = ::discardWindow,
-                    onMoveToWindow = ::moveProject,
-                    onMoveToNewWindow = { path, name -> moveProject(path, newWindow(name, workspace.id)) },
+                    onMoveToWindow = ::moveTab,
+                    onMoveToNewWindow = { tab, name -> moveTab(tab, newWindow(name, workspace.id)) },
                     onGeometry = { geometry -> mutate(workspace.id) { it.copy(geometry = geometry) } },
                     onToggleTheme = { darkMode = !darkMode },
                     onCloseWindow = { closeWindow(workspace.id) },
@@ -394,25 +427,28 @@ private fun ApplicationScope.WorkspaceWindow(
     recentProjects: List<Path>,
     darkMode: Boolean,
     onFocused: () -> Unit,
-    onSelectProject: (Path) -> Unit,
-    onCloseProject: (Path) -> Unit,
-    onOpenRecent: (Path) -> Unit,
+    onSelectTab: (Long) -> Unit,
+    onCloseTab: (Long) -> Unit,
+    onNewTab: () -> Unit,
+    onRenameTab: (Long, String) -> Unit,
+    onOpenProject: (Path) -> Unit,
     onOpenOther: () -> Unit,
-    onReorder: (List<Path>) -> Unit,
+    onReorder: (List<ProjectTab>) -> Unit,
     onNewWindow: (String) -> Unit,
     onRenameWindow: (String) -> Unit,
     onRenameOtherWindow: (Long, String) -> Unit,
     onShowWindow: (Long) -> Unit,
     onDiscardWindow: (Long) -> Unit,
-    onMoveToWindow: (Path, Long) -> Unit,
-    onMoveToNewWindow: (Path, String) -> Unit,
+    onMoveToWindow: (Long, Long) -> Unit,
+    onMoveToNewWindow: (Long, String) -> Unit,
     onGeometry: (WindowGeometry) -> Unit,
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
     onUnregister: () -> Unit = {},
 ) {
-    val activeProject = workspace.active
+    val activeTab = workspace.activeTab
+    val activeProject = activeTab?.path
     // Read once, at the composition that opens this window: from here on the window state is the
     // authority on where the window is, and it reports changes back through [onGeometry]. A window
     // with nothing of its own falls back to the geometry the single-window builds saved, then to a
@@ -595,17 +631,17 @@ private fun ApplicationScope.WorkspaceWindow(
             // active project fills everything under it.
             Column(modifier = Modifier.fillMaxSize()) {
                 ProjectBar(
-                    projects = workspace.projects,
-                    activeProject = activeProject,
+                    tabs = workspace.tabs,
+                    activeTab = workspace.active,
                     dirtyProjects = dirtyProjects,
-                    recentProjects = recentProjects,
                     windows = windows,
                     windowId = workspace.id,
-                    onSelect = onSelectProject,
-                    onClose = onCloseProject,
-                    onOpenRecent = onOpenRecent,
-                    onOpenOther = onOpenOther,
+                    onSelect = onSelectTab,
+                    onClose = onCloseTab,
+                    onNewTab = onNewTab,
+                    onRenameTab = onRenameTab,
                     onReorder = onReorder,
+                    onOpenOther = onOpenOther,
                     onNewWindow = onNewWindow,
                     onRenameWindow = onRenameWindow,
                     onRenameOtherWindow = onRenameOtherWindow,
@@ -616,15 +652,20 @@ private fun ApplicationScope.WorkspaceWindow(
                     isDark = darkMode,
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                    if (activeProject != null) {
-                        // Key the workspace on the active project: each App owns per-project state
-                        // (git repo, tabs, indexes) behind remember(projectPath), so re-keying on a
-                        // tab switch tears the old project's state down and builds the new one's.
-                        key(activeProject) {
+                    if (activeTab != null && activeProject != null) {
+                        // Key the workspace on the active tab: each App owns per-project state (git
+                        // repo, tabs, indexes) behind remember(projectPath), so re-keying on a tab
+                        // switch tears the old tab's state down and builds the new one's — including
+                        // between two tabs that happen to be on the same project.
+                        key(activeTab.id) {
                             App(
                                 projectPath = activeProject,
                                 repoWatcher = repoWatcher,
                                 onDirtyChange = { dirty -> onProjectDirty(activeProject, dirty) },
+                                recentProjects = recentProjects,
+                                openProjects = workspace.projects,
+                                onOpenProject = onOpenProject,
+                                onOpenOtherProject = onOpenOther,
                                 onToggleTheme = onToggleTheme,
                                 fileSearchTrigger = fileSearchTrigger,
                                 findInFilesTrigger = findInFilesTrigger,
@@ -640,6 +681,7 @@ private fun ApplicationScope.WorkspaceWindow(
                     } else {
                         WindowPickerPanel(
                             parked = Workspaces.parked(windows),
+                            thisWindow = workspace,
                             onOpenWindow = onShowWindow,
                             onRenameWindow = onRenameOtherWindow,
                             onDiscardWindow = onDiscardWindow,
@@ -671,23 +713,33 @@ private fun resolveStartup(arg: Path?): Startup {
     if (arg != null) {
         val holder = Workspaces.containing(saved, arg)
         if (holder != null) {
-            val opened = Workspaces.update(saved, holder.id) { it.copy(open = true, active = arg) }
+            // Whichever of that window's tabs is on the project — a project may have more than one,
+            // and the first is as good an answer as any to "show me this".
+            val tab = holder.tabs.first { it.path == arg }
+            val opened = Workspaces.update(saved, holder.id) { it.copy(open = true, active = tab.id) }
             return Startup(opened, holder.id)
         }
         val into = saved.firstOrNull { it.open } ?: saved.firstOrNull()
         if (into != null) {
+            val tab = ProjectTab(Workspaces.nextTabId(saved), arg)
             val opened = Workspaces.update(saved, into.id) {
-                it.copy(open = true, projects = it.projects + listOf(arg), active = arg)
+                it.copy(open = true, tabs = it.tabs + tab, active = tab.id)
             }
             return Startup(opened, into.id)
         }
-        return Startup(listOf(Workspace(id = 0, name = "", projects = listOf(arg), active = arg)), 0)
+        return Startup(listOf(singleTabWindow(arg)), 0)
     }
     if (saved.isNotEmpty()) {
         return Startup(saved, saved.first { it.open }.id)
     }
     val picked = pickProjectDir(initial = null) ?: return Startup(emptyList(), 0)
-    return Startup(listOf(Workspace(id = 0, name = "", projects = listOf(picked), active = picked)), 0)
+    return Startup(listOf(singleTabWindow(picked)), 0)
+}
+
+/** The one window a launch with nothing saved starts with: [project], and nothing else. */
+private fun singleTabWindow(project: Path): Workspace {
+    val tabs = ProjectTabs.of(listOf(project))
+    return Workspace(id = 0, name = "", tabs = tabs, active = tabs.first().id)
 }
 
 /** Shows a directory chooser. Returns null if the user cancelled. */

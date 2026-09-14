@@ -86,14 +86,29 @@ class SettingsTest {
         assertTrue(raw.contains("open.0="), "should write open.0= entry, got:\n$raw")
     }
 
+    /** A window on [projects], its tabs numbered from [firstTab], showing the one at [active]. */
+    private fun window(
+        id: Long,
+        name: String,
+        projects: List<Path>,
+        firstTab: Long = 0,
+        active: Int? = 0,
+        geometry: WindowGeometry? = null,
+        open: Boolean = true,
+        closedAt: Long? = null,
+    ): Workspace {
+        val tabs = ProjectTabs.of(projects, firstTab)
+        return Workspace(id, name, tabs, active?.let { tabs[it].id }, geometry, open, closedAt)
+    }
+
     @Test
     fun `workspaces round-trip name, tabs, active tab and geometry`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
         val b = tmp.resolve("b").also { Files.createDirectories(it) }
         val windows = listOf(
-            Workspace(0, "work", listOf(a), active = a, geometry = WindowGeometry(900, 700, -5, 40)),
-            Workspace(1, "games", listOf(b), active = b, open = false),
+            window(0, "work", listOf(a), geometry = WindowGeometry(900, 700, -5, 40)),
+            window(1, "games", listOf(b), firstTab = 1, open = false),
         )
         Settings.saveWorkspaces(windows)
 
@@ -101,10 +116,90 @@ class SettingsTest {
     }
 
     @Test
+    fun `two tabs on one project round-trip as two tabs, with the right one in front`(
+        @TempDir tmp: Path,
+    ) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        // The second tab on `a` is the one in front — the case a saved path could not tell apart
+        // from the first, which is why the active tab is saved as a position.
+        val windows = listOf(window(0, "work", listOf(a, b, a), active = 2))
+        Settings.saveWorkspaces(windows)
+
+        val loaded = Settings.loadWorkspaces()
+        assertEquals(listOf(a, b, a), loaded.single().projects)
+        assertEquals(2, loaded.single().tabs.indexOfFirst { it.id == loaded.single().active })
+        assertEquals(windows, loaded)
+    }
+
+    @Test
+    fun `a renamed tab round-trips its name, and an unnamed one writes no row`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val window = window(0, "work", listOf(a, a))
+        val named = window.copy(tabs = listOf(window.tabs[0].copy(name = "a — release"), window.tabs[1]))
+        Settings.saveWorkspaces(listOf(named))
+
+        assertEquals(listOf("a — release", "a"), Settings.loadWorkspaces().single().tabs.map { it.label })
+        val raw = Files.readString(tmp.resolve("nop/state"))
+        assertTrue("ws.0.tabname.0=a — release" in raw, "the renamed tab should be saved, got:\n$raw")
+        assertTrue("ws.0.tabname.1" !in raw, "a tab with no name of its own should write none, got:\n$raw")
+    }
+
+    @Test
+    fun `an active tab saved as a path by an older build still comes back`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val state = tmp.resolve("nop/state").also { Files.createDirectories(it.parent) }
+        Files.writeString(
+            state,
+            """
+            ws.0.name=work
+            ws.0.open=true
+            ws.0.active=/p/b
+            ws.0.project.0=/p/a
+            ws.0.project.1=/p/b
+            """.trimIndent(),
+        )
+
+        val loaded = Settings.loadWorkspaces().single()
+        assertEquals(Paths.get("/p/b"), loaded.activeTab?.path)
+    }
+
+    @Test
+    fun `a window whose saved active tab is gone opens on its first tab`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val state = tmp.resolve("nop/state").also { Files.createDirectories(it.parent) }
+        Files.writeString(
+            state,
+            """
+            ws.0.name=work
+            ws.0.open=true
+            ws.0.active=7
+            ws.0.project.0=/p/a
+            """.trimIndent(),
+        )
+
+        assertEquals(Paths.get("/p/a"), Settings.loadWorkspaces().single().activeTab?.path)
+    }
+
+    @Test
+    fun `tab ids are unique across the whole window list`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        Settings.saveWorkspaces(
+            listOf(window(0, "work", listOf(a, a)), window(1, "games", listOf(a), firstTab = 2)),
+        )
+
+        val ids = Settings.loadWorkspaces().flatMap { it.tabs }.map { it.id }
+        assertEquals(ids.size, ids.distinct().size)
+    }
+
+    @Test
     fun `a parked window round-trips the time it was closed`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
-        val windows = listOf(Workspace(0, "games", listOf(a), active = a, open = false, closedAt = 1_700_000_000_000))
+        val windows = listOf(window(0, "games", listOf(a), open = false, closedAt = 1_700_000_000_000))
 
         Settings.saveWorkspaces(windows)
 
@@ -115,7 +210,7 @@ class SettingsTest {
     fun `an unnamed window with no geometry round-trips`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
-        val windows = listOf(Workspace(0, "", listOf(a), active = a))
+        val windows = listOf(window(0, "", listOf(a)))
         Settings.saveWorkspaces(windows)
 
         assertEquals(windows, Settings.loadWorkspaces())
@@ -129,7 +224,7 @@ class SettingsTest {
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
         val b = tmp.resolve("b").also { Files.createDirectories(it) }
         Settings.saveWorkspaces(
-            listOf(Workspace(0, "work", listOf(a)), Workspace(1, "games", listOf(b), open = false)),
+            listOf(window(0, "work", listOf(a)), window(1, "games", listOf(b), firstTab = 1, open = false)),
         )
 
         assertEquals(listOf(a, b).map { it.toAbsolutePath().normalize() }, Settings.loadOpenProjects())
@@ -159,8 +254,8 @@ class SettingsTest {
         // user was done with those projects.
         assertTrue(loaded.all { it.open })
         // Each window opens on its own first tab, bar the one holding the saved active project.
-        assertEquals(Paths.get("/p/a"), loaded[0].active)
-        assertEquals(Paths.get("/p/c"), loaded[1].active)
+        assertEquals(Paths.get("/p/a"), loaded[0].activeTab?.path)
+        assertEquals(Paths.get("/p/c"), loaded[1].activeTab?.path)
     }
 
     @Test
@@ -268,18 +363,16 @@ class SettingsTest {
         assertNull(r.horizontal)
         assertNull(r.tools)
         assertNull(r.diff)
-        assertNull(r.preview)
     }
 
     @Test
     fun `split ratios round-trip`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
-        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f, preview = 0.24f)
+        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f)
         val r = Settings.loadSplitRatios()
         assertEquals(0.31f, r.horizontal)
         assertEquals(0.42f, r.tools)
         assertEquals(0.63f, r.diff)
-        assertEquals(0.24f, r.preview)
     }
 
     @Test
@@ -287,13 +380,12 @@ class SettingsTest {
         Settings.configRoot = tmp
         val state = tmp.resolve("nop/state").also {
             Files.createDirectories(it.parent)
-            Files.writeString(it, "split.h=1.5\nsplit.tools=-0.2\nsplit.diff=2.0\nsplit.preview=-1\n")
+            Files.writeString(it, "split.h=1.5\nsplit.tools=-0.2\nsplit.diff=2.0\n")
         }
         val r = Settings.loadSplitRatios()
         assertNull(r.horizontal, "h=1.5 should be rejected")
         assertNull(r.tools, "tools=-0.2 should be rejected")
         assertNull(r.diff, "diff=2.0 should be rejected")
-        assertNull(r.preview, "preview=-1 should be rejected")
     }
 
     @Test
@@ -304,6 +396,18 @@ class SettingsTest {
             Files.writeString(it, "split.v=0.55\n")
         }
         assertNull(Settings.loadSplitRatios().tools, "split.v held a height fraction; it must not seed the width split")
+    }
+
+    @Test
+    fun `a state file from before the preview moved still loads`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        tmp.resolve("nop/state").also {
+            Files.createDirectories(it.parent)
+            // "split.preview" sized the markdown editor/preview divider, which no longer exists —
+            // the preview is a tool-panel tab now. The line must be inert, not fatal.
+            Files.writeString(it, "split.h=0.3\nsplit.preview=0.24\n")
+        }
+        assertEquals(0.3f, Settings.loadSplitRatios().horizontal)
     }
 
     @Test
@@ -418,7 +522,7 @@ class SettingsTest {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
-        val windows = listOf(Workspace(0, "work", listOf(proj), active = proj, geometry = WindowGeometry(800, 600, 0, 0)))
+        val windows = listOf(window(0, "work", listOf(proj), geometry = WindowGeometry(800, 600, 0, 0)))
         Settings.saveWorkspaces(windows)
         Settings.addRecentProject(a)
 

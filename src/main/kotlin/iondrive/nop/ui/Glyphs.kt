@@ -84,6 +84,19 @@ internal fun DrawScope.drawWrapIcon(tint: Color) {
     drawLine(tint, Offset(w * 0.2f, h * 0.8f), Offset(w * 0.4f, h), strokeWidth = stroke, cap = StrokeCap.Round)
 }
 
+/**
+ * A chevron pointing left or right: the arrows at the ends of the tool tab strip, which scroll it
+ * when it holds more tabs than the panel can show.
+ */
+internal fun DrawScope.drawChevron(tint: Color, pointsLeft: Boolean) {
+    val w = size.width
+    val h = size.height
+    val tip = if (pointsLeft) w * 0.3f else w * 0.7f
+    val tail = if (pointsLeft) w * 0.7f else w * 0.3f
+    drawLine(tint, Offset(tail, h * 0.15f), Offset(tip, h * 0.5f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+    drawLine(tint, Offset(tip, h * 0.5f), Offset(tail, h * 0.85f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+}
+
 // A disclosure chevron: ">" (points right) when the group is collapsed, "v" (points down) when it's
 // expanded — the usual "click to reveal what's underneath" convention.
 internal fun DrawScope.drawDisclosure(tint: Color, collapsed: Boolean) {

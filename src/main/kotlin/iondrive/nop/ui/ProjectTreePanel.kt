@@ -447,6 +447,10 @@ fun ProjectTreePanel(
     onPasteRequest: (targetDir: File) -> Unit = {},
     canPaste: () -> Boolean = { false },
     onMoveRequest: (source: File, targetDir: File) -> Unit = { _, _ -> },
+    // The word at the head of the panel. A slot rather than a plain label because it is also the way
+    // to another project — see [ProjectMenuLabel] — which is a question for whoever owns the window's
+    // tabs, not for a tree showing one project's files.
+    projectLabel: @Composable () -> Unit = { Text("Project") },
     headerExtras: @Composable () -> Unit = {},
 ) {
     val rootId = remember(projectPath) { projectPath.toFile().absolutePath }
@@ -579,7 +583,7 @@ fun ProjectTreePanel(
         ) {
             val isDark = JewelTheme.isDark
             val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
-            Text("Project")
+            projectLabel()
             Tooltip(tooltip = {
                 Text("Open selected with the system default app")
             }) {

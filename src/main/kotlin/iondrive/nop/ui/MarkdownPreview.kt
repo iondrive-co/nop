@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -94,12 +95,22 @@ private val MARKDOWN_PARSER: Parser = Parser.builder()
     .extensions(listOf(TablesExtension.create(), StrikethroughExtension.create()))
     .build()
 
-/** Parses [text] as commonmark + GFM and renders it as a stack of Compose nodes. */
+/**
+ * Parses [text] as commonmark + GFM and renders it as a stack of Compose nodes.
+ *
+ * [scroll] is a parameter rather than a `remember` here because the preview lives in the tool panel
+ * and is composed one file at a time: the caller passes the scroll state belonging to the file being
+ * previewed (see [FileEdit.previewScroll]), so switching tabs and coming back lands where the reader
+ * left off instead of at the top — or, worse, at the offset the *previous* file was scrolled to.
+ */
 @Composable
-fun MarkdownPreview(text: String, modifier: Modifier = Modifier) {
+fun MarkdownPreview(
+    text: String,
+    modifier: Modifier = Modifier,
+    scroll: ScrollState = rememberScrollState(),
+) {
     // Re-parse only when the text changes. The AST is cheap to walk so we don't memoize past this.
     val document = remember(text) { MARKDOWN_PARSER.parse(text) }
-    val scroll = rememberScrollState()
     val colors = if (JewelTheme.isDark) MdColors.Dark else MdColors.Light
     Box(
         modifier = modifier

@@ -4,7 +4,6 @@ import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.FileChange
-import iondrive.nop.terminal.TerminalSession
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -50,25 +49,6 @@ class TabsPersistenceTest {
         assertEquals(false, loaded[0].selected)
         assertEquals("history", loaded[1].kind)
         assertEquals(true, loaded[1].selected)
-    }
-
-    @Test
-    fun `save drops Terminal tabs`(@TempDir tmp: Path) {
-        val target = tmp.resolve("tabs.tsv")
-        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
-        val keep = tmp.resolve("keep.kt").toFile().apply { writeText("") }
-
-        // TerminalSession is lazy — constructing one starts no PTY, so this is safe headless.
-        val tabs = listOf<Tab>(
-            Tab.FileView(keep),
-            Tab.Terminal(TerminalSession.shell(repo)),
-        )
-        TabsPersistence.save(target, snapshotOf(tabs))
-
-        val loaded = tabRows(TabsPersistence.load(target))
-        assertEquals(1, loaded.size)
-        assertEquals("file", loaded[0].kind)
-        assertEquals(keep.absolutePath, loaded[0].path)
     }
 
     @Test

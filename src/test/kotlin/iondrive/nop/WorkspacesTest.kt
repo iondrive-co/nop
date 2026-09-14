@@ -10,8 +10,16 @@ import java.nio.file.Paths
 class WorkspacesTest {
     private fun p(s: String): Path = Paths.get(s)
 
-    private fun ws(id: Long, name: String, vararg projects: String, open: Boolean = true) =
-        Workspace(id, name, projects.map(::p), active = projects.firstOrNull()?.let(::p), open = open)
+    /**
+     * A window on [projects], its first tab in front. Tab ids are spaced out by window so that a
+     * list built here has the same property the real one does: no two tabs anywhere share an id.
+     */
+    private fun ws(id: Long, name: String, vararg projects: String, open: Boolean = true): Workspace {
+        val tabs = ProjectTabs.of(projects.map(::p), firstId = id * 100)
+        return Workspace(id, name, tabs, active = tabs.firstOrNull()?.id, open = open)
+    }
+
+    private fun tabs(vararg projects: String) = ProjectTabs.of(projects.map(::p))
 
     @Test
     fun `title is the window's name`() {
@@ -21,6 +29,13 @@ class WorkspacesTest {
     @Test
     fun `an unnamed window is titled after the project it is showing`() {
         assertEquals("pog", ws(0, "", "/p/pog").title)
+    }
+
+    @Test
+    fun `an unnamed window showing a renamed tab is titled by that name`() {
+        val work = ws(0, "", "/p/pog")
+        val renamed = work.copy(tabs = listOf(work.tabs[0].copy(name = "pog — server")))
+        assertEquals("pog — server", renamed.title)
     }
 
     @Test
@@ -48,6 +63,11 @@ class WorkspacesTest {
     }
 
     @Test
+    fun `allProjects counts a project with two tabs once — it is one working tree`() {
+        assertEquals(listOf(p("/p/a")), Workspaces.allProjects(listOf(ws(0, "work", "/p/a", "/p/a"))))
+    }
+
+    @Test
     fun `activeProjects covers the showing windows only`() {
         val list = listOf(ws(0, "work", "/p/a"), ws(1, "games", "/p/c", open = false))
         assertEquals(setOf(p("/p/a")), Workspaces.activeProjects(list))
@@ -55,50 +75,65 @@ class WorkspacesTest {
 
     @Test
     fun `move slides a tab along the bar`() {
-        val tabs = listOf(p("/a"), p("/b"), p("/c"))
-        assertEquals(listOf(p("/b"), p("/c"), p("/a")), Workspaces.move(tabs, 0, 2))
-        assertEquals(listOf(p("/c"), p("/a"), p("/b")), Workspaces.move(tabs, 2, 0))
+        val row = tabs("/a", "/b", "/c")
+        assertEquals(listOf(1L, 2L, 0L), Workspaces.move(row, 0, 2).map { it.id })
+        assertEquals(listOf(2L, 0L, 1L), Workspaces.move(row, 2, 0).map { it.id })
     }
 
     @Test
     fun `move ignores an out-of-range or standstill index`() {
-        val tabs = listOf(p("/a"), p("/b"))
-        assertEquals(tabs, Workspaces.move(tabs, 1, 1))
-        assertEquals(tabs, Workspaces.move(tabs, 0, 5))
-        assertEquals(tabs, Workspaces.move(tabs, -1, 0))
+        val row = tabs("/a", "/b")
+        assertEquals(row, Workspaces.move(row, 1, 1))
+        assertEquals(row, Workspaces.move(row, 0, 5))
+        assertEquals(row, Workspaces.move(row, -1, 0))
     }
 
     @Test
-    fun `moveProject hands a tab over and takes it off the window that had it`() {
+    fun `moveTab hands a tab over and takes it off the window that had it`() {
         val list = listOf(ws(0, "work", "/p/a", "/p/b"), ws(1, "games", "/p/c"))
-        val moved = Workspaces.moveProject(list, p("/p/b"), toId = 1)
+        val moving = list[0].tabs[1]
+        val moved = Workspaces.moveTab(list, moving.id, toId = 1)
 
         assertEquals(listOf(p("/p/a")), moved[0].projects)
         assertEquals(listOf(p("/p/c"), p("/p/b")), moved[1].projects)
-        // The window it landed in shows it — that is what the user just asked for.
-        assertEquals(p("/p/b"), moved[1].active)
+        // The window it landed in shows it — that is what the user just asked for — and it is the
+        // same tab that left, not a new one on the same project.
+        assertEquals(moving.id, moved[1].active)
     }
 
     @Test
     fun `moving the tab that was in front leaves the donor showing its neighbour`() {
-        val list = listOf(
-            Workspace(0, "work", listOf(p("/p/a"), p("/p/b")), active = p("/p/b")),
-            ws(1, "games", "/p/c"),
-        )
-        val moved = Workspaces.moveProject(list, p("/p/b"), toId = 1)
-        assertEquals(p("/p/a"), moved[0].active)
+        val work = ws(0, "work", "/p/a", "/p/b")
+        val list = listOf(work.copy(active = work.tabs[1].id), ws(1, "games", "/p/c"))
+        val moved = Workspaces.moveTab(list, work.tabs[1].id, toId = 1)
+        assertEquals(p("/p/a"), moved[0].activeTab?.path)
     }
 
     @Test
-    fun `moving a project to the window it is already in changes nothing`() {
+    fun `moving a tab to the window it is already in changes nothing`() {
         val list = listOf(ws(0, "work", "/p/a"))
-        assertEquals(list, Workspaces.moveProject(list, p("/p/a"), toId = 0))
+        assertEquals(list, Workspaces.moveTab(list, list[0].tabs[0].id, toId = 0))
     }
 
     @Test
-    fun `moveProject ignores a window that isn't there`() {
+    fun `moveTab ignores a window that isn't there`() {
         val list = listOf(ws(0, "work", "/p/a"))
-        assertEquals(list, Workspaces.moveProject(list, p("/p/a"), toId = 7))
+        assertEquals(list, Workspaces.moveTab(list, list[0].tabs[0].id, toId = 7))
+    }
+
+    @Test
+    fun `moveTab ignores a tab that isn't there`() {
+        val list = listOf(ws(0, "work", "/p/a"), ws(1, "games", "/p/b"))
+        assertEquals(list, Workspaces.moveTab(list, tabId = 999, toId = 1))
+    }
+
+    @Test
+    fun `moveTab takes one of a project's two tabs and leaves the other`() {
+        val list = listOf(ws(0, "work", "/p/a", "/p/a"), ws(1, "games", "/p/b"))
+        val moved = Workspaces.moveTab(list, list[0].tabs[0].id, toId = 1)
+
+        assertEquals(listOf(p("/p/a")), moved[0].projects)
+        assertEquals(listOf(p("/p/b"), p("/p/a")), moved[1].projects)
     }
 
     @Test
@@ -117,6 +152,20 @@ class WorkspacesTest {
     fun `nextId clears every id in use`() {
         assertEquals(0L, Workspaces.nextId(emptyList()))
         assertEquals(8L, Workspaces.nextId(listOf(ws(3, "a"), ws(7, "b"))))
+    }
+
+    @Test
+    fun `nextTabId clears every tab id in use, in every window`() {
+        assertEquals(0L, Workspaces.nextTabId(emptyList()))
+        // ws(1, …) numbers its tabs from 100, so the next id has to clear that window too.
+        assertEquals(102L, Workspaces.nextTabId(listOf(ws(0, "work", "/p/a"), ws(1, "games", "/p/b", "/p/c"))))
+    }
+
+    @Test
+    fun `holdingTab finds the window a tab is in`() {
+        val list = listOf(ws(0, "work", "/p/a"), ws(1, "games", "/p/b"))
+        assertEquals(1L, Workspaces.holdingTab(list, list[1].tabs[0].id)?.id)
+        assertNull(Workspaces.holdingTab(list, 999))
     }
 
     // --- the upgrade from the single bar of separator-grouped tabs -------------------------------
@@ -155,8 +204,15 @@ class WorkspacesTest {
     @Test
     fun `the saved active tab stays in front of its own window, others take their first tab`() {
         val out = Workspaces.migrateRail(rail, active = p("/p/paren"), geometry = null)
-        assertEquals(p("/p/ops"), out[0].active)
-        assertEquals(p("/p/paren"), out[1].active)
+        assertEquals(p("/p/ops"), out[0].activeTab?.path)
+        assertEquals(p("/p/paren"), out[1].activeTab?.path)
+    }
+
+    @Test
+    fun `migrateRail hands out tab ids that no two windows share`() {
+        val out = Workspaces.migrateRail(rail, active = null, geometry = null)
+        val ids = out.flatMap { it.tabs }.map { it.id }
+        assertEquals(ids.size, ids.distinct().size)
     }
 
     @Test

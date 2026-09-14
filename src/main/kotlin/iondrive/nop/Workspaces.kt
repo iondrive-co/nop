@@ -5,7 +5,7 @@ import java.nio.file.Paths
 
 /**
  * One nop window: a name, the ordered project tabs it shows along its top bar, and which of those
- * is the project the workspace beneath the bar is currently showing.
+ * is the tab the workspace beneath the bar is currently showing.
  *
  * A window is the unit the user organises projects into — what named separators in a single bar used
  * to do, a whole window now does, so "games" is a window rather than a fold in a very long strip.
@@ -17,32 +17,39 @@ import java.nio.file.Paths
  *
  * [id] is a runtime identity for keying windows and addressing one for a rename or a move; it isn't
  * persisted, since nothing outside a single run refers to a workspace by anything but its position.
+ * [active] addresses a tab the same way, by [ProjectTab.id] rather than by path: a project may have
+ * more than one tab, and a path would no longer say which of them is in front.
  * [geometry] is this window's own size and place on screen, remembered per window so reopening one
  * puts it back where it was.
  */
 data class Workspace(
     val id: Long,
     val name: String,
-    val projects: List<Path>,
-    val active: Path? = null,
+    val tabs: List<ProjectTab>,
+    val active: Long? = null,
     val geometry: WindowGeometry? = null,
     val open: Boolean = true,
     /** When this window was parked, in epoch millis; null while it is open, or was never closed. */
     val closedAt: Long? = null,
 ) {
+    /** The projects this window's tabs are on, in bar order — with repeats, where a tab is a second
+     * look at a project one of the others already shows. */
+    val projects: List<Path> get() = tabs.map { it.path }
+
+    /** The tab in front, or null in a window with no tabs left. */
+    val activeTab: ProjectTab? get() = tabs.firstOrNull { it.id == active }
+
     /**
      * What the title bar and the window list call this window. A named workspace goes by its name;
-     * an unnamed one — every window on a fresh install, until the user names it — falls back to the
-     * project it is showing, which is what the title used to say after the old "nop — " prefix.
+     * an unnamed one — every window on a fresh install, until the user names it — falls back to what
+     * the tab it is showing says, which is what the title used to say after the old "nop — " prefix.
      */
     val title: String
-        get() = name.ifBlank {
-            (active ?: projects.firstOrNull())?.fileName?.toString() ?: "nop"
-        }
+        get() = name.ifBlank { (activeTab ?: tabs.firstOrNull())?.label ?: "nop" }
 }
 
 /**
- * Pure helpers over the window list — creation, naming, moving projects between windows, and the
+ * Pure helpers over the window list — creation, naming, moving tabs between windows, and the
  * one-time upgrade from the old single-window rail — kept out of the Compose and IO layers so they
  * can be unit-tested directly.
  */
@@ -56,7 +63,19 @@ object Workspaces {
     /** An id no workspace on [list] is using, for a window about to be created. */
     fun nextId(list: List<Workspace>): Long = (list.maxOfOrNull { it.id } ?: -1L) + 1L
 
+    /**
+     * An id no tab on [list] is using, for a tab about to be opened. Ids run across the whole window
+     * list rather than per window so a tab keeps its own id when it moves to another window — the
+     * one it lands among can't already be using it.
+     */
+    fun nextTabId(list: List<Workspace>): Long =
+        (list.flatMap { it.tabs }.maxOfOrNull { it.id } ?: -1L) + 1L
+
     fun byId(list: List<Workspace>, id: Long): Workspace? = list.firstOrNull { it.id == id }
+
+    /** The window holding the tab with id [tabId], or null when no window does. */
+    fun holdingTab(list: List<Workspace>, tabId: Long): Workspace? =
+        list.firstOrNull { ws -> ws.tabs.any { it.id == tabId } }
 
     /**
      * The windows waiting to be picked up, most recently closed first: the parked ones that still
@@ -64,7 +83,7 @@ object Workspaces {
      * which is why [park] drops one rather than keeping it.
      */
     fun parked(list: List<Workspace>): List<Workspace> =
-        list.filter { !it.open && it.projects.isNotEmpty() }
+        list.filter { !it.open && it.tabs.isNotEmpty() }
             .sortedByDescending { it.closedAt ?: Long.MIN_VALUE }
 
     /**
@@ -74,14 +93,18 @@ object Workspaces {
      */
     fun park(list: List<Workspace>, id: Long, nowMs: Long): List<Workspace> {
         val window = byId(list, id) ?: return list
-        if (window.projects.isEmpty()) return list.filter { it.id != id }
+        if (window.tabs.isEmpty()) return list.filter { it.id != id }
         return update(list, id) { it.copy(open = false, closedAt = nowMs) }
     }
 
     /** Throws a window away for good, tabs and all. Only ever from the picker's discard. */
     fun discard(list: List<Workspace>, id: Long): List<Workspace> = list.filter { it.id != id }
 
-    /** The first window holding [path] as one of its tabs, or null when no window has it open. */
+    /**
+     * The first window with a tab on [path], or null when no window has it open. What `nop /some/dir`
+     * uses to raise the window already showing a project rather than opening another copy of it; the
+     * ways the user asks for a second tab by hand say so explicitly and don't come through here.
+     */
     fun containing(list: List<Workspace>, path: Path): Workspace? {
         val norm = path.toAbsolutePath().normalize()
         return list.firstOrNull { ws -> ws.projects.any { it == norm } }
@@ -90,9 +113,9 @@ object Workspaces {
     /** Every project open in any window, in window order, deduped. */
     fun allProjects(list: List<Workspace>): List<Path> = list.flatMap { it.projects }.distinct()
 
-    /** The active project of each window that is currently showing — the tabs nobody should poll. */
+    /** The project each showing window has in front — the trees nobody should poll. */
     fun activeProjects(list: List<Workspace>): Set<Path> =
-        list.filter { it.open }.mapNotNull { it.active }.toSet()
+        list.filter { it.open }.mapNotNull { it.activeTab?.path }.toSet()
 
     /**
      * Replaces the workspace with [id] using [transform]. Anything else is left as it stands, and an
@@ -103,35 +126,35 @@ object Workspaces {
         list.map { if (it.id == id) transform(it) else it }
 
     /**
-     * Moves the project at [from] to index [to] within one window's tabs, shifting the rest.
+     * Moves the item at [from] to index [to] within one window's tabs, shifting the rest.
      * Out-of-range indices (or from == to) return the list unchanged, so a stale mid-drag index is
      * harmless.
      */
-    fun move(projects: List<Path>, from: Int, to: Int): List<Path> {
-        if (from == to || from !in projects.indices || to !in projects.indices) return projects
-        val out = projects.toMutableList()
+    fun <T> move(items: List<T>, from: Int, to: Int): List<T> {
+        if (from == to || from !in items.indices || to !in items.indices) return items
+        val out = items.toMutableList()
         out.add(to, out.removeAt(from))
         return out
     }
 
     /**
-     * Hands [path] to the window with id [toId] and takes it off whichever window held it, so a
-     * project sits in exactly one window. The receiving window makes it its active tab (that is what
-     * the user just asked for by moving it there); the donor picks its next active tab the same way
-     * closing that tab would. Moving a project to the window it is already in is a no-op.
+     * Hands the tab with id [tabId] to the window with id [toId] and takes it off whichever window
+     * held it. The receiving window makes it its active tab (that is what the user just asked for by
+     * moving it there); the donor picks its next active tab the same way closing that tab would.
+     * Moving a tab to the window it is already in is a no-op, as is moving one that isn't there.
      */
-    fun moveProject(list: List<Workspace>, path: Path, toId: Long): List<Workspace> {
-        val norm = path.toAbsolutePath().normalize()
-        val target = byId(list, toId) ?: return list
-        if (norm in target.projects) return list
+    fun moveTab(list: List<Workspace>, tabId: Long, toId: Long): List<Workspace> {
+        val from = holdingTab(list, tabId) ?: return list
+        if (from.id == toId) return list
+        val tab = from.tabs.first { it.id == tabId }
+        if (byId(list, toId) == null) return list
         return list.map { ws ->
-            when {
-                // `+ listOf(norm)` rather than `+ norm`: a Path is itself an Iterable of its name
-                // elements, so the bare form appends the segments of the path instead of the path.
-                ws.id == toId -> ws.copy(projects = ws.projects + listOf(norm), active = norm)
-                norm in ws.projects -> ws.copy(
-                    projects = ws.projects.filter { it != norm },
-                    active = ProjectTabs.activeAfterClose(ws.projects, norm, ws.active),
+            when (ws.id) {
+                toId -> ws.copy(tabs = ws.tabs + tab, active = tab.id)
+                from.id -> ws.copy(
+                    // The next active tab is read off the order as it stood before the removal.
+                    active = ProjectTabs.activeAfterClose(ws.tabs, tabId, ws.active),
+                    tabs = ws.tabs.filter { it.id != tabId },
                 )
                 else -> ws
             }
@@ -140,7 +163,7 @@ object Workspaces {
 
     /**
      * [base] adjusted so it doesn't collide with a name already [taken] — "games" becomes "games 2",
-     * then "games 3". Window names are the only handle the user has on a window in the "+" menu, so
+     * then "games 3". Window names are the only handle the user has on a window in the picker, so
      * two windows sharing one would leave them indistinguishable.
      */
     fun uniqueName(base: String, taken: Collection<String>): String {
@@ -176,10 +199,15 @@ object Workspaces {
         // tabs open an unnamed one; a separator starts a named one and ends whatever came before.
         var name: String? = null
         var projects = mutableListOf<Path>()
+        // Tab ids run on across the windows the upgrade makes, the way [nextTabId] would hand them
+        // out, so no two tabs anywhere share one.
+        var nextTab = 0L
 
         fun flush() {
             if (name == null && projects.isEmpty()) return
-            out.add(Workspace(id = out.size.toLong(), name = name ?: "", projects = projects.toList()))
+            val tabs = ProjectTabs.of(projects.toList(), nextTab)
+            nextTab += tabs.size
+            out.add(Workspace(id = out.size.toLong(), name = name ?: "", tabs = tabs))
         }
 
         for (value in encoded) {
@@ -206,8 +234,9 @@ object Workspaces {
 
         val normActive = active?.toAbsolutePath()?.normalize()
         return out.mapIndexed { idx, ws ->
+            val savedAt = ws.tabs.indexOfFirst { it.path == normActive }.takeIf { it >= 0 }
             ws.copy(
-                active = ProjectTabs.initialActive(ws.projects, normActive),
+                active = ProjectTabs.initialActive(ws.tabs, savedAt),
                 geometry = cascade(geometry, idx),
             )
         }

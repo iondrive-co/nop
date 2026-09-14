@@ -4,6 +4,7 @@ import iondrive.nop.PathOrder
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand
 import org.eclipse.jgit.api.errors.CheckoutConflictException
+import org.eclipse.jgit.api.errors.StashApplyFailureException
 import org.eclipse.jgit.diff.DiffEntry
 import org.eclipse.jgit.diff.DiffFormatter
 import org.eclipse.jgit.lib.Repository
@@ -21,6 +22,7 @@ import org.eclipse.jgit.treewalk.filter.SkipWorkTreeFilter
 import org.eclipse.jgit.diff.RawText
 import org.eclipse.jgit.treewalk.WorkingTreeIterator
 import org.eclipse.jgit.util.io.DisabledOutputStream
+import org.eclipse.jgit.dircache.Checkout
 import org.eclipse.jgit.dircache.DirCache
 import org.eclipse.jgit.dircache.DirCacheCheckout
 import org.eclipse.jgit.dircache.DirCacheEditor
@@ -804,14 +806,79 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
 
     /** Apply a stash without removing it from the shelf. */
     fun stashApply(entry: StashEntry) {
-        git.stashApply().setStashRef(entry.sha).call()
+        applyRestoringUntracked(entry)
     }
 
     /** Apply a stash then drop it. */
     fun stashPop(entry: StashEntry) {
         // Apply first; if this throws (e.g., conflicts), keep the stash on the shelf
-        git.stashApply().setStashRef(entry.sha).call()
+        applyRestoringUntracked(entry)
         git.stashDrop().setStashRef(entry.index).call()
+    }
+
+    /**
+     * JGit restores an entry's untracked files only after the tracked merge has succeeded, so a
+     * conflicting apply writes the conflict markers and leaves every untracked file where it was —
+     * on the shelf, with nothing on screen to say so. The entry survives either way, so the files
+     * are never lost, but a working tree quietly short of files reads as loss. Put them back, and
+     * name them in the failure.
+     */
+    private fun applyRestoringUntracked(entry: StashEntry) {
+        try {
+            git.stashApply().setStashRef(entry.sha).call()
+        } catch (failure: StashApplyFailureException) {
+            val restored = runCatching { restoreUntracked(entry.sha) }.getOrDefault(emptyList())
+            if (restored.isEmpty()) throw failure
+            throw StashApplyFailureException(
+                "${failure.message} The stash was kept, and the untracked files it carries were " +
+                    "put back: ${restored.joinToString(", ")}.",
+                failure,
+            )
+        }
+    }
+
+    /**
+     * Writes the untracked files a stash carries in its third parent into the working tree,
+     * returning the paths written. A path already on disk is skipped rather than overwritten: the
+     * entry stays on the shelf, so a skip is recoverable where a clobber is not.
+     *
+     * The smudge command has to come off the walk and be passed on. JGit's own untracked restore
+     * hardcodes it to null, which writes a git-lfs pointer to disk in place of the file it stands
+     * for — the second tree is a [FileTreeIterator] partly so `.gitattributes` resolves here.
+     */
+    private fun restoreUntracked(stashSha: String): List<String> {
+        val written = ArrayList<String>()
+        RevWalk(repository).use { revWalk ->
+            val stashCommit = revWalk.parseCommit(ObjectId.fromString(stashSha))
+            if (stashCommit.parentCount < 3) return emptyList()
+            val untrackedTree = revWalk.parseTree(stashCommit.getParent(2))
+            val checkout = Checkout(repository).setRecursiveDeletion(true)
+            TreeWalk(repository).use { walk ->
+                walk.setOperationType(TreeWalk.OperationType.CHECKOUT_OP)
+                walk.addTree(untrackedTree)
+                walk.addTree(FileTreeIterator(repository))
+                walk.isRecursive = true
+                while (walk.next()) {
+                    if (walk.getTree(0, AbstractTreeIterator::class.java) == null) continue
+                    if (walk.getTree(1, FileTreeIterator::class.java) != null) continue
+                    val path = walk.pathString
+                    val cacheEntry = DirCacheEntry(walk.rawPath)
+                    cacheEntry.setFileMode(walk.getFileMode(0))
+                    cacheEntry.setObjectId(walk.getObjectId(0))
+                    checkout.checkout(
+                        cacheEntry,
+                        DirCacheCheckout.CheckoutMetadata(
+                            walk.getEolStreamType(TreeWalk.OperationType.CHECKOUT_OP),
+                            walk.getFilterCommand(Constants.ATTR_FILTER_TYPE_SMUDGE),
+                        ),
+                        walk.objectReader,
+                        path,
+                    )
+                    written.add(path)
+                }
+            }
+        }
+        return written
     }
 
     /** Drop a stash without applying. */

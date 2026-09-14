@@ -12,7 +12,7 @@ data class WindowGeometry(
     val y: Int?,
 )
 
-data class SplitRatios(val horizontal: Float?, val tools: Float?, val diff: Float?, val preview: Float?)
+data class SplitRatios(val horizontal: Float?, val tools: Float?, val diff: Float?)
 
 /**
  * Tiny persistent settings stored at $XDG_CONFIG_HOME/nop/state (default ~/.config/nop/state)
@@ -98,9 +98,10 @@ object Settings {
     }
 
     /**
-     * Every window the user has, in order: its name, its project tabs, which of them was active,
-     * where the window sat on screen, and whether it was showing when nop last exited. Stored as
-     * `ws.0.name`, `ws.0.project.0`, … one numbered block per window.
+     * Every window the user has, in order: its name, its project tabs (with any name the user gave
+     * one), which of them was active, where the window sat on screen, and whether it was showing when
+     * nop last exited. Stored as `ws.0.name`, `ws.0.project.0`, `ws.0.tabname.0`, … one numbered
+     * block per window.
      *
      * When no `ws.N` block exists the state is from a build that had a single window and grouped its
      * projects with named separators in one bar, so the layout is upgraded on the spot — see
@@ -116,20 +117,44 @@ object Settings {
             .distinct()
             .sorted()
         if (indices.isEmpty()) return migratedWorkspaces(map)
+        // Tab ids are handed out across the whole file, not per window, so a tab moved to another
+        // window can't collide with one already there.
+        var nextTab = 0L
         return indices.mapIndexed { seq, i ->
             val prefix = "$WORKSPACE_PREFIX$i."
+            // A tab's own name, where it has been given one; blank for the rest, which go by their
+            // project's directory name.
+            val tabs = ProjectTabs.of(numbered(map, prefix + "project."), nextTab)
+                .mapIndexed { j, tab -> tab.copy(name = map["${prefix}tabname.$j"].orEmpty()) }
+            nextTab += tabs.size
             Workspace(
                 // Ids are handed out by position: nothing outside one run refers to a window by id.
                 id = seq.toLong(),
                 name = map[prefix + "name"].orEmpty(),
-                projects = numbered(map, prefix + "project."),
-                active = map[prefix + "active"]?.takeIf { it.isNotBlank() }?.let(::parsePath),
+                tabs = tabs,
+                // A window with tabs always has one in front — a saved position that no longer
+                // exists (or a file that never wrote one) falls back to the first tab rather than
+                // opening the window on nothing.
+                active = ProjectTabs.initialActive(tabs, savedActiveIndex(map[prefix + "active"], tabs)),
                 geometry = decodeGeometry(map[prefix + "geom"]),
                 // Absent means open: only a window the user actually closed writes `open=false`.
                 open = map[prefix + "open"] != "false",
                 closedAt = map[prefix + "closed"]?.toLongOrNull(),
             )
         }
+    }
+
+    /**
+     * Which tab a window's saved `active` value points at, as a position in [tabs]. It holds that
+     * position, since a project may now have more than one tab and a path would no longer say which
+     * of them was in front; a value from a build before that is the active project's path, and is
+     * resolved to the first tab on it.
+     */
+    private fun savedActiveIndex(value: String?, tabs: List<ProjectTab>): Int? {
+        val raw = value?.takeIf { it.isNotBlank() } ?: return null
+        raw.toIntOrNull()?.let { return it }
+        val path = parsePath(raw)?.toAbsolutePath()?.normalize() ?: return null
+        return tabs.indexOfFirst { it.path == path }.takeIf { it >= 0 }
     }
 
     /**
@@ -149,11 +174,18 @@ object Settings {
             // Newlines in a name would split the line format, so they are flattened on the way out.
             map[prefix + "name"] = ws.name.replace('\n', ' ').replace('\r', ' ')
             map[prefix + "open"] = ws.open.toString()
-            ws.active?.let { map[prefix + "active"] = it.toAbsolutePath().normalize().toString() }
+            // The tab in front by position, not by path: two tabs may be on the same project.
+            ws.tabs.indexOfFirst { it.id == ws.active }.takeIf { it >= 0 }
+                ?.let { map[prefix + "active"] = it.toString() }
             ws.closedAt?.let { map[prefix + "closed"] = it.toString() }
             ws.geometry?.let { map[prefix + "geom"] = encodeGeometry(it) }
-            ws.projects.forEachIndexed { j, p ->
-                map["${prefix}project.$j"] = p.toAbsolutePath().normalize().toString()
+            ws.tabs.forEachIndexed { j, tab ->
+                map["${prefix}project.$j"] = tab.path.toAbsolutePath().normalize().toString()
+                // Only a renamed tab writes a name; the rest are named by their directory, and a row
+                // saying so would be a row to keep in step for nothing.
+                if (tab.name.isNotBlank()) {
+                    map["${prefix}tabname.$j"] = tab.name.replace('\n', ' ').replace('\r', ' ')
+                }
             }
         }
         Workspaces.allProjects(list).forEachIndexed { idx, p ->
@@ -173,17 +205,18 @@ object Settings {
             }
             .sortedBy { it.first }
             .map { it.second }
-        val active = loadActiveProject()
+        val active = loadActiveProject()?.toAbsolutePath()?.normalize()
         val geometry = loadWindowGeometry()
         if (rail.isNotEmpty()) return Workspaces.migrateRail(rail, active, geometry)
         val projects = loadOpenProjects().map { it.toAbsolutePath().normalize() }
         if (projects.isEmpty()) return emptyList()
+        val tabs = ProjectTabs.of(projects)
         return listOf(
             Workspace(
                 id = 0,
                 name = "",
-                projects = projects,
-                active = ProjectTabs.initialActive(projects, active),
+                tabs = tabs,
+                active = ProjectTabs.initialActive(tabs, tabs.indexOfFirst { it.path == active }.takeIf { it >= 0 }),
                 geometry = geometry,
             ),
         )
@@ -293,17 +326,17 @@ object Settings {
             // right edge — a saved height fraction must not be reused as a width fraction.
             tools = map["split.tools"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
             diff = map["split.diff"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
-            // The markdown editor/preview divider, shared by every .md tab.
-            preview = map["split.preview"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
         )
     }
 
-    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float, preview: Float) {
+    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float) {
         val map = load()
         map["split.h"] = horizontal.toString()
         map["split.tools"] = tools.toString()
         map["split.diff"] = diff.toString()
-        map["split.preview"] = preview.toString()
+        // "split.preview" was the markdown editor/preview divider. The preview moved into the tool
+        // panel, which is sized by "split.tools", so the key is no longer read or written; a state
+        // file left over from an older build simply carries a line nothing looks at.
         save(map)
     }
 

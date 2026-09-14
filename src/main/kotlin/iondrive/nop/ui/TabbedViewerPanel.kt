@@ -34,7 +34,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -73,9 +72,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
-import java.awt.CardLayout
 import java.io.File
-import javax.swing.JPanel
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.ContextMenuDivider
@@ -130,8 +127,6 @@ fun TabbedViewerPanel(
     onToggleWrap: () -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
-    previewSplitRatio: Float = 0.5f,
-    onPreviewSplitRatioChange: (Float) -> Unit = {},
     // Ask the app to put up the revision picker for this file; picking one opens a
     // [Tab.RevisionDiff]. Handled up there because that's where the app's dialogs live.
     onCompareWithRevision: (File) -> Unit = {},
@@ -142,18 +137,11 @@ fun TabbedViewerPanel(
 ) {
     val selected = tabsState.selectedTab
 
-    // Closing a tab also flushes its edit buffer and stops any launcher process behind it. Shared
-    // by the close button (onClose) and the "Close Other Tabs" context-menu action so both paths
-    // tear a tab down the same way.
+    // Closing a tab flushes its edit buffer. Shared by the close button (onClose) and the
+    // "Close Other Tabs" context-menu action so both paths tear a tab down the same way.
     fun cleanUp(tab: Tab) {
         editStore.close(tab.id)
-        if (tab is Tab.Terminal) tab.session.dispose()
     }
-
-    // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
-    // SwingPanel-per-tab can't work). Remembered here so it — and the live PTYs inside it —
-    // outlive switches to non-terminal tabs.
-    val terminalCards = remember { JPanel(CardLayout()) }
 
     // One flag for every view under the strip, so the toggle in the strip means the same thing to a
     // file tab and to either diff — see [LocalWrapLines].
@@ -174,62 +162,41 @@ fun TabbedViewerPanel(
                     val showHistory: () -> Unit = {
                         if (repo != null) tabsState.open(Tab.History(current.file, repo.rootDir.toFile()))
                     }
-                    if (current.file.extension.equals("md", ignoreCase = true)) {
-                        MarkdownEditWithPreview(
-                            tab = current,
-                            store = editStore,
-                            onSaved = onFileSaved,
-                            pendingLine = pendingLine,
-                            onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
-                            pendingSearchQuery = pendingSearch,
-                            onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
-                            findInFileTrigger = findInFileTrigger,
-                            replaceInFileTrigger = replaceInFileTrigger,
-                            saveTrigger = saveTrigger,
-                            onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
-                            onShowHistory = showHistory,
-                            onCompareWithRevision = { onCompareWithRevision(current.file) },
-                            gitTracked = gitTracked,
-                            previewRatio = previewSplitRatio,
-                            onPreviewRatioChange = onPreviewSplitRatioChange,
-                        )
-                    } else {
-                        FileEditView(
-                            tab = current,
-                            store = editStore,
-                            onSaved = onFileSaved,
-                            onResolveAt = { text, offset -> onResolveAt(current.file, text, offset) },
-                            onJump = onJump,
-                            pendingLine = pendingLine,
-                            onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
-                            pendingSearchQuery = pendingSearch,
-                            onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
-                            findInFileTrigger = findInFileTrigger,
-                            replaceInFileTrigger = replaceInFileTrigger,
-                            saveTrigger = saveTrigger,
-                            repo = repo,
-                            blameEnabled = blameEnabled,
-                            onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
-                            onShowHistory = showHistory,
-                            onCompareWithRevision = { onCompareWithRevision(current.file) },
-                            gitTracked = gitTracked,
-                            // A blame line resolves to the commit that last touched it; open that
-                            // commit's diff for this file so the user can read the change in full.
-                            onOpenBlameCommit = { sha ->
-                                val rel = repo?.let { repoRelativePath(it, current.file) }
-                                if (repo != null && rel != null) {
-                                    tabsState.open(
-                                        Tab.CommitDiff(
-                                            sha = sha,
-                                            shortSha = sha.take(7),
-                                            file = CommitFile(rel, CommitFileChange.MODIFIED),
-                                            repoRoot = repo.rootDir.toFile(),
-                                        ),
-                                    )
-                                }
-                            },
-                        )
-                    }
+                    FileEditView(
+                        tab = current,
+                        store = editStore,
+                        onSaved = onFileSaved,
+                        onResolveAt = { text, offset -> onResolveAt(current.file, text, offset) },
+                        onJump = onJump,
+                        pendingLine = pendingLine,
+                        onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
+                        pendingSearchQuery = pendingSearch,
+                        onPendingSearchConsumed = { tabsState.clearSearchQuery(current.id) },
+                        findInFileTrigger = findInFileTrigger,
+                        replaceInFileTrigger = replaceInFileTrigger,
+                        saveTrigger = saveTrigger,
+                        repo = repo,
+                        blameEnabled = blameEnabled,
+                        onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
+                        onShowHistory = showHistory,
+                        onCompareWithRevision = { onCompareWithRevision(current.file) },
+                        gitTracked = gitTracked,
+                        // A blame line resolves to the commit that last touched it; open that
+                        // commit's diff for this file so the user can read the change in full.
+                        onOpenBlameCommit = { sha ->
+                            val rel = repo?.let { repoRelativePath(it, current.file) }
+                            if (repo != null && rel != null) {
+                                tabsState.open(
+                                    Tab.CommitDiff(
+                                        sha = sha,
+                                        shortSha = sha.take(7),
+                                        file = CommitFile(rel, CommitFileChange.MODIFIED),
+                                        repoRoot = repo.rootDir.toFile(),
+                                    ),
+                                )
+                            }
+                        },
+                    )
                 }
                 is Tab.Diff -> if (repo != null) DiffView(
                     repo = repo,
@@ -279,7 +246,6 @@ fun TabbedViewerPanel(
                     reloadKey = tabsState.reloadKey(current.id),
                     findTrigger = findInFileTrigger,
                 )
-                is Tab.Terminal -> TerminalView(current, terminalCards)
                 null -> Box(
                     modifier = Modifier.fillMaxSize().padding(16.dp),
                     contentAlignment = androidx.compose.ui.Alignment.Center,
@@ -304,7 +270,7 @@ private fun spellcheckExtensionOf(tab: Tab?): String? = when (tab) {
     is Tab.CommitDiff -> File(tab.file.path).extension
     is Tab.RevisionDiff -> tab.file.extension
     is Tab.LocalDiff -> tab.file.extension
-    is Tab.History, is Tab.LocalHistory, is Tab.Terminal, null -> null
+    is Tab.History, is Tab.LocalHistory, null -> null
 }
 
 /**
@@ -322,7 +288,6 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
     // A local-history revision is a snapshot of a file that may well be open and dirty beside it,
     // but the revision itself is fixed — no save marker, same as a commit diff.
     is Tab.LocalHistory, is Tab.LocalDiff, is Tab.RevisionDiff -> tab.title
-    is Tab.Terminal -> tab.title
 }
 
 private fun saveMarker(edit: FileEdit?): String = when {
@@ -1004,80 +969,6 @@ internal fun repoRelativePath(repo: GitRepo, file: File): String? = runCatching 
         .relativize(file.toPath().toAbsolutePath().normalize())
         .toString().replace(File.separatorChar, '/')
 }.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") }
-
-/**
- * Markdown tab layout: editor on the left, live-rendered preview on the right.
- *
- * The divider between them is [HorizontalSplit], not Jewel's HorizontalSplitLayout — the latter
- * ignored drag deltas here just as it did in the app's other splits, which left the preview stuck
- * at half the tab with no way to squeeze it down and give the source more room.
- *
- * Everything the plain editor is given has to be forwarded to the editor half — a markdown file is
- * still a file, and dropping the inbound jump/search parameters here is what used to make a global
- * "Find in files" hit in a .md open the tab at the top with nothing highlighted (and leave the
- * queued jump uncleared in TabsState, since nothing ever consumed it).
- */
-@Composable
-private fun MarkdownEditWithPreview(
-    tab: Tab.FileView,
-    store: FileEditStore,
-    onSaved: () -> Unit,
-    pendingLine: Int? = null,
-    onPendingLineConsumed: () -> Unit = {},
-    pendingSearchQuery: String? = null,
-    onPendingSearchConsumed: () -> Unit = {},
-    findInFileTrigger: Int = 0,
-    replaceInFileTrigger: Int = 0,
-    saveTrigger: Int = 0,
-    onShowLocalHistory: () -> Unit = {},
-    onShowHistory: () -> Unit = {},
-    onCompareWithRevision: () -> Unit = {},
-    gitTracked: Boolean = false,
-    previewRatio: Float = 0.5f,
-    onPreviewRatioChange: (Float) -> Unit = {},
-) {
-    val edit = remember(tab.id) { store.edit(tab) }
-    val previewText by remember(edit) {
-        derivedStateOf { edit.state.text.toString() }
-    }
-    HorizontalSplit(
-        ratio = previewRatio,
-        onRatioChange = onPreviewRatioChange,
-        // The preview can be squeezed down to a sliver — the point of dragging it is usually to get
-        // it out of the way — while the editor keeps enough width to stay writable.
-        minFirstDp = 160.dp,
-        minSecondDp = 0.dp,
-        first = {
-            FileEditView(
-                tab = tab,
-                store = store,
-                onSaved = onSaved,
-                pendingLine = pendingLine,
-                onPendingLineConsumed = onPendingLineConsumed,
-                pendingSearchQuery = pendingSearchQuery,
-                onPendingSearchConsumed = onPendingSearchConsumed,
-                findInFileTrigger = findInFileTrigger,
-                replaceInFileTrigger = replaceInFileTrigger,
-                saveTrigger = saveTrigger,
-                onShowLocalHistory = onShowLocalHistory,
-                onShowHistory = onShowHistory,
-                onCompareWithRevision = onCompareWithRevision,
-                gitTracked = gitTracked,
-            )
-        },
-        second = {
-            // Clipped: squeezed past the width its longest word needs, the rendered text lays out
-            // wider than the pane it was given and would otherwise spill over the panel beside it.
-            Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
-                MarkdownPreview(
-                    text = previewText,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-        },
-        modifier = Modifier.fillMaxSize(),
-    )
-}
 
 /**
  * Longest line of [text], in characters — the monospace stand-in for "widest", and so how wide the

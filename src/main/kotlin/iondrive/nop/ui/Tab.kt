@@ -8,7 +8,6 @@ import androidx.compose.runtime.setValue
 import iondrive.nop.Log
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.FileChange
-import iondrive.nop.terminal.TerminalSession
 import java.io.File
 
 sealed class Tab {
@@ -63,17 +62,6 @@ sealed class Tab {
     data class LocalDiff(val file: File, val timestampMillis: Long) : Tab() {
         override val id: String get() = "localdiff:${file.absolutePath}:$timestampMillis"
         override val title: String get() = "${LocalHistoryFormat.time(timestampMillis)} ${file.name}"
-    }
-
-    /**
-     * A live PTY-backed terminal — a launcher run or a plain shell. Each invocation is its own
-     * tab (the nanoTime suffix keeps re-runs distinct), so it never collapses onto an existing one.
-     */
-    class Terminal(val session: TerminalSession) : Tab() {
-        override val id: String = "terminal:${session.title}:${System.nanoTime()}"
-        override val title: String get() = session.title
-        override fun equals(other: Any?): Boolean = other is Terminal && other.id == id
-        override fun hashCode(): Int = id.hashCode()
     }
 }
 

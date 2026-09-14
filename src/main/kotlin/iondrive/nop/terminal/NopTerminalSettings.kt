@@ -24,9 +24,25 @@ class NopTerminalSettings(
     @Volatile var fg: Color,
     @Volatile var link: Color,
 ) : DefaultSettingsProvider() {
-    override fun getTerminalFontSize(): Float = 13f
+    override fun getTerminalFontSize(): Float = FONT_SIZE
 
-    override fun getTerminalFont(): Font = Font(Font.MONOSPACED, Font.PLAIN, getTerminalFontSize().toInt())
+    /**
+     * The same JetBrains Mono the editor renders code with (see `NopFonts`), so a shell sitting
+     * beside a file looks like part of the same application.
+     *
+     * The face matters more here than anywhere else in nop: AWT's logical `MONOSPACED` family —
+     * what this used to ask for, and what JediTerm falls back to — resolves on most Linux boxes to
+     * DejaVu Sans Mono, whose small x-height and heavy hinting is what made the terminal read as a
+     * different, older program than the one around it.
+     */
+    override fun getTerminalFont(): Font = monoFont.deriveFont(FONT_SIZE)
+
+    /**
+     * A little air between rows. JediTerm packs lines at exactly the font's height (1.0), which is
+     * tighter than any terminal the user has beside it — 1.1 is roughly what IntelliJ's terminal
+     * and xterm.js-based terminals give a line.
+     */
+    override fun getLineSpacing(): Float = 1.1f
 
     /**
      * The style every character is written with unless the program asks for another colour.
@@ -90,6 +106,28 @@ class NopTerminalSettings(
     private fun Color.toJediColor() = com.jediterm.core.Color(red, green, blue)
 
     private companion object {
+        /** Matches the editor's 13sp, so code reads the same size in a file and in a shell. */
+        const val FONT_SIZE = 13f
+
+        private const val FONT_RESOURCE = "fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"
+
+        /**
+         * JetBrains Mono, loaded from the TTF the Jewel dependency already puts on the classpath —
+         * the same file `NopFonts` hands Compose, so the terminal and the editor render the same
+         * face without this repo carrying its own copy of the font. Falls back to the platform
+         * monospace if a Jewel upgrade ever moves the resource: a duller terminal beats no text.
+         */
+        val monoFont: Font = run {
+            val loader = Thread.currentThread().contextClassLoader ?: NopTerminalSettings::class.java.classLoader
+            val stream = loader?.getResourceAsStream(FONT_RESOURCE)
+            if (stream == null) {
+                Font(Font.MONOSPACED, Font.PLAIN, FONT_SIZE.toInt())
+            } else {
+                runCatching { stream.use { Font.createFont(Font.TRUETYPE_FONT, it) } }
+                    .getOrElse { Font(Font.MONOSPACED, Font.PLAIN, FONT_SIZE.toInt()) }
+            }
+        }
+
         val isMac: Boolean = System.getProperty("os.name").orEmpty().lowercase().startsWith("mac")
 
         val copyKeys = listOf(

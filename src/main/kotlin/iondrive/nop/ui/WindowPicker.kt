@@ -49,6 +49,9 @@ import org.jetbrains.jewel.ui.component.Text
  * are. Clicking a row opens that window again; a row can also be renamed, or discarded for good
  * behind a confirmation, and there is a button for a window that never existed before.
  *
+ * Naming the window the card was opened from lives here too: a window's name is a window-level
+ * thing, and this is the one place that is about windows rather than about what is inside one.
+ *
  * It shows in two places, which between them cover every way a user can end up wanting a window
  * back: [WindowPickerPanel] fills a window that has no project tabs (there is nothing else for that
  * window to show, and everything worth doing next is on this card), and [WindowPickerPopup] is the
@@ -57,6 +60,7 @@ import org.jetbrains.jewel.ui.component.Text
 @Composable
 fun WindowPickerPanel(
     parked: List<Workspace>,
+    thisWindow: Workspace?,
     onOpenWindow: (Long) -> Unit,
     onRenameWindow: (Long, String) -> Unit,
     onDiscardWindow: (Long) -> Unit,
@@ -73,8 +77,10 @@ fun WindowPickerPanel(
     ) {
         WindowPickerCard(
             parked = parked,
+            thisWindow = thisWindow,
             onOpenWindow = onOpenWindow,
             onRenameWindow = { id -> renaming = parked.firstOrNull { it.id == id } },
+            onRenameThisWindow = { renaming = thisWindow },
             onDiscardWindow = onDiscardWindow,
             onNewWindow = onNewWindow,
             onOpenProject = onOpenProject,
@@ -83,10 +89,14 @@ fun WindowPickerPanel(
 
     renaming?.let { window ->
         NewEntryDialog(
-            title = "Rename window",
-            description = "The name this closed window goes by in the picker, and will go by when it opens.",
+            title = if (window.name.isBlank()) "Name window" else "Rename window",
+            description = if (window.id == thisWindow?.id) {
+                "The name this window goes by in its title bar and in the window picker."
+            } else {
+                "The name this closed window goes by in the picker, and will go by when it opens."
+            },
             initialText = window.name,
-            confirmLabel = "Rename",
+            confirmLabel = if (window.name.isBlank()) "Name" else "Rename",
             onSubmit = { name -> onRenameWindow(window.id, name); renaming = null; null },
             onCancel = { renaming = null },
         )
@@ -97,8 +107,10 @@ fun WindowPickerPanel(
 @Composable
 fun WindowPickerPopup(
     parked: List<Workspace>,
+    thisWindow: Workspace?,
     onOpenWindow: (Long) -> Unit,
     onRenameWindow: (Long) -> Unit,
+    onRenameThisWindow: () -> Unit,
     onDiscardWindow: (Long) -> Unit,
     onNewWindow: () -> Unit,
     onOpenProject: () -> Unit,
@@ -111,8 +123,10 @@ fun WindowPickerPopup(
     ) {
         WindowPickerCard(
             parked = parked,
+            thisWindow = thisWindow,
             onOpenWindow = { onDismiss(); onOpenWindow(it) },
             onRenameWindow = { onDismiss(); onRenameWindow(it) },
+            onRenameThisWindow = { onDismiss(); onRenameThisWindow() },
             onDiscardWindow = onDiscardWindow,
             onNewWindow = { onDismiss(); onNewWindow() },
             onOpenProject = { onDismiss(); onOpenProject() },
@@ -123,8 +137,10 @@ fun WindowPickerPopup(
 @Composable
 private fun WindowPickerCard(
     parked: List<Workspace>,
+    thisWindow: Workspace?,
     onOpenWindow: (Long) -> Unit,
     onRenameWindow: (Long) -> Unit,
+    onRenameThisWindow: () -> Unit,
     onDiscardWindow: (Long) -> Unit,
     onNewWindow: () -> Unit,
     onOpenProject: () -> Unit,
@@ -186,6 +202,14 @@ private fun WindowPickerCard(
         ) {
             CardButton(text = "New window", onClick = { confirming = null; onNewWindow() })
             CardButton(text = "Open a project…", onClick = { confirming = null; onOpenProject() })
+            // A window nobody has named goes by whatever project it is showing, so the button says
+            // what it would be doing: giving it a name of its own, rather than changing one.
+            if (thisWindow != null) {
+                CardButton(
+                    text = if (thisWindow.name.isBlank()) "Name this window…" else "Rename this window…",
+                    onClick = { confirming = null; onRenameThisWindow() },
+                )
+            }
         }
     }
 }
@@ -204,9 +228,7 @@ private fun ParkedRow(
     val hovered by interaction.collectIsHoveredAsState()
     val hoverBg = if (isDark) Color(0xFF2D2F33) else Color(0xFFEBECEE)
     val muted = if (isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
-    val names = remember(window.projects) {
-        window.projects.joinToString(" · ") { it.fileName?.toString() ?: it.toString() }
-    }
+    val names = remember(window.tabs) { window.tabs.joinToString(" · ") { it.label } }
 
     Row(
         modifier = Modifier

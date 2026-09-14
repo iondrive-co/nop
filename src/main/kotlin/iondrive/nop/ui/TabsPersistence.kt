@@ -28,10 +28,7 @@ import java.nio.file.Path
  *                        snapshot: if git's view of the file moved on while nop was elsewhere
  *                        (committed, staged, deleted), the restored tab shows the file's state
  *                        against HEAD as it is now, which is what a reopen would have shown anyway.
- *
- * Terminal tabs wrap a running PTY process, which dies with the session, so they are dropped at
- * save time.
- *
+ * *
  * Stored as TSV under the project's data dir: `kind<TAB>path<TAB>selected?`, plus
  * `<TAB>sha<TAB>changeType` for commit diffs, `<TAB>timestamp` for local ones, `<TAB>sha` for
  * revision diffs and `<TAB>changeKind` for working-tree diffs. One tab per line; unparseable lines
@@ -88,20 +85,20 @@ object TabsPersistence {
                 )
                 for (tab in snapshot.tabs) {
                     if (snapshot.groupOf[tab.id] != group.id) continue
-                    add(encodeTab(tab, snapshot.selectedId) ?: continue)
+                    add(encodeTab(tab, snapshot.selectedId))
                 }
             }
         }
         runCatching {
             Files.createDirectories(target.parent)
-            // Empty file on no persistable tabs — easier than tracking "did we ever save" for
-            // the load side. An empty file loads as an empty list.
+            // Empty file on no tabs — easier than tracking "did we ever save" for the load
+            // side. An empty file loads as an empty list.
             Files.writeString(target, rows.joinToString("\n"))
         }
     }
 
-    /** One tab's row, or null for the kinds that can't outlive the session. */
-    private fun encodeTab(tab: Tab, selectedId: String?): String? {
+    /** One tab's row. */
+    private fun encodeTab(tab: Tab, selectedId: String?): String {
         val selected = if (tab.id == selectedId) "1" else "0"
         val (kind, file) = when (tab) {
             is Tab.FileView -> KIND_FILE to tab.file
@@ -125,7 +122,6 @@ object TabsPersistence {
             is Tab.Diff -> return listOf(
                 KIND_DIFF, tab.change.path, selected, tab.change.kind.name,
             ).joinToString("\t")
-            is Tab.Terminal -> return null
         }
         return "$kind\t${file.absolutePath}\t$selected"
     }

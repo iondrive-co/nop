@@ -1,6 +1,8 @@
 package iondrive.nop.git
 
+import org.eclipse.jgit.api.errors.StashApplyFailureException
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
@@ -416,6 +418,33 @@ class GitRepoTest {
         repo.stashPop(shelf[0])
         assertEquals(2, repo.loadStatus().changes.size, "changes restored after pop")
         assertTrue(repo.stashList().isEmpty(), "shelf empty after pop")
+        repo.close()
+    }
+
+    @Test
+    fun `stash pop restores untracked files even when the tracked merge conflicts`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "edit.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        (tmp / "edit.txt").writeText("stashed\n")
+        (tmp / "new.txt").writeText("untracked\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        repo.stashCreate("wip", repo.loadStatus().changes)
+        assertFalse((tmp / "new.txt").toFile().exists(), "untracked file went onto the shelf")
+
+        // Move HEAD under the shelf so applying it cannot merge cleanly
+        (tmp / "edit.txt").writeText("moved on\n")
+        runShell(tmp, "git add -A && git commit -q -m moved")
+
+        val shelf = repo.stashList()
+        assertEquals(1, shelf.size)
+        assertThrows(StashApplyFailureException::class.java) { repo.stashPop(shelf[0]) }
+
+        assertTrue((tmp / "new.txt").toFile().exists(), "untracked file restored despite the conflict")
+        assertEquals("untracked\n", (tmp / "new.txt").toFile().readText(), "and with its content")
+        assertEquals(1, repo.stashList().size, "a failed pop keeps the entry on the shelf")
         repo.close()
     }
 

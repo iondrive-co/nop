@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -18,6 +19,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
@@ -56,10 +58,13 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.ui.component.Text
+import java.awt.CardLayout
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import javax.swing.JPanel
 
 // How often the commit panel re-checks git state on its own, so changes from editing, branch
 // switches, or external git commands show up without hitting Refresh.
@@ -103,6 +108,14 @@ fun App(
     // Reports this project's dirty state up to its project tab, which is why the workspace poller
     // leaves the project in front alone: the status below is fresher than a re-walk would find.
     onDirtyChange: (Boolean) -> Unit = {},
+    // What the "Project" label over the tree offers as the way to a different project: the recently
+    // used ones, minus the ones this window already has a tab for, and a browse for anything else.
+    // Handed down from the window rather than read here — which projects are open is the window's
+    // business, not one project's.
+    recentProjects: List<Path> = emptyList(),
+    openProjects: List<Path> = emptyList(),
+    onOpenProject: (Path) -> Unit = {},
+    onOpenOtherProject: () -> Unit = {},
     onToggleTheme: () -> Unit = {},
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
@@ -226,19 +239,16 @@ fun App(
     val savedRatios = remember { Settings.loadSplitRatios() }
     var hRatio by remember { mutableStateOf(savedRatios.horizontal ?: 0.22f) }
     // Share of the area right of the project tree given to the viewer; the rest is the tool
-    // panel (Commit/Search/Stash) on the window's right edge.
+    // panel (Commit/Search/Usages/Stash/Preview/Run) on the window's right edge.
     var toolsRatio by remember { mutableStateOf(savedRatios.tools ?: 0.68f) }
     // The divider between a diff's before/after halves — even by default, draggable to favour
     // whichever side is being read.
     var diffRatio by remember { mutableStateOf(savedRatios.diff ?: 0.5f) }
-    // The divider between a markdown file's source and its rendered preview — drag it right to
-    // shrink the preview (all the way out of the way, if that's what the file needs).
-    var previewRatio by remember { mutableStateOf(savedRatios.preview ?: 0.5f) }
     LaunchedEffect(Unit) {
-        snapshotFlow { listOf(hRatio, toolsRatio, diffRatio, previewRatio) }
+        snapshotFlow { listOf(hRatio, toolsRatio, diffRatio) }
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest { (h, t, d, p) -> Settings.saveSplitRatios(h, t, d, p) }
+            .collectLatest { (h, t, d) -> Settings.saveSplitRatios(h, t, d) }
     }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
@@ -495,6 +505,10 @@ fun App(
     var toolTab by remember(projectPath) { mutableStateOf(ToolTab.Commit) }
     var searchFieldFocusTrigger by remember(projectPath) { mutableStateOf(0) }
     val searchQueryState = remember(rootPath) { TextFieldState() }
+    // Held out here for the same reason, and a sharper one: the panel is composed only while its
+    // tab is selected, so a message remembered inside it was lost the moment anything flipped the
+    // panel away — which now includes opening a markdown file or starting a script.
+    val commitMessageState = remember(rootPath) { TextFieldState() }
     // Window-level counter; only bumps past the composition-time value count, else switching
     // back to a project after the session's first Ctrl+Shift+F would land on Search, not Commit.
     val findInFilesBaseline = remember(projectPath) { findInFilesTrigger }
@@ -504,6 +518,25 @@ fun App(
             searchFieldFocusTrigger += 1
         }
     }
+
+    // The terminals behind the Run tab. Owned here, above the tool panel, so a script keeps running
+    // (and keeps its scrollback) while the user is reading the commit list or a search result — and
+    // so every run is killed when this project's composition goes away, which is a project-tab
+    // switch or a closed window. Without that last part a switch would leave the PTY, its children
+    // and whatever ports they hold alive with nothing left on screen able to reach them.
+    val runSessions = remember(projectPath) { RunSessions() }
+    DisposableEffect(runSessions) { onDispose { runSessions.disposeAll() } }
+    // The shells behind the terminal tabs at the head of the tool strip. A separate list from the
+    // launcher runs above — those belong to the Run tab and come and go with the scripts that
+    // started them, while these are the project's own terminals. The first one is opened here so
+    // the tab is there from the start; it costs nothing until it is looked at, because a session
+    // spawns no PTY until the panel asks it for a widget.
+    val terminals = remember(projectPath) { RunSessions().apply { openShell(rootPath.toFile()) } }
+    DisposableEffect(terminals) { onDispose { terminals.disposeAll() } }
+    // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
+    // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in
+    // it — outlive visits to the other tool tabs.
+    val terminalCards = remember(projectPath) { JPanel(CardLayout()) }
 
     // Commit-message text-area height, persisted per-project. Long commit messages need more
     // room than the default; we save what the user dragged it to so reopening the project
@@ -621,7 +654,6 @@ fun App(
                 is Tab.History -> tab.file.takeIf { includeHistoryTabs }
                 is Tab.LocalHistory -> tab.file.takeIf { includeHistoryTabs }
                 is Tab.LocalDiff -> tab.file
-                is Tab.Terminal -> null
             }
             val p = tabFile?.absolutePath ?: return@filter false
             p == targetPath || p.startsWith("$targetPath${File.separator}")
@@ -1007,6 +1039,16 @@ fun App(
             .toString().replace(File.separatorChar, '/')
     }.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") } ?: "."
 
+    // The markdown tab the Preview panel renders, or null when the editor is showing something
+    // else. Only a [Tab.FileView] qualifies: a diff of a .md file is already two panes of text and
+    // has no single buffer to render.
+    val previewTab: Tab.FileView? = (tabsState.selectedTab as? Tab.FileView)
+        ?.takeIf { it.file.extension.equals("md", ignoreCase = true) }
+
+    // Nothing here flips the tool panel to Preview. Opening a .md file used to, which meant the
+    // panel you had chosen — a terminal, the commit list — was taken off you by the act of reading a
+    // README. The tab is there to be picked when the rendered version is what you want.
+
     // Sync the active tab's underlying file back into the tree so the sidebar always shows
     // which file the user is currently looking at.
     val revealFile: File? = when (val t = tabsState.selectedTab) {
@@ -1017,7 +1059,7 @@ fun App(
         is Tab.History -> t.file
         is Tab.LocalHistory -> t.file
         is Tab.LocalDiff -> t.file
-        is Tab.Terminal, null -> null
+        null -> null
     }
 
     val openFiles: List<File> = tabsState.tabs.mapNotNull { tab ->
@@ -1029,7 +1071,6 @@ fun App(
             is Tab.History -> tab.file
             is Tab.LocalHistory -> tab.file
             is Tab.LocalDiff -> tab.file
-            is Tab.Terminal -> null
         }
     }
 
@@ -1039,7 +1080,6 @@ fun App(
 
     fun closeTab(tab: Tab) {
         editStore.close(tab.id)
-        if (tab is Tab.Terminal) tab.session.dispose()
         tabsState.close(tab.id)
     }
 
@@ -1053,11 +1093,7 @@ fun App(
     fun closeOtherFiles(file: File) {
         val tab = tabsState.tabs.firstOrNull { it is Tab.FileView && it.file.absolutePath == file.absolutePath }
             ?: return
-        val removed = tabsState.closeOthers(tab.id)
-        removed.forEach {
-            editStore.close(it.id)
-            if (it is Tab.Terminal) it.session.dispose()
-        }
+        tabsState.closeOthers(tab.id).forEach { editStore.close(it.id) }
     }
 
     fun closeAllFiles() {
@@ -1111,15 +1147,27 @@ fun App(
                             wrapLines = !wrapLines
                             Settings.saveWrapLines(wrapLines)
                         },
+                        projectLabel = {
+                            ProjectMenuLabel(
+                                recentProjects = recentProjects,
+                                openProjects = openProjects,
+                                onOpenProject = onOpenProject,
+                                onOpenOther = onOpenOtherProject,
+                            )
+                        },
                         headerExtras = {
                             LauncherButton(
                                 launchers = launchers,
                                 readOnlyNames = readOnlyNames,
                                 onRun = { launcher ->
-                                    tabsState.open(Tab.Terminal(TerminalSession.forLauncher(launcher, rootPath.toFile())))
+                                    runSessions.open(TerminalSession.forLauncher(launcher, rootPath.toFile()))
+                                    toolTab = ToolTab.Run
                                 },
                                 onNewTerminal = {
-                                    tabsState.open(Tab.Terminal(TerminalSession.shell(rootPath.toFile())))
+                                    // Same thing the strip's "+" does: shells live in the terminal
+                                    // tabs, so the two ways of asking for one land in one place.
+                                    terminals.openShell(rootPath.toFile())
+                                    toolTab = ToolTab.Terminal
                                 },
                                 onAdd = { persistLaunchers(stored + it) },
                                 onDelete = { persistLaunchers(stored - it) },
@@ -1128,7 +1176,7 @@ fun App(
                     )
                 },
                 second = {
-                    // Viewer in the middle, tool panel (Commit/Search/Stash) on the right edge,
+                    // Viewer in the middle, tool panel (Commit/Search/Preview/Run/…) on the right edge,
                     // running the full height of the window to mirror the project tree on the left.
                     HorizontalSplit(
                         modifier = Modifier.fillMaxSize(),
@@ -1168,8 +1216,6 @@ fun App(
                                 },
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },
-                                previewSplitRatio = previewRatio,
-                                onPreviewSplitRatioChange = { previewRatio = it },
                                 onCompareWithRevision = { pendingCompare = it },
                                 onRevertCommit = ::askRevertCommit,
                             )
@@ -1178,6 +1224,17 @@ fun App(
                             ToolTabs(
                                 selected = toolTab,
                                 onSelect = { toolTab = it },
+                                terminals = terminals,
+                                onNewTerminal = {
+                                    terminals.openShell(rootPath.toFile())
+                                    toolTab = ToolTab.Terminal
+                                },
+                                onSelectTerminal = { id ->
+                                    terminals.select(id)
+                                    toolTab = ToolTab.Terminal
+                                },
+                                onCloseTerminal = { terminals.close(it) },
+                                terminal = { TerminalTabPanel(terminals, terminalCards) },
                                 commit = {
                                     CommitPanel(
                                         status = status,
@@ -1285,6 +1342,7 @@ fun App(
                                         commitInFlight = commitInFlight,
                                         commitProgress = commitProgress,
                                         messageClearTrigger = messageClearTrigger,
+                                        messageState = commitMessageState,
                                         messageHeight = commitMessageHeight,
                                         onMessageHeightChange = { commitMessageHeight = it },
                                         stashInFlight = stashInFlight,
@@ -1345,6 +1403,33 @@ fun App(
                                         },
                                     )
                                 },
+                                preview = {
+                                    if (previewTab == null) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().padding(16.dp),
+                                            contentAlignment = androidx.compose.ui.Alignment.Center,
+                                        ) {
+                                            Text("Open a markdown file to see it rendered here")
+                                        }
+                                    } else {
+                                        // Reads the live buffer, not the file: the preview has always
+                                        // tracked what the user is typing rather than what was last
+                                        // saved, and the editor beside it is writing into this very
+                                        // TextFieldState.
+                                        val edit = editStore.edit(previewTab)
+                                        // Clipped: squeezed past the width its longest word needs,
+                                        // the rendered text lays out wider than the panel it was
+                                        // given and would otherwise spill over the viewer beside it.
+                                        Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
+                                            MarkdownPreview(
+                                                text = edit.state.text.toString(),
+                                                modifier = Modifier.fillMaxSize(),
+                                                scroll = edit.previewScroll,
+                                            )
+                                        }
+                                    }
+                                },
+                                run = { RunPanel(runSessions, terminalCards) },
                                 stash = {
                                     StashPanel(
                                         stashes = stashes,

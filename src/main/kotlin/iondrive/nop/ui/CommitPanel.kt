@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -89,8 +90,10 @@ fun CommitPanel(
     commitProgress: CommitProgress? = null,
     // Bumped by the caller each time a commit or stash lands, which empties the message field.
     messageClearTrigger: Int = 0,
+    // Hoisted, like [SearchPanel]'s query: the tool panel composes one tab at a time, so a message
+    // remembered here would be lost the moment the user looked at the preview or a search result.
+    messageState: TextFieldState = rememberTextFieldState(),
 ) {
-    val messageState = remember { TextFieldState() }
     // Emptied when a commit or stash has actually landed, never on the click that starts one.
     // Clearing on click cost the user their message whenever the commit didn't run — and because
     // the Commit button needs a non-blank message, it also left the button greyed out on an empty

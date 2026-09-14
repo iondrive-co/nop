@@ -21,19 +21,20 @@ import javax.swing.JPanel
 import kotlin.math.roundToInt
 
 /**
- * Renders a [Tab.Terminal]. Launcher sessions get a slim Compose header (name · status +
- * Stop/Re-run); a plain shell fills the whole tab.
+ * Renders one [RunSession]. Launcher runs get a slim Compose header (name · status + Stop/Re-run);
+ * a plain shell fills the whole panel.
  *
  * All terminals share a *single* [cards] panel (a Swing [CardLayout]) hosted by one [SwingPanel].
  * This is deliberate: Compose Desktop embeds each `SwingPanel` as a heavyweight AWT component in
- * one shared native overlay, so having one `SwingPanel` per terminal tab makes them paint over
- * each other and never switch. Routing every terminal through one card panel sidesteps that —
- * switching tabs is a plain `CardLayout.show`, which Swing handles correctly. The panel itself is
- * remembered above the tab `when`, so it (and the live widgets in it) survive visits to non-terminal
- * tabs. Colours are pushed in from nop's theme on every update so light/dark toggles take effect live.
+ * one shared native overlay, so having one `SwingPanel` per run makes them paint over each other
+ * and never switch. Routing every terminal through one card panel sidesteps that — switching runs
+ * is a plain `CardLayout.show`, which Swing handles correctly. The panel itself is remembered in
+ * [App], above the tool panel, so it (and the live widgets in it) survive visits to the other tool
+ * tabs. Colours are pushed in from nop's theme on every update so light/dark toggles take effect
+ * live.
  */
 @Composable
-fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
+fun TerminalView(tab: RunSession, cards: JPanel) {
     val isDark = JewelTheme.isDark
     val bg = JewelTheme.globalColors.panelBackground
     val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
@@ -72,7 +73,7 @@ fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
                 ensureCard(cards, tab, awtBg, awtFg, awtLink)
                 tab.session.applyColors(awtBg, awtFg, awtLink)
                 cards.background = awtBg
-                // Only flip the visible card (and steal focus) when the selected terminal actually
+                // Only flip the visible card (and steal focus) when the selected run actually
                 // changes — not on every recomposition, which would fight terminal text selection.
                 if (cards.getClientProperty(SHOWN_ID) != tab.id) {
                     (cards.layout as CardLayout).show(cards, tab.id)
@@ -80,17 +81,29 @@ fun TerminalView(tab: Tab.Terminal, cards: JPanel) {
                     tab.session.getOrCreateWidget(awtBg, awtFg, awtLink).requestFocusInWindow()
                 }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().padding(bottom = TOGGLE_CLEARANCE),
         )
     }
 }
 
+/**
+ * Room left below the terminal for [ThemeToggleButton], which floats in the bottom-right corner of
+ * the window — over this panel, as it happens.
+ *
+ * A [SwingPanel] is a heavyweight AWT component: it is composited above everything Compose draws,
+ * so any Compose content under its rectangle is simply not on screen. Without this the terminal
+ * swallowed the light/dark toggle the moment it opened. Keeping the strip clear is the one way to
+ * leave that corner reachable that doesn't depend on `compose.interop.blending`, an experimental
+ * flag whose behaviour varies by renderer.
+ */
+private val TOGGLE_CLEARANCE = 34.dp
+
 private const val SHOWN_ID = "nop.shownTerminalId"
 
-/** Lazily create the session's widget and add it to the shared card panel under the tab id. */
+/** Lazily create the session's widget and add it to the shared card panel under the run id. */
 private fun ensureCard(
     cards: JPanel,
-    tab: Tab.Terminal,
+    tab: RunSession,
     bg: java.awt.Color,
     fg: java.awt.Color,
     link: java.awt.Color,

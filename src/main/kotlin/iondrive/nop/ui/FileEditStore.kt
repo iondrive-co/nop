@@ -80,6 +80,13 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
      * while word wrap is off — with it on there is nothing off to the right to scroll to.
      */
     val hScroll: ScrollState = ScrollState(0)
+
+    /**
+     * Where this file's rendered markdown preview is scrolled to, for the same reason again: the
+     * Preview tool tab shows one file at a time, so a scroll state remembered inside it would be
+     * inherited by whichever file is previewed next.
+     */
+    val previewScroll: ScrollState = ScrollState(0)
     val findQuery: TextFieldState = TextFieldState()
     val replaceWith: TextFieldState = TextFieldState()
     var savedText: String by mutableStateOf(initialText)

@@ -50,7 +50,7 @@ class TerminalSession private constructor(
     fun getOrCreateWidget(bg: Color, fg: Color, link: Color): JediTermWidget {
         widget?.let { return it }
         val s = NopTerminalSettings(bg, fg, link)
-        val w = JediTermWidget(INITIAL_COLUMNS, INITIAL_ROWS, s)
+        val w = NopTerminalWidget(INITIAL_COLUMNS, INITIAL_ROWS, s)
         // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
         // Must be installed before the process starts writing, or early output misses out: JediTerm
         // only runs the filters over a line as it is written.
@@ -212,10 +212,20 @@ class TerminalSession private constructor(
                 isLauncher = true,
             )
 
-        /** Opens a plain interactive shell — a normal terminal, not tied to a launcher. */
+        /**
+         * Opens a plain interactive shell — a normal terminal, not tied to a launcher.
+         *
+         * Every one of them is called the same thing. Numbering them looked tidier until you closed
+         * one: the count only ever goes up, so a strip holding a single terminal would label it
+         * "Term 4". A name that is the user's to set (right-click the tab) beats one nop guesses at
+         * from a number that means nothing to them.
+         *
+         * No keyboard glyph in the name, unlike the ▶ a launcher run carries: the tool strip draws
+         * that itself, so it survives a rename rather than being the first thing a rename deletes.
+         */
         fun shell(dir: File): TerminalSession =
             TerminalSession(
-                title = "⌨ Terminal",
+                title = "Term",
                 command = if (isWindows) listOf("cmd.exe") else listOf(loginShell()),
                 workingDir = dir,
                 isLauncher = false,
