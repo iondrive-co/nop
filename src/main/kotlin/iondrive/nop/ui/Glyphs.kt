@@ -15,21 +15,48 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /**
- * The handful of tiny vector glyphs nop draws itself rather than shipping an icon for, and the close
- * affordance built on one of them. Shared by the two grouped strips — the vertical project rail and
- * the horizontal editor tab bar — so a group chevron or a close cross looks the same in both.
+ * The handful of tiny vector glyphs nop draws itself rather than shipping an icon for, plus the
+ * close affordance and the selected-tab underline built on them. Shared by the two grouped strips —
+ * the project bar along the top of the window and the editor tab bar below it — so a group chevron,
+ * a close cross or an accent rule looks the same in both.
  */
 internal fun DrawScope.drawPlusIcon(tint: Color) {
     val c = size.width / 2f
     drawLine(tint, Offset(c, 2.5f), Offset(c, size.height - 2.5f), strokeWidth = 1.5f, cap = StrokeCap.Round)
     drawLine(tint, Offset(2.5f, c), Offset(size.width - 2.5f, c), strokeWidth = 1.5f, cap = StrokeCap.Round)
+}
+
+/**
+ * The windows mark: two overlapping frames, the way every desktop draws "the other windows". Sits
+ * beside the "+" in the project bar and opens the window picker.
+ */
+internal fun DrawScope.drawWindowsIcon(tint: Color) {
+    val w = size.width
+    val h = size.height
+    val stroke = 1.3f
+    // The frame behind, offset up and to the right; only its two outer edges show past the front one.
+    drawLine(tint, Offset(w * 0.3f, h * 0.12f), Offset(w, h * 0.12f), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(w, h * 0.12f), Offset(w, h * 0.7f), strokeWidth = stroke, cap = StrokeCap.Round)
+    // The frame in front, drawn whole, with a title bar so it reads as a window and not a box.
+    val left = 0f
+    val top = h * 0.3f
+    val right = w * 0.7f
+    val bottom = h * 0.98f
+    drawLine(tint, Offset(left, top), Offset(right, top), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(left, bottom), Offset(right, bottom), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(left, top), Offset(left, bottom), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(right, top), Offset(right, bottom), strokeWidth = stroke, cap = StrokeCap.Round)
+    drawLine(tint, Offset(left, h * 0.5f), Offset(right, h * 0.5f), strokeWidth = stroke, cap = StrokeCap.Round)
 }
 
 internal fun DrawScope.drawCloseIcon(tint: Color) {
@@ -96,3 +123,21 @@ internal fun CloseButton(isDark: Boolean, onClose: () -> Unit) {
         Canvas(Modifier.size(8.dp)) { drawCloseIcon(tint) }
     }
 }
+
+/**
+ * An accent rule along a tab's bottom edge, marking a selected or active one.
+ *
+ * Painted rather than laid out: a strip may measure its children against an unbounded width, and a
+ * `fillMaxWidth()` underline inside one is silently a no-op — it sizes to nothing and never appears.
+ * Drawing after the content sidesteps the constraint entirely.
+ */
+internal fun Modifier.tabUnderline(show: Boolean, color: Color, thickness: Dp): Modifier =
+    if (!show) this else drawWithContent {
+        drawContent()
+        val height = thickness.toPx()
+        drawRect(
+            color = color,
+            topLeft = Offset(0f, size.height - height),
+            size = Size(size.width, height),
+        )
+    }

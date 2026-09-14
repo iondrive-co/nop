@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicLong
  * [GitRepo.workingTreeDirs] never descends into one and nothing here watches inside it. For a plain
  * nested clone that costs nothing — the parent reports the whole directory as untracked whatever
  * happens inside it. For a true submodule, whose content changes do show as a parent modification,
- * the parent's flag would wait for the next change it can see. No repository on this rail has one.
+ * the parent's flag would wait for the next change it can see. No repository open here has one.
  */
 class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
     private val service: WatchService = FileSystems.getDefault().newWatchService()
@@ -210,7 +210,7 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
         const val UNKNOWN = -1L
 
         /**
-         * Per-repository directory ceiling. This machine's whole 23-project rail needs 1.5k, so the
+         * Per-repository directory ceiling. All 23 projects on this machine need 1.5k, so the
          * ceiling is not there to be reached in normal use — it is the point past which watching a
          * tree costs more than the walks it saves, and where falling back to polling is the right
          * answer. Linux's default watch limit (~500k) is far above either number.

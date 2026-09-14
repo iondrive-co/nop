@@ -100,8 +100,8 @@ fun App(
     // Borrowed from the workspace, which watches every open project's tree. Null means "no watcher"
     // — every poll then walks the tree, which is what this panel did before there was one.
     repoWatcher: RepoWatcher? = null,
-    // Reports this project's dirty state up to the rail, which is why the workspace poller leaves
-    // the active project alone: the status below is fresher than anything a re-walk would find.
+    // Reports this project's dirty state up to its project tab, which is why the workspace poller
+    // leaves the project in front alone: the status below is fresher than a re-walk would find.
     onDirtyChange: (Boolean) -> Unit = {},
     onToggleTheme: () -> Unit = {},
     fileSearchTrigger: Int = 0,
@@ -128,7 +128,7 @@ fun App(
     var polledGeneration by remember(projectPath) { mutableStateOf(RepoWatcher.UNKNOWN) }
     // Whether [status] has been loaded yet, as opposed to still being the empty placeholder. Only
     // reported dirtiness depends on this: switching to a project starts a fresh composition, and
-    // announcing the placeholder's "clean" to the rail would blink the tab's dot off and back on
+    // announcing the placeholder's "clean" upward would blink the tab's dot off and back on
     // once the real status landed a moment later.
     var statusLoaded by remember(projectPath) { mutableStateOf(false) }
     var stashes by remember(projectPath) { mutableStateOf<List<StashEntry>>(emptyList()) }
@@ -1020,15 +1020,57 @@ fun App(
         is Tab.Terminal, null -> null
     }
 
-    val tintColor = projectTint(rootPath, JewelTheme.isDark)
+    val openFiles: List<File> = tabsState.tabs.mapNotNull { tab ->
+        when (tab) {
+            is Tab.FileView -> tab.file
+            is Tab.Diff -> File(tab.repoRoot, tab.change.path)
+            is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
+            is Tab.RevisionDiff -> tab.file
+            is Tab.History -> tab.file
+            is Tab.LocalHistory -> tab.file
+            is Tab.LocalDiff -> tab.file
+            is Tab.Terminal -> null
+        }
+    }
+
+    val dirtyFiles: Set<File> = tabsState.tabs.filterIsInstance<Tab.FileView>().filter {
+        editStore.peek(it.id)?.hasUserEdit == true
+    }.map { it.file }.toSet()
+
+    fun closeTab(tab: Tab) {
+        editStore.close(tab.id)
+        if (tab is Tab.Terminal) tab.session.dispose()
+        tabsState.close(tab.id)
+    }
+
+    fun closeFile(file: File) {
+        val tab = tabsState.tabs.firstOrNull { it is Tab.FileView && it.file.absolutePath == file.absolutePath }
+            ?: tabsState.tabs.firstOrNull { jumpToSourceTarget(it)?.absolutePath == file.absolutePath }
+            ?: return
+        closeTab(tab)
+    }
+
+    fun closeOtherFiles(file: File) {
+        val tab = tabsState.tabs.firstOrNull { it is Tab.FileView && it.file.absolutePath == file.absolutePath }
+            ?: return
+        val removed = tabsState.closeOthers(tab.id)
+        removed.forEach {
+            editStore.close(it.id)
+            if (it is Tab.Terminal) it.session.dispose()
+        }
+    }
+
+    fun closeAllFiles() {
+        val removed = tabsState.tabs.toList()
+        for (tab in removed) {
+            closeTab(tab)
+        }
+    }
 
     Box(
         modifier = Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Project-identity strip: a subtle band tinted from the project path's hash, so two
-            // windows on different projects look visually distinct at a glance.
-            Box(modifier = Modifier.fillMaxWidth().height(4.dp).background(tintColor))
             HorizontalSplit(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 ratio = hRatio,
@@ -1038,9 +1080,15 @@ fun App(
                         projectPath = rootPath,
                         status = status,
                         refreshKey = fsRefreshKey,
+                        openFiles = openFiles,
+                        activeFile = revealFile,
+                        dirtyFiles = dirtyFiles,
                         revealFile = revealFile,
                         revealRequest = treeReveal,
                         onFileClick = { tabsState.open(Tab.FileView(it)) },
+                        onCloseFile = ::closeFile,
+                        onCloseOtherFiles = ::closeOtherFiles,
+                        onCloseAllFiles = ::closeAllFiles,
                         onDeleteRequest = { pendingDelete = it },
                         onNewFile = { pendingEntry = TreeEntryDialog.NewFile(FileOperations.parentDirFor(it)) },
                         onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },
@@ -1058,6 +1106,11 @@ fun App(
                         gitEnabled = repo != null,
                         blameEnabled = blameEnabled,
                         onToggleBlame = { blameEnabled = !blameEnabled },
+                        wrapLines = wrapLines,
+                        onToggleWrap = {
+                            wrapLines = !wrapLines
+                            Settings.saveWrapLines(wrapLines)
+                        },
                         headerExtras = {
                             LauncherButton(
                                 launchers = launchers,

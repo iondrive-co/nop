@@ -3,13 +3,13 @@ package iondrive.nop
 import java.nio.file.Path
 
 /**
- * Pure helpers for the left-rail project tabs, kept out of the Compose layer so they can be
- * unit-tested without spinning up a UI.
+ * Pure helpers for the project tabs along the top of a window, kept out of the Compose layer so they
+ * can be unit-tested without spinning up a UI. Which window holds which tabs is [Workspaces].
  */
 object ProjectTabs {
     /**
-     * The tab that should become active after [closed] is removed from [projects] (the list as it
-     * stood *before* removal). When the closed tab wasn't the active one, [active] is returned
+     * The tab that should become active after [closed] is removed from [projects] (that window's
+     * tabs as they stood *before* removal). When the closed tab wasn't the active one, [active] is returned
      * unchanged. When it was, selection falls to the tab that slides into its slot, else the new
      * last tab, else null once nothing is left.
      */
@@ -20,7 +20,7 @@ object ProjectTabs {
         return remaining.getOrNull(idx) ?: remaining.lastOrNull()
     }
 
-    /** The tab to show on launch: the saved active tab when it's still open, else the first tab. */
+    /** The tab a window shows on launch: its saved active tab when still open, else its first. */
     fun initialActive(projects: List<Path>, saved: Path?): Path? =
         saved?.takeIf { it in projects } ?: projects.firstOrNull()
 

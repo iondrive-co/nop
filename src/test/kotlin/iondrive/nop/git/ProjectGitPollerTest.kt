@@ -8,7 +8,7 @@ import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 
-class RailGitPollerTest {
+class ProjectGitPollerTest {
     @Test
     fun `the first sweep reports every project and a quiet sweep reports none`(@TempDir tmp: Path) {
         val clean = initRepo(tmp / "clean")
@@ -17,11 +17,11 @@ class RailGitPollerTest {
 
         val clock = FakeClock()
         RepoWatcher().use { watcher ->
-            RailGitPoller(watcher, nowMs = clock::now).use { poller ->
+            ProjectGitPoller(watcher, nowMs = clock::now).use { poller ->
                 poller.retain(listOf(clean, dirty))
 
                 assertEquals(
-                    mapOf(clean to false, dirty to true), poller.sweep(active = null),
+                    mapOf(clean to false, dirty to true), poller.sweep(active = emptySet()),
                     "nothing has been walked yet, so every project is walked once",
                 )
                 // The point of the whole class: once each tree is watched and quiet, a tick walks
@@ -39,9 +39,9 @@ class RailGitPollerTest {
         val project = initRepo(tmp / "project")
         val clock = FakeClock()
         RepoWatcher().use { watcher ->
-            RailGitPoller(watcher, nowMs = clock::now).use { poller ->
+            ProjectGitPoller(watcher, nowMs = clock::now).use { poller ->
                 poller.retain(listOf(project))
-                poller.sweep(active = null)
+                poller.sweep(active = emptySet())
                 sweepUntilQuiet(poller, clock)
 
                 // Establish a walk at a known point on the clock: the rate limit runs from the last
@@ -53,18 +53,18 @@ class RailGitPollerTest {
                 )
 
                 // Inside the interval nothing is walked however much the tree moves — this is what
-                // stops a checkout an agent is writing to from costing what the whole rail used to.
+                // stops a checkout an agent is writing to from costing what every open project used to.
                 (project / "more.txt").writeText("also uncommitted\n")
-                clock.advance(RailGitPoller.BACKGROUND_INTERVAL_MS / 2)
+                clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS / 2)
                 assertEquals(
-                    emptyMap<Path, Boolean>(), poller.sweep(active = null),
+                    emptyMap<Path, Boolean>(), poller.sweep(active = emptySet()),
                     "a change inside the interval waits its turn",
                 )
 
                 // Deferred, not dropped: the change is still pending on the next eligible sweep.
-                clock.advance(RailGitPoller.BACKGROUND_INTERVAL_MS)
+                clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS)
                 assertEquals(
-                    mapOf(project to true), poller.sweep(active = null),
+                    mapOf(project to true), poller.sweep(active = emptySet()),
                     "and is walked as soon as the interval has passed",
                 )
             }
@@ -79,11 +79,11 @@ class RailGitPollerTest {
 
         val clock = FakeClock()
         RepoWatcher().use { watcher ->
-            RailGitPoller(watcher, nowMs = clock::now).use { poller ->
+            ProjectGitPoller(watcher, nowMs = clock::now).use { poller ->
                 poller.retain(listOf(active, other))
 
                 assertEquals(
-                    setOf(other), poller.sweep(active = active).keys,
+                    setOf(other), poller.sweep(active = setOf(active)).keys,
                     "the project on screen has a fresh status of its own; walking it again is the " +
                         "duplicated work this skip exists to remove",
                 )
@@ -96,15 +96,15 @@ class RailGitPollerTest {
     }
 
     @Test
-    fun `closing a rail tab releases its repository and watches`(@TempDir tmp: Path) {
+    fun `closing a project tab releases its repository and watches`(@TempDir tmp: Path) {
         val kept = initRepo(tmp / "kept")
         val closed = initRepo(tmp / "closed")
 
         val clock = FakeClock()
         RepoWatcher().use { watcher ->
-            RailGitPoller(watcher, nowMs = clock::now).use { poller ->
+            ProjectGitPoller(watcher, nowMs = clock::now).use { poller ->
                 poller.retain(listOf(kept, closed))
-                poller.sweep(active = null)
+                poller.sweep(active = emptySet())
                 assertTrue(watcher.watchCount(closed) > 0, "watched while the tab was open")
 
                 poller.retain(listOf(kept))
@@ -114,7 +114,7 @@ class RailGitPollerTest {
                     "a closed tab must not leave a tree of watches behind it",
                 )
 
-                // Change both trees. Only the one still on the rail may come back from a sweep.
+                // Change both trees. Only the one still open may come back from a sweep.
                 (kept / "pending.txt").writeText("uncommitted\n")
                 (closed / "pending.txt").writeText("uncommitted\n")
                 assertEquals(
@@ -139,24 +139,24 @@ class RailGitPollerTest {
      * many it took. The fixtures' own writes are still arriving as watch events when a test starts,
      * so the first few sweeps legitimately have something to look at.
      */
-    private fun sweepUntilQuiet(poller: RailGitPoller, clock: FakeClock): Int {
+    private fun sweepUntilQuiet(poller: ProjectGitPoller, clock: FakeClock): Int {
         var sweeps = 0
         val deadline = System.currentTimeMillis() + TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
-            clock.advance(RailGitPoller.BACKGROUND_INTERVAL_MS * 2)
+            clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS * 2)
             sweeps++
-            if (poller.sweep(active = null).isEmpty()) return sweeps
+            if (poller.sweep(active = emptySet()).isEmpty()) return sweeps
             Thread.sleep(POLL_MS)
         }
         error("poller never went quiet")
     }
 
     /** The first sweep past the interval that actually walks something. */
-    private fun awaitSweep(poller: RailGitPoller, clock: FakeClock): Map<Path, Boolean> {
+    private fun awaitSweep(poller: ProjectGitPoller, clock: FakeClock): Map<Path, Boolean> {
         val deadline = System.currentTimeMillis() + TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
-            clock.advance(RailGitPoller.BACKGROUND_INTERVAL_MS * 2)
-            val swept = poller.sweep(active = null)
+            clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS * 2)
+            val swept = poller.sweep(active = emptySet())
             if (swept.isNotEmpty()) return swept
             Thread.sleep(POLL_MS)
         }

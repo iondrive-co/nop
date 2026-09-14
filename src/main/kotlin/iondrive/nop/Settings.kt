@@ -98,40 +98,121 @@ object Settings {
     }
 
     /**
-     * The full ordered rail layout — project tabs interleaved with named separators — stored as
-     * `rail.0`, `rail.1`, … Falls back to the project-only list (open.N / legacy) when no rail.N
-     * entries exist yet, so an upgrade from a pre-separator build keeps every tab.
+     * Every window the user has, in order: its name, its project tabs, which of them was active,
+     * where the window sat on screen, and whether it was showing when nop last exited. Stored as
+     * `ws.0.name`, `ws.0.project.0`, … one numbered block per window.
+     *
+     * When no `ws.N` block exists the state is from a build that had a single window and grouped its
+     * projects with named separators in one bar, so the layout is upgraded on the spot — see
+     * [Workspaces.migrateRail]. Older still (no rail either) is one unnamed window holding whatever
+     * `open.N`/`project` recorded. Neither is written back until something changes, so nothing is
+     * lost by looking.
      */
-    fun loadRailLayout(): List<RailItem> {
+    fun loadWorkspaces(): List<Workspace> {
         val map = load()
-        val encoded = map.entries
-            .mapNotNull { (k, v) ->
-                val idx = if (k.startsWith("rail.")) k.removePrefix("rail.").toIntOrNull() else null
-                if (idx == null) null else idx to v
-            }
-            .filter { it.second.isNotBlank() }
-            .sortedBy { it.first }
-            .map { it.second }
-        if (encoded.isNotEmpty()) {
-            var nextSepId = 0L
-            return encoded.mapNotNull { RailLayout.decode(it, separatorId = nextSepId++) }
+        val indices = map.keys
+            .filter { it.startsWith(WORKSPACE_PREFIX) }
+            .mapNotNull { it.removePrefix(WORKSPACE_PREFIX).substringBefore('.').toIntOrNull() }
+            .distinct()
+            .sorted()
+        if (indices.isEmpty()) return migratedWorkspaces(map)
+        return indices.mapIndexed { seq, i ->
+            val prefix = "$WORKSPACE_PREFIX$i."
+            Workspace(
+                // Ids are handed out by position: nothing outside one run refers to a window by id.
+                id = seq.toLong(),
+                name = map[prefix + "name"].orEmpty(),
+                projects = numbered(map, prefix + "project."),
+                active = map[prefix + "active"]?.takeIf { it.isNotBlank() }?.let(::parsePath),
+                geometry = decodeGeometry(map[prefix + "geom"]),
+                // Absent means open: only a window the user actually closed writes `open=false`.
+                open = map[prefix + "open"] != "false",
+                closedAt = map[prefix + "closed"]?.toLongOrNull(),
+            )
         }
-        return loadOpenProjects().map { RailItem.Project(it) }
     }
 
     /**
-     * Persists the rail layout. Writes the typed `rail.N` rows and also mirrors the project paths
-     * into `open.N` (in rail order) so [loadOpenProjects] and older builds still see the open set.
+     * Persists the window list. Also mirrors every project path into `open.N` (in window order) so
+     * [loadOpenProjects] — and a build from before windows existed — still sees the open set. The
+     * retired `rail.N` rows are dropped as they are superseded, so the upgrade happens once.
      */
-    fun saveRailLayout(items: List<RailItem>) {
+    fun saveWorkspaces(list: List<Workspace>) {
         val map = load()
-        map.keys.filter { it.startsWith("rail.") || it.startsWith("open.") }.toList().forEach(map::remove)
+        map.keys
+            .filter { it.startsWith(WORKSPACE_PREFIX) || it.startsWith("open.") || it.startsWith("rail.") }
+            .toList()
+            .forEach(map::remove)
         map.remove("project")
-        items.forEachIndexed { idx, item -> map["rail.$idx"] = RailLayout.encode(item) }
-        RailLayout.projects(items).forEachIndexed { idx, p ->
+        list.forEachIndexed { i, ws ->
+            val prefix = "$WORKSPACE_PREFIX$i."
+            // Newlines in a name would split the line format, so they are flattened on the way out.
+            map[prefix + "name"] = ws.name.replace('\n', ' ').replace('\r', ' ')
+            map[prefix + "open"] = ws.open.toString()
+            ws.active?.let { map[prefix + "active"] = it.toAbsolutePath().normalize().toString() }
+            ws.closedAt?.let { map[prefix + "closed"] = it.toString() }
+            ws.geometry?.let { map[prefix + "geom"] = encodeGeometry(it) }
+            ws.projects.forEachIndexed { j, p ->
+                map["${prefix}project.$j"] = p.toAbsolutePath().normalize().toString()
+            }
+        }
+        Workspaces.allProjects(list).forEachIndexed { idx, p ->
             map["open.$idx"] = p.toAbsolutePath().normalize().toString()
         }
         save(map)
+    }
+
+    private const val WORKSPACE_PREFIX = "ws."
+
+    /** The one-time read of a pre-windows state file. Empty when there is nothing to upgrade. */
+    private fun migratedWorkspaces(map: Map<String, String>): List<Workspace> {
+        val rail = map.entries
+            .mapNotNull { (k, v) ->
+                val idx = if (k.startsWith("rail.")) k.removePrefix("rail.").toIntOrNull() else null
+                if (idx == null || v.isBlank()) null else idx to v
+            }
+            .sortedBy { it.first }
+            .map { it.second }
+        val active = loadActiveProject()
+        val geometry = loadWindowGeometry()
+        if (rail.isNotEmpty()) return Workspaces.migrateRail(rail, active, geometry)
+        val projects = loadOpenProjects().map { it.toAbsolutePath().normalize() }
+        if (projects.isEmpty()) return emptyList()
+        return listOf(
+            Workspace(
+                id = 0,
+                name = "",
+                projects = projects,
+                active = ProjectTabs.initialActive(projects, active),
+                geometry = geometry,
+            ),
+        )
+    }
+
+    /** Values of the `<prefix>0`, `<prefix>1`, … keys as paths, in index order. */
+    private fun numbered(map: Map<String, String>, prefix: String): List<Path> =
+        map.entries
+            .mapNotNull { (k, v) ->
+                val idx = if (k.startsWith(prefix)) k.removePrefix(prefix).toIntOrNull() else null
+                if (idx == null || v.isBlank()) null else idx to v
+            }
+            .sortedBy { it.first }
+            .mapNotNull { parsePath(it.second) }
+            .map { it.toAbsolutePath().normalize() }
+
+    private fun parsePath(value: String): Path? = runCatching { Paths.get(value) }.getOrNull()
+
+    /** `width,height` for a window that has never been moved, `width,height,x,y` for one that has. */
+    private fun encodeGeometry(g: WindowGeometry): String =
+        if (g.x == null || g.y == null) "${g.width},${g.height}" else "${g.width},${g.height},${g.x},${g.y}"
+
+    private fun decodeGeometry(value: String?): WindowGeometry? {
+        val parts = value?.split(',')?.map { it.trim() } ?: return null
+        if (parts.size < 2) return null
+        val w = parts[0].toIntOrNull() ?: return null
+        val h = parts[1].toIntOrNull() ?: return null
+        if (w <= 0 || h <= 0) return null
+        return WindowGeometry(w, h, parts.getOrNull(2)?.toIntOrNull(), parts.getOrNull(3)?.toIntOrNull())
     }
 
     /** Most-recently-opened first. */
@@ -181,6 +262,11 @@ object Settings {
         save(map)
     }
 
+    /**
+     * The size and position of the single window builds before this one had. Windows carry their own
+     * geometry now (see [loadWorkspaces]); this is read only to seed the ones an upgrade creates, and
+     * the first window of a fresh install.
+     */
     fun loadWindowGeometry(): WindowGeometry? {
         val map = load()
         val w = map["window.width"]?.toIntOrNull() ?: return null
@@ -192,15 +278,6 @@ object Settings {
             x = map["window.x"]?.toIntOrNull(),
             y = map["window.y"]?.toIntOrNull(),
         )
-    }
-
-    fun saveWindowGeometry(g: WindowGeometry) {
-        val map = load()
-        map["window.width"] = g.width.toString()
-        map["window.height"] = g.height.toString()
-        if (g.x != null) map["window.x"] = g.x.toString() else map.remove("window.x")
-        if (g.y != null) map["window.y"] = g.y.toString() else map.remove("window.y")
-        save(map)
     }
 
     /**

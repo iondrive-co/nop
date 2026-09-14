@@ -258,7 +258,7 @@ class TabsState {
      * Closes every tab except [keepId], which becomes the selected tab. Returns the removed tabs so
      * the caller can run per-tab cleanup (flush edits, stop launcher processes). No-op returning an
      * empty list if [keepId] isn't currently open. Groups are left alone — the emptied ones stay as
-     * buckets to open into, the same way a project-rail separator outlives the tabs beneath it.
+     * buckets to open into, the same way a window outlives the project tabs closed out of it.
      */
     fun closeOthers(keepId: String): List<Tab> {
         val keep = _tabs.firstOrNull { it.id == keepId } ?: return emptyList()

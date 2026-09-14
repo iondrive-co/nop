@@ -4,17 +4,26 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
-import java.nio.file.Paths
 
 /**
- * The grouped-strip maths, exercised through the project rail's items — the strip they were first
- * written for. The horizontal tab bar drives the same code with its own entry type; the rules that
- * are specific to it (a tab always belongs to a group) live in [iondrive.nop.ui.TabGroups].
+ * The grouped-strip maths, exercised through a bare stand-in entry type rather than any one strip's
+ * items, since the rules under test are the ones every grouped strip shares. The editor tab bar
+ * drives the same code with its own entries; the rules specific to it (a tab always belongs to a
+ * group) live in [iondrive.nop.ui.TabGroups].
  */
 class GroupedStripTest {
-    private fun proj(s: String) = RailItem.Project(Paths.get(s))
-    private fun sep(name: String, id: Long = 0) = RailItem.Separator(name, id)
-    private fun sepC(name: String, id: Long = 0) = RailItem.Separator(name, id, collapsed = true)
+    /** A member or a header of a strip, named so failures say which entry moved where. */
+    private data class Entry(
+        val name: String,
+        override val isHeader: Boolean,
+        override val collapsed: Boolean = false,
+    ) : GroupedEntry<Entry> {
+        override fun expanded(): Entry = copy(collapsed = false)
+    }
+
+    private fun proj(s: String) = Entry(s, isHeader = false)
+    private fun sep(name: String) = Entry(name, isHeader = true)
+    private fun sepC(name: String) = Entry(name, isHeader = true, collapsed = true)
 
     @Test
     fun `visibleBlocks gives every row its own single span when nothing is collapsed`() {
@@ -72,20 +81,20 @@ class GroupedStripTest {
     // Drag steps below measure every row at ROW px, so a group of n rows stands n * ROW tall and has
     // to be travelled halfway for the swap to commit.
     private val ROW = 50
-    private fun step(items: List<RailItem>, from: Int, asGroup: Boolean, delta: Float) =
+    private fun step(items: List<Entry>, from: Int, asGroup: Boolean, delta: Float) =
         GroupedStrip.dragStep(items, from, asGroup, delta) { ROW }
 
-    private fun under(items: List<RailItem>, from: Int, delta: Float) =
+    private fun under(items: List<Entry>, from: Int, delta: Float) =
         GroupedStrip.collapsedUnderDrag(items, from, delta) { ROW }
 
     @Test
     fun `dragStep moves a group above the previous group with its tabs`() {
         // The reported bug: dragging the last group's header up used to move the bare label, leaving
         // its tabs behind to be swallowed by whichever separator ended up above them.
-        val items = listOf(sep("A", 1), proj("/a"), sep("B", 2), proj("/b"), sep("C", 3), proj("/c"))
+        val items = listOf(sep("A"), proj("/a"), sep("B"), proj("/b"), sep("C"), proj("/c"))
         val moved = step(items, from = 4, asGroup = true, delta = -60f)!!
         assertEquals(
-            listOf(sep("A", 1), proj("/a"), sep("C", 3), proj("/c"), sep("B", 2), proj("/b")),
+            listOf(sep("A"), proj("/a"), sep("C"), proj("/c"), sep("B"), proj("/b")),
             moved.items,
         )
         // Group B is two rows tall, so the drag consumed its full height moving up past it.
@@ -94,10 +103,10 @@ class GroupedStripTest {
 
     @Test
     fun `dragStep moves a group below the next group with its tabs`() {
-        val items = listOf(sep("B", 1), proj("/b1"), proj("/b2"), sep("C", 2), proj("/c"))
+        val items = listOf(sep("B"), proj("/b1"), proj("/b2"), sep("C"), proj("/c"))
         val moved = step(items, from = 0, asGroup = true, delta = 60f)!!
         assertEquals(
-            listOf(sep("C", 2), proj("/c"), sep("B", 1), proj("/b1"), proj("/b2")),
+            listOf(sep("C"), proj("/c"), sep("B"), proj("/b1"), proj("/b2")),
             moved.items,
         )
         assertEquals(2 * ROW, moved.travelled)
@@ -105,7 +114,7 @@ class GroupedStripTest {
 
     @Test
     fun `dragStep waits until a group has been travelled halfway`() {
-        val items = listOf(sep("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b"))
+        val items = listOf(sep("A"), proj("/a1"), proj("/a2"), sep("B"), proj("/b"))
         // Group A is three rows tall (150px): 70px up isn't yet past its midpoint, 80px is.
         assertNull(step(items, from = 3, asGroup = true, delta = -70f))
         assertNotNull(step(items, from = 3, asGroup = true, delta = -80f))
@@ -115,9 +124,9 @@ class GroupedStripTest {
     fun `dragStep measures a collapsed neighbour by its separator row alone`() {
         // "Work" hides two tabs, so it's one row on screen — half of ROW is all the travel it takes
         // to hop it, even though the block that moves is three entries long.
-        val items = listOf(sepC("Work", 1), proj("/b"), proj("/c"), sep("New", 2))
+        val items = listOf(sepC("Work"), proj("/b"), proj("/c"), sep("New"))
         val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
-        assertEquals(listOf(sep("New", 2), sepC("Work", 1), proj("/b"), proj("/c")), moved.items)
+        assertEquals(listOf(sep("New"), sepC("Work"), proj("/b"), proj("/c")), moved.items)
         assertEquals(-ROW, moved.travelled)
     }
 
@@ -125,16 +134,16 @@ class GroupedStripTest {
     fun `dragStep steps a bare separator one row at a time so it can split a group`() {
         // A newly added separator heads no tabs, so it drags as a plain row: one step up drops it
         // between the tabs of the group above, splitting it.
-        val items = listOf(sep("Work", 1), proj("/a"), proj("/b"), sep("New", 2))
+        val items = listOf(sep("Work"), proj("/a"), proj("/b"), sep("New"))
         val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
-        assertEquals(listOf(sep("Work", 1), proj("/a"), sep("New", 2), proj("/b")), moved.items)
+        assertEquals(listOf(sep("Work"), proj("/a"), sep("New"), proj("/b")), moved.items)
     }
 
     @Test
     fun `dragStep moves a project across a group boundary a row at a time`() {
-        val items = listOf(sep("A", 1), proj("/a"), sep("B", 2), proj("/b"))
+        val items = listOf(sep("A"), proj("/a"), sep("B"), proj("/b"))
         val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
-        assertEquals(listOf(sep("A", 1), proj("/a"), proj("/b"), sep("B", 2)), moved.items)
+        assertEquals(listOf(sep("A"), proj("/a"), proj("/b"), sep("B")), moved.items)
     }
 
     @Test
@@ -142,11 +151,11 @@ class GroupedStripTest {
         // The reported bug: one step up used to swap /b1 with its own separator, parking it after the
         // closed group's tabs — i.e. inside it — where it stopped being drawn at all. Both rows above
         // have to be crossed to reach the next slot /b1 still shows in, at the top of the rail.
-        val items = listOf(sepC("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b1"), proj("/b2"))
+        val items = listOf(sepC("A"), proj("/a1"), proj("/a2"), sep("B"), proj("/b1"), proj("/b2"))
         assertNull(step(items, from = 4, asGroup = false, delta = -30f)) // past B's row, nowhere to land
         val moved = step(items, from = 4, asGroup = false, delta = -80f)!!
         assertEquals(
-            listOf(proj("/b1"), sepC("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b2")),
+            listOf(proj("/b1"), sepC("A"), proj("/a1"), proj("/a2"), sep("B"), proj("/b2")),
             moved.items,
         )
         // Closed A is one row on screen despite its two hidden tabs, so B's row plus A's is 2 * ROW.
@@ -155,11 +164,11 @@ class GroupedStripTest {
 
     @Test
     fun `dragStep carries a project over a closed group below into the next open one`() {
-        val items = listOf(proj("/a"), sepC("W", 1), proj("/w"), sep("O", 2), proj("/o"))
+        val items = listOf(proj("/a"), sepC("W"), proj("/w"), sep("O"), proj("/o"))
         val moved = step(items, from = 0, asGroup = false, delta = 80f)!!
         assertEquals(
             // /a lands as the first tab of the open group, the nearest slot below where it shows.
-            listOf(sepC("W", 1), proj("/w"), sep("O", 2), proj("/a"), proj("/o")),
+            listOf(sepC("W"), proj("/w"), sep("O"), proj("/a"), proj("/o")),
             moved.items,
         )
         assertEquals(2 * ROW, moved.travelled)
@@ -169,7 +178,7 @@ class GroupedStripTest {
     fun `dragStep leaves a project put when only closed groups lie beyond it`() {
         // Nothing below is drawn — every slot is inside "W" — so the row holds its place instead of
         // disappearing into the group. Hover-to-open is the way in; see expandUnderDrag.
-        val items = listOf(proj("/a"), sepC("W", 1), proj("/w1"), proj("/w2"))
+        val items = listOf(proj("/a"), sepC("W"), proj("/w1"), proj("/w2"))
         assertNull(step(items, from = 0, asGroup = false, delta = 30f))
         assertNull(step(items, from = 0, asGroup = false, delta = 500f))
     }
@@ -178,16 +187,16 @@ class GroupedStripTest {
     fun `dragStep hops a bare separator over a closed group instead of splitting it`() {
         // Slots inside a closed group aren't drop targets even for a separator, which would otherwise
         // take two visually identical steps to cross one that hides two tabs.
-        val items = listOf(sepC("W", 1), proj("/w1"), proj("/w2"), sep("New", 2))
+        val items = listOf(sepC("W"), proj("/w1"), proj("/w2"), sep("New"))
         val moved = step(items, from = 3, asGroup = false, delta = -30f)!!
-        assertEquals(listOf(sep("New", 2), sepC("W", 1), proj("/w1"), proj("/w2")), moved.items)
+        assertEquals(listOf(sep("New"), sepC("W"), proj("/w1"), proj("/w2")), moved.items)
     }
 
     @Test
     fun `dragStep moves a group over a closed group whole`() {
-        val items = listOf(sepC("A", 1), proj("/a"), sep("B", 2), proj("/b"))
+        val items = listOf(sepC("A"), proj("/a"), sep("B"), proj("/b"))
         val moved = step(items, from = 2, asGroup = true, delta = -30f)!!
-        assertEquals(listOf(sep("B", 2), proj("/b"), sepC("A", 1), proj("/a")), moved.items)
+        assertEquals(listOf(sep("B"), proj("/b"), sepC("A"), proj("/a")), moved.items)
         assertEquals(-ROW, moved.travelled)
     }
 
@@ -195,26 +204,26 @@ class GroupedStripTest {
     fun `dragStep honours a caller's extra landing rule`() {
         // The tab strip's rule: an entry may never come to rest ahead of the first header, because
         // every tab has to belong to a group.
-        val items = listOf(sep("A", 1), proj("/a"), proj("/b"))
-        val landable = { list: List<RailItem>, index: Int ->
+        val items = listOf(sep("A"), proj("/a"), proj("/b"))
+        val landable = { list: List<Entry>, index: Int ->
             GroupedStrip.isVisible(list, index) && (index > 0 || list[index].isHeader)
         }
         // Dragged hard against the start of the strip the row stops at the front of its own group,
         // the furthest slot the rule still accepts, instead of crossing the header.
         val stopped = GroupedStrip.dragStep(items, from = 2, asGroup = false, delta = -200f, canLand = landable) { ROW }!!
-        assertEquals(listOf(sep("A", 1), proj("/b"), proj("/a")), stopped.items)
+        assertEquals(listOf(sep("A"), proj("/b"), proj("/a")), stopped.items)
         assertEquals(-ROW, stopped.travelled)
         // Without the extra rule the same drag carries it past the header — which is what the rail
         // wants, and the tab strip must not do.
         assertEquals(
-            listOf(proj("/b"), sep("A", 1), proj("/a")),
+            listOf(proj("/b"), sep("A"), proj("/a")),
             step(items, from = 2, asGroup = false, delta = -200f)!!.items,
         )
     }
 
     @Test
     fun `collapsedUnderDrag names the closed group the row is held over`() {
-        val items = listOf(sepC("A", 1), proj("/a"), sepC("B", 2), proj("/b"), sep("C", 3), proj("/c"))
+        val items = listOf(sepC("A"), proj("/a"), sepC("B"), proj("/b"), sep("C"), proj("/c"))
         // Dragging /c up: C's row covers the first ROW of travel, then closed B, then closed A.
         assertNull(under(items, from = 5, delta = -30f)) // still over C's own separator
         assertEquals(2, under(items, from = 5, delta = -70f)) // over B
@@ -225,7 +234,7 @@ class GroupedStripTest {
 
     @Test
     fun `collapsedUnderDrag ignores rows that are already open`() {
-        val items = listOf(sep("A", 1), proj("/a"), proj("/b"))
+        val items = listOf(sep("A"), proj("/a"), proj("/b"))
         assertNull(under(items, from = 2, delta = -30f))
         assertNull(under(items, from = 2, delta = 0f))
         assertNull(under(items, from = 1, delta = 30f)) // nothing below
@@ -233,10 +242,10 @@ class GroupedStripTest {
 
     @Test
     fun `expandUnderDrag opens a group above and lifts the dragged row into it`() {
-        val items = listOf(sepC("A", 1), proj("/a1"), proj("/a2"), sep("B", 2), proj("/b"))
+        val items = listOf(sepC("A"), proj("/a1"), proj("/a2"), sep("B"), proj("/b"))
         val moved = GroupedStrip.expandUnderDrag(items, from = 4, header = 0) { ROW }!!
         assertEquals(
-            listOf(sep("A", 1), proj("/b"), proj("/a1"), proj("/a2"), sep("B", 2)),
+            listOf(sep("A"), proj("/b"), proj("/a1"), proj("/a2"), sep("B")),
             moved.items,
         )
         // /b sat below the two separator rows and now sits below one, so it rose a single row — the
@@ -246,16 +255,16 @@ class GroupedStripTest {
 
     @Test
     fun `expandUnderDrag opens a group below and lifts the dragged row into it`() {
-        val items = listOf(proj("/a"), sepC("W", 1), proj("/w"))
+        val items = listOf(proj("/a"), sepC("W"), proj("/w"))
         val moved = GroupedStrip.expandUnderDrag(items, from = 0, header = 1) { ROW }!!
-        assertEquals(listOf(sep("W", 1), proj("/a"), proj("/w")), moved.items)
+        assertEquals(listOf(sep("W"), proj("/a"), proj("/w")), moved.items)
         // /a dropped past the separator row it was held over.
         assertEquals(ROW, moved.travelled)
     }
 
     @Test
     fun `expandUnderDrag refuses a group that is already open, a non-separator, and a group header`() {
-        val items = listOf(sep("A", 1), proj("/a"), sepC("W", 2), proj("/w"), sep("Bare", 3))
+        val items = listOf(sep("A"), proj("/a"), sepC("W"), proj("/w"), sep("Bare"))
         assertNull(GroupedStrip.expandUnderDrag(items, from = 3, header = 0) { ROW }) // "A" isn't closed
         assertNull(GroupedStrip.expandUnderDrag(items, from = 3, header = 1) { ROW }) // /a isn't a separator
         assertNull(GroupedStrip.expandUnderDrag(items, from = 9, header = 2) { ROW }) // stale row index
@@ -266,7 +275,7 @@ class GroupedStripTest {
 
     @Test
     fun `isVisible hides only the tabs inside a closed group`() {
-        val items = listOf(proj("/a"), sepC("W", 1), proj("/w"), sep("O", 2), proj("/o"))
+        val items = listOf(proj("/a"), sepC("W"), proj("/w"), sep("O"), proj("/o"))
         assertEquals(true, GroupedStrip.isVisible(items, 0)) // above every separator
         assertEquals(true, GroupedStrip.isVisible(items, 1)) // separators always show
         assertEquals(false, GroupedStrip.isVisible(items, 2)) // inside closed "W"
@@ -276,7 +285,7 @@ class GroupedStripTest {
 
     @Test
     fun `dragStep is a no-op at the ends and for a stale index`() {
-        val items = listOf(sep("A", 1), proj("/a"), proj("/b"))
+        val items = listOf(sep("A"), proj("/a"), proj("/b"))
         assertNull(step(items, from = 0, asGroup = true, delta = -80f)) // already at the top
         assertNull(step(items, from = 2, asGroup = false, delta = 80f)) // already at the bottom
         assertNull(step(items, from = -1, asGroup = false, delta = 80f))

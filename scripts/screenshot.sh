@@ -8,9 +8,9 @@
 #     config, docs), with one file opened to its side-by-side diff in the editor beside it. The
 #     opened file is long enough to scroll past the window bottom, with its hunks spread far
 #     apart, so the change stripe beside the diff shows separate blocks marking where they are.
-#   - A workspace/preview shot: several synthetic project tabs grouped by named separators in the
-#     left rail, with a few editor tabs open in the active project. NOTHING from the user's real
-#     workspace appears.
+#   - A workspace/preview shot: a named window holding several synthetic project tabs along the top,
+#     with a few editor tabs open in the active project. NOTHING from the user's real workspace
+#     appears.
 #
 # The two shots are set up in opposite themes so the README demonstrates both. Output is
 # quantised to a 256-colour palette before saving, which trims the PNGs by ~3x with no
@@ -98,13 +98,14 @@ project_data_dir() {
     echo "$cfg/nop/projects/$safe-$short"
 }
 
-# Spawn an isolated nop. $1=XDG config dir, $2=window-title basename to wait for, $3=optional
-# project arg (empty → restore the seeded rail layout). Sets the global LAST_WID to the window id.
+# Spawn an isolated nop. $1=XDG config dir, $2=exact window title to wait for, $3=optional project
+# arg (empty → restore the seeded window layout). A nop window is titled by the name its window was
+# given, or by the project it is showing when it has no name. Sets the global LAST_WID to its id.
 # (Sets a global rather than echoing, so the PID it records for cleanup survives in this shell
 # rather than a command-substitution subshell.)
 LAST_WID=""
 launch_isolated() {
-    local cfg="$1" want_basename="$2" arg="${3:-}"
+    local cfg="$1" want_title="$2" arg="${3:-}"
     local log="$cfg/nop.log"
     {
         echo "launching at $(date -Is): NOP_BIN=$NOP_BIN cfg=$cfg arg=$arg"
@@ -122,7 +123,7 @@ launch_isolated() {
 
     local wid=""
     for _ in $(seq 60); do
-        wid=$(DISPLAY="$DISPLAY_SPEC" wmctrl -l 2>/dev/null | awk -v t="nop — $want_basename" '$0 ~ t {print $1; exit}' || true)
+        wid=$(DISPLAY="$DISPLAY_SPEC" wmctrl -l 2>/dev/null | awk -v t=" $want_title$" '$0 ~ t {print $1; exit}' || true)
         [ -n "$wid" ] && break
         if ! kill -0 "$pid" 2>/dev/null; then
             echo "isolated nop exited before showing a window; log at $log" >&2
@@ -132,7 +133,7 @@ launch_isolated() {
         sleep 0.5
     done
     if [ -z "$wid" ]; then
-        echo "isolated nop window ('nop — $want_basename') never appeared; log at $log" >&2
+        echo "isolated nop window ('$want_title') never appeared; log at $log" >&2
         tail -n 40 "$log" >&2 || true
         exit 4
     fi
@@ -490,7 +491,7 @@ for off in 245 215 300 330 365; do
     DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$diff_row_x" $(( DY + off ))
     sleep 0.15
     DISPLAY="$DISPLAY_SPEC" xdotool click 1
-    # Park the cursor over the editor (not the rail's "+" button) so no tooltip is in the shot.
+    # Park the cursor over the editor (not the bar's "+" button) so no tooltip is in the shot.
     DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( DX + DW * 65 / 100 )) $(( DY + DH * 28 / 100 ))
     sleep 0.9
     cand="$(mktemp --suffix=.png)"
@@ -513,6 +514,8 @@ echo "diff shot ink=$best_ink"
 # Scene 2 — workspace / preview (synthetic tabs + tab groups, NOT the user's workspace)
 # ===========================================================================================
 PREV_BASENAME="webapp-$$"
+# The name the preview shot's window goes by — its title, and how launch_isolated finds it.
+PREV_WINDOW="WORK"
 PREV_CFG="$TMP_PARENT/prev-cfg"
 mkdir -p "$PREV_CFG/nop"
 
@@ -550,7 +553,7 @@ cat > "$WEBAPP/README.md" <<'EOF'
 
 A small synthetic project used for the nop screenshot.
 EOF
-# The other two rail projects aren't opened in the shot, but they need a file each so their repo has
+# The other two project tabs aren't opened in the shot, but they need a file each so their repo has
 # a commit (an empty repo has no HEAD) and so their tree isn't bare if clicked.
 cat > "$API/main.py" <<'EOF'
 # Tiny synthetic API server for the nop screenshot.
@@ -586,23 +589,21 @@ for demo in "$WEBAPP" "$API" "$BLOG"; do
     git -C "$demo" commit --quiet -m "initial commit"
 done
 
-# Rail layout: two named separators grouping three project tabs. open.N mirrors the projects so a
-# no-arg launch restores the layout (Settings.loadRailLayout falls back to open.N otherwise).
+# One window, named, holding the three demo project tabs — that name is the window's title, and the
+# tabs are the project bar along the top of the shot. `ws.N` is the window layout nop restores on a
+# no-arg launch (Settings.loadWorkspaces).
 cat > "$PREV_CFG/nop/state" <<EOF
-window.width=$SHOT_WIDTH
-window.height=$SHOT_HEIGHT
 theme=$user_theme
 split.h=$SHOT_H_RATIO
 split.tools=0.80
 active=$WEBAPP
-rail.0=sep:WORK
-rail.1=project:$WEBAPP
-rail.2=project:$API
-rail.3=sep:SIDE PROJECTS
-rail.4=project:$BLOG
-open.0=$WEBAPP
-open.1=$API
-open.2=$BLOG
+ws.0.name=$PREV_WINDOW
+ws.0.open=true
+ws.0.active=$WEBAPP
+ws.0.geom=$SHOT_WIDTH,$SHOT_HEIGHT
+ws.0.project.0=$WEBAPP
+ws.0.project.1=$API
+ws.0.project.2=$BLOG
 EOF
 
 # Seed editor tabs for the active project so the top tab strip shows several tabs (App.kt selected).
@@ -614,11 +615,11 @@ mkdir -p "$PREV_DATA"
     printf 'file\t%s\t0\n' "$WEBAPP/README.md"
 } > "$PREV_DATA/tabs.tsv"
 
-launch_isolated "$PREV_CFG" "$PREV_BASENAME" ""
+launch_isolated "$PREV_CFG" "$PREV_WINDOW" ""
 prev_wid="$LAST_WID"
 read PX PY PW PH < <(geometry_of "$prev_wid")
 echo "preview window $prev_wid at $PX,$PY ${PW}x${PH}"
-# Park the cursor over the editor so the rail's "+" tooltip isn't captured.
+# Park the cursor over the editor so the project bar's "+" tooltip isn't captured.
 DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( PX + PW * 60 / 100 )) $(( PY + PH * 30 / 100 ))
 sleep 1.0
 

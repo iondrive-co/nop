@@ -2,15 +2,16 @@ package iondrive.nop
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.LocalTextContextMenu
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -33,15 +34,15 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import iondrive.nop.git.RailGitPoller
+import iondrive.nop.git.ProjectGitPoller
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.spell.Dictionary
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
-import iondrive.nop.ui.EmptyProjectState
 import iondrive.nop.ui.NopTextContextMenu
-import iondrive.nop.ui.ProjectRail
+import iondrive.nop.ui.ProjectBar
+import iondrive.nop.ui.WindowPickerPanel
 import iondrive.nop.ui.nopMenuStyle
 import iondrive.nop.ui.projectTint
 import iondrive.nop.ui.projectWindowIcon
@@ -68,10 +69,14 @@ import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
 
+// The size a window opens at when neither it nor an older build's saved geometry says otherwise.
+private const val DEFAULT_WINDOW_WIDTH = 1000
+private const val DEFAULT_WINDOW_HEIGHT = 700
+
 // How often the workspace looks at whether each open project's dirty dot needs updating. A tick
 // where nothing has changed on disk costs a counter comparison per project, so this stays short;
-// what a tick may actually *walk* is bounded by RailGitPoller instead.
-private const val RAIL_GIT_POLL_MS = 3000L
+// what a tick may actually *walk* is bounded by ProjectGitPoller instead.
+private const val PROJECT_GIT_POLL_MS = 3000L
 
 @OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
@@ -83,14 +88,14 @@ fun main(args: Array<String>) {
         .filter { Files.isDirectory(it) }
 
     // If another nop is already running, hand the requested paths off to it (or just ask it
-    // to come to the foreground when no paths were supplied) and exit. The primary will dedupe
-    // already-open projects and focus their windows, so the user gets one window per project.
+    // to come to the foreground when no paths were supplied) and exit. The primary owns every
+    // window, so it can raise the one that already holds the project rather than opening a second.
     if (SingleInstance.tryForward(argPaths, Settings.configRoot)) {
         exitProcess(0)
     }
 
-    val initial = resolveInitialProjects(args)
-    if (initial.isEmpty()) exitProcess(0)
+    val startup = resolveStartup(argPaths.firstOrNull())
+    if (startup.workspaces.isEmpty()) exitProcess(0)
 
     // Read the spellchecker's word lists while the window is still being built. They're wanted the
     // moment a file or diff is on screen, and a diff checks its lines during composition — so
@@ -98,39 +103,27 @@ fun main(args: Array<String>) {
     Thread { Dictionary.warmUp() }.apply { isDaemon = true; name = "dictionary-warmup" }.start()
 
     application {
-        // The persistent rail layout shown in the left rail: project tabs interleaved with named
-        // separators (bold group labels). Every project opened stays here — switching tabs only
-        // changes which one is active; the little "x" removes one for good. Separators are added
-        // from the "+" menu and dragged into place. Restored from disk; when nop was launched with
-        // an explicit project arg we start fresh from that arg instead. Saved on every change.
-        val railItems = remember {
-            mutableStateListOf<RailItem>().apply {
-                if (args.isNotEmpty()) addAll(initial.map { RailItem.Project(it) })
-                else addAll(Settings.loadRailLayout().ifEmpty { initial.map { RailItem.Project(it) } })
-            }
-        }
-        // Next id to hand a freshly-created separator. Separator ids are runtime-only (drag keys +
-        // rename/remove targeting); seed past whatever the restored layout already used.
-        var nextSepId by remember {
-            mutableStateOf((railItems.filterIsInstance<RailItem.Separator>().maxOfOrNull { it.id } ?: -1L) + 1L)
-        }
-        // Most-recently-used projects, newest first, backing the "+" tab's dropdown. Seeded from
+        // Every window the user has: a name, its own bar of project tabs, and whether it is showing.
+        // Restored from disk (upgrading an older single-window layout on the way in — see
+        // [Settings.loadWorkspaces]) and saved back on every change. A window the user closes stays
+        // on this list with `open = false`, so its tabs are still there to come back to.
+        val workspaces = remember { mutableStateListOf<Workspace>().apply { addAll(startup.workspaces) } }
+        // Most-recently-used projects, newest first, backing every window's "+" dropdown. Seeded from
         // disk unioned with whatever's open now, so even a first run (before this list was tracked)
         // offers the current projects once they're closed.
         val recentProjects = remember {
             mutableStateListOf<Path>().apply {
-                addAll((initial + Settings.loadRecentProjects()).map { it.toAbsolutePath().normalize() }.distinct())
+                val open = Workspaces.allProjects(startup.workspaces)
+                addAll((open + Settings.loadRecentProjects()).map { it.toAbsolutePath().normalize() }.distinct())
             }
         }
         var darkMode by remember { mutableStateOf(Settings.loadDarkMode()) }
-        // The active tab — the project the workspace is currently showing. Restored from disk when
-        // it's still one of the open tabs, otherwise the first tab. Null only once every tab is
-        // closed, which surfaces the empty state.
-        var activeProject by remember {
-            mutableStateOf(ProjectTabs.initialActive(RailLayout.projects(railItems), Settings.loadActiveProject()))
-        }
-        // The live window, captured so the IPC "focus" signal can raise it.
-        val windowRef = remember { mutableStateOf<androidx.compose.ui.awt.ComposeWindow?>(null) }
+        // The live windows, captured so a "show this window" click — and the IPC focus signal — can
+        // raise one that is already on screen rather than doing nothing.
+        val windowRefs = remember { mutableStateMapOf<Long, androidx.compose.ui.awt.ComposeWindow>() }
+        // The window that last had the pointer or the keyboard in it, which is where a project
+        // arriving from the command line lands when no window already holds it.
+        var focusedId by remember { mutableStateOf(startup.focused) }
 
         fun bumpRecent(path: Path) {
             val norm = path.toAbsolutePath().normalize()
@@ -138,71 +131,129 @@ fun main(args: Array<String>) {
             recentProjects.add(0, norm)
         }
 
-        fun openProject(path: Path) {
-            val norm = path.toAbsolutePath().normalize()
-            Log.info("open project $norm")
-            if (railItems.none { it is RailItem.Project && it.path == norm }) {
-                railItems.add(RailItem.Project(norm))
-            }
-            activeProject = norm
-            bumpRecent(norm)
+        /** Replaces the workspace with [id] in place, leaving the rest of the window list alone. */
+        fun mutate(id: Long, transform: (Workspace) -> Workspace) {
+            val idx = workspaces.indexOfFirst { it.id == id }
+            if (idx >= 0) workspaces[idx] = transform(workspaces[idx])
         }
 
-        fun closeProject(path: Path) {
-            val norm = path.toAbsolutePath().normalize()
-            val idx = railItems.indexOfFirst { it is RailItem.Project && it.path == norm }
-            if (idx < 0) return
-            // Compute the next active tab from the pre-removal project order, then drop the tab.
-            val next = ProjectTabs.activeAfterClose(RailLayout.projects(railItems), norm, activeProject)
-            railItems.removeAt(idx)
-            activeProject = next
-            // Keep the just-closed project at the top of recents so it's one click to reopen.
-            bumpRecent(norm)
-        }
-
-        // Append a new separator; the user drags it up into place. Blank names get a placeholder so
-        // the row is still visible and right-clickable to rename.
-        fun addSeparator(name: String) {
-            railItems.add(RailItem.Separator(name.trim().ifBlank { "Group" }, nextSepId))
-            nextSepId += 1
-        }
-
-        fun renameSeparator(index: Int, name: String) {
-            val item = railItems.getOrNull(index)
-            if (item is RailItem.Separator) {
-                railItems[index] = RailItem.Separator(name.trim().ifBlank { "Group" }, item.id, item.collapsed)
-            }
-        }
-
-        fun removeSeparator(index: Int) {
-            if (railItems.getOrNull(index) is RailItem.Separator) railItems.removeAt(index)
-        }
-
-        // Collapse/expand the group headed by the separator at [index], hiding or revealing the tabs
-        // beneath it. The flag rides on the Separator so it persists with the rest of the layout.
-        fun toggleCollapse(index: Int) {
-            val item = railItems.getOrNull(index)
-            if (item is RailItem.Separator) {
-                railItems[index] = RailItem.Separator(item.name, item.id, !item.collapsed)
-            }
-        }
-
-        // Drag-reorder: adopt the reordered rail the rail hands back (a block swap computed against
-        // the visible rows). Same-size guard keeps a stale mid-drag list a no-op. Reusing the item
-        // instances preserves their identity so the keyed rows just move rather than rebuild.
-        fun reorderRail(new: List<RailItem>) {
-            if (new.size != railItems.size) return
-            railItems.clear()
-            railItems.addAll(new)
-        }
-
-        fun raiseWindow() {
-            val w = windowRef.value ?: return
+        fun raiseWindow(id: Long) {
+            val w = windowRefs[id] ?: return
             if ((w.extendedState and Frame.ICONIFIED) != 0) {
                 w.extendedState = w.extendedState and Frame.ICONIFIED.inv()
             }
             w.toFront()
             w.requestFocus()
+        }
+
+        /** Shows a window that was closed, and raises whichever window it is either way. */
+        fun showWindow(id: Long) {
+            mutate(id) { it.copy(open = true, closedAt = null) }
+            focusedId = id
+            // A window that has just been added to the composition has no AWT peer yet, so the raise
+            // waits for the frame that creates it.
+            SwingUtilities.invokeLater { raiseWindow(id) }
+        }
+
+        /**
+         * Opens [path] as a tab of the window with id [into], unless another window already holds it
+         * — a project belongs to one window, so a second copy would mean two editors over one
+         * working tree. That window is raised and switched to the project instead.
+         */
+        fun openProject(into: Long, path: Path) {
+            val norm = path.toAbsolutePath().normalize()
+            val existing = Workspaces.containing(workspaces, norm)
+            val target = existing?.id ?: into
+            Log.info("open project $norm in window $target")
+            mutate(target) {
+                // `+ listOf(norm)`, never `+ norm`: a Path is an Iterable of its own name elements,
+                // so the bare form would append "home", "miles", … instead of the path.
+                val projects = if (norm in it.projects) it.projects else it.projects + listOf(norm)
+                it.copy(projects = projects, active = norm, open = true, closedAt = null)
+            }
+            focusedId = target
+            bumpRecent(norm)
+            if (existing != null) SwingUtilities.invokeLater { raiseWindow(target) }
+        }
+
+        fun closeProject(id: Long, path: Path) {
+            val norm = path.toAbsolutePath().normalize()
+            mutate(id) {
+                if (norm !in it.projects) {
+                    it
+                } else {
+                    it.copy(
+                        // The next active tab is read off the order as it stood before the removal.
+                        active = ProjectTabs.activeAfterClose(it.projects, norm, it.active),
+                        projects = it.projects.filter { p -> p != norm },
+                    )
+                }
+            }
+            // Keep the just-closed project at the top of recents so it's one click to reopen.
+            bumpRecent(norm)
+        }
+
+        /** A new, empty window, placed one cascade step off the window it was created from. */
+        fun newWindow(name: String, from: Long): Long {
+            val id = Workspaces.nextId(workspaces)
+            val taken = workspaces.map { it.name }
+            workspaces.add(
+                Workspace(
+                    id = id,
+                    name = Workspaces.uniqueName(name, taken),
+                    projects = emptyList(),
+                    geometry = Workspaces.cascade(Workspaces.byId(workspaces, from)?.geometry, 1),
+                ),
+            )
+            focusedId = id
+            return id
+        }
+
+        fun renameWindow(id: Long, name: String) {
+            val taken = workspaces.filter { it.id != id }.map { it.name }
+            mutate(id) { it.copy(name = Workspaces.uniqueName(name, taken)) }
+        }
+
+        /** Throws a parked window away, tabs and all — the picker's discard, once confirmed. */
+        fun discardWindow(id: Long) {
+            val idx = workspaces.indexOfFirst { it.id == id }
+            if (idx >= 0 && !workspaces[idx].open) workspaces.removeAt(idx)
+        }
+
+        /**
+         * Hands a project tab to another window, and brings that window out to receive it. The
+         * windows are written back row by row rather than cleared and refilled: the list is what
+         * gets persisted, and an emptied-then-rebuilt one can be seen — and saved — half done.
+         */
+        fun moveProject(path: Path, toId: Long) {
+            val moved = Workspaces.moveProject(workspaces.toList(), path, toId)
+            if (moved.size != workspaces.size) return
+            moved.forEachIndexed { i, ws -> if (workspaces[i] != ws) workspaces[i] = ws }
+            showWindow(toId)
+        }
+
+        /**
+         * Closing a window puts it away rather than throwing it out: the workspace keeps its tabs and
+         * comes back from any other window's "+" menu. The last window on screen is different — there
+         * is nowhere left to reopen it from, so closing that one quits nop, and it stays marked open
+         * so the next launch starts where this one left off.
+         */
+        fun closeWindow(id: Long) {
+            if (workspaces.count { it.open } <= 1) {
+                exitApplication()
+            } else {
+                windowRefs.remove(id)
+                val parked = Workspaces.park(workspaces.toList(), id, System.currentTimeMillis())
+                if (parked.size == workspaces.size) {
+                    // Parked: same list, one row changed.
+                    parked.forEachIndexed { i, ws -> if (workspaces[i] != ws) workspaces[i] = ws }
+                } else {
+                    // A window with no tabs left in it isn't kept — there would be nothing to
+                    // reopen, and the picker would offer an empty row for ever.
+                    workspaces.removeAll { it.id == id }
+                }
+                if (focusedId == id) focusedId = workspaces.firstOrNull { it.open }?.id ?: id
+            }
         }
 
         // Start the IPC server so subsequent `nop /some/path` invocations can forward to us.
@@ -212,11 +263,14 @@ fun main(args: Array<String>) {
                 configRoot = Settings.configRoot,
                 onOpen = { path ->
                     SwingUtilities.invokeLater {
-                        openProject(path)
-                        raiseWindow()
+                        val into = focusedId.takeIf { id -> workspaces.any { it.id == id && it.open } }
+                            ?: workspaces.firstOrNull { it.open }?.id
+                            ?: focusedId
+                        openProject(into, path)
+                        raiseWindow(into)
                     }
                 },
-                onFocus = { SwingUtilities.invokeLater { raiseWindow() } },
+                onFocus = { SwingUtilities.invokeLater { raiseWindow(focusedId) } },
                 onQuit = {
                     // A newer build is taking over the single-instance slot — step aside so the
                     // fresh code runs instead of this stale process lingering in the background.
@@ -226,16 +280,18 @@ fun main(args: Array<String>) {
             onDispose { handle?.close() }
         }
 
-        // Persist the rail layout (projects + separators, in order) and active tab on every change.
-        // Empty is saved too: the only way the list empties is the user closing every tab, and that
-        // choice should survive a restart.
+        // Persist the window list on every change — names, tabs, active tab, geometry, what's open.
+        // An empty window list is saved too: the only way it empties is the user closing everything,
+        // and that choice should survive a restart.
         LaunchedEffect(Unit) {
-            snapshotFlow { railItems.toList() }
+            snapshotFlow { workspaces.toList() }
                 .distinctUntilChanged()
-                .collectLatest { Settings.saveRailLayout(it) }
+                .collectLatest { Settings.saveWorkspaces(it) }
         }
+        // The active project of the focused window, kept as the single "what was in front last"
+        // marker: it is what decides which window to open when a restored layout has none.
         LaunchedEffect(Unit) {
-            snapshotFlow { activeProject }
+            snapshotFlow { workspaces.firstOrNull { it.id == focusedId }?.active }
                 .distinctUntilChanged()
                 .collectLatest { Settings.saveActiveProject(it) }
         }
@@ -246,106 +302,145 @@ fun main(args: Array<String>) {
         }
         LaunchedEffect(darkMode) { Settings.saveDarkMode(darkMode) }
 
-        // Per-project "has uncommitted changes" flags backing the dirty dot on each rail tab. The
-        // active project's flag is reported by its own App below, which already holds a fresh status;
-        // every other open project is kept current by [RailGitPoller], which watches working trees
-        // rather than re-walking them (see its docs for what that replaced, and why).
+        // Per-project "has uncommitted changes" flags backing the dirty dot on each project tab,
+        // shared by every window since a project's working tree is the same tree wherever its tab
+        // sits. The project in front of each window is reported by its own App below, which already
+        // holds a fresh status; every other open project is kept current by [ProjectGitPoller], which
+        // watches working trees rather than re-walking them (see its docs for what that replaced).
         val projectDirty = remember { mutableStateMapOf<Path, Boolean>() }
         val repoWatcher = remember { RepoWatcher() }
-        val railPoller = remember { RailGitPoller(repoWatcher) }
+        val projectPoller = remember { ProjectGitPoller(repoWatcher) }
         // The watcher outlives the poller: the active project's panel reads it too, so it is closed
         // second, after the poller has let go of its repositories.
         DisposableEffect(Unit) {
             onDispose {
-                railPoller.close()
+                projectPoller.close()
                 repoWatcher.close()
             }
         }
-        // collectLatest restarts the loop when tabs open or close and when the active tab changes —
-        // the poller needs to know which project to leave alone — dropping stale flags first.
+        // collectLatest restarts the loop when tabs open or close and when a window changes what it
+        // is showing — the poller needs to know which projects to leave alone — dropping stale flags
+        // first. A project whose window is closed still polls: its dot should be right the moment
+        // that window comes back.
         LaunchedEffect(Unit) {
             snapshotFlow {
-                railItems.filterIsInstance<RailItem.Project>().map { it.path } to activeProject
+                Workspaces.allProjects(workspaces) to Workspaces.activeProjects(workspaces)
             }
                 .distinctUntilChanged()
                 .collectLatest { (paths, active) ->
                     projectDirty.keys.retainAll(paths.toSet())
-                    railPoller.retain(paths)
+                    projectPoller.retain(paths)
                     while (true) {
-                        val swept = withContext(Dispatchers.IO) { railPoller.sweep(active) }
+                        val swept = withContext(Dispatchers.IO) { projectPoller.sweep(active) }
                         // Only write flags that actually moved: a no-op write to snapshot state still
-                        // counts as a write, and would recompose the rail on every tick.
+                        // counts as a write, and would recompose every bar on every tick.
                         for ((path, dirty) in swept) {
                             if (projectDirty[path] != dirty) projectDirty[path] = dirty
                         }
-                        delay(RAIL_GIT_POLL_MS)
+                        delay(PROJECT_GIT_POLL_MS)
                     }
                 }
         }
 
-        WorkspaceWindow(
-            railItems = railItems.toList(),
-            activeProject = activeProject,
-            dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
-            repoWatcher = repoWatcher,
-            onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
-            recentProjects = recentProjects.toList(),
-            darkMode = darkMode,
-            onSelectProject = { activeProject = it },
-            onCloseProject = ::closeProject,
-            onOpenRecent = ::openProject,
-            onOpenOther = { pickProjectDir(initial = activeProject?.toFile())?.let(::openProject) },
-            onAddSeparator = ::addSeparator,
-            onRenameSeparator = ::renameSeparator,
-            onRemoveSeparator = ::removeSeparator,
-            onToggleCollapse = ::toggleCollapse,
-            onReorder = ::reorderRail,
-            onToggleTheme = { darkMode = !darkMode },
-            onCloseWindow = ::exitApplication,
-            onRegister = { w -> windowRef.value = w },
-            onUnregister = { windowRef.value = null },
-        )
+        val allWindows = workspaces.toList()
+        for (workspace in allWindows) {
+            if (!workspace.open) continue
+            // Keyed on the window's identity so its state — geometry, key triggers, the App under it
+            // — belongs to that window and isn't re-seated onto another when the list changes.
+            key(workspace.id) {
+                WorkspaceWindow(
+                    workspace = workspace,
+                    windows = allWindows,
+                    dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
+                    repoWatcher = repoWatcher,
+                    onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
+                    recentProjects = recentProjects.toList(),
+                    darkMode = darkMode,
+                    onFocused = { focusedId = workspace.id },
+                    onSelectProject = { path -> mutate(workspace.id) { it.copy(active = path) } },
+                    onCloseProject = { path -> closeProject(workspace.id, path) },
+                    onOpenRecent = { path -> openProject(workspace.id, path) },
+                    onOpenOther = {
+                        pickProjectDir(initial = workspace.active?.toFile())
+                            ?.let { openProject(workspace.id, it) }
+                    },
+                    onReorder = { projects -> mutate(workspace.id) { it.copy(projects = projects) } },
+                    onNewWindow = { name -> newWindow(name, workspace.id) },
+                    onRenameWindow = { name -> renameWindow(workspace.id, name) },
+                    onRenameOtherWindow = ::renameWindow,
+                    onShowWindow = ::showWindow,
+                    onDiscardWindow = ::discardWindow,
+                    onMoveToWindow = ::moveProject,
+                    onMoveToNewWindow = { path, name -> moveProject(path, newWindow(name, workspace.id)) },
+                    onGeometry = { geometry -> mutate(workspace.id) { it.copy(geometry = geometry) } },
+                    onToggleTheme = { darkMode = !darkMode },
+                    onCloseWindow = { closeWindow(workspace.id) },
+                    onRegister = { w -> windowRefs[workspace.id] = w },
+                    onUnregister = { windowRefs.remove(workspace.id) },
+                )
+            }
+        }
     }
 }
 
 @OptIn(FlowPreview::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ApplicationScope.WorkspaceWindow(
-    railItems: List<RailItem>,
-    activeProject: Path?,
+    workspace: Workspace,
+    windows: List<Workspace>,
     dirtyProjects: Set<Path>,
     repoWatcher: RepoWatcher,
     onProjectDirty: (Path, Boolean) -> Unit,
     recentProjects: List<Path>,
     darkMode: Boolean,
+    onFocused: () -> Unit,
     onSelectProject: (Path) -> Unit,
     onCloseProject: (Path) -> Unit,
     onOpenRecent: (Path) -> Unit,
     onOpenOther: () -> Unit,
-    onAddSeparator: (String) -> Unit,
-    onRenameSeparator: (Int, String) -> Unit,
-    onRemoveSeparator: (Int) -> Unit,
-    onToggleCollapse: (Int) -> Unit,
-    onReorder: (List<RailItem>) -> Unit,
+    onReorder: (List<Path>) -> Unit,
+    onNewWindow: (String) -> Unit,
+    onRenameWindow: (String) -> Unit,
+    onRenameOtherWindow: (Long, String) -> Unit,
+    onShowWindow: (Long) -> Unit,
+    onDiscardWindow: (Long) -> Unit,
+    onMoveToWindow: (Path, Long) -> Unit,
+    onMoveToNewWindow: (Path, String) -> Unit,
+    onGeometry: (WindowGeometry) -> Unit,
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
     onUnregister: () -> Unit = {},
 ) {
-    val saved = Settings.loadWindowGeometry()
+    val activeProject = workspace.active
+    // Read once, at the composition that opens this window: from here on the window state is the
+    // authority on where the window is, and it reports changes back through [onGeometry]. A window
+    // with nothing of its own falls back to the geometry the single-window builds saved, then to a
+    // default — either way [asked] is the size this window was actually given, which is what the
+    // first reading is measured against.
+    val saved = remember { workspace.geometry ?: Settings.loadWindowGeometry() }
+    val asked = remember {
+        WindowGeometry(
+            width = saved?.width ?: DEFAULT_WINDOW_WIDTH,
+            height = saved?.height ?: DEFAULT_WINDOW_HEIGHT,
+            x = saved?.x,
+            y = saved?.y,
+        )
+    }
     val windowState = rememberWindowState(
-        size = DpSize(
-            width = saved?.width?.dp ?: 1000.dp,
-            height = saved?.height?.dp ?: 700.dp,
-        ),
-        position = if (saved?.x != null && saved.y != null) {
-            WindowPosition(saved.x.dp, saved.y.dp)
+        size = DpSize(asked.width.dp, asked.height.dp),
+        position = if (asked.x != null && asked.y != null) {
+            WindowPosition(asked.x.dp, asked.y.dp)
         } else {
             WindowPosition.PlatformDefault
         },
     )
 
     LaunchedEffect(windowState) {
+        // What the window over-reports its own size by, measured off its first settled reading and
+        // taken off every reading after that — without it the window grows by the decoration on
+        // every launch. See [WindowOverhead].
+        var overhead: WindowOverhead? = null
         snapshotFlow {
             WindowGeometry(
                 width = windowState.size.width.value.toInt().coerceAtLeast(200),
@@ -356,7 +451,10 @@ private fun ApplicationScope.WorkspaceWindow(
         }
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest { Settings.saveWindowGeometry(it) }
+            .collectLatest { reported ->
+                val gap = overhead ?: WindowOverhead.measure(asked, reported).also { overhead = it }
+                onGeometry(gap.applyTo(reported))
+            }
     }
 
     // Window icon tinted from the active project's path — gives the taskbar/dock entry a colour
@@ -390,9 +488,10 @@ private fun ApplicationScope.WorkspaceWindow(
     Window(
         state = windowState,
         onCloseRequest = onCloseWindow,
-        // Title carries both the app and the active project. scripts/screenshot.sh greps for
-        // "nop — " to find a running instance.
-        title = "nop — ${activeProject?.fileName ?: "no project"}",
+        // The window goes by the name the user gave it — a window is what a group of projects is
+        // now, so "games" names one outright. An unnamed window falls back to the project it is
+        // showing. scripts/screenshot.sh greps the title to find a running instance.
+        title = workspace.title,
         icon = windowIcon,
         onPreviewKeyEvent = { event ->
             val isShift = event.key == Key.ShiftLeft || event.key == Key.ShiftRight
@@ -474,7 +573,16 @@ private fun ApplicationScope.WorkspaceWindow(
     ) {
         DisposableEffect(Unit) {
             onRegister(window)
-            onDispose { onUnregister() }
+            // Whichever window the user last touched is where a project handed to nop from the
+            // command line lands, so the focus listener is how that question gets answered.
+            val listener = object : java.awt.event.WindowAdapter() {
+                override fun windowActivated(e: java.awt.event.WindowEvent?) = onFocused()
+            }
+            window.addWindowListener(listener)
+            onDispose {
+                window.removeWindowListener(listener)
+                onUnregister()
+            }
         }
         IntUiTheme(
             theme = if (darkMode) JewelTheme.darkThemeDefinition() else JewelTheme.lightThemeDefinition(),
@@ -483,29 +591,36 @@ private fun ApplicationScope.WorkspaceWindow(
             // nop's own text-field context menu, in place of Jewel's icon-carrying one — see
             // [NopTextContextMenu].
             CompositionLocalProvider(LocalTextContextMenu provides NopTextContextMenu) {
-            Row(modifier = Modifier.fillMaxSize()) {
-                ProjectRail(
-                    items = railItems,
+            // The project bar spans the top of the window, under the title; the workspace for the
+            // active project fills everything under it.
+            Column(modifier = Modifier.fillMaxSize()) {
+                ProjectBar(
+                    projects = workspace.projects,
                     activeProject = activeProject,
                     dirtyProjects = dirtyProjects,
                     recentProjects = recentProjects,
+                    windows = windows,
+                    windowId = workspace.id,
                     onSelect = onSelectProject,
                     onClose = onCloseProject,
                     onOpenRecent = onOpenRecent,
                     onOpenOther = onOpenOther,
-                    onAddSeparator = onAddSeparator,
-                    onRenameSeparator = onRenameSeparator,
-                    onRemoveSeparator = onRemoveSeparator,
-                    onToggleCollapse = onToggleCollapse,
                     onReorder = onReorder,
+                    onNewWindow = onNewWindow,
+                    onRenameWindow = onRenameWindow,
+                    onRenameOtherWindow = onRenameOtherWindow,
+                    onShowWindow = onShowWindow,
+                    onDiscardWindow = onDiscardWindow,
+                    onMoveToWindow = onMoveToWindow,
+                    onMoveToNewWindow = onMoveToNewWindow,
                     isDark = darkMode,
                 )
-                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (activeProject != null) {
                         // Key the workspace on the active project: each App owns per-project state
                         // (git repo, tabs, indexes) behind remember(projectPath), so re-keying on a
                         // tab switch tears the old project's state down and builds the new one's.
-                        androidx.compose.runtime.key(activeProject) {
+                        key(activeProject) {
                             App(
                                 projectPath = activeProject,
                                 repoWatcher = repoWatcher,
@@ -523,7 +638,14 @@ private fun ApplicationScope.WorkspaceWindow(
                             )
                         }
                     } else {
-                        EmptyProjectState(onAdd = onOpenOther)
+                        WindowPickerPanel(
+                            parked = Workspaces.parked(windows),
+                            onOpenWindow = onShowWindow,
+                            onRenameWindow = onRenameOtherWindow,
+                            onDiscardWindow = onDiscardWindow,
+                            onNewWindow = { onNewWindow("") },
+                            onOpenProject = onOpenOther,
+                        )
                     }
                 }
             }
@@ -532,14 +654,40 @@ private fun ApplicationScope.WorkspaceWindow(
     }
 }
 
-private fun resolveInitialProjects(args: Array<String>): List<Path> {
-    if (args.isNotEmpty()) {
-        return listOf(Paths.get(args[0]).toAbsolutePath().normalize())
+/** The window list nop starts with, and which of those windows the user is taken to. */
+private data class Startup(val workspaces: List<Workspace>, val focused: Long)
+
+/**
+ * Works out what to put on screen. Normally that is the saved window list, with the windows that
+ * were showing when nop last exited showing again.
+ *
+ * A project [arg] from the command line is added to the picture rather than replacing it: the window
+ * that already holds that project is opened and focused, and if no window does, it joins the first
+ * window that was going to open anyway. A launch that finds nothing saved at all — a first run —
+ * asks for a directory and makes one unnamed window for it.
+ */
+private fun resolveStartup(arg: Path?): Startup {
+    val saved = Workspaces.opened(Settings.loadWorkspaces(), Settings.loadActiveProject())
+    if (arg != null) {
+        val holder = Workspaces.containing(saved, arg)
+        if (holder != null) {
+            val opened = Workspaces.update(saved, holder.id) { it.copy(open = true, active = arg) }
+            return Startup(opened, holder.id)
+        }
+        val into = saved.firstOrNull { it.open } ?: saved.firstOrNull()
+        if (into != null) {
+            val opened = Workspaces.update(saved, into.id) {
+                it.copy(open = true, projects = it.projects + listOf(arg), active = arg)
+            }
+            return Startup(opened, into.id)
+        }
+        return Startup(listOf(Workspace(id = 0, name = "", projects = listOf(arg), active = arg)), 0)
     }
-    val saved = Settings.loadOpenProjects().filter { Files.isDirectory(it) }
-    if (saved.isNotEmpty()) return saved.map { it.toAbsolutePath().normalize() }.distinct()
-    val picked = pickProjectDir(initial = null) ?: return emptyList()
-    return listOf(picked)
+    if (saved.isNotEmpty()) {
+        return Startup(saved, saved.first { it.open }.id)
+    }
+    val picked = pickProjectDir(initial = null) ?: return Startup(emptyList(), 0)
+    return Startup(listOf(Workspace(id = 0, name = "", projects = listOf(picked), active = picked)), 0)
 }
 
 /** Shows a directory chooser. Returns null if the user cancelled. */

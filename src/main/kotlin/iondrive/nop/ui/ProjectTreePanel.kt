@@ -1,19 +1,28 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -25,6 +34,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path as ComposePath
@@ -45,11 +55,14 @@ import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.isMetaPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
+import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import iondrive.nop.git.GitStatus
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.InternalJewelApi
@@ -99,28 +112,214 @@ private val IGNORED_DIR_NAMES = setOf(
     "node_modules", "build", "out", "target", "dist", ".next", "__pycache__",
 )
 
-private fun Path.asFilteredTree(): Tree<File> = buildTree {
-    val root = toFile()
-    addNode(root, id = root.absolutePath) { addChildren(root) }
+sealed class TreeEntry {
+    abstract val id: String
+
+    data class Node(
+        val file: File,
+        override val id: String = file.absolutePath,
+    ) : TreeEntry()
+
+    data class Ellipsis(
+        val parentDir: File,
+        val hiddenItems: List<File>,
+        val rangeId: String,
+        val isDirectory: Boolean,
+        override val id: String = rangeId,
+    ) : TreeEntry() {
+        val hiddenFiles: List<File> get() = hiddenItems
+    }
+
+    data class Collapse(
+        val parentDir: File,
+        val rangeId: String,
+        val count: Int,
+        val isDirectory: Boolean,
+        override val id: String = "collapse:$rangeId",
+    ) : TreeEntry()
 }
 
-private fun ChildrenGeneratorScope<File>.addChildren(dir: File) {
-    val files = dir.listFiles() ?: return
-    files
-        // Dotfiles (.claude, .github, .gitignore, …) are shown; only the curated build/VCS
-        // directories in IGNORED_DIR_NAMES are pruned, so the tree mirrors what's on disk.
-        .filter { it.name !in IGNORED_DIR_NAMES }
-        .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-        .forEach { file ->
-            if (file.isFile) {
-                addLeaf(file, id = file.absolutePath)
-            } else {
-                addNode(file, id = file.absolutePath) { addChildren(file) }
+/**
+ * Groups children in [dir], compressing long runs of non-open subdirectories and files
+ * into expandable [TreeEntry.Ellipsis] entries.
+ */
+internal fun computeDirectoryEntries(
+    dir: File,
+    files: List<File>,
+    openFilePaths: Set<String>,
+    expandedEllipsisKeys: Set<String>,
+    openDirectoryIds: Set<String> = emptySet(),
+    minItemsForEllipsis: Int = 6,
+    minRunForEllipsis: Int = 3,
+): List<TreeEntry> {
+    val (dirs, leafFiles) = files.partition { it.isDirectory }
+    val sortedDirs = dirs.sortedBy { it.name.lowercase() }
+    val sortedFiles = leafFiles.sortedBy { it.name.lowercase() }
+
+    val entries = mutableListOf<TreeEntry>()
+
+    // 1. Process Directories
+    if (sortedDirs.size <= minItemsForEllipsis) {
+        for (d in sortedDirs) {
+            entries.add(TreeEntry.Node(d))
+        }
+    } else {
+        // A directory is forced-visible if it contains an open file, is expanded, or is an open target
+        val openDirIndices = sortedDirs.mapIndexedNotNull { idx, d ->
+            val dirPrefix = d.absolutePath + File.separator
+            val containsOpenFile = openFilePaths.any { it.startsWith(dirPrefix) || it == d.absolutePath }
+            val isExpanded = d.absolutePath in openDirectoryIds || openDirectoryIds.any { it.startsWith(dirPrefix) }
+            if (containsOpenFile || isExpanded) idx else null
+        }
+
+        val visibleDirIndices = mutableSetOf<Int>()
+        if (openDirIndices.isEmpty()) {
+            for (i in 0 until minOf(3, sortedDirs.size)) {
+                visibleDirIndices.add(i)
+            }
+        } else {
+            for (idx in openDirIndices) {
+                if (idx - 1 >= 0) visibleDirIndices.add(idx - 1)
+                visibleDirIndices.add(idx)
+                if (idx + 1 < sortedDirs.size) visibleDirIndices.add(idx + 1)
             }
         }
+
+        var idx = 0
+        while (idx < sortedDirs.size) {
+            if (idx in visibleDirIndices) {
+                entries.add(TreeEntry.Node(sortedDirs[idx]))
+                idx++
+            } else {
+                val hiddenRun = mutableListOf<File>()
+                while (idx < sortedDirs.size && idx !in visibleDirIndices) {
+                    hiddenRun.add(sortedDirs[idx])
+                    idx++
+                }
+                if (hiddenRun.size < minRunForEllipsis) {
+                    for (d in hiddenRun) {
+                        entries.add(TreeEntry.Node(d))
+                    }
+                } else {
+                    val rangeId = "ellipsis:dirs:${dir.absolutePath}:${hiddenRun.first().name}..${hiddenRun.last().name}"
+                    if (rangeId in expandedEllipsisKeys) {
+                        for (d in hiddenRun) {
+                            entries.add(TreeEntry.Node(d))
+                        }
+                        entries.add(TreeEntry.Collapse(dir, rangeId, hiddenRun.size, isDirectory = true))
+                    } else {
+                        entries.add(TreeEntry.Ellipsis(dir, hiddenRun, rangeId, isDirectory = true))
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Process Files
+    if (sortedFiles.size <= minItemsForEllipsis) {
+        for (f in sortedFiles) {
+            entries.add(TreeEntry.Node(f))
+        }
+        return entries
+    }
+
+    val openIndices = sortedFiles.mapIndexedNotNull { idx, f ->
+        if (f.absolutePath in openFilePaths) idx else null
+    }
+
+    val visibleIndices = mutableSetOf<Int>()
+    if (openIndices.isEmpty()) {
+        for (i in 0 until minOf(3, sortedFiles.size)) {
+            visibleIndices.add(i)
+        }
+    } else {
+        for (idx in openIndices) {
+            if (idx - 1 >= 0) visibleIndices.add(idx - 1)
+            visibleIndices.add(idx)
+            if (idx + 1 < sortedFiles.size) visibleIndices.add(idx + 1)
+        }
+    }
+
+    var idx = 0
+    while (idx < sortedFiles.size) {
+        if (idx in visibleIndices) {
+            entries.add(TreeEntry.Node(sortedFiles[idx]))
+            idx++
+        } else {
+            val hiddenRun = mutableListOf<File>()
+            while (idx < sortedFiles.size && idx !in visibleIndices) {
+                hiddenRun.add(sortedFiles[idx])
+                idx++
+            }
+            if (hiddenRun.size < minRunForEllipsis) {
+                for (f in hiddenRun) {
+                    entries.add(TreeEntry.Node(f))
+                }
+            } else {
+                val rangeId = "ellipsis:files:${dir.absolutePath}:${hiddenRun.first().name}..${hiddenRun.last().name}"
+                if (rangeId in expandedEllipsisKeys) {
+                    for (f in hiddenRun) {
+                        entries.add(TreeEntry.Node(f))
+                    }
+                    entries.add(TreeEntry.Collapse(dir, rangeId, hiddenRun.size, isDirectory = false))
+                } else {
+                    entries.add(TreeEntry.Ellipsis(dir, hiddenRun, rangeId, isDirectory = false))
+                }
+            }
+        }
+    }
+
+    return entries
 }
 
-private fun visibleChildren(dir: File): List<File> = (dir.listFiles() ?: emptyArray())
+private fun Path.asFilteredTree(
+    openFilePaths: Set<String>,
+    expandedEllipsisKeys: Set<String>,
+    openDirectoryIds: Set<String> = emptySet(),
+): Tree<TreeEntry> = buildTree {
+    val root = toFile()
+    val rootEntry = TreeEntry.Node(root)
+    addNode(rootEntry, id = root.absolutePath) {
+        addChildren(root, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+    }
+}
+
+private fun ChildrenGeneratorScope<TreeEntry>.addChildren(
+    dir: File,
+    openFilePaths: Set<String>,
+    expandedEllipsisKeys: Set<String>,
+    openDirectoryIds: Set<String>,
+) {
+    val entries = computeDirectoryEntries(
+        dir = dir,
+        files = visibleChildren(dir),
+        openFilePaths = openFilePaths,
+        expandedEllipsisKeys = expandedEllipsisKeys,
+        openDirectoryIds = openDirectoryIds,
+    )
+    for (entry in entries) {
+        when (entry) {
+            is TreeEntry.Node -> {
+                val file = entry.file
+                if (file.isDirectory) {
+                    addNode(entry, id = file.absolutePath) {
+                        addChildren(file, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+                    }
+                } else {
+                    addLeaf(entry, id = file.absolutePath)
+                }
+            }
+            is TreeEntry.Ellipsis -> {
+                addLeaf(entry, id = entry.rangeId)
+            }
+            is TreeEntry.Collapse -> {
+                addLeaf(entry, id = entry.id)
+            }
+        }
+    }
+}
+
+internal fun visibleChildren(dir: File): List<File> = (dir.listFiles() ?: emptyArray())
     .filter { it.name !in IGNORED_DIR_NAMES }
     .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
 
@@ -129,16 +328,46 @@ private fun visibleChildren(dir: File): List<File> = (dir.listFiles() ?: emptyAr
  * LazyTree uses, given [openIds] (absolute paths of directories that are expanded). Returns -1
  * when the target isn't part of the visible tree, e.g. because an ancestor isn't open.
  */
-internal fun flattenedRowIndexOf(rootFile: File, targetPath: String, openIds: Set<String>): Int {
+internal fun flattenedRowIndexOf(
+    rootFile: File,
+    targetPath: String,
+    openIds: Set<String>,
+    openFilePaths: Set<String> = emptySet(),
+    expandedEllipsisKeys: Set<String> = emptySet(),
+): Int {
     var counter = 0
-    fun walk(file: File): Int {
-        if (file.absolutePath == targetPath) return counter
+    fun walk(dir: File): Int {
+        if (dir.absolutePath == targetPath) return counter
         counter++
-        if (!file.isDirectory) return -1
-        if (file.absolutePath != rootFile.absolutePath && file.absolutePath !in openIds) return -1
-        for (child in visibleChildren(file)) {
-            val found = walk(child)
-            if (found >= 0) return found
+        if (!dir.isDirectory) return -1
+        if (dir.absolutePath != rootFile.absolutePath && dir.absolutePath !in openIds) return -1
+        val entries = computeDirectoryEntries(
+            dir = dir,
+            files = visibleChildren(dir),
+            openFilePaths = openFilePaths,
+            expandedEllipsisKeys = expandedEllipsisKeys,
+            openDirectoryIds = openIds,
+        )
+        for (entry in entries) {
+            when (entry) {
+                is TreeEntry.Node -> {
+                    val file = entry.file
+                    if (file.isDirectory) {
+                        val found = walk(file)
+                        if (found >= 0) return found
+                    } else {
+                        if (file.absolutePath == targetPath) return counter
+                        counter++
+                    }
+                }
+                is TreeEntry.Ellipsis -> {
+                    if (entry.hiddenItems.any { it.absolutePath == targetPath }) return counter
+                    counter++
+                }
+                is TreeEntry.Collapse -> {
+                    counter++
+                }
+            }
         }
         return -1
     }
@@ -191,76 +420,90 @@ fun ProjectTreePanel(
     projectPath: Path,
     status: GitStatus,
     refreshKey: Int = 0,
+    openFiles: List<File> = emptyList(),
+    activeFile: File? = null,
+    dirtyFiles: Set<File> = emptySet(),
     revealFile: File? = null,
-    // Like revealFile, but driven by the app rather than the active tab: set to a just-created
-    // directory/package so the tree expands its ancestors, selects it, and scrolls it into view.
     revealRequest: File? = null,
     onFileClick: (File) -> Unit,
-    // Delete the given rows. Carries the whole multi-selection (Ctrl/Shift click), so it's a list
-    // even for the common single-file case.
+    onCloseFile: (File) -> Unit = {},
+    onCloseOtherFiles: (File) -> Unit = {},
+    onCloseAllFiles: () -> Unit = {},
     onDeleteRequest: (List<File>) -> Unit = {},
     onHistoryRequest: (File) -> Unit = {},
-    // Pick a commit to diff a file against — the context menu's "Compare with Revision…". Only
-    // offered when [gitEnabled], since there are no revisions to pick from otherwise.
     onCompareWithRevision: (File) -> Unit = {},
-    // Whether this project is inside a git repo, i.e. whether the git actions are worth offering.
     gitEnabled: Boolean = false,
     blameEnabled: Boolean = false,
     onToggleBlame: () -> Unit = {},
+    wrapLines: Boolean = false,
+    onToggleWrap: () -> Unit = {},
     onOpenInSystem: (File) -> Unit = ::openInSystem,
-    // Context-menu actions. The File passed is whatever the user right-clicked; the app decides
-    // where to create relative to it (inside a directory, alongside a file).
     onNewFile: (File) -> Unit = {},
     onNewDirectory: (File) -> Unit = {},
     onNewPackage: (File) -> Unit = {},
     onCopyFile: (File) -> Unit = {},
-    // F2 / "Rename…": rename the given row in place. Always a single row — unlike delete and copy,
-    // renaming a whole multi-selection isn't a thing.
     onRenameRequest: (File) -> Unit = {},
-    // Ctrl+C: put these rows on the clipboard. Ctrl+V: copy whatever is on the clipboard into
-    // [targetDir], which is the selected directory (or the selected file's parent, or the project
-    // root when nothing is selected). [canPaste] says whether the clipboard holds anything, so the
-    // context menu only offers "Paste" when it would do something.
     onClipboardCopy: (List<File>) -> Unit = {},
     onPasteRequest: (targetDir: File) -> Unit = {},
     canPaste: () -> Boolean = { false },
-    // Drag-and-drop move: fired when the user drops [source] onto the directory row [targetDir].
     onMoveRequest: (source: File, targetDir: File) -> Unit = { _, _ -> },
     headerExtras: @Composable () -> Unit = {},
 ) {
-    val tree = remember(projectPath, refreshKey) { projectPath.asFilteredTree() }
-    val treeState = rememberTreeState()
     val rootId = remember(projectPath) { projectPath.toFile().absolutePath }
 
-    // Drag-to-move state. draggedFile is non-null for the duration of a drag; dropTargetPath is
-    // the absolute path of whichever directory row the pointer is currently over (for highlight
-    // + the eventual move target). dirRowRanges tracks every currently-composed directory row's
-    // root-relative Y band, rebuilt continuously via onGloballyPositioned as rows lay out.
     var draggedFile by remember(projectPath) { mutableStateOf<File?>(null) }
     var dropTargetPath by remember(projectPath) { mutableStateOf<String?>(null) }
     val dirRowRanges = remember(projectPath) { mutableStateMapOf<String, ClosedFloatingPointRange<Float>>() }
 
-    // Whether the most recent pointer press over the tree carried a multi-select modifier — Ctrl or
-    // Meta (toggle a row) or Shift (extend the range). The LazyTree already grows treeState's
-    // selection on such clicks; this flag lets onElementClick tell that apart from a plain click so
-    // that building a selection doesn't also open a tab per click. Only a plain click opens a file.
-    // Captured on the Initial pointer pass so it's set before the tree's own click handling runs.
     var pressCarriedSelectModifier by remember(projectPath) { mutableStateOf(false) }
-
-    // The multi-selection as it stood the instant before a right-click press. The tree collapses its
-    // selection to the clicked row on press, so the context menu reads this snapshot instead to let
-    // "Delete" act on the whole set — matching how file managers treat a right-click on a selected
-    // row (the selection is kept and the action applies to all of it).
     var selectionBeforeSecondaryPress by remember(projectPath) { mutableStateOf<List<File>>(emptyList()) }
+
+    val effectiveOpenFiles = remember(openFiles, revealFile) {
+        if (openFiles.isNotEmpty()) openFiles else listOfNotNull(revealFile)
+    }
+    val effectiveActiveFile = activeFile ?: revealFile
+    val openFilePaths = remember(effectiveOpenFiles) { effectiveOpenFiles.map { it.absolutePath }.toSet() }
+
+    // User-expanded directory/file ellipsis blocks
+    var expandedEllipsisKeys by remember(projectPath) { mutableStateOf<Set<String>>(emptySet()) }
+
+    val treeState = rememberTreeState()
+    val openDirectoryIds = treeState.openNodes.filterIsInstance<String>().toSet()
+
+    val tree = remember(projectPath, refreshKey, openFilePaths, expandedEllipsisKeys, openDirectoryIds) {
+        projectPath.asFilteredTree(openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+    }
+
+    // Track which files have had their ancestors opened so we don't re-expand folders the user collapsed
+    val revealedFilePaths = remember(projectPath) { mutableSetOf<String>() }
 
     LaunchedEffect(rootId) {
         treeState.openNodes(listOf(rootId))
     }
 
+    // Expand ancestor folders for open files on initial load or when a newly opened file appears
+    LaunchedEffect(effectiveOpenFiles, projectPath) {
+        val rootFile = projectPath.toFile().absoluteFile
+        val toOpen = mutableListOf<String>()
+        for (f in effectiveOpenFiles) {
+            val abs = f.absoluteFile
+            if (abs.path !in revealedFilePaths) {
+                revealedFilePaths.add(abs.path)
+                var cur: File? = abs.parentFile
+                while (cur != null) {
+                    toOpen += cur.absolutePath
+                    if (cur.absolutePath == rootFile.absolutePath) break
+                    cur = cur.parentFile
+                }
+            }
+        }
+        if (toOpen.isNotEmpty()) {
+            treeState.openNodes(toOpen)
+        }
+    }
+
     // Expand ancestors and select [target] so the tree mirrors it, scrolling it into view when
-    // it's offscreen (typical after a Ctrl-click jump into a deeply nested role, or after
-    // creating a directory under a collapsed folder). Shared by the active-tab reveal and the
-    // app-driven revealRequest below.
+    // it's offscreen. Only triggered when active file changes.
     suspend fun revealInTree(target: File) {
         val rootFile = projectPath.toFile().absoluteFile
         val abs = target.absoluteFile
@@ -278,15 +521,9 @@ fun ProjectTreePanel(
         treeState.openNodes(ancestors)
         treeState.selectedKeys = setOf(abs.absolutePath)
 
-        // Walk the same filtered tree the UI renders to find the row index of the target.
-        // The LazyTree's internal node list isn't part of its public API, so we rebuild the
-        // flattened order from the filesystem + the set of open node IDs.
         val openIds = treeState.openNodes.filterIsInstance<String>().toSet() + rootFile.absolutePath
-        val targetIndex = flattenedRowIndexOf(rootFile, abs.absolutePath, openIds)
+        val targetIndex = flattenedRowIndexOf(rootFile, abs.absolutePath, openIds, openFilePaths, expandedEllipsisKeys)
         if (targetIndex >= 0) {
-            // Yield one frame so the LazyList re-measures with the newly-opened ancestors —
-            // otherwise visibleItemsInfo still reflects the pre-expansion layout and we'd
-            // scroll unnecessarily.
             withFrameNanos { }
             val lazyList = treeState.lazyListState.lazyListState
             val info = lazyList.layoutInfo
@@ -300,39 +537,24 @@ fun ProjectTreePanel(
         }
     }
 
-    // When the active tab changes, mirror its file in the tree.
     LaunchedEffect(revealFile, projectPath) {
         revealFile?.let { revealInTree(it) }
     }
-    // When the app reveals a freshly-created directory/package. Keyed on revealRequest alone (not
-    // refreshKey): the app bumps refreshKey and sets revealRequest in the same batch, so the tree
-    // has already rescanned by the time this effect body runs. Keying on refreshKey too would
-    // re-yank the selection back here on every later refresh (git poll, file save).
+
     LaunchedEffect(revealRequest, projectPath) {
         revealRequest?.let { revealInTree(it) }
     }
 
     fun selectedFile(): File? {
-        // Selection keys are the absolute paths we used as element IDs in asFilteredTree.
         val key = treeState.selectedKeys.firstOrNull() as? String ?: return null
         if (key == rootId) return null
         return File(key).takeIf { it.exists() }
     }
 
-    // Every selected row as a file — the whole Ctrl/Shift multi-selection, for actions (delete)
-    // that operate on all of it rather than a single target.
     fun selectedFiles(): List<File> = selectedFilesOf(treeState.selectedKeys, rootId)
 
-    // Where a paste lands: inside the selected directory, alongside the selected file, or at the
-    // project root when the selection is empty (or is the root itself).
     fun pasteTarget(): File = selectedFile()?.let(FileOperations::parentDirFor) ?: projectPath.toFile()
-
-    // History falls back to the project root so the button can show whole-repo log
-    // when nothing (or the root itself) is selected.
     fun historyTarget(): File = selectedFile() ?: projectPath.toFile()
-
-    // For "open in system": the user is most likely targeting whatever they've picked in the
-    // tree, but fall back to the project root so the button always does something useful.
     fun systemOpenTarget(): File = selectedFile() ?: projectPath.toFile()
 
     val baseTreeStyle = LocalLazyTreeStyle.current
@@ -373,7 +595,6 @@ fun ProjectTreePanel(
             Tooltip(tooltip = {
                 Text(if (blameEnabled) "Hide git blame annotations (B)" else "Annotate open file with git blame (B)")
             }) {
-                // Highlight the icon while the annotate column is showing so the toggle reads as on.
                 val blameTint = if (blameEnabled) {
                     if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)
                 } else tint
@@ -381,8 +602,17 @@ fun ProjectTreePanel(
                     Canvas(Modifier.size(16.dp)) { drawBlameIcon(blameTint) }
                 }
             }
-            // Push headerExtras (the launcher ▶) to the far right
-            androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
+            Tooltip(tooltip = {
+                Text(if (wrapLines) "Unwrap long lines" else "Wrap long lines")
+            }) {
+                val wrapTint = if (wrapLines) {
+                    if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)
+                } else tint
+                IconButton(onClick = onToggleWrap) {
+                    Canvas(Modifier.size(16.dp)) { drawWrapIcon(wrapTint) }
+                }
+            }
+            Spacer(Modifier.weight(1f))
             headerExtras()
         }
         LazyTree(
@@ -390,10 +620,6 @@ fun ProjectTreePanel(
             treeState = treeState,
             style = treeStyle,
             modifier = Modifier.fillMaxSize()
-                // Watch the Initial pass so we know, before the tree's own click handling runs,
-                // whether this click is meant to grow the selection (Ctrl/Meta/Shift) or open a
-                // file (plain). Purely observational — never consumes, so selection and drag still
-                // work exactly as before.
                 .pointerInput(Unit) {
                     awaitPointerEventScope {
                         while (true) {
@@ -402,7 +628,6 @@ fun ProjectTreePanel(
                             val mods = event.keyboardModifiers
                             pressCarriedSelectModifier =
                                 mods.isCtrlPressed || mods.isMetaPressed || mods.isShiftPressed
-                            // Snapshot before the tree collapses the selection on a right-click.
                             if (event.buttons.isSecondaryPressed) {
                                 selectionBeforeSecondaryPress = selectedFilesOf(treeState.selectedKeys, rootId)
                             }
@@ -415,8 +640,6 @@ fun ProjectTreePanel(
                     when (event.key) {
                         Key.Delete -> selectedFiles().takeIf { it.isNotEmpty() }
                             ?.let { onDeleteRequest(it); true } ?: false
-                        // Ctrl/Cmd+C and Ctrl/Cmd+V. Guarded on the modifier so a bare C or V
-                        // stays free (unlike H/B, which are the tree's own single-key shortcuts).
                         Key.C -> if (copyModifier) {
                             selectedFiles().takeIf { it.isNotEmpty() }?.let { onClipboardCopy(it) }
                             true
@@ -429,128 +652,302 @@ fun ProjectTreePanel(
                     }
                 },
             onElementClick = { element ->
-                val file = element.data
-                // Ctrl/Shift clicks are building a multi-selection (the tree has already updated it);
-                // don't also open the file, or every click in the selection would spawn a tab.
-                if (file.isFile && !pressCarriedSelectModifier) onFileClick(file)
-            },
-        ) { element ->
-            val file: File = element.data
-            val relPath = file.relativePathTo(projectPath)
-            val kind = when {
-                relPath == null -> null
-                file.isFile -> status.byPath[relPath]
-                else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
-            }
-            val color = kind?.let(ChangeColors::forKind)
-            // Git status colour wins; otherwise darken the label in light mode (Jewel's default is
-            // too pale) and leave the dark theme on its inherited default.
-            val labelColor = color ?: if (!JewelTheme.isDark) ProjectTextLight else null
-            val iconTint = if (JewelTheme.isDark) ProjectIconTintDark else ProjectIconTintLight
-            ContextMenuArea(items = {
-                buildList {
-                    add(ContextMenuItem("New File…") { onNewFile(file) })
-                    add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
-                    add(ContextMenuItem("New Package…") { onNewPackage(file) })
-                    if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
-                    // Clipboard copy/paste, the menu route to the Ctrl+C / Ctrl+V shortcuts.
-                    // Copy takes the whole selection when the clicked row is part of it; paste
-                    // lands inside a clicked directory, or beside a clicked file.
-                    add(ContextMenuItem("Copy") { onClipboardCopy(menuTargetsFor(file, selectionBeforeSecondaryPress)) })
-                    if (canPaste()) {
-                        add(ContextMenuItem("Paste") { onPasteRequest(FileOperations.parentDirFor(file)) })
+                when (val entry = element.data) {
+                    is TreeEntry.Node -> {
+                        val file = entry.file
+                        if (file.isFile && !pressCarriedSelectModifier) onFileClick(file)
                     }
-                    // The project root's name is the project itself, not a row the tree owns.
-                    if (file.absolutePath != rootId) {
-                        add(ContextMenuItem("Rename…") { onRenameRequest(file) })
+                    is TreeEntry.Ellipsis -> {
+                        expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId
                     }
-                    // The git pair the toolbar's history button and its H shortcut also reach —
-                    // here because the file the user wants them for is the one under the pointer.
-                    // "Compare" is file-only: a directory has revisions but no side-by-side.
-                    if (gitEnabled) {
-                        add(ContextMenuItem("Show History") { onHistoryRequest(file) })
-                        if (file.isFile) {
-                            add(ContextMenuItem("Compare with Revision…") { onCompareWithRevision(file) })
-                        }
-                    }
-                    // Delete acts on the whole selection when the right-clicked row is part of it,
-                    // else just that row. The project root has nowhere to go, so it's never deletable.
-                    if (file.absolutePath != rootId) {
-                        val targets = menuTargetsFor(file, selectionBeforeSecondaryPress)
-                        // The right-click already collapsed the highlight to this one row; when it was
-                        // part of a multi-selection, restore the highlight so the menu visibly acts on
-                        // every row it will delete.
-                        if (targets.size > 1) {
-                            treeState.selectedKeys = targets.mapTo(mutableSetOf()) { it.absolutePath }
-                        }
-                        val label = if (targets.size > 1) "Delete ${targets.size} Items" else "Delete"
-                        add(ContextMenuItem(label) { onDeleteRequest(targets) })
+                    is TreeEntry.Collapse -> {
+                        expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId
                     }
                 }
-            }) {
-                // This row's own layout coordinates, refreshed on every placement — used to convert
-                // drag pointer positions (local to this node) into root coordinates for hit-testing
-                // against dirRowRanges. The project root isn't draggable (there's nowhere to move it
-                // to), so it never starts a drag, but it stays a valid drop target below.
-                val rowCoords = remember(file.absolutePath) { mutableStateOf<LayoutCoordinates?>(null) }
-                val isDropTarget = file.isDirectory && dropTargetPath == file.absolutePath &&
-                    draggedFile != null && draggedFile != file
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onGloballyPositioned { coords ->
-                            rowCoords.value = coords
-                            if (file.isDirectory) {
-                                val bounds = coords.boundsInRoot()
-                                dirRowRanges[file.absolutePath] = bounds.top..bounds.bottom
-                            } else {
-                                dirRowRanges.remove(file.absolutePath)
+            },
+        ) { element ->
+            val isDark = JewelTheme.isDark
+            val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
+
+            when (val entry = element.data) {
+                is TreeEntry.Ellipsis -> {
+                    val interactionSource = remember(entry.rangeId) { MutableInteractionSource() }
+                    val isHovered by interactionSource.collectIsHoveredAsState()
+                    val count = entry.hiddenItems.size
+                    val noun = if (entry.isDirectory) {
+                        if (count == 1) "folder" else "folders"
+                    } else {
+                        if (count == 1) "file" else "files"
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(24.dp)
+                            .padding(end = 8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(
+                                if (isHovered) (if (isDark) Color(0x20FFFFFF) else Color(0x10000000)) else Color.Transparent,
+                            )
+                            .hoverable(interactionSource)
+                            .clickable { expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId },
+                    ) {
+                        if (entry.isDirectory) {
+                            Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint.copy(alpha = 0.7f)) }
+                        } else {
+                            Spacer(Modifier.width(FileRowIndent))
+                        }
+                        Text(
+                            text = "··· $count more $noun ···",
+                            fontSize = 11.sp,
+                            fontFamily = NopFonts.Mono,
+                            color = if (isDark) Color(0xFF8B8F99) else Color(0xFF6C707E),
+                        )
+                        if (isHovered) {
+                            Text(
+                                text = "show",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0),
+                            )
+                        }
+                    }
+                }
+
+                is TreeEntry.Collapse -> {
+                    val interactionSource = remember(entry.rangeId) { MutableInteractionSource() }
+                    val isHovered by interactionSource.collectIsHoveredAsState()
+                    val noun = if (entry.isDirectory) {
+                        if (entry.count == 1) "folder" else "folders"
+                    } else {
+                        if (entry.count == 1) "file" else "files"
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(22.dp)
+                            .padding(end = 8.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(
+                                if (isHovered) (if (isDark) Color(0x20FFFFFF) else Color(0x10000000)) else Color.Transparent,
+                            )
+                            .hoverable(interactionSource)
+                            .clickable { expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId },
+                    ) {
+                        if (entry.isDirectory) {
+                            Spacer(Modifier.width(16.dp))
+                        } else {
+                            Spacer(Modifier.width(FileRowIndent))
+                        }
+                        Text(
+                            text = "▴ collapse ${entry.count} $noun",
+                            fontSize = 10.sp,
+                            fontFamily = NopFonts.Mono,
+                            color = if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0),
+                        )
+                    }
+                }
+
+                is TreeEntry.Node -> {
+                    val file: File = entry.file
+                    val isOpen = file.isFile && file.absolutePath in openFilePaths
+                    val isActive = file.isFile && file.absolutePath == effectiveActiveFile?.absolutePath
+                    val isDirty = file.isFile && file in dirtyFiles
+
+                    val relPath = file.relativePathTo(projectPath)
+                    val kind = when {
+                        relPath == null -> null
+                        file.isFile -> status.byPath[relPath]
+                        else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
+                    }
+                    val color = kind?.let(ChangeColors::forKind)
+
+                    // High contrast text color: Active is bright white (dark) / deep blue (light)
+                    val labelColor = color ?: when {
+                        isActive -> if (isDark) Color(0xFFFFFFFF) else Color(0xFF0F3E85)
+                        isOpen -> if (isDark) Color(0xFFDFE1E5) else Color(0xFF1F2329)
+                        else -> if (!isDark) ProjectTextLight else null
+                    }
+
+                    ContextMenuArea(items = {
+                        buildList {
+                            if (isOpen) {
+                                add(ContextMenuItem("Close") { onCloseFile(file) })
+                                if (effectiveOpenFiles.size > 1) {
+                                    add(ContextMenuItem("Close Others") { onCloseOtherFiles(file) })
+                                    add(ContextMenuItem("Close All") { onCloseAllFiles() })
+                                }
+                            }
+                            add(ContextMenuItem("New File…") { onNewFile(file) })
+                            add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
+                            add(ContextMenuItem("New Package…") { onNewPackage(file) })
+                            if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                            add(ContextMenuItem("Copy") { onClipboardCopy(menuTargetsFor(file, selectionBeforeSecondaryPress)) })
+                            if (canPaste()) {
+                                add(ContextMenuItem("Paste") { onPasteRequest(FileOperations.parentDirFor(file)) })
+                            }
+                            if (file.absolutePath != rootId) {
+                                add(ContextMenuItem("Rename…") { onRenameRequest(file) })
+                            }
+                            if (gitEnabled) {
+                                add(ContextMenuItem("Show History") { onHistoryRequest(file) })
+                                if (file.isFile) {
+                                    add(ContextMenuItem("Compare with Revision…") { onCompareWithRevision(file) })
+                                }
+                            }
+                            if (file.absolutePath != rootId) {
+                                val targets = if (pressCarriedSelectModifier) {
+                                    menuTargetsFor(file, selectionBeforeSecondaryPress)
+                                } else {
+                                    listOf(file)
+                                }
+                                if (targets.size > 1) {
+                                    treeState.selectedKeys = targets.mapTo(mutableSetOf()) { it.absolutePath }
+                                }
+                                val label = if (targets.size > 1) "Delete ${targets.size} Items" else "Delete"
+                                add(ContextMenuItem(label) { onDeleteRequest(targets) })
                             }
                         }
-                        .then(
-                            if (file.absolutePath == rootId) {
-                                Modifier
-                            } else {
-                                Modifier.pointerInput(file.absolutePath) {
-                                    detectDragGestures(
-                                        onDragStart = { draggedFile = file },
-                                        onDrag = { change, _ ->
-                                            change.consume()
-                                            val coords = rowCoords.value ?: return@detectDragGestures
-                                            val rootY = coords.localToRoot(change.position).y
-                                            dropTargetPath = directoryPathAtY(dirRowRanges, rootY)
-                                                ?.takeIf { it != file.absolutePath }
-                                        },
-                                        onDragEnd = {
-                                            val target = dropTargetPath
-                                            val source = draggedFile
-                                            draggedFile = null
-                                            dropTargetPath = null
-                                            if (target != null && source != null) onMoveRequest(source, File(target))
-                                        },
-                                        onDragCancel = {
-                                            draggedFile = null
-                                            dropTargetPath = null
-                                        },
-                                    )
+                    }) {
+                        val rowCoords = remember(file.absolutePath) { mutableStateOf<LayoutCoordinates?>(null) }
+                        val isDropTarget = file.isDirectory && dropTargetPath == file.absolutePath &&
+                            draggedFile != null && draggedFile != file
+                        val interactionSource = remember(file.absolutePath) { MutableInteractionSource() }
+                        val isHovered by interactionSource.collectIsHoveredAsState()
+
+                        // Highlight styling: Active file has vivid BLUE background; Open file has neutral GRAY background + border
+                        val rowBackground = when {
+                            isDropTarget -> DropTargetHighlight
+                            isActive -> if (isDark) Color(0xFF2B5282) else Color(0xFFCEE0FD)
+                            isOpen -> if (isDark) Color(0xFF26282D) else Color(0xFFEEF0F4)
+                            else -> Color.Transparent
+                        }
+
+                        val rowBorder = when {
+                            isOpen && !isActive -> BorderStroke(1.dp, if (isDark) Color(0x28FFFFFF) else Color(0x18000000))
+                            else -> null
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(end = 4.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .then(if (rowBorder != null) Modifier.border(rowBorder, RoundedCornerShape(4.dp)) else Modifier)
+                                .hoverable(interactionSource)
+                                .onGloballyPositioned { coords ->
+                                    rowCoords.value = coords
+                                    if (file.isDirectory) {
+                                        val bounds = coords.boundsInRoot()
+                                        dirRowRanges[file.absolutePath] = bounds.top..bounds.bottom
+                                    } else {
+                                        dirRowRanges.remove(file.absolutePath)
+                                    }
                                 }
-                            },
-                        )
-                        .alpha(if (draggedFile == file) 0.5f else 1f)
-                        .background(if (isDropTarget) DropTargetHighlight else Color.Transparent),
-                ) {
-                    // Directories carry a folder glyph between the expand chevron and the name, the
-                    // way IntelliJ's project view does. Files get an equivalent-width spacer instead
-                    // (see [FileRowIndent]) so their name lands in the same column as directory names
-                    // rather than out to the left of the folder it lives in.
-                    if (file.isDirectory) {
-                        Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
-                    } else {
-                        Spacer(Modifier.width(FileRowIndent))
+                                .then(
+                                    if (file.absolutePath == rootId) {
+                                        Modifier
+                                    } else {
+                                        Modifier.pointerInput(file.absolutePath) {
+                                            detectDragGestures(
+                                                onDragStart = { draggedFile = file },
+                                                onDrag = { change, _ ->
+                                                    change.consume()
+                                                    val coords = rowCoords.value ?: return@detectDragGestures
+                                                    val rootY = coords.localToRoot(change.position).y
+                                                    dropTargetPath = directoryPathAtY(dirRowRanges, rootY)
+                                                        ?.takeIf { it != file.absolutePath }
+                                                },
+                                                onDragEnd = {
+                                                    val target = dropTargetPath
+                                                    val source = draggedFile
+                                                    draggedFile = null
+                                                    dropTargetPath = null
+                                                    if (target != null && source != null) onMoveRequest(source, File(target))
+                                                },
+                                                onDragCancel = {
+                                                    draggedFile = null
+                                                    dropTargetPath = null
+                                                },
+                                            )
+                                        }
+                                    },
+                                )
+                                .then(
+                                    if (isOpen) {
+                                        Modifier.pointerInput(file.absolutePath) {
+                                            awaitPointerEventScope {
+                                                while (true) {
+                                                    val event = awaitPointerEvent()
+                                                    if (event.type == PointerEventType.Press && event.buttons.isTertiaryPressed) {
+                                                        onCloseFile(file)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                                .alpha(if (draggedFile == file) 0.5f else 1f)
+                                .background(rowBackground),
+                        ) {
+                            if (file.isDirectory) {
+                                Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
+                            } else {
+                                // Active file gets prominent glowing vertical accent bar
+                                if (isActive) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(3.5.dp)
+                                            .height(16.dp)
+                                            .clip(RoundedCornerShape(2.dp))
+                                            .background(if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)),
+                                    )
+                                    Spacer(Modifier.width(FileRowIndent - 3.5.dp))
+                                } else {
+                                    Spacer(Modifier.width(FileRowIndent))
+                                }
+                            }
+
+                            if (labelColor != null) {
+                                Text(
+                                    file.name,
+                                    color = labelColor,
+                                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                            } else {
+                                Text(
+                                    file.name,
+                                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                            }
+
+                            if (isDirty) {
+                                Spacer(Modifier.width(4.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(ChangeColors.MODIFIED),
+                                )
+                            }
+
+                            if (isOpen) {
+                                Spacer(Modifier.weight(1f))
+                                Box(modifier = Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                                    if (isHovered || isActive) {
+                                        CloseButton(isDark = isDark, onClose = { onCloseFile(file) })
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if (labelColor != null) Text(file.name, color = labelColor) else Text(file.name)
                 }
             }
         }
@@ -710,4 +1107,3 @@ private fun DrawScope.drawHistoryIcon(tint: Color) {
         cap = StrokeCap.Round,
     )
 }
-

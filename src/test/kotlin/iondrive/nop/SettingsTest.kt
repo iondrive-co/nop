@@ -87,67 +87,129 @@ class SettingsTest {
     }
 
     @Test
-    fun `rail layout round-trips projects and separators in order`(@TempDir tmp: Path) {
+    fun `workspaces round-trip name, tabs, active tab and geometry`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
         val b = tmp.resolve("b").also { Files.createDirectories(it) }
-        val items = listOf(
-            RailItem.Separator("Work", 0),
-            RailItem.Project(a),
-            RailItem.Separator("Personal", 1),
-            RailItem.Project(b),
+        val windows = listOf(
+            Workspace(0, "work", listOf(a), active = a, geometry = WindowGeometry(900, 700, -5, 40)),
+            Workspace(1, "games", listOf(b), active = b, open = false),
         )
-        Settings.saveRailLayout(items)
+        Settings.saveWorkspaces(windows)
 
-        val loaded = Settings.loadRailLayout()
-        assertEquals(
-            listOf(
-                RailItem.Separator("Work", 0),
-                RailItem.Project(a.toAbsolutePath().normalize()),
-                RailItem.Separator("Personal", 0),
-                RailItem.Project(b.toAbsolutePath().normalize()),
-            ),
-            loaded,
-        )
+        assertEquals(windows, Settings.loadWorkspaces())
     }
 
     @Test
-    fun `saveRailLayout mirrors projects into the open list for backward compat`(@TempDir tmp: Path) {
+    fun `a parked window round-trips the time it was closed`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val windows = listOf(Workspace(0, "games", listOf(a), active = a, open = false, closedAt = 1_700_000_000_000))
+
+        Settings.saveWorkspaces(windows)
+
+        assertEquals(windows, Settings.loadWorkspaces())
+    }
+
+    @Test
+    fun `an unnamed window with no geometry round-trips`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val windows = listOf(Workspace(0, "", listOf(a), active = a))
+        Settings.saveWorkspaces(windows)
+
+        assertEquals(windows, Settings.loadWorkspaces())
+    }
+
+    @Test
+    fun `saveWorkspaces mirrors every window's projects into the open list for backward compat`(
+        @TempDir tmp: Path,
+    ) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
         val b = tmp.resolve("b").also { Files.createDirectories(it) }
-        Settings.saveRailLayout(listOf(RailItem.Separator("Work", 0), RailItem.Project(a), RailItem.Project(b)))
-
-        assertEquals(
-            listOf(a, b).map { it.toAbsolutePath().normalize() },
-            Settings.loadOpenProjects(),
+        Settings.saveWorkspaces(
+            listOf(Workspace(0, "work", listOf(a)), Workspace(1, "games", listOf(b), open = false)),
         )
+
+        assertEquals(listOf(a, b).map { it.toAbsolutePath().normalize() }, Settings.loadOpenProjects())
     }
 
     @Test
-    fun `loadRailLayout upgrades a project-only state with no rail entries`(@TempDir tmp: Path) {
+    fun `loadWorkspaces upgrades a rail layout into one window per group`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val state = tmp.resolve("nop/state").also { Files.createDirectories(it.parent) }
+        Files.writeString(
+            state,
+            """
+            active=/p/c
+            rail.0=sep:work
+            rail.1=project:/p/a
+            rail.2=project:/p/b
+            rail.3=sepc:games
+            rail.4=project:/p/c
+            """.trimIndent(),
+        )
+
+        val loaded = Settings.loadWorkspaces()
+        assertEquals(listOf("work", "games"), loaded.map { it.name })
+        assertEquals(listOf(Paths.get("/p/a"), Paths.get("/p/b")), loaded[0].projects)
+        assertEquals(listOf(Paths.get("/p/c")), loaded[1].projects)
+        // Both groups open, the collapsed one included — a fold in the old bar didn't mean the
+        // user was done with those projects.
+        assertTrue(loaded.all { it.open })
+        // Each window opens on its own first tab, bar the one holding the saved active project.
+        assertEquals(Paths.get("/p/a"), loaded[0].active)
+        assertEquals(Paths.get("/p/c"), loaded[1].active)
+    }
+
+    @Test
+    fun `loadWorkspaces upgrades a project-only state into a single unnamed window`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
         Settings.saveOpenProjects(listOf(a))
 
-        assertEquals(
-            listOf(RailItem.Project(a.toAbsolutePath().normalize())),
-            Settings.loadRailLayout(),
-        )
+        val loaded = Settings.loadWorkspaces()
+        assertEquals(1, loaded.size)
+        assertEquals("", loaded[0].name)
+        assertEquals(listOf(a.toAbsolutePath().normalize()), loaded[0].projects)
+        assertTrue(loaded[0].open)
     }
 
     @Test
-    fun `window geometry round-trips alongside the open projects`(@TempDir tmp: Path) {
+    fun `saving workspaces drops the retired rail rows it upgraded from`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
-        val project = tmp.resolve("project").also { Files.createDirectories(it) }
-        Settings.saveOpenProjects(listOf(project))
-        Settings.saveWindowGeometry(WindowGeometry(width = 1024, height = 768, x = 50, y = 100))
+        val state = tmp.resolve("nop/state").also { Files.createDirectories(it.parent) }
+        Files.writeString(
+            state,
+            """
+            rail.0=sep:work
+            rail.1=project:/p/a
+            theme=light
+            """.trimIndent(),
+        )
 
-        val w = Settings.loadWindowGeometry()
-        assertEquals(WindowGeometry(1024, 768, 50, 100), w)
+        Settings.saveWorkspaces(Settings.loadWorkspaces())
 
-        // Saving geometry must not clobber the open-projects list.
-        assertEquals(listOf(project.toAbsolutePath().normalize()), Settings.loadOpenProjects())
+        val raw = Files.readString(state)
+        assertTrue("rail." !in raw, "rail rows should be gone once upgraded, got:\n$raw")
+        // Unrelated settings are left alone.
+        assertTrue(!Settings.loadDarkMode())
+    }
+
+    @Test
+    fun `the geometry an older single-window build saved seeds the windows upgraded from it`(
+        @TempDir tmp: Path,
+    ) {
+        Settings.configRoot = tmp
+        val state = tmp.resolve("nop/state").also { Files.createDirectories(it.parent) }
+        Files.writeString(
+            state,
+            "window.width=1024\nwindow.height=768\nwindow.x=50\nwindow.y=100\nrail.0=project:/p/a\n",
+        )
+
+        assertEquals(WindowGeometry(1024, 768, 50, 100), Settings.loadWindowGeometry())
+        assertEquals(WindowGeometry(1024, 768, 50, 100), Settings.loadWorkspaces().single().geometry)
     }
 
     @Test
@@ -352,16 +414,15 @@ class SettingsTest {
     }
 
     @Test
-    fun `saving recent projects does not clobber open projects or window geometry`(@TempDir tmp: Path) {
+    fun `saving recent projects does not clobber the windows`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val proj = tmp.resolve("project").also { Files.createDirectories(it) }
         val a = tmp.resolve("a").also { Files.createDirectories(it) }
-        Settings.saveOpenProjects(listOf(proj))
-        Settings.saveWindowGeometry(WindowGeometry(800, 600, 0, 0))
+        val windows = listOf(Workspace(0, "work", listOf(proj), active = proj, geometry = WindowGeometry(800, 600, 0, 0)))
+        Settings.saveWorkspaces(windows)
         Settings.addRecentProject(a)
 
-        assertEquals(listOf(proj.toAbsolutePath().normalize()), Settings.loadOpenProjects())
-        assertEquals(WindowGeometry(800, 600, 0, 0), Settings.loadWindowGeometry())
+        assertEquals(windows, Settings.loadWorkspaces())
         assertEquals(listOf(a.toAbsolutePath().normalize()), Settings.loadRecentProjects())
     }
 }

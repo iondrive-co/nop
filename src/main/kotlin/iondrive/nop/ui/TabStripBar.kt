@@ -32,16 +32,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -66,11 +62,10 @@ private const val DRAG_EXPAND_MS = 600L
 /**
  * The horizontal strip above the editor: the open tabs, split into named groups.
  *
- * A group is the horizontal twin of the project rail's separators — a bold label heading the tabs
- * after it, collapsible, renamable, and draggable with its tabs in tow (both strips run on
- * [GroupedStrip], which owns that behaviour). The difference is that every tab belongs to a group:
- * a session starts with one called "MR1", exactly one group is *active* at a time, and whatever the
- * user opens next lands in that one. The "+" at the end of the bar adds a group and arms it.
+ * A group is a bold label heading the tabs after it — collapsible, renamable, and draggable with
+ * its tabs in tow (see [GroupedStrip], which owns that behaviour). Every tab belongs to one: a
+ * session starts with a group called "MR1", exactly one group is *active* at a time, and whatever
+ * the user opens next lands in that one. The "+" at the end of the bar adds a group and arms it.
  *
  * Tabs drag between groups a slot at a time; a group header drags as a unit over its neighbours;
  * and resting a dragged tab on a collapsed group opens it and drops the tab inside, which is the
@@ -243,8 +238,7 @@ private fun keyOf(item: StripItem): String = when (item) {
 }
 
 /**
- * Wraps one strip slot with drag-to-reorder, the horizontal counterpart of the project rail's
- * reorderable row. While dragging, the slot follows the pointer (translation + raised above its
+ * Wraps one strip slot with drag-to-reorder. While dragging, the slot follows the pointer (translation + raised above its
  * neighbours); each time it travels past half a neighbour's width we swap the two so the strip
  * reflows live — see [GroupedStrip.dragStep], which owns the whole decision. A group header that
  * heads tabs drags as its group, taking them along and hopping a neighbouring group whole;
@@ -331,8 +325,8 @@ private fun ReorderableSlot(
 }
 
 /**
- * A group label in the tab bar — bold and letter-spaced like the rail's separators, with a
- * disclosure chevron marking its state and a rule separating it from the group before it. The
+ * A group label in the tab bar — bold and letter-spaced, with a disclosure chevron marking its
+ * state and a rule separating it from the group before it. The
  * *active* group (the one new files open into) carries the same accent underline the selected tab
  * does, so it's obvious where the next click in the tree will land. Clicking the label arms the
  * group; clicking the chevron folds its tabs away. Right-click renames, adds or closes one.
@@ -388,7 +382,7 @@ private fun GroupHeader(
                     // Padding ahead of the underline keeps the armed-group rule clear of the selected
                     // tab's, so the two accents read as two marks rather than one long line.
                     .padding(end = 8.dp)
-                    .underline(active, style.colors.underlineSelected, style.metrics.underlineThickness),
+                    .tabUnderline(active, style.colors.underlineSelected, style.metrics.underlineThickness),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -454,7 +448,7 @@ private fun EditorTab(
             modifier = Modifier
                 .fillMaxHeight()
                 .background(background)
-                .underline(selected, style.colors.underlineSelected, style.metrics.underlineThickness)
+                .tabUnderline(selected, style.colors.underlineSelected, style.metrics.underlineThickness)
                 .hoverable(interaction)
                 .clickable(onClick = onClick),
         ) {
@@ -481,24 +475,6 @@ private fun EditorTab(
         }
     }
 }
-
-/**
- * An accent rule along the bottom edge, marking the selected tab and the armed group.
- *
- * Painted rather than laid out: the strip scrolls horizontally, so its children are measured against
- * an unbounded width, and a `fillMaxWidth()` underline inside one is silently a no-op — it sizes to
- * nothing and never appears. Drawing after the content sidesteps the constraint entirely.
- */
-private fun Modifier.underline(show: Boolean, color: Color, thickness: Dp): Modifier =
-    if (!show) this else drawWithContent {
-        drawContent()
-        val height = thickness.toPx()
-        drawRect(
-            color = color,
-            topLeft = Offset(0f, size.height - height),
-            size = Size(size.width, height),
-        )
-    }
 
 /**
  * The word-wrap toggle, beside the "+". Applies to every file tab and every diff at once — it's a

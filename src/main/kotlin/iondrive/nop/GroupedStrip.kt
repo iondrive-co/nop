@@ -1,9 +1,9 @@
 package iondrive.nop
 
 /**
- * One entry of a grouped strip — the shape shared by the vertical project rail and the horizontal
- * editor tab bar. An entry is either a plain member or a header ([isHeader]), which owns the run of
- * members after it, down to the next header. A [collapsed] header hides the members it owns: they
+ * One entry of a grouped strip — the shape shared by the project bar along the top of the window
+ * and the editor tab bar below it. An entry is either a plain member or a header ([isHeader]), which
+ * owns the run of members after it, down to the next header. A [collapsed] header hides the members it owns: they
  * stay in the list but are neither drawn nor dragged on their own, so the group reads — and moves —
  * as a single slot.
  *
@@ -40,8 +40,8 @@ data class GroupDragStep<T>(val items: List<T>, val travelled: Int)
 /**
  * Pure layout maths for a strip of items grouped under collapsible headers, kept out of the Compose
  * layer so it can be unit-tested directly. Axis-agnostic: the caller supplies each entry's `extent`
- * — a row's height in the vertical rail, a tab's width in the horizontal tab bar — and reads the
- * resulting offsets along whichever axis it lays out on.
+ * — a tab's width in both of nop's strips, a row's height were one laid out vertically — and reads
+ * the resulting offsets along whichever axis it lays out on.
  */
 object GroupedStrip {
     /**

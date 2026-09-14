@@ -952,7 +952,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * [loadStatus] covers, so a caller can be *told* when to re-run it instead of re-running it to
      * find out.
      *
-     * Pruning ignored directories is what makes watching a whole rail of projects affordable: on
+     * Pruning ignored directories is what makes watching every open project affordable: on
      * this machine's 23, the 61.8k directories on disk came to 1.5k once virtualenvs and build
      * output were dropped. Directories the index already holds an entry under are kept even when an
      * ignore rule matches them — git goes on tracking what it already tracks, so changes there do

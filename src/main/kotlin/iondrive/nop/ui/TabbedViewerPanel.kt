@@ -159,17 +159,6 @@ fun TabbedViewerPanel(
     // file tab and to either diff — see [LocalWrapLines].
     CompositionLocalProvider(LocalWrapLines provides wrapLines) {
     Column(modifier = Modifier.fillMaxSize()) {
-        // Drawn even with nothing open: the strip is where the tab groups live, so a project whose
-        // tabs were all closed (or were terminals and diffs, which don't survive a restart) still
-        // shows its groups and the "+" that adds one.
-        TabStripBar(
-            state = tabsState,
-            style = JewelTheme.editorTabStyle,
-            labelFor = { labelFor(it, editStore) },
-            onTabsClosed = { closed -> closed.forEach(::cleanUp) },
-            wrapLines = wrapLines,
-            onToggleWrap = onToggleWrap,
-        )
         // One answer per tab to "is this spellcheckable, and as what?", inherited by every text
         // surface underneath — the editor, and both halves of whichever diff is open.
         CompositionLocalProvider(LocalSpellcheckExtension provides spellcheckExtensionOf(selected)) {

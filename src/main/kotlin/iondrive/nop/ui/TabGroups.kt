@@ -16,7 +16,7 @@ data class TabGroup(val id: Long, val name: String, val collapsed: Boolean = fal
 
 /**
  * One entry of the horizontal tab strip: a group [Header], or a [Slot] holding one tab of the group
- * headed to its left. The strip is a [GroupedEntry] list for the same reason the project rail is —
+ * headed to its left. The strip is a [GroupedEntry] list for the same reason the project bar is —
  * so both share [GroupedStrip]'s block, collapse and drag-reorder maths.
  */
 sealed interface StripItem : GroupedEntry<StripItem> {

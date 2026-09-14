@@ -25,7 +25,7 @@ import org.jetbrains.jewel.ui.icon.PathIconKey
  * Jewel's own version asks for the IntelliJ platform's action icons, which only exist inside the
  * IDE: standalone, the lookup fails and the menu draws a magenta "missing icon" square next to
  * Paste. nop ships no icon set of its own, and the menu reads fine without one (its other context
- * menus — project tree, tab strip, project rail — have never had icons), so this builds the same
+ * menus — project tree, tab strip, project bar — have never had icons), so this builds the same
  * four entries with none. Everything else is Jewel's: the same popup, the same keyboard handling,
  * and the same shortcut hints, which come from the action type rather than the label.
  *
