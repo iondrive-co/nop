@@ -81,7 +81,7 @@ compose.desktop {
             // in the jlinked image (88 MB -> 106 MB), which is the whole price of the Java support.
             modules("java.management", "java.compiler", "jdk.compiler")
             packageName = "nop"
-            packageVersion = "0.62.0"
+            packageVersion = "0.63.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
