@@ -32,8 +32,8 @@ import org.jetbrains.jewel.ui.theme.defaultTabStyle
  * name its widget is filed under in the shared [CardLayout][java.awt.CardLayout] panel, so it has to
  * be stable for the life of the run.
  */
-class RunSession(val session: TerminalSession) {
-    val id: String = "run:${session.title}:${System.nanoTime()}"
+class RunSession(override val session: TerminalSession) : TerminalTab {
+    override val id: String = "run:${session.title}:${System.nanoTime()}"
 
     /**
      * What the tab is called. Starts as the session's own name and can be renamed from the tab's
@@ -42,6 +42,21 @@ class RunSession(val session: TerminalSession) {
      * name is a label on the tab, not something the process behind it knows or cares about.
      */
     var title: String by mutableStateOf(session.title)
+}
+
+/**
+ * Anything the shared terminal card panel can draw: a launcher run, one of the project's shells, or
+ * an agent session.
+ *
+ * [TerminalView] hosts every terminal widget in one Swing `CardLayout` keyed by [id], so the only
+ * thing it needs of a tab is a stable id and the session behind it. Pulling that out as an
+ * interface is what lets the agent tabs share the panel — and the single `SwingPanel` — with the
+ * terminals rather than needing a second one, which Compose Desktop cannot composite correctly.
+ */
+interface TerminalTab {
+    /** Stable for the life of the run: it is the card's name in the shared panel. */
+    val id: String
+    val session: TerminalSession
 }
 
 /**

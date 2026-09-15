@@ -53,6 +53,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import iondrive.nop.agent.AgentSession
+import iondrive.nop.agent.AgentSessions
 import kotlinx.coroutines.launch
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -69,6 +71,16 @@ enum class ToolTab(val label: String) {
      * a separate "a terminal is selected" flag beside this enum could fall out of step with it.
      */
     Terminal("Terminal"),
+
+    /**
+     * The vendor coding agents. Like [Terminal] this is not one tab: each open session draws its
+     * own, and its "+" opens the picker rather than a session, because which account to spend is a
+     * choice and not a default. Selected with nothing picked, that picker is what shows.
+     *
+     * It has no fixed tab of its own — the "+" is how you get a new one, the way it is for the
+     * terminals.
+     */
+    Agent("Agent"),
     Commit("Commit"),
     Search("Search"),
     Usages("Usages"),
@@ -81,8 +93,12 @@ enum class ToolTab(val label: String) {
     Run("Run"),
 }
 
-/** The tabs with a fixed label — everything but the terminals, which come and go. */
-private val FIXED_TOOL_TABS: List<ToolTab> = ToolTab.entries.filterNot { it == ToolTab.Terminal }
+/**
+ * The tabs with a fixed label. Terminals and agent sessions are both absent: they come and go, each
+ * draws its own tab, and each has a "+" of its own to make another.
+ */
+private val FIXED_TOOL_TABS: List<ToolTab> =
+    ToolTab.entries.filterNot { it == ToolTab.Terminal || it == ToolTab.Agent }
 
 /** Caps how wide one tab may grow, so a long terminal name can't push the rest off the strip. */
 private val TAB_MAX_WIDTH = 160.dp
@@ -100,12 +116,19 @@ private val RENAME_FIELD_WIDTH = 120.dp
 private const val TERMINAL_GLYPH = "⌨"
 
 /**
+ * Marks an agent session's tab. Like [TERMINAL_GLYPH] it is drawn with the label rather than stored
+ * in it, so a session renamed by the CLI's own title is still visibly an agent.
+ */
+private const val AGENT_GLYPH = "✦"
+
+/**
  * The tabs in the tool panel on the window's right edge, and the panel under them.
  *
- * The strip is in two parts. The terminals come first — a shell at the project root, plus one for
- * every press of the "+" that follows them — and each is closeable, because closing one is what
- * kills its shell. After them come the fixed tabs (Commit, Search, …), which are part of the
- * chrome rather than a user-managed collection and so have no ×.
+ * The strip is in three parts. The terminals come first — a shell at the project root, plus one for
+ * every press of the "+" that follows them — then any open agent sessions; each of those is
+ * closeable, because closing one is what kills the process behind it. After them come the fixed
+ * tabs (Agent, Commit, Search, …), which are part of the chrome rather than a user-managed
+ * collection and so have no ×.
  *
  * Selection state lives in [App] so external triggers can flip to a tab without poking the panel —
  * Ctrl+Shift+F for Search, Alt+F7 for Usages, selecting a markdown file for Preview, and starting a
@@ -124,7 +147,14 @@ fun ToolTabs(
     onNewTerminal: () -> Unit,
     onSelectTerminal: (String) -> Unit,
     onCloseTerminal: (String) -> Unit,
+    agents: AgentSessions,
+    onNewAgent: () -> Unit,
+    onShowPicker: () -> Unit,
+    onSelectAgent: (String) -> Unit,
+    onCloseAgent: (String) -> Unit,
+    onRenameAgent: (String, String) -> Unit,
     terminal: @Composable () -> Unit,
+    agent: @Composable () -> Unit,
     commit: @Composable () -> Unit,
     search: @Composable () -> Unit,
     usages: @Composable () -> Unit,
@@ -140,10 +170,17 @@ fun ToolTabs(
             onNewTerminal = onNewTerminal,
             onSelectTerminal = onSelectTerminal,
             onCloseTerminal = onCloseTerminal,
+            agents = agents,
+            onNewAgent = onNewAgent,
+            onShowPicker = onShowPicker,
+            onSelectAgent = onSelectAgent,
+            onCloseAgent = onCloseAgent,
+            onRenameAgent = onRenameAgent,
         )
         Box(modifier = Modifier.fillMaxSize()) {
             when (selected) {
                 ToolTab.Terminal -> terminal()
+                ToolTab.Agent -> agent()
                 ToolTab.Commit -> commit()
                 ToolTab.Search -> search()
                 ToolTab.Usages -> usages()
@@ -173,6 +210,12 @@ private fun ToolTabStrip(
     onNewTerminal: () -> Unit,
     onSelectTerminal: (String) -> Unit,
     onCloseTerminal: (String) -> Unit,
+    agents: AgentSessions,
+    onNewAgent: () -> Unit,
+    onShowPicker: () -> Unit,
+    onSelectAgent: (String) -> Unit,
+    onCloseAgent: (String) -> Unit,
+    onRenameAgent: (String, String) -> Unit,
 ) {
     val style = JewelTheme.defaultTabStyle
     val isDark = JewelTheme.isDark
@@ -196,6 +239,13 @@ private fun ToolTabStrip(
         val now = terminals.sessions.size
         if (now > openTerminals) plus.bringIntoView()
         openTerminals = now
+    }
+    val agentPlus = remember { BringIntoViewRequester() }
+    var openAgents by remember { mutableStateOf(agents.sessions.size) }
+    LaunchedEffect(agents.sessions.size) {
+        val now = agents.sessions.size
+        if (now > openAgents) agentPlus.bringIntoView()
+        openAgents = now
     }
 
     Row(
@@ -248,6 +298,59 @@ private fun ToolTabStrip(
                 isDark = isDark,
                 onClick = onNewTerminal,
                 modifier = Modifier.bringIntoViewRequester(plus),
+            )
+            // Agent sessions sit between the terminals and the fixed tabs, so both kinds of live
+            // process are at the head of the strip and the chrome stays together at the tail. Each
+            // is closeable and renameable for the same reasons a terminal is: the × is what stops
+            // the process, and the account name says which quota is being spent, never which piece
+            // of work the tab is doing.
+            // With nothing running there is still a tab, and it is still called "Agent": the strip
+            // should look the same whether or not a session happens to be open, the way the
+            // terminals' does. A shape that appears and disappears is one the eye has to re-find.
+            // Clicking it shows the picker, which is what the panel holds with nothing selected.
+            if (agents.sessions.isEmpty() && agents.pickerTabVisible) {
+                ToolStripTab(
+                    label = "$AGENT_GLYPH ${AgentSession.DEFAULT_TITLE}",
+                    selected = selected == ToolTab.Agent,
+                    isDark = isDark,
+                    style = style,
+                    onClick = onShowPicker,
+                    // Closes like a terminal's does, and reserves the same room whether or not the
+                    // × is showing. What it closes is the tab, not a process — there isn't one yet
+                    // — which is the same thing closing the last terminal does to the strip.
+                    onClose = { agents.hidePickerTab() },
+                )
+            }
+            agents.sessions.forEach { agentSession ->
+                key(agentSession.sessionId) {
+                    if (agentSession.sessionId == renamingId) {
+                        TabRenameField(
+                            initial = agentSession.title,
+                            style = style,
+                            onCommit = { name ->
+                                onRenameAgent(agentSession.sessionId, name)
+                                renamingId = null
+                            },
+                            onCancel = { renamingId = null },
+                        )
+                    } else {
+                        ToolStripTab(
+                            label = "$AGENT_GLYPH ${agentSession.title}",
+                            selected = selected == ToolTab.Agent &&
+                                agentSession.sessionId == agents.selectedId,
+                            isDark = isDark,
+                            style = style,
+                            onClick = { onSelectAgent(agentSession.sessionId) },
+                            onClose = { onCloseAgent(agentSession.sessionId) },
+                            onRename = { renamingId = agentSession.sessionId },
+                        )
+                    }
+                }
+            }
+            NewAgentButton(
+                isDark = isDark,
+                onClick = onNewAgent,
+                modifier = Modifier.bringIntoViewRequester(agentPlus),
             )
             FIXED_TOOL_TABS.forEach { tab ->
                 key(tab) {
@@ -438,6 +541,21 @@ private fun RevealWhenSelected(requester: BringIntoViewRequester, selected: Bool
 private fun NewTerminalButton(isDark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
     Tooltip(tooltip = { Text("New terminal at the project root") }) {
+        Box(
+            modifier = modifier.fillMaxHeight().width(24.dp).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.size(13.dp)) { drawPlusIcon(tint) }
+        }
+    }
+}
+
+/** The "+" after the agent sessions: starts another one. Drawn exactly as the terminals' is. */
+@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun NewAgentButton(isDark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
+    Tooltip(tooltip = { Text("New agent session") }) {
         Box(
             modifier = modifier.fillMaxHeight().width(24.dp).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,

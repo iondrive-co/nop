@@ -10,6 +10,10 @@ plugins {
     kotlin("jvm") version "2.2.20"
     id("org.jetbrains.compose") version "1.10.0"
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.20"
+    // @Serializable for the agent launcher's account config and session event log. The runtime
+    // (kotlinx-serialization-json) was already a dependency; this adds only the compiler plugin
+    // that generates serializers, so nothing new ships in the app image.
+    kotlin("plugin.serialization") version "2.2.20"
 }
 
 kotlin {
@@ -28,7 +32,6 @@ dependencies {
     implementation("org.eclipse.jgit:org.eclipse.jgit:7.1.1.202505221757-r")
     implementation("io.github.java-diff-utils:java-diff-utils:4.16")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
-    // Used only via the JsonElement API to parse package.json — no compiler plugin needed.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.commonmark:commonmark:0.24.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.24.0")
@@ -79,7 +82,10 @@ compose.desktop {
             // Java sources with; without them ToolProvider.getSystemJavaCompiler() returns null in
             // the packaged app and every Java feature silently switches itself off. Costs ~18 MB
             // in the jlinked image (88 MB -> 106 MB), which is the whole price of the Java support.
-            modules("java.management", "java.compiler", "jdk.compiler")
+            // java.net.http carries the HttpClient the agent launcher reads account usage with;
+            // without it the packaged app throws NoClassDefFoundError the first time it polls,
+            // which the dev build never shows because a full JDK has the module anyway.
+            modules("java.management", "java.compiler", "jdk.compiler", "java.net.http")
             packageName = "nop"
             packageVersion = "0.63.0"
             description = "Desktop editor and change reviewer"

@@ -105,6 +105,7 @@ fun ProjectBar(
     onDiscardWindow: (Long) -> Unit,
     onMoveToWindow: (Long, Long) -> Unit,
     onMoveToNewWindow: (Long, String) -> Unit,
+    onToggleTheme: () -> Unit,
     isDark: Boolean,
 ) {
     // The bar sits a shade darker than the workspace below it, so the two read as separate surfaces
@@ -165,6 +166,16 @@ fun ProjectBar(
             }
         }
         Box(modifier = Modifier.width(1.dp).height(BAR_HEIGHT).background(divider))
+        // The light/dark toggle used to float in the window's bottom-right corner; the agent usage
+        // indicator has that corner now. It lands here rather than in the editor tab strip because
+        // this bar is drawn once per window while that strip is per viewer panel — in a split view
+        // the toggle would have rendered twice, which is one theme control too many.
+        Box(
+            modifier = Modifier.height(BAR_HEIGHT),
+            contentAlignment = Alignment.Center,
+        ) {
+            ThemeToggleButton(onToggle = onToggleTheme, modifier = Modifier)
+        }
         // The way back to a window that was closed, and to this window's name. At the far right,
         // away from the tabs: it is about the window, not about what is in it.
         WindowsTab(

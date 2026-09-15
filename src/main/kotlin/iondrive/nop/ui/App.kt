@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -24,6 +26,16 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.agent.Account
+import iondrive.nop.agent.AgentConfig
+import iondrive.nop.agent.Accounts
+import iondrive.nop.agent.AgentSessions
+import iondrive.nop.agent.EventLog
+import iondrive.nop.agent.Login
+import iondrive.nop.agent.PastSession
+import iondrive.nop.agent.Provider
+import iondrive.nop.agent.Usage
+import iondrive.nop.agent.UsageReading
 import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
@@ -73,6 +85,13 @@ private const val GIT_POLL_INTERVAL_MS = 3_000L
 // How many recent commit messages to remember per project for the reuse dropdown.
 private const val COMMIT_MESSAGE_HISTORY_CAP = 20
 
+/**
+ * How often each agent account's quota is re-read. Five minutes, because the thing it feeds is a
+ * decision made a few times a day: polling harder would spend Anthropic's rate limit to watch
+ * Anthropic's rate limit, and a Codex reading only changes when that account runs a session anyway.
+ */
+private const val USAGE_POLL_INTERVAL_MS = 5 * 60 * 1000L
+
 // A pending project-tree creation/copy dialog. NewX carry the parent directory the entry will be
 // created in; CopyFile carries the source file being duplicated.
 /**
@@ -116,7 +135,6 @@ fun App(
     openProjects: List<Path> = emptyList(),
     onOpenProject: (Path) -> Unit = {},
     onOpenOtherProject: () -> Unit = {},
-    onToggleTheme: () -> Unit = {},
     fileSearchTrigger: Int = 0,
     findInFilesTrigger: Int = 0,
     findInFileTrigger: Int = 0,
@@ -533,6 +551,64 @@ fun App(
     // spawns no PTY until the panel asks it for a widget.
     val terminals = remember(projectPath) { RunSessions().apply { openShell(rootPath.toFile()) } }
     DisposableEffect(terminals) { onDispose { terminals.disposeAll() } }
+    // The vendor agent sessions behind the Agent tab. Owned here for the same reasons as the
+    // terminals — a session must survive a look at the commit list, and must die with the project
+    // rather than leave a CLI running against a checkout nothing on screen can reach. Nothing is
+    // opened eagerly: a vendor CLI is a real account and real quota, so it starts when asked for.
+    val agentSessions = remember(projectPath) { AgentSessions() }
+    DisposableEffect(agentSessions) { onDispose { agentSessions.disposeAll() } }
+    // This project's earlier agent sessions, for the picker. Re-read whenever the open sessions
+    // change, which is when a session that just ended becomes one of them.
+    var pastAgentSessions by remember(projectPath) { mutableStateOf(emptyList<PastSession>()) }
+    LaunchedEffect(projectPath, agentSessions.sessions.size) {
+        pastAgentSessions = withContext(Dispatchers.IO) { EventLog.sessions(rootPath) }
+    }
+    // The configured accounts. Window-level state rather than per-project: the accounts are global,
+    // and reloading here is what makes a change in the settings dialog show up in the picker.
+    var agentConfig by remember { mutableStateOf<AgentConfig?>(null) }
+    LaunchedEffect(Unit) {
+        if (agentConfig == null) agentConfig = withContext(Dispatchers.IO) { Accounts.load() }
+    }
+    val agentAccounts: List<Account> = agentConfig?.accounts.orEmpty()
+    // How much room the usage strip at the bottom of the window is taking. Terminals are
+    // heavyweight AWT components drawn over everything Compose paints, so each one has to stop
+    // short of the strip by exactly this much or the strip is simply not on screen.
+    var usageStripHeight by remember { mutableStateOf(0.dp) }
+    // Whether the accounts dialog is up.
+    // Once per nop run, not once per opening: re-asking every time turns a lock into a nuisance and
+    // trains the user to keep the dialog open, which is the opposite of what it is for.
+    var showAccounts by remember { mutableStateOf(false) }
+    // Model lists, per account, fetched once each from the provider. Claude's comes from the
+    // Anthropic Models API with the account's own token, so it reflects what that account may
+    // actually use rather than a list baked in here to go stale.
+    val agentModels = remember { mutableStateMapOf<String, List<String>>() }
+    // Each account's quota, refreshed on a background coroutine. Deliberately only a number to look
+    // at: nothing here interrupts a running TUI. Being told at 80% that the session is over is
+    // worse than seeing the number and deciding at the next natural stopping point — a quota wall
+    // the CLI itself hits is different, and Quota handles that, because there the session is
+    // already finished.
+    val agentUsage = remember { mutableStateMapOf<String, UsageReading>() }
+    LaunchedEffect(agentAccounts) {
+        if (agentAccounts.isEmpty()) return@LaunchedEffect
+        while (true) {
+            for (account in agentAccounts) {
+                // Contained per account. A poller is background convenience; nothing it can hit —
+                // a dead endpoint, a credentials file someone is mid-way through rewriting — is
+                // worth taking the window down for, and an uncaught throw here would.
+                runCatching {
+                    agentUsage[account.name] = withContext(Dispatchers.IO) { Usage.read(account) }
+                    if (account.provider == Provider.Anthropic && account.name !in agentModels) {
+                        val models = withContext(Dispatchers.IO) { Usage.discoverClaudeModels(account) }
+                        if (models.isNotEmpty()) agentModels[account.name] = models
+                    }
+                }.onFailure { failure ->
+                    if (failure is CancellationException) throw failure
+                    Log.warn("could not read usage for ${account.name}: $failure")
+                }
+            }
+            delay(USAGE_POLL_INTERVAL_MS)
+        }
+    }
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
     // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in
     // it — outlive visits to the other tool tabs.
@@ -1169,6 +1245,7 @@ fun App(
                                     terminals.openShell(rootPath.toFile())
                                     toolTab = ToolTab.Terminal
                                 },
+                                onAgentAccounts = { showAccounts = true },
                                 onAdd = { persistLaunchers(stored + it) },
                                 onDelete = { persistLaunchers(stored - it) },
                             )
@@ -1221,6 +1298,12 @@ fun App(
                             )
                         },
                         second = {
+                            // Every terminal in the window is inside this panel, and each has to
+                            // stop short of the usage strip floating over the window's bottom-right
+                            // corner — see LocalTerminalBottomInset.
+                            CompositionLocalProvider(
+                                LocalTerminalBottomInset provides usageStripHeight,
+                            ) {
                             ToolTabs(
                                 selected = toolTab,
                                 onSelect = { toolTab = it },
@@ -1234,7 +1317,64 @@ fun App(
                                     toolTab = ToolTab.Terminal
                                 },
                                 onCloseTerminal = { terminals.close(it) },
+                                agents = agentSessions,
+                                onNewAgent = {
+                                    // Starts a session, the way the terminals' "+" starts a shell.
+                                    // The account is the one this project used last — read off the
+                                    // session logs, so it survives a restart — or the only one
+                                    // configured. With several accounts and no history there is
+                                    // nothing to infer, so it asks instead of guessing which quota
+                                    // to spend.
+                                    val last = pastAgentSessions.firstNotNullOfOrNull { past ->
+                                        agentAccounts.firstOrNull { it.name == past.lastAccount }
+                                    }
+                                    val account = last ?: agentAccounts.singleOrNull()
+                                    if (account != null) {
+                                        agentSessions.open(rootPath.toFile(), account)
+                                    } else {
+                                        agentSessions.showPicker()
+                                    }
+                                    toolTab = ToolTab.Agent
+                                },
+                                onShowPicker = {
+                                    agentSessions.showPicker()
+                                    toolTab = ToolTab.Agent
+                                },
+                                onSelectAgent = { id ->
+                                    agentSessions.select(id)
+                                    toolTab = ToolTab.Agent
+                                },
+                                onCloseAgent = { agentSessions.close(it) },
+                                onRenameAgent = { id, name -> agentSessions.rename(id, name) },
                                 terminal = { TerminalTabPanel(terminals, terminalCards) },
+                                agent = {
+                                    AgentPanel(
+                                        state = agentSessions,
+                                        accounts = agentAccounts,
+                                        readings = agentUsage,
+                                        sessions = pastAgentSessions,
+                                        cards = terminalCards,
+                                        onLaunch = { account ->
+                                            agentSessions.open(rootPath.toFile(), account)
+                                            toolTab = ToolTab.Agent
+                                        },
+                                        onReopen = { past ->
+                                            // Native resume, not a replay of a summary: the vendor
+                                            // still has the real session, and landing back in it is
+                                            // strictly better than landing in a description of it.
+                                            val account = agentAccounts.firstOrNull { it.name == past.lastAccount }
+                                            if (account != null) {
+                                                agentSessions.open(
+                                                    dir = rootPath.toFile(),
+                                                    account = account,
+                                                    resumeId = past.lastNativeSessionId,
+                                                )
+                                                toolTab = ToolTab.Agent
+                                            }
+                                        },
+                                        onSettings = { showAccounts = true },
+                                    )
+                                },
                                 commit = {
                                     CommitPanel(
                                         status = status,
@@ -1467,16 +1607,50 @@ fun App(
                                     )
                                 },
                             )
+                            }
                         },
                     )
                 },
             )
         }
 
-        ThemeToggleButton(
-            onToggle = onToggleTheme,
+        // The corner the theme toggle used to float in. Usage earns it: which account has quota
+        // left is the thing you look at to decide what to do next, and it is global state, so
+        // burying it behind a tab would cost a click you only make once you already suspect the
+        // answer. The toggle moved to the project bar, which is drawn once per window.
+        UsageIndicator(
+            accounts = agentAccounts,
+            readings = agentUsage,
+            onClick = { showAccounts = true },
+            onHeight = { usageStripHeight = it },
             modifier = Modifier.align(androidx.compose.ui.Alignment.BottomEnd),
         )
+
+        if (showAccounts) {
+            val config = agentConfig ?: AgentConfig()
+            AccountsDialog(
+                config = config,
+                readings = agentUsage,
+                modelsFor = { account ->
+                    agentModels[account.name] ?: account.provider.fallbackModels
+                },
+                onSave = { next ->
+                    agentConfig = next
+                    scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
+                },
+                onLogIn = { account ->
+                    // In a terminal tab, not in the dialog: the vendor flows need a real TTY, and a
+                    // terminal is a heavyweight AWT component that Compose composites *above* every
+                    // popup — one drawn inside this dialog would simply not be on screen. The output
+                    // staying in the tab afterwards is also the only thing that explains a login
+                    // that didn't take.
+                    showAccounts = false
+                    terminals.open(Login.session(account))
+                    toolTab = ToolTab.Terminal
+                },
+                onClose = { showAccounts = false },
+            )
+        }
 
         pendingDelete?.let { targets ->
             ConfirmDeleteDialog(

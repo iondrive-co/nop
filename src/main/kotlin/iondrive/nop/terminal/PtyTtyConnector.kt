@@ -15,10 +15,33 @@ import java.nio.charset.StandardCharsets
  * The resize → [PtyProcess.setWinSize] hop is the important part: it's what delivers `SIGWINCH`
  * to the child so full-screen apps (vim, htop, less) reflow when the tab is resized.
  */
-class PtyTtyConnector(private val process: PtyProcess) :
-    ProcessTtyConnector(process, StandardCharsets.UTF_8) {
+class PtyTtyConnector(
+    private val process: PtyProcess,
+    /**
+     * Sees every character on its way to the terminal, and changes none of them.
+     *
+     * The agent launcher uses it for two things the CLI never tells nop directly: noticing the
+     * moment a vendor announces a quota wall, and keeping a little plain text to build a handoff
+     * out of when that provider's transcript can't be read. Both are read-only by construction —
+     * the tap gets a copy after the decode and cannot alter what the terminal draws.
+     *
+     * It runs on the thread feeding the terminal, so an expensive one would show up as lag in the
+     * TUI. Anything a tap wants to do beyond a regex belongs on another thread.
+     */
+    private val tap: ((String) -> Unit)? = null,
+) : ProcessTtyConnector(process, StandardCharsets.UTF_8) {
 
     override fun getName(): String = "pty"
+
+    override fun read(buf: CharArray, offset: Int, length: Int): Int {
+        val read = super.read(buf, offset, length)
+        val listener = tap
+        if (read > 0 && listener != null) {
+            // Failures are swallowed: a broken tap must never cost the user their terminal.
+            runCatching { listener(String(buf, offset, read)) }
+        }
+        return read
+    }
 
     override fun isConnected(): Boolean = process.isAlive
 

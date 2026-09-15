@@ -1,0 +1,359 @@
+package iondrive.nop.agent
+
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import iondrive.nop.Log
+import iondrive.nop.agent.transcript.ClaudeTailer
+import iondrive.nop.agent.transcript.CodexTailer
+import iondrive.nop.agent.transcript.RunContext
+import iondrive.nop.agent.transcript.Tailer
+import iondrive.nop.agent.transcript.TranscriptFollower
+import iondrive.nop.terminal.TerminalSession
+import iondrive.nop.ui.TerminalTab
+import java.io.File
+import java.util.UUID
+
+/** Why a run stopped. Only [Exited] is the user simply quitting the TUI. */
+enum class EndReason { Exited, Quota, Switched, Killed }
+
+/**
+ * One run of one account's CLI inside a session: the argv and environment it was started with, the
+ * PTY behind it, and the native session id its transcript is filed under.
+ *
+ * A run is not a session. Handing the work from Claude to Codex ends one run and starts another
+ * inside the same [AgentSession], which is what keeps one event log, one history entry and one tab
+ * across a provider switch.
+ */
+class AgentRun(
+    val account: Account,
+    val command: AgentCommand,
+    val session: TerminalSession,
+    /** Set when this run was started from a handoff summary rather than from scratch. */
+    val seededFromHandoff: Boolean,
+) {
+    /**
+     * The native session id, once it is known. Claude's is minted before the spawn; Codex's only
+     * exists after its first rollout line, so the tailer fills this in when it finds it.
+     */
+    @Volatile
+    var nativeSessionId: String? = command.nativeSessionId
+
+    /** Why the run ended, set when it does. Null while it is still going. */
+    @Volatile
+    var endReason: EndReason? = null
+
+    /** Follows this run's transcript. Null when the provider has no tailer nop can use. */
+    var follower: TranscriptFollower? = null
+
+    /** What the vendor said as it ran out, when that is why the run ended. */
+    @Volatile
+    var quota: QuotaHit? = null
+}
+
+/**
+ * One agent session in one project: a tab in the tool strip, the run currently in it, and the
+ * account behind that run.
+ *
+ * The session outlives its runs. That is the whole point of it — "switch to Codex" kills the Claude
+ * TUI and opens a Codex one in the same tab, carrying the same session id, so the history entry and
+ * the event log both stay continuous across the switch rather than splitting into two unrelated
+ * halves.
+ *
+ * Nothing here parses the terminal. The TUI is drawn by JediTerm exactly as it would be in a shell;
+ * what nop knows about what happened inside it comes from the CLI's own transcript on disk, read by
+ * a tailer on a separate channel that this session owns but never renders.
+ */
+class AgentSession(
+    val projectDir: File,
+    account: Account,
+    seed: String? = null,
+    resumeId: String? = null,
+) : TerminalTab {
+    /** nop's own id for the session, distinct from any provider's. Names the event log file. */
+    val sessionId: String = UUID.randomUUID().toString()
+
+    /**
+     * What happened in this session, in a vocabulary neither vendor uses — which is what makes a
+     * handoff between them possible at all. Written by the tailer, and by the terminal tap while a
+     * run has produced no transcript event yet.
+     */
+    val log: EventLog = EventLog.open(sessionId).also {
+        it.append(
+            AgentEvent.SessionStarted(
+                projectPath = projectDir.absolutePath,
+                at = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    /**
+     * Reads the vendor's terminal output looking for the moment it refuses to continue.
+     *
+     * One per session rather than per run, and [QuotaWatcher.reset] on each new run, so the tail
+     * left over from an account that ran out cannot fire again the instant its replacement starts.
+     *
+     * Declared before [run], and it has to be: property initialisers run in declaration order, and
+     * initialising `run` starts a run that installs this as its output tap. Below `run` it is still
+     * null at that moment. The lambda's own reference back to `run` is safe the other way round —
+     * nothing reaches it until the PTY starts, which is when the panel first asks for a widget.
+     */
+    private val quotaWatcher: QuotaWatcher = QuotaWatcher { hit ->
+        val current = run
+        if (current.endReason != null) return@QuotaWatcher
+        Log.info("agent quota wall on ${current.account.name}: ${hit.line}")
+        current.quota = hit
+        endRun(EndReason.Quota)
+        // Killed rather than left sitting at its own error — the session is over either way. Killed
+        // and not disposed, so the dead TUI keeps its last frame under the panel, which is usually
+        // the thing that says whether switching is the right call.
+        current.session.kill()
+    }
+
+    /**
+     * Bumped for each run so the terminal card panel — which files widgets under [id] — sees a
+     * genuinely new card when a switch replaces the TUI, rather than re-showing the dead one.
+     */
+    private var runIndex by mutableStateOf(0)
+
+    var run: AgentRun by mutableStateOf(start(account, seed, resumeId, seededFromHandoff = false))
+        private set
+
+    override val id: String get() = "agent:$sessionId:$runIndex"
+    override val session: TerminalSession get() = run.session
+
+    /** The account whose CLI is running now — which a switch changes. */
+    val account: Account get() = run.account
+
+    /**
+     * The tab's label.
+     *
+     * Every session starts under the same name, for the reason every terminal is called "Term":
+     * a label nop guesses at is a label the user has to read past. The account name was the guess,
+     * and it answers the wrong question — which quota is being spent, not which piece of work the
+     * tab is doing — while the settings dialog and the picker both already say it.
+     *
+     * Two better names replace it. The CLI writes a title into its own transcript a turn or two in
+     * ("AWS support"), and the user can right-click the tab and say so themselves.
+     */
+    var title: String by mutableStateOf(DEFAULT_TITLE)
+        private set
+
+    /**
+     * Whether the user named this tab themselves. Once they have, nothing else writes to [title] —
+     * not a switch, not the CLI's own idea of what the session is about. A name you typed being
+     * quietly replaced a minute later is worse than no rename at all.
+     */
+    private var titleIsUsers by mutableStateOf(false)
+
+    /** Renames the tab. A blank name is ignored: the user who cleared the field meant to cancel. */
+    fun rename(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        title = trimmed
+        titleIsUsers = true
+    }
+
+    /** A title the CLI gave the session. Yields to a name the user chose. */
+    fun titleFromTranscript(name: String) {
+        if (titleIsUsers) return
+        val trimmed = name.trim()
+        if (trimmed.isNotEmpty()) title = trimmed
+    }
+
+    /** True once the current run has ended and the post-exit choices belong on screen. */
+    val ended: Boolean get() = endedAt > 0
+
+    /**
+     * When the current run ended, or 0 while it is still going.
+     *
+     * The session's own record of the ending rather than the terminal's, because the two disagree
+     * in the case that matters: a run killed at a quota wall never reports an exit code, so waiting
+     * for one would mean the panel offering to hand the work over was the one thing that never
+     * appeared when it was needed. It is also the piece of Compose state that makes the panel show
+     * at all — the end is noticed on a watcher thread, and [run] itself does not change.
+     */
+    var endedAt: Long by mutableStateOf(0L)
+        private set
+
+    /**
+     * Kills the current run and starts [account]'s CLI in its place, optionally seeded with a
+     * prompt or resuming a native session. The session id, tab and history entry all stay put.
+     */
+    fun switchTo(
+        account: Account,
+        seed: String? = null,
+        resumeId: String? = null,
+        reason: EndReason = EndReason.Switched,
+        seededFromHandoff: Boolean = false,
+        handoffPath: String? = null,
+    ) {
+        val from = run.account.provider.id
+        endRun(reason)
+        run.session.dispose()
+        log.append(
+            AgentEvent.ProviderSwitched(
+                from = from,
+                to = account.provider.id,
+                reason = reason,
+                handoffPath = handoffPath,
+                at = System.currentTimeMillis(),
+            ),
+        )
+        runIndex += 1
+        run = start(account, seed, resumeId, seededFromHandoff)
+        endedAt = 0
+    }
+
+    /**
+     * Records why the current run stopped, drains its tailer and logs the end.
+     *
+     * The drain is not tidiness. A CLI writes its last records as it exits — the final answer, and
+     * the stop reason that says whether it reached one — and those are exactly what a handoff
+     * summary is built out of, so stopping the tailer without one last read loses the most useful
+     * part of the session.
+     */
+    fun endRun(reason: EndReason) {
+        if (run.endReason != null) return
+        run.endReason = reason
+        run.follower?.stop()
+        run.follower = null
+        log.append(AgentEvent.RunEnded(run.session.exitCode, reason, System.currentTimeMillis()))
+        endedAt = System.currentTimeMillis()
+    }
+
+    /**
+     * Hands the work to [target]: builds a summary of what has happened, writes it beside the log,
+     * and opens the new provider pointed at it.
+     *
+     * The summary is written before the new CLI starts, and the prompt is one line naming the file,
+     * so a handoff that reads badly leaves something on disk to look at rather than only a process
+     * that has already exited.
+     */
+    fun handOver(target: Account, reason: EndReason = EndReason.Switched): Handoff.Written {
+        endRun(reason)
+        val written = Handoff.write(sessionId, log.events(), target.provider)
+        switchTo(
+            account = target,
+            seed = Handoff.seedPrompt(run.account.provider, written.path),
+            reason = reason,
+            seededFromHandoff = true,
+            handoffPath = written.path.toString(),
+        )
+        return written
+    }
+
+    /** Starts the same account again in this tab, resuming the vendor's own session where it left off. */
+    fun reopen(resumeId: String? = run.nativeSessionId) {
+        switchTo(account = run.account, resumeId = resumeId, reason = EndReason.Switched)
+    }
+
+    /** Kills the PTY and everything under it. Idempotent; called when the tab or project closes. */
+    fun dispose() {
+        endRun(EndReason.Killed)
+        run.session.dispose()
+        log.close()
+    }
+
+    private fun start(
+        account: Account,
+        seed: String?,
+        resumeId: String?,
+        seededFromHandoff: Boolean,
+    ): AgentRun {
+        val command = Spawn.command(account, projectDir, seed, resumeId)
+        // The vendor's TUI decides whether to run its first-run flow from its own config, not from
+        // whether it has a token — so an account inherited with a perfectly good login would be
+        // asked to sign in again. See VendorConfig.
+        VendorConfig.prepareForInteractive(account)
+        Log.info("agent run ${account.provider.id}/${account.name} in ${projectDir.name}")
+        quotaWatcher.reset()
+        val newRun: AgentRun
+        val terminal = TerminalSession.agent(
+            command = command.argv,
+            env = command.env,
+            dir = projectDir,
+            title = account.name,
+            // Two jobs, one copy of the output, and neither of them touches what is drawn. The
+            // quota watcher is how nop learns the CLI has hit a wall — it announces that in its own
+            // UI and nowhere else — and the screen tail is the fallback a handoff is built from
+            // when the provider's transcript cannot be read.
+            outputTap = { text ->
+                quotaWatcher.feed(text)
+                log.appendScreenTail(QuotaWatcher.stripAnsi(text))
+            },
+        )
+        newRun = AgentRun(account, command, terminal, seededFromHandoff)
+        val startedAt = System.currentTimeMillis()
+        log.beginRun()
+        log.append(
+            AgentEvent.RunStarted(
+                provider = account.provider.id,
+                account = account.name,
+                model = account.model,
+                reasoning = account.reasoning,
+                nativeSessionId = command.nativeSessionId,
+                argv = command.argv,
+                seededFromHandoff = seededFromHandoff,
+                at = startedAt,
+            ),
+        )
+
+        val context = RunContext(
+            projectDir = projectDir.toPath(),
+            home = account.homePath,
+            nativeSessionId = command.nativeSessionId,
+            startedAt = startedAt,
+        )
+        val tailer = tailerFor(account)
+        newRun.follower = TranscriptFollower(
+            tailer = tailer,
+            run = context,
+            log = log,
+            onEvent = { event ->
+                log.append(event)
+                // The CLI names its own session a turn or two in. That name says far more about
+                // which of three open tabs this is than the account does.
+                if (event is AgentEvent.SessionTitled) titleFromTranscript(event.title)
+            },
+            // A second RunStarted, logged the moment the transcript is found rather than at spawn.
+            // Deliberate, not a duplicate: the log is append-only, and the path, the offset and —
+            // for a provider that names its own session — the id simply do not exist yet when the
+            // CLI is launched. Everything that reads runs takes the last one.
+            onLocated = { path, offset ->
+                newRun.nativeSessionId = tailer.nativeSessionId() ?: newRun.nativeSessionId
+                log.append(
+                    AgentEvent.RunStarted(
+                        provider = account.provider.id,
+                        account = account.name,
+                        model = account.model,
+                        reasoning = account.reasoning,
+                        nativeSessionId = newRun.nativeSessionId,
+                        transcriptPath = path.toString(),
+                        transcriptOffset = offset,
+                        argv = command.argv,
+                        seededFromHandoff = seededFromHandoff,
+                        at = System.currentTimeMillis(),
+                    ),
+                )
+            },
+        ).also { it.start() }
+
+        // The tailer has to be stopped from the thread that notices the exit, not from whoever
+        // happens to look at the session next: the last records are written on the way out. Guarded
+        // on still being the current run, so a dying TUI a switch has already replaced cannot end
+        // the one that took its place.
+        terminal.onExit = { if (run === newRun) endRun(EndReason.Exited) }
+        return newRun
+    }
+
+    private fun tailerFor(account: Account): Tailer = when (account.provider) {
+        Provider.Anthropic -> ClaudeTailer(account.homePath)
+        Provider.OpenAI -> CodexTailer(account.homePath)
+    }
+
+    companion object {
+        /** What an agent tab is called before anything better is known. See [title]. */
+        const val DEFAULT_TITLE: String = "Agent"
+    }
+}

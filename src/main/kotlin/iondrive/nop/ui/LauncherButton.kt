@@ -38,14 +38,16 @@ import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
 
 /**
- * Play button + popup that lists the project's launchers and lets the user add new ones.
- * Sits to the right of the "Change…" button in the project panel.
+ * Play button + popup that lists the project's launchers and lets the user add new ones, plus the
+ * two things that are about starting work rather than about a script: a fresh terminal, and the
+ * agent accounts. Sits to the right of the "Change…" button in the project panel.
  */
 @Composable
 fun LauncherButton(
     launchers: List<Launcher>,
     onRun: (Launcher) -> Unit,
     onNewTerminal: () -> Unit,
+    onAgentAccounts: () -> Unit,
     onAdd: (Launcher) -> Unit,
     onDelete: (Launcher) -> Unit,
     readOnlyNames: Set<String> = emptySet(),
@@ -77,6 +79,10 @@ fun LauncherButton(
                         expanded = false
                         onNewTerminal()
                     },
+                    onAgentAccounts = {
+                        expanded = false
+                        onAgentAccounts()
+                    },
                     onAddRequest = {
                         expanded = false
                         showAddDialog = true
@@ -105,6 +111,7 @@ private fun LauncherMenu(
     readOnlyNames: Set<String>,
     onRun: (Launcher) -> Unit,
     onNewTerminal: () -> Unit,
+    onAgentAccounts: () -> Unit,
     onAddRequest: () -> Unit,
     onDelete: (Launcher) -> Unit,
 ) {
@@ -134,6 +141,13 @@ private fun LauncherMenu(
         Spacer(Modifier.height(4.dp))
         OutlinedButton(onClick = onNewTerminal, modifier = Modifier.fillMaxWidth()) {
             Text("New Terminal")
+        }
+        Spacer(Modifier.height(4.dp))
+        // The second way to the accounts dialog, beside the usage indicator's. This menu is already
+        // where "start something in this project" lives, and setting an account up is what you come
+        // looking for when the Agent tab has nothing to offer yet.
+        OutlinedButton(onClick = onAgentAccounts, modifier = Modifier.fillMaxWidth()) {
+            Text("Agent accounts…")
         }
         Spacer(Modifier.height(4.dp))
         DefaultButton(onClick = onAddRequest, modifier = Modifier.fillMaxWidth()) {

@@ -1,0 +1,513 @@
+{
+  "_comment": "Captured from chad's build_agent_command (src/chad/server/services/task_executor.py) on 2026-09-15. The per-account environment is the whole of how several vendor accounts stay isolated, so nop's Spawn is checked against what the implementation it was ported from actually produced, not against a restatement of the intent. PATH is dropped: chad prepended its managed tools dir, nop resolves the binary to an absolute path instead.",
+  "homes": {
+    "anthropic": "/home/dev/.chad/claude-configs/claude-main",
+    "openai": "/home/dev/.chad/codex-homes/codex-main"
+  },
+  "cases": [
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": null,
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "default",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "low",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "4000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "medium",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "10000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "high",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "21000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "xHigh",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "28000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "Max",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "31999"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "Ultracode",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "31999"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": null,
+      "reasoning": "minimal",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": null,
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "default",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "low",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "4000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "medium",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "10000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "high",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "21000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "xHigh",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "28000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "Max",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "31999"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "Ultracode",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "31999"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "default",
+      "reasoning": "minimal",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": null,
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "default",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "low",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "4000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "medium",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "10000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "high",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "21000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "xHigh",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "28000"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "Max",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "31999"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "Ultracode",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main",
+        "MAX_THINKING_TOKENS": "31999"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "account": "claude-main",
+      "model": "some-model",
+      "reasoning": "minimal",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/home/dev/.chad/claude-configs/claude-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": null,
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "default",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "low",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "medium",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "high",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "xHigh",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "Max",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "Ultracode",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": null,
+      "reasoning": "minimal",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": null,
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "default",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "low",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "medium",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "high",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "xHigh",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "Max",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "Ultracode",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "default",
+      "reasoning": "minimal",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": null,
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "default",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "low",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "medium",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "high",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "xHigh",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "Max",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "Ultracode",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    },
+    {
+      "provider": "openai",
+      "account": "codex-main",
+      "model": "some-model",
+      "reasoning": "minimal",
+      "env": {
+        "HOME": "/home/dev/.chad/codex-homes/codex-main"
+      }
+    }
+  ]
+}

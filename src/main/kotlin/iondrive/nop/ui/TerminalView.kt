@@ -21,7 +21,8 @@ import javax.swing.JPanel
 import kotlin.math.roundToInt
 
 /**
- * Renders one [RunSession]. Launcher runs get a slim Compose header (name · status + Stop/Re-run);
+ * Renders one [TerminalTab] — a launcher run, a shell, or an agent session. Launcher runs get a
+ * slim Compose header (name · status + Stop/Re-run);
  * a plain shell fills the whole panel.
  *
  * All terminals share a *single* [cards] panel (a Swing [CardLayout]) hosted by one [SwingPanel].
@@ -34,7 +35,7 @@ import kotlin.math.roundToInt
  * live.
  */
 @Composable
-fun TerminalView(tab: RunSession, cards: JPanel) {
+fun TerminalView(tab: TerminalTab, cards: JPanel) {
     val isDark = JewelTheme.isDark
     val bg = JewelTheme.globalColors.panelBackground
     val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
@@ -81,29 +82,32 @@ fun TerminalView(tab: RunSession, cards: JPanel) {
                     tab.session.getOrCreateWidget(awtBg, awtFg, awtLink).requestFocusInWindow()
                 }
             },
-            modifier = Modifier.fillMaxSize().padding(bottom = TOGGLE_CLEARANCE),
+            modifier = Modifier.fillMaxSize().padding(bottom = LocalTerminalBottomInset.current),
         )
     }
 }
 
 /**
- * Room left below the terminal for [ThemeToggleButton], which floats in the bottom-right corner of
- * the window — over this panel, as it happens.
+ * How much room the terminal leaves at the bottom of the window for whatever floats there — the
+ * agent usage strip.
  *
  * A [SwingPanel] is a heavyweight AWT component: it is composited above everything Compose draws,
- * so any Compose content under its rectangle is simply not on screen. Without this the terminal
- * swallowed the light/dark toggle the moment it opened. Keeping the strip clear is the one way to
- * leave that corner reachable that doesn't depend on `compose.interop.blending`, an experimental
- * flag whose behaviour varies by renderer.
+ * so any Compose content under its rectangle is simply not on screen. A terminal that filled its
+ * panel drew straight over the usage strip and there was no way to see or click it.
+ *
+ * Measured rather than guessed. The strip's height depends on how many accounts are configured and
+ * how they wrap, so a fixed clearance is wrong for everyone but the person it was tuned for — it
+ * was 34dp, which was one account's worth. [UsageIndicator] reports what it actually occupies and
+ * [App] puts the number here.
  */
-private val TOGGLE_CLEARANCE = 34.dp
+val LocalTerminalBottomInset = androidx.compose.runtime.compositionLocalOf { 0.dp }
 
 private const val SHOWN_ID = "nop.shownTerminalId"
 
 /** Lazily create the session's widget and add it to the shared card panel under the run id. */
 private fun ensureCard(
     cards: JPanel,
-    tab: RunSession,
+    tab: TerminalTab,
     bg: java.awt.Color,
     fg: java.awt.Color,
     link: java.awt.Color,

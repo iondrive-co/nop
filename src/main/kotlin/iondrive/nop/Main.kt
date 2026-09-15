@@ -649,6 +649,7 @@ private fun ApplicationScope.WorkspaceWindow(
                     onDiscardWindow = onDiscardWindow,
                     onMoveToWindow = onMoveToWindow,
                     onMoveToNewWindow = onMoveToNewWindow,
+                    onToggleTheme = onToggleTheme,
                     isDark = darkMode,
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -666,7 +667,6 @@ private fun ApplicationScope.WorkspaceWindow(
                                 openProjects = workspace.projects,
                                 onOpenProject = onOpenProject,
                                 onOpenOtherProject = onOpenOther,
-                                onToggleTheme = onToggleTheme,
                                 fileSearchTrigger = fileSearchTrigger,
                                 findInFilesTrigger = findInFilesTrigger,
                                 findInFileTrigger = findInFileTrigger,

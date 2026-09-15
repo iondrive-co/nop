@@ -20,7 +20,7 @@ import kotlin.concurrent.thread
  * true), which is what makes password prompts, full-screen TUIs (vim/htop), colour and
  * `SIGWINCH`-on-resize work — none of which the old pipe-based `LauncherRun` could do.
  *
- * Build one with [forLauncher] or [shell]. The widget + process are created lazily on the AWT
+ * Build one with [forLauncher], [shell] or [agent]. The widget + process are created lazily on the AWT
  * event dispatch thread via [getOrCreateWidget] (called by the terminal host's `SwingPanel`); the
  * host also drives [applyColors] when the theme changes. A launcher session can be re-run in place
  * with [restart]; [dispose] tears everything down when the tab closes.
@@ -31,10 +31,39 @@ class TerminalSession private constructor(
     private val workingDir: File,
     /** Launcher sessions show a header with status + Stop/Re-run; a plain shell shows none. */
     val isLauncher: Boolean,
+    /**
+     * Extra environment for the child, merged over the inherited one. Empty for a shell or a
+     * launcher run, which want exactly the environment nop was started with; an agent session uses
+     * it to point the vendor CLI at one account's credential directory, which is the whole of how
+     * several accounts stay apart.
+     */
+    private val env: Map<String, String> = emptyMap(),
+    /**
+     * Sees the child's output on its way to the screen, unchanged. Only an agent session sets one —
+     * it is how nop notices a quota wall the vendor announced in its own UI, which nothing else
+     * tells it about. See [PtyTtyConnector].
+     */
+    private val outputTap: ((String) -> Unit)? = null,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(false)
         private set
+
+    /**
+     * What the last child exited with, or null while one is still running (or before any has run).
+     * Compose-observable, because the agent panel's post-exit choices are drawn from it — "the TUI
+     * quit" and "the TUI died" are different situations and only the code tells them apart.
+     */
+    var exitCode: Int? by mutableStateOf(null)
+        private set
+
+    /**
+     * Called once on the watcher thread each time a child exits, with its exit code. Set by an
+     * agent session so it can drain its tailer and close its log at the moment the run ends,
+     * rather than noticing later from a poll.
+     */
+    @Volatile
+    var onExit: ((Int) -> Unit)? = null
 
     private var widget: JediTermWidget? = null
     private var settings: NopTerminalSettings? = null
@@ -126,6 +155,19 @@ class TerminalSession private constructor(
         }
     }
 
+    /**
+     * Kills the child and everything under it, but leaves the widget — and so the last frame the
+     * program drew — on screen.
+     *
+     * This is what ending an agent run on a quota wall needs. [dispose] would take the terminal
+     * away with the process, and the last thing the CLI drew is usually the only thing that says
+     * whether handing the work to another provider is the right call. The `process` reference is
+     * kept deliberately, so the watcher thread still records the exit code and fires [onExit].
+     */
+    fun kill() {
+        process?.let { killTree(it) }
+    }
+
     /** Kills the process tree, detaches the widget from its host card, and disposes it. Idempotent. */
     fun dispose() {
         killProcess()
@@ -137,29 +179,38 @@ class TerminalSession private constructor(
     }
 
     private fun startProcess(): PtyProcess {
-        val env = HashMap(System.getenv())
+        val childEnv = HashMap(System.getenv())
         // Advertise a colour terminal so tools enable ANSI output and full-screen rendering.
-        env["TERM"] = "xterm-256color"
+        childEnv["TERM"] = "xterm-256color"
+        // Last, so an agent session's HOME / CLAUDE_CONFIG_DIR beats the inherited one. Overriding
+        // HOME is the point rather than an accident: it is how the Codex CLI is made to read one
+        // account's ~/.codex instead of the machine owner's.
+        childEnv.putAll(env)
         val proc = PtyProcessBuilder()
             .setCommand(command.toTypedArray())
-            .setEnvironment(env)
+            .setEnvironment(childEnv)
             .setDirectory(workingDir.absolutePath)
             .setInitialColumns(INITIAL_COLUMNS)
             .setInitialRows(INITIAL_ROWS)
             .start()
         process = proc
         running = true
+        exitCode = null
         // Daemon watcher flips `running` false the moment the child exits, so the header can swap
         // its Stop button for Re-run without polling.
         thread(isDaemon = true, name = "terminal-watch") {
-            runCatching { proc.waitFor() }
-            if (process === proc) running = false
+            val code = runCatching { proc.waitFor() }.getOrDefault(-1)
+            if (process === proc) {
+                running = false
+                exitCode = code
+                onExit?.invoke(code)
+            }
         }
         return proc
     }
 
     private fun attach(w: JediTermWidget, proc: PtyProcess) {
-        w.ttyConnector = PtyTtyConnector(proc)
+        w.ttyConnector = PtyTtyConnector(proc, outputTap)
         w.start()
     }
 
@@ -229,6 +280,30 @@ class TerminalSession private constructor(
                 command = if (isWindows) listOf("cmd.exe") else listOf(loginShell()),
                 workingDir = dir,
                 isLauncher = false,
+            )
+
+        /**
+         * Runs a vendor coding agent's TUI: its own rendering, its own keybindings, nothing of
+         * nop's in the way. [env] carries the account's credential directory — see [Spawn].
+         *
+         * `isLauncher = false`, so no Stop/Re-run header appears above it. The TUI owns the whole
+         * interaction, including how it is quit; a Stop button beside it would be a second, worse
+         * way to end a session that is already mid-turn.
+         */
+        fun agent(
+            command: List<String>,
+            env: Map<String, String>,
+            dir: File,
+            title: String,
+            outputTap: ((String) -> Unit)? = null,
+        ): TerminalSession =
+            TerminalSession(
+                title = title,
+                command = command,
+                workingDir = dir,
+                isLauncher = false,
+                env = env,
+                outputTap = outputTap,
             )
 
         private fun loginShell(): String =

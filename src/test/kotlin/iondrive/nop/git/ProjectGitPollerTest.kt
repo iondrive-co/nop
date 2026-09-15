@@ -145,7 +145,10 @@ class ProjectGitPollerTest {
         while (System.currentTimeMillis() < deadline) {
             clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS * 2)
             sweeps++
-            if (poller.sweep(active = emptySet()).isEmpty()) return sweeps
+            if (poller.sweep(active = emptySet()).isEmpty()) {
+                println("INSTR quiet after $sweeps sweeps, ${System.currentTimeMillis() - (deadline - TIMEOUT_MS)}ms")
+                return sweeps
+            }
             Thread.sleep(POLL_MS)
         }
         error("poller never went quiet")
@@ -157,7 +160,10 @@ class ProjectGitPollerTest {
         while (System.currentTimeMillis() < deadline) {
             clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS * 2)
             val swept = poller.sweep(active = emptySet())
-            if (swept.isNotEmpty()) return swept
+            if (swept.isNotEmpty()) {
+                println("INSTR awaitSweep took ${System.currentTimeMillis() - (deadline - TIMEOUT_MS)}ms")
+                return swept
+            }
             Thread.sleep(POLL_MS)
         }
         error("poller never walked the change")
