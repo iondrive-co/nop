@@ -1338,4 +1338,104 @@ class GitRepoTest {
         val exit = proc.waitFor()
         check(exit == 0) { "Command failed (exit=$exit): $cmd\n$out" }
     }
+
+    /**
+     * The point of a session base: work the agent committed mid-run must stay on screen. HEAD moves
+     * with the commit, so a plain status has nothing to say about it — [GitRepo.changesSince] reads
+     * the baseline's tree as well and unions the two.
+     */
+    @Test
+    fun `changesSince carries committed work alongside the working tree`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "kept.txt").writeText("kept\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        val repo = GitRepo.discover(tmp)!!
+        val baseline = repo.headSha()!!
+
+        // Committed during the run, then more work left uncommitted beside it.
+        (tmp / "committed.txt").writeText("done\n")
+        runShell(tmp, "git add -A && git commit -q -m work")
+        (tmp / "kept.txt").writeText("edited\n")
+        (tmp / "untracked.txt").writeText("?\n")
+
+        val status = repo.loadStatus()
+        val since = repo.changesSince(baseline, status).associate { it.path to it.kind }
+        repo.close()
+
+        assertEquals(ChangeKind.ADDED, since["committed.txt"], "the commit's file must still be listed")
+        assertEquals(ChangeKind.MODIFIED, since["kept.txt"])
+        assertEquals(ChangeKind.UNTRACKED, since["untracked.txt"])
+    }
+
+    /** A file the agent committed and then edited again is one change, described as it stands now. */
+    @Test
+    fun `changesSince prefers the working tree's kind over the commit's`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        val repo = GitRepo.discover(tmp)!!
+        val baseline = repo.headSha()!!
+        (tmp / "a.txt").writeText("v2\n")
+        runShell(tmp, "git add -A && git commit -q -m v2")
+        (tmp / "a.txt").writeText("v3\n")
+
+        val since = repo.changesSince(baseline, repo.loadStatus())
+        repo.close()
+
+        assertEquals(1, since.size, "one file, one row: $since")
+        assertEquals(ChangeKind.MODIFIED, since.first().kind)
+    }
+
+    /** With nothing committed since, "session" and "uncommitted" are the same question. */
+    @Test
+    fun `changesSince at HEAD is the plain status`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "a.txt").writeText("v2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val status = repo.loadStatus()
+        val since = repo.changesSince(repo.headSha()!!, status)
+        repo.close()
+
+        assertEquals(status.changes, since)
+    }
+
+    /** An unresolvable base is a reason to show the working tree, not to show nothing. */
+    @Test
+    fun `changesSince falls back to the status for a base that is gone`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("v1\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        (tmp / "a.txt").writeText("v2\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val status = repo.loadStatus()
+        val since = repo.changesSince("0000000000000000000000000000000000000000", status)
+        repo.close()
+
+        assertEquals(status.changes, since)
+    }
+
+    @Test
+    fun `branchBaseSha finds where a branch left its trunk`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q -b main && git config user.email t@x && git config user.name T")
+        (tmp / "a.txt").writeText("a\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        val repo = GitRepo.discover(tmp)!!
+        val trunk = repo.headSha()
+
+        runShell(tmp, "git checkout -q -b feature")
+        (tmp / "b.txt").writeText("b\n")
+        runShell(tmp, "git add -A && git commit -q -m feature")
+
+        val base = repo.branchBaseSha()
+        repo.close()
+        assertEquals(trunk, base, "the base of feature is the commit main is on")
+    }
+
 }

@@ -80,15 +80,34 @@ fun AgentPicker(
             Spacer(Modifier.height(14.dp))
             Text("Earlier sessions here", fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
-            // Agent tabs are not restored across a restart, in keeping with nop's terminals. This
-            // list is where they come back instead — and reopening one resumes the vendor's own
-            // session rather than replaying a summary of it, so nothing is lost by closing the tab.
-            sessions.forEach { past ->
+            // The sessions that are *not* in the strip: one still open there is reached by its own
+            // tab, and listing it here as well would offer to resume a conversation that is already
+            // running, in a second tab beside it. Reopening one of these resumes the vendor's own
+            // session rather than replaying a summary of it, so nothing is lost by closing a tab —
+            // which is what makes this list, and not the strip, the thing that has to be reachable
+            // while a session is running.
+            //
+            // Capped, because this list stopped being short the moment it started including the
+            // sessions nop did not run: two checkouts on the machine this was written on had 199
+            // between them. What a picker is for is getting back into work from the last day or
+            // two, and a row five hundred deep is found by searching, which this is not.
+            sessions.take(EARLIER_SESSIONS_SHOWN).forEach { past ->
                 key(past.sessionId) { PastSessionRow(past = past, onReopen = { onReopen(past) }) }
+            }
+            val hidden = sessions.size - EARLIER_SESSIONS_SHOWN
+            if (hidden > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text("and $hidden older", color = AgentMuted)
             }
         }
     }
 }
+
+/**
+ * How many earlier sessions the picker lists. See the comment at the call site for why there is a
+ * limit at all.
+ */
+private const val EARLIER_SESSIONS_SHOWN = 20
 
 /** One earlier session in this project: what it was about, and the account that was doing it. */
 @Composable

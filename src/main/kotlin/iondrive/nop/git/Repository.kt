@@ -9,6 +9,7 @@ import org.eclipse.jgit.diff.DiffEntry
 import org.eclipse.jgit.diff.DiffFormatter
 import org.eclipse.jgit.lib.Repository
 import org.eclipse.jgit.revwalk.RevWalk
+import org.eclipse.jgit.revwalk.filter.RevFilter
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder
 import org.eclipse.jgit.treewalk.AbstractTreeIterator
 import org.eclipse.jgit.treewalk.EmptyTreeIterator
@@ -905,6 +906,93 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             .sortedWith(compareBy(PathOrder) { it.path })
         val branch = repository.branch
         return GitStatus(branch = branch, changes = changes)
+    }
+
+    /**
+     * What [rev] changed on its way to the working tree, as the same [FileChange] list a status
+     * walk produces — so a caller can draw commits-plus-uncommitted-work as one set of changes.
+     *
+     * The two halves are unioned rather than concatenated, and the working tree wins: a file
+     * committed during the run and edited again since is one change, and the kind that describes it
+     * is the one git reports *now*. A path the commits touched but the working tree does not is
+     * carried over with the kind the tree comparison gives it, which is how work the agent already
+     * committed stays on screen instead of vanishing at the commit.
+     *
+     * Returns the plain status when [rev] is HEAD or cannot be resolved, which is what makes
+     * "session" and "uncommitted" the same view until something is committed.
+     */
+    fun changesSince(rev: String, status: GitStatus): List<FileChange> {
+        val from = runCatching { repository.resolve(rev) }.getOrNull() ?: return status.changes
+        val head = repository.resolve("HEAD") ?: return status.changes
+        if (from == head) return status.changes
+        val committed = runCatching { changedPathsBetween(from, head) }.getOrElse { return status.changes }
+        val byPath = LinkedHashMap<String, FileChange>()
+        committed.forEach { byPath[it.path] = it }
+        status.changes.forEach { byPath[it.path] = it }
+        return byPath.values.sortedWith(compareBy(PathOrder) { it.path })
+    }
+
+    /**
+     * How the tree at [to] differs from the tree at [from], in status vocabulary. A rename is
+     * reported as its two halves (the old path removed, the new one added): the diff surface reads
+     * a path at two revisions, so a change it cannot name a left-hand path for is one it cannot
+     * draw.
+     */
+    fun changedPathsBetween(from: ObjectId, to: ObjectId): List<FileChange> {
+        val reader = repository.newObjectReader()
+        val oldTree = CanonicalTreeParser().apply { reset(reader, treeOf(from)) }
+        val newTree = CanonicalTreeParser().apply { reset(reader, treeOf(to)) }
+        val formatter = DiffFormatter(DisabledOutputStream.INSTANCE)
+        formatter.setRepository(repository)
+        return formatter.scan(oldTree, newTree).map { entry ->
+            when (entry.changeType) {
+                DiffEntry.ChangeType.ADD, DiffEntry.ChangeType.COPY ->
+                    FileChange(entry.newPath, ChangeKind.ADDED)
+                DiffEntry.ChangeType.DELETE -> FileChange(entry.oldPath, ChangeKind.REMOVED)
+                else -> FileChange(entry.newPath, ChangeKind.MODIFIED)
+            }
+        }
+    }
+
+    private fun treeOf(commitish: ObjectId): ObjectId =
+        RevWalk(repository).use { walk -> walk.parseCommit(commitish).tree.id }
+
+    /**
+     * Where this branch left the one it was cut from — the merge base with its upstream, or failing
+     * that with whichever of the usual trunk names the repository has.
+     *
+     * Tried in that order rather than assuming `main`: a branch that tracks a remote knows its own
+     * base, and only a branch with no upstream has to be guessed at. Null when nothing resolves
+     * (a detached HEAD on a repository with no trunk), which the caller reads as "no branch base
+     * to diff against" rather than as an error.
+     */
+    fun branchBaseSha(): String? {
+        val head = repository.resolve("HEAD") ?: return null
+        val candidates = ArrayList<String>()
+        val branch = repository.branch
+        if (branch != null) {
+            val cfg = repository.config
+            val remote = cfg.getString(ConfigConstants.CONFIG_BRANCH_SECTION, branch, "remote")
+            val merge = cfg.getString(ConfigConstants.CONFIG_BRANCH_SECTION, branch, "merge")
+            if (remote != null && merge != null) {
+                candidates += "$remote/${Repository.shortenRefName(merge)}"
+            }
+        }
+        candidates += listOf("origin/HEAD", "origin/main", "origin/master", "main", "master")
+        for (name in candidates) {
+            val other = runCatching { repository.resolve(name) }.getOrNull() ?: continue
+            if (other == head) continue
+            val base = runCatching { mergeBase(head, other) }.getOrNull() ?: continue
+            return base.name
+        }
+        return null
+    }
+
+    private fun mergeBase(a: ObjectId, b: ObjectId): ObjectId? = RevWalk(repository).use { walk ->
+        walk.revFilter = RevFilter.MERGE_BASE
+        walk.markStart(walk.parseCommit(a))
+        walk.markStart(walk.parseCommit(b))
+        walk.next()?.id
     }
 
     /** File content at HEAD for the given repo-relative path, or null if the path is absent from HEAD. */

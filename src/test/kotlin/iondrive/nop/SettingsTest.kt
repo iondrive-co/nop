@@ -363,16 +363,18 @@ class SettingsTest {
         assertNull(r.horizontal)
         assertNull(r.tools)
         assertNull(r.diff)
+        assertNull(r.session)
     }
 
     @Test
     fun `split ratios round-trip`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
-        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f)
+        Settings.saveSplitRatios(horizontal = 0.31f, tools = 0.42f, diff = 0.63f, session = 0.55f)
         val r = Settings.loadSplitRatios()
         assertEquals(0.31f, r.horizontal)
         assertEquals(0.42f, r.tools)
         assertEquals(0.63f, r.diff)
+        assertEquals(0.55f, r.session)
     }
 
     @Test
@@ -623,6 +625,7 @@ class SettingsTest {
                 nativeSessionId = "11111111-2222-3333-4444-555555555555",
                 title = "parser rewrite",
                 titleIsUsers = true,
+                baselineSha = "0123456789abcdef0123456789abcdef01234567",
             ),
             Settings.OpenAgent(
                 sessionId = "nop-2",
@@ -656,6 +659,46 @@ class SettingsTest {
         Settings.saveOpenAgents(project, listOf(agentRow()))
         Settings.saveOpenAgents(project, emptyList())
         assertTrue(Settings.loadOpenAgents(project).isEmpty())
+    }
+
+    /**
+     * The baseline sha arrived after the format was in use, as a seventh field. A six-field row is
+     * an older nop's, and the tab it comes back as simply has no baseline — dropping it would cost
+     * the user the session rather than the feature.
+     */
+    @Test
+    fun `a six-field agent row restores with no baseline`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val file = Settings.projectDataDir(project).resolve("agents")
+        Files.createDirectories(file.parent)
+        Files.writeString(file, "nop-1\tanthropic\tclaude-main\tvendor-1\told tab\t1\n")
+
+        assertEquals(
+            listOf(
+                Settings.OpenAgent(
+                    sessionId = "nop-1",
+                    provider = "anthropic",
+                    account = "claude-main",
+                    nativeSessionId = "vendor-1",
+                    title = "old tab",
+                    titleIsUsers = true,
+                    baselineSha = "",
+                ),
+            ),
+            Settings.loadOpenAgents(project),
+        )
+    }
+
+    @Test
+    fun `the collapsed tool panel is remembered`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        // Nothing saved reads as "showing", so a first run opens with both halves on screen.
+        assertEquals(false, Settings.loadToolsCollapsed())
+        Settings.saveToolsCollapsed(true)
+        assertEquals(true, Settings.loadToolsCollapsed())
+        Settings.saveToolsCollapsed(false)
+        assertEquals(false, Settings.loadToolsCollapsed())
     }
 
     /** A tab or a newline in a name would split the row it is written on. */

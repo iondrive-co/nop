@@ -7,6 +7,7 @@ import iondrive.nop.Log
 import iondrive.nop.Settings
 import iondrive.nop.agent.transcript.ClaudeTailer
 import iondrive.nop.agent.transcript.CodexTailer
+import iondrive.nop.agent.transcript.LiveTranscripts
 import iondrive.nop.agent.transcript.RunContext
 import iondrive.nop.agent.transcript.Tailer
 import iondrive.nop.agent.transcript.TranscriptFollower
@@ -87,6 +88,17 @@ class AgentSession(
     restoredTitle: String? = null,
     /** Whether [restoredTitle] is a name the user typed. See [titleIsUsers]. */
     titleByUser: Boolean = false,
+    /**
+     * Where the repository stood when this session began — HEAD's sha at the moment the tab was
+     * opened, or null for a session nop cannot place (no repository, or a tab restored from a state
+     * file written before this was recorded).
+     *
+     * It is what the Diff tab's "session" base means: everything this agent has done, whether or
+     * not it has committed any of it. Recorded once and never moved, which is the whole point —
+     * a base that followed HEAD would empty the panel at the first commit, which is the moment the
+     * user most wants to see what changed.
+     */
+    val baselineSha: String? = null,
 ) : TerminalTab {
 
     /**
@@ -236,6 +248,9 @@ class AgentSession(
         run.endReason = reason
         run.follower?.stop()
         run.follower = null
+        // Let go of the transcript before the next run looks for one. A dead run still holding its
+        // id would make its own session look like somebody else's to the tab that resumes it.
+        LiveTranscripts.release(run.nativeSessionId)
         log.append(AgentEvent.RunEnded(run.session.exitCode, reason, System.currentTimeMillis()))
         endedAt = System.currentTimeMillis()
     }
@@ -299,7 +314,32 @@ class AgentSession(
             nativeSessionId = native,
             title = title,
             titleIsUsers = titleIsUsers,
+            baselineSha = baselineSha.orEmpty(),
         )
+    }
+
+    /**
+     * The shell command that lands back in this session outside nop, or null while the vendor has
+     * not named it yet.
+     *
+     * It exists because nop cannot make a session visible to a bare `claude` and should not pretend
+     * otherwise. Both CLIs keep a session's transcript in the same directory as the credentials for
+     * the account that wrote it — `$CLAUDE_CONFIG_DIR/projects/<slug>/` for one, `$CODEX_HOME/
+     * sessions/` for the other — with no setting that separates the two. So running several
+     * accounts side by side, which is the point of the picker, splits the transcripts as a side
+     * effect: a session nop ran under `claude-work` is not in the store a plain `claude` reads, and
+     * no amount of work on nop's side changes where that CLI looks.
+     *
+     * What nop can do is say where it put it. One environment variable in front of the ordinary
+     * command is the whole difference, and it is the same variable nop itself launches with.
+     */
+    fun resumeCommand(): String? {
+        val native = run.nativeSessionId ?: return null
+        val home = account.home
+        return when (account.provider) {
+            Provider.Anthropic -> "CLAUDE_CONFIG_DIR=$home claude --resume $native"
+            Provider.OpenAI -> "CODEX_HOME=$home/.codex codex resume $native"
+        }
     }
 
     /** Kills the PTY and everything under it. Idempotent; called when the tab or project closes. */
@@ -338,6 +378,11 @@ class AgentSession(
             },
         )
         newRun = AgentRun(account, command, terminal, seededFromHandoff)
+        // Claimed here rather than when the transcript turns up, because the gap between the two is
+        // exactly when a tab opened beside this one would mistake this session's file for a `/clear`
+        // of its own. Claude's id is known before the spawn; Codex's is claimed in [onLocated]
+        // below, as soon as the CLI has named it.
+        LiveTranscripts.claim(command.nativeSessionId)
         val startedAt = System.currentTimeMillis()
         log.beginRun()
         log.append(
@@ -358,6 +403,9 @@ class AgentSession(
             home = account.homePath,
             nativeSessionId = command.nativeSessionId,
             startedAt = startedAt,
+            // Everything nop is following *except* this run. It is what stops the tailer adopting
+            // the transcript of another agent tab on the same project — see [LiveTranscripts].
+            foreign = { id -> id != newRun.nativeSessionId && LiveTranscripts.isLive(id) },
         )
         val tailer = tailerFor(account)
         newRun.follower = TranscriptFollower(
@@ -375,7 +423,16 @@ class AgentSession(
             // for a provider that names its own session — the id simply do not exist yet when the
             // CLI is launched. Everything that reads runs takes the last one.
             onLocated = { path, offset ->
-                newRun.nativeSessionId = tailer.nativeSessionId() ?: newRun.nativeSessionId
+                val previous = newRun.nativeSessionId
+                newRun.nativeSessionId = tailer.nativeSessionId() ?: previous
+                // The id can change under a run twice: a Codex session is named only once its first
+                // rollout line lands, and a `/clear` typed in either TUI moves the run to a new one.
+                // Both have to move the claim, or the session nop is now following is one the tab
+                // next door is free to adopt.
+                if (newRun.nativeSessionId != previous) {
+                    LiveTranscripts.release(previous)
+                    LiveTranscripts.claim(newRun.nativeSessionId)
+                }
                 log.append(
                     AgentEvent.RunStarted(
                         provider = account.provider.id,

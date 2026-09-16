@@ -24,6 +24,8 @@ import androidx.compose.foundation.Canvas
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentSession
 import iondrive.nop.agent.UsageReading
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
@@ -51,6 +53,9 @@ fun AgentSessionBar(
 ) {
     val others = accounts.filter { it.name != session.account.name }
     var expanded by remember(session.sessionId) { mutableStateOf(false) }
+    // Reset per run, so the confirmation belongs to the command actually on the clipboard rather
+    // than to one copied before a handoff changed which account is running.
+    var copied by remember(session.id) { mutableStateOf(false) }
     val tint = if (JewelTheme.isDark) ProjectIconTintDark else ProjectIconTintLight
 
     Column(
@@ -70,6 +75,22 @@ fun AgentSessionBar(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            // The one thing nop cannot do for you, offered as the command that does it. A vendor
+            // keeps a session's transcript beside the credentials of the account that wrote it, so
+            // a session nop ran under one account is not in the store a bare `claude` reads — and
+            // nothing nop does to its own state changes where that CLI looks. See
+            // [AgentSession.resumeCommand].
+            session.resumeCommand()?.let { command ->
+                Text(
+                    if (copied) "Copied" else "Copy resume command",
+                    color = AgentMuted,
+                    modifier = Modifier.clickable {
+                        Toolkit.getDefaultToolkit().systemClipboard
+                            .setContents(StringSelection(command), null)
+                        copied = true
+                    },
+                )
+            }
             if (others.isNotEmpty()) {
                 Row(
                     modifier = Modifier.clickable { expanded = !expanded },

@@ -174,6 +174,27 @@ class AgentSessionsTest {
         )
     }
 
+    /**
+     * nop cannot put a session into the store a bare `claude` reads — the vendor keeps a transcript
+     * beside the credentials that wrote it — so it says where it put it instead. One environment
+     * variable in front of the ordinary command is the whole difference.
+     */
+    @Test
+    fun `a session can say how to resume it from a shell`(@TempDir tmp: Path) {
+        val claude = sessions().open(tmp.toFile(), account("claude-main"))
+        val native = claude.run.nativeSessionId
+        assertEquals(
+            "CLAUDE_CONFIG_DIR=/homes/claude-main claude --resume $native",
+            claude.resumeCommand(),
+        )
+
+        val codex = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+        assertNull(
+            codex.resumeCommand(),
+            "Codex names its own session, so there is nothing to resume until it has",
+        )
+    }
+
     @Test
     fun `a session records where it was started`(@TempDir tmp: Path) {
         val project: File = tmp.toFile()

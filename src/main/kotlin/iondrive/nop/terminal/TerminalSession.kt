@@ -237,10 +237,34 @@ class TerminalSession private constructor(
         widget = null
     }
 
+    /**
+     * Whether the terminal is currently painted on a dark background, by the perceived brightness
+     * of the colour nop's theme last pushed in. Defaults to light for a process that somehow starts
+     * before the widget: black-on-white is what JediTerm itself falls back to.
+     */
+    private fun isDarkBackground(): Boolean {
+        val bg = settings?.bg ?: return false
+        return (0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue) < 128
+    }
+
     private fun startProcess(): PtyProcess {
         val childEnv = HashMap(System.getenv())
         // Advertise a colour terminal so tools enable ANSI output and full-screen rendering.
         childEnv["TERM"] = "xterm-256color"
+        // Which way round the terminal is, stated up front rather than left to be asked for.
+        //
+        // JediTerm does answer the OSC 11 "what colour is your background?" query, with the themed
+        // colour NopTerminalSettings is holding at the time — but a CLI that asks has to have its
+        // answer before it draws its first frame, and one that gives up waiting assumes a *dark*
+        // terminal. That is what puts a near-black diff panel and pale-blue inline code on nop's
+        // light theme: the CLI never learned the background is white. COLORFGBG is the same answer
+        // in a form nothing can race — every TUI that reads it (claude, vim, delta, bat) reads it
+        // before it renders. The pair is foreground;background as xterm colour indices, and only
+        // the second half is read: 15 (white) means a light terminal, 0 (black) a dark one.
+        //
+        // It is a snapshot, not a subscription: a theme toggle repaints the terminal but cannot
+        // reach a CLI already running in it. The next run gets the new value.
+        childEnv["COLORFGBG"] = if (isDarkBackground()) "15;0" else "0;15"
         // Last, so an agent session's HOME / CLAUDE_CONFIG_DIR beats the inherited one. Overriding
         // HOME is the point rather than an accident: it is how the Codex CLI is made to read one
         // account's ~/.codex instead of the machine owner's.

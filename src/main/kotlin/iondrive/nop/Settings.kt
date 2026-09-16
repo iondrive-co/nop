@@ -12,7 +12,13 @@ data class WindowGeometry(
     val y: Int?,
 )
 
-data class SplitRatios(val horizontal: Float?, val tools: Float?, val diff: Float?)
+data class SplitRatios(
+    val horizontal: Float?,
+    val tools: Float?,
+    val diff: Float?,
+    /** Share of the tool region given to the session pane; the rest is the tool panel beside it. */
+    val session: Float?,
+)
 
 /**
  * Tiny persistent settings stored at $XDG_CONFIG_HOME/nop/state (default ~/.config/nop/state)
@@ -326,17 +332,33 @@ object Settings {
             // right edge — a saved height fraction must not be reused as a width fraction.
             tools = map["split.tools"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
             diff = map["split.diff"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
+            session = map["split.session"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
         )
     }
 
-    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float) {
+    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float, session: Float) {
         val map = load()
         map["split.h"] = horizontal.toString()
         map["split.tools"] = tools.toString()
         map["split.diff"] = diff.toString()
+        map["split.session"] = session.toString()
         // "split.preview" was the markdown editor/preview divider. The preview moved into the tool
         // panel, which is sized by "split.tools", so the key is no longer read or written; a state
         // file left over from an older build simply carries a line nothing looks at.
+        save(map)
+    }
+
+    /**
+     * Whether the tool half of the region was folded away when nop last exited.
+     *
+     * Global rather than per project, like the split ratios beside it: it says how wide the user
+     * wants their agent, which does not change with the repository they point it at.
+     */
+    fun loadToolsCollapsed(): Boolean = load()["tools.collapsed"] == "1"
+
+    fun saveToolsCollapsed(collapsed: Boolean) {
+        val map = load()
+        map["tools.collapsed"] = if (collapsed) "1" else "0"
         save(map)
     }
 
@@ -508,6 +530,8 @@ object Settings {
         val nativeSessionId: String,
         val title: String,
         val titleIsUsers: Boolean,
+        /** HEAD when the session was opened; blank for a row written before this was recorded. */
+        val baselineSha: String = "",
     )
 
     /**
@@ -542,6 +566,10 @@ object Settings {
                     // AgentSession.DEFAULT_TITLE.
                     title = parts[4].trim(),
                     titleIsUsers = parts[5].trim() == "1",
+                    // Seventh field, added after the format was in use: a six-field row is a tab
+                    // written by an older nop, and the session it comes back as simply has no
+                    // baseline to diff against rather than being skipped as malformed.
+                    baselineSha = parts.getOrNull(6)?.trim().orEmpty(),
                 )
             }
             .toList()
@@ -563,6 +591,7 @@ object Settings {
                     flatten(agent.nativeSessionId),
                     flatten(agent.title),
                     if (agent.titleIsUsers) "1" else "0",
+                    flatten(agent.baselineSha),
                 ).joinToString("\t")
             }
             Files.writeString(f, if (body.isEmpty()) body else body + "\n")

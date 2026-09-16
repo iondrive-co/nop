@@ -41,8 +41,10 @@ class AgentSessions {
         account: Account,
         seed: String? = null,
         resumeId: String? = null,
+        /** HEAD as the caller sees it now — see [AgentSession.baselineSha]. */
+        baselineSha: String? = null,
     ): AgentSession {
-        val session = AgentSession(dir, account, seed, resumeId)
+        val session = AgentSession(dir, account, seed, resumeId, baselineSha = baselineSha)
         _sessions.add(session)
         selectedId = session.sessionId
         pickerTabVisible = true
@@ -78,6 +80,10 @@ class AgentSessions {
     fun restore(rows: List<Settings.OpenAgent>, dir: File, accounts: List<Account>) {
         if (restored) return
         restored = true
+        // Logged even when there is nothing, because "no tabs came back" has two causes that look
+        // identical on screen — a state file with no rows in it, and a restore that never ran — and
+        // only one of them is a bug.
+        Log.info("restoring ${rows.size} agent tab(s) in ${dir.name}")
         rows.forEach { row ->
             if (_sessions.any { it.sessionId == row.sessionId }) return@forEach
             val account = accounts.firstOrNull {
@@ -96,6 +102,7 @@ class AgentSessions {
                     sessionId = row.sessionId,
                     restoredTitle = row.title,
                     titleByUser = row.titleIsUsers,
+                    baselineSha = row.baselineSha.takeIf { it.isNotBlank() },
                 ),
             )
         }
@@ -111,10 +118,12 @@ class AgentSessions {
     }
 
     /**
-     * Whether the strip carries a tab for the picker when no session is running.
+     * Whether the strip carries a tab for the picker — whether or not a session is running.
      *
-     * Closing it takes it out, exactly as closing the last terminal leaves the strip with only its
-     * "+". Pressing "+" puts it back, and so does opening a session.
+     * It is drawn beside the sessions rather than only in place of them, because the picker is the
+     * one place an *earlier* session can be resumed from and the "+" starts a new one instead of
+     * opening it. Closing it takes it out, exactly as closing the last terminal leaves the strip
+     * with only its "+". Pressing "+" puts it back, and so does opening a session.
      */
     var pickerTabVisible: Boolean by mutableStateOf(true)
         private set

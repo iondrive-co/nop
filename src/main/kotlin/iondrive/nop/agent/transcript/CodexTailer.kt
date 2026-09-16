@@ -69,7 +69,12 @@ class CodexTailer(private val home: Path) : Tailer {
         for (file in candidates) {
             val meta = sessionMeta(file) ?: continue
             if (meta["cwd"].str() != wanted) continue
-            sessionId = meta["id"].str()
+            val id = meta["id"].str()
+            // A rollout another run is already following is not this run's, however new it is: two
+            // Codex tabs on one project both match "newest rollout opened here", and the one that
+            // lost would log the other's turns and take its name. See [RunContext.foreign].
+            if (id != null && run.foreign(id)) continue
+            sessionId = id
             return file
         }
         return null

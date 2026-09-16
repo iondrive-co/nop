@@ -32,6 +32,7 @@ import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.EventLog
 import iondrive.nop.agent.Login
+import iondrive.nop.agent.NativeSessions
 import iondrive.nop.agent.PastSession
 import iondrive.nop.agent.Provider
 import iondrive.nop.agent.Usage
@@ -262,12 +263,19 @@ fun App(
     // The divider between a diff's before/after halves — even by default, draggable to favour
     // whichever side is being read.
     var diffRatio by remember { mutableStateOf(savedRatios.diff ?: 0.5f) }
+    // Inside the tool region: how much of it the session pane (agents, terminals, runs) takes, with
+    // the tool panel beside it. Slightly past half by default — the pane holding a full-screen TUI
+    // is the one that suffers first when it is short of columns.
+    var sessionRatio by remember { mutableStateOf(savedRatios.session ?: 0.58f) }
     LaunchedEffect(Unit) {
-        snapshotFlow { listOf(hRatio, toolsRatio, diffRatio) }
+        snapshotFlow { listOf(hRatio, toolsRatio, diffRatio, sessionRatio) }
             .debounce(500)
             .distinctUntilChanged()
-            .collectLatest { (h, t, d) -> Settings.saveSplitRatios(h, t, d) }
+            .collectLatest { (h, t, d, s) -> Settings.saveSplitRatios(h, t, d, s) }
     }
+    // Whether the tool panel is folded away, leaving the whole region to the session.
+    var toolsCollapsed by remember { mutableStateOf(Settings.loadToolsCollapsed()) }
+    LaunchedEffect(toolsCollapsed) { Settings.saveToolsCollapsed(toolsCollapsed) }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
     // disk once and then cached for the whole session, so a file changed outside nop (another editor,
@@ -517,10 +525,39 @@ fun App(
         if (fileSearchTrigger > fileSearchBaseline) fileSearchOpen = true
     }
 
-    // Tool-panel tab selection (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we
-    // flip the tool panel to Search and forward the trigger into SearchPanel so it requests
-    // focus on its input field.
+    // The tool region holds two selections, one per side — see [ToolTabs]. This is the right-hand
+    // one (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we flip the tool panel to
+    // Search and forward the trigger into SearchPanel so it requests focus on its input field.
     var toolTab by remember(projectPath) { mutableStateOf(ToolTab.Commit) }
+
+    /**
+     * Which collection the session pane on the left is drawing, or null for the agent picker.
+     *
+     * Null rather than Agent at the start, and they are not the same thing: the picker is what an
+     * empty pane holds, and a session restored into the strip is deliberately not selected by the
+     * restore (see [AgentSessions.restore]).
+     */
+    var sessionTab by remember(projectPath) { mutableStateOf<ToolTab?>(null) }
+
+    /**
+     * Shows [tab] on the right, unfolding the tool panel if it was collapsed.
+     *
+     * Every external trigger goes through here rather than assigning the selection directly. A
+     * Ctrl+Shift+F that flipped the hidden panel to Search would look, from the user's side, like
+     * the shortcut doing nothing at all.
+     */
+    fun showTool(tab: ToolTab) {
+        toolTab = tab
+        toolsCollapsed = false
+    }
+
+    /** Shows [tab]'s collection in the session pane on the left. */
+    fun showSession(tab: ToolTab) {
+        sessionTab = tab
+    }
+
+    /** What the Diff tab dates its "session" base from — see [DiffPanel]. */
+    var diffBase by remember(projectPath) { mutableStateOf(DiffBase.Session) }
     var searchFieldFocusTrigger by remember(projectPath) { mutableStateOf(0) }
     val searchQueryState = remember(rootPath) { TextFieldState() }
     // Held out here for the same reason, and a sharper one: the panel is composed only while its
@@ -532,7 +569,7 @@ fun App(
     val findInFilesBaseline = remember(projectPath) { findInFilesTrigger }
     LaunchedEffect(findInFilesTrigger) {
         if (findInFilesTrigger > findInFilesBaseline) {
-            toolTab = ToolTab.Search
+            showTool(ToolTab.Search)
             searchFieldFocusTrigger += 1
         }
     }
@@ -590,12 +627,8 @@ fun App(
     val agentSessions = remember(projectPath, rootPath) {
         AgentSessionStore.of(root = rootPath, project = projectPath)
     }
-    // This project's earlier agent sessions, for the picker. Re-read whenever the open sessions
-    // change, which is when a session that just ended becomes one of them.
+    // This project's earlier agent sessions, for the picker.
     var pastAgentSessions by remember(projectPath) { mutableStateOf(emptyList<PastSession>()) }
-    LaunchedEffect(projectPath, agentSessions.sessions.size) {
-        pastAgentSessions = withContext(Dispatchers.IO) { EventLog.sessions(rootPath) }
-    }
     // The configured accounts. Window-level state rather than per-project: the accounts are global,
     // and reloading here is what makes a change in the settings dialog show up in the picker.
     var agentConfig by remember { mutableStateOf<AgentConfig?>(null) }
@@ -603,6 +636,26 @@ fun App(
         if (agentConfig == null) agentConfig = withContext(Dispatchers.IO) { Accounts.load() }
     }
     val agentAccounts: List<Account> = agentConfig?.accounts.orEmpty()
+    // Two sources, because "the sessions on this project" is not the same set as "the sessions nop
+    // ran on this project". nop's own event logs know the account and carry the name the user gave
+    // a tab; the vendor's store is where a `claude` run from a shell in this checkout ends up, and
+    // nothing about that session exists on nop's side at all. Read together, the picker lists the
+    // work rather than the subset of it that happened to go through nop.
+    //
+    // nop's row wins a tie, which is every session it ran: it is the same conversation either way,
+    // and only that side knows which configured account is behind it.
+    //
+    // Re-read whenever the open sessions change — which is when a session that just ended becomes
+    // one of these — and whenever the accounts do, since they are what says which stores to read.
+    LaunchedEffect(projectPath, agentSessions.sessions.size, agentAccounts) {
+        pastAgentSessions = withContext(Dispatchers.IO) {
+            val own = EventLog.sessions(rootPath)
+            val seen = own.mapNotNull { it.lastNativeSessionId }.toSet()
+            val native = NativeSessions.claude(rootPath, NativeSessions.stores(agentAccounts))
+                .filterNot { it.sessionId in seen }
+            (own + native).sortedByDescending { it.startedAt }
+        }
+    }
     // The agent tabs this project had when nop last exited, put back and then kept up to date.
     //
     // Restore first and watch afterwards, in one effect, exactly as the tab strip below does: two
@@ -1139,7 +1192,7 @@ fun App(
     val findUsagesBaseline = remember(projectPath) { findUsagesTrigger }
     LaunchedEffect(findUsagesTrigger) {
         if (findUsagesTrigger <= findUsagesBaseline) return@LaunchedEffect
-        toolTab = ToolTab.Usages
+        showTool(ToolTab.Usages)
         resolveUsagesAtCaret()
     }
 
@@ -1152,7 +1205,7 @@ fun App(
         val resolved = resolveUsagesAtCaret()
         if (resolved == null) {
             // The panel already carries the explanation; show it rather than a silent no-op.
-            toolTab = ToolTab.Usages
+            showTool(ToolTab.Usages)
             return@LaunchedEffect
         }
         val (result, active) = resolved
@@ -1268,7 +1321,7 @@ fun App(
                         onHistoryRequest = { file ->
                             if (repo != null) {
                                 historySessions.open(file, repo.rootDir.toFile())
-                                toolTab = ToolTab.History
+                                showTool(ToolTab.History)
                             }
                         },
                         onCompareWithRevision = { pendingCompare = it },
@@ -1294,13 +1347,13 @@ fun App(
                                 readOnlyNames = readOnlyNames,
                                 onRun = { launcher ->
                                     runSessions.open(TerminalSession.forLauncher(launcher, rootPath.toFile()))
-                                    toolTab = ToolTab.Run
+                                    showSession(ToolTab.Run)
                                 },
                                 onNewTerminal = {
                                     // Same thing the strip's "+" does: shells live in the terminal
                                     // tabs, so the two ways of asking for one land in one place.
                                     terminals.openShell(rootPath.toFile())
-                                    toolTab = ToolTab.Terminal
+                                    showSession(ToolTab.Terminal)
                                 },
                                 onAgentAccounts = { showAccounts = true },
                                 onAdd = { persistLaunchers(stored + it) },
@@ -1354,7 +1407,7 @@ fun App(
                                 onShowHistory = { file ->
                                     if (repo != null) {
                                         historySessions.open(file, repo.rootDir.toFile())
-                                        toolTab = ToolTab.History
+                                        showTool(ToolTab.History)
                                     }
                                 },
                             )
@@ -1368,15 +1421,20 @@ fun App(
                             ) {
                             ToolTabs(
                                 selected = toolTab,
-                                onSelect = { toolTab = it },
+                                onSelect = { showTool(it) },
+                                sessionTab = sessionTab,
+                                collapsed = toolsCollapsed,
+                                onToggleCollapsed = { toolsCollapsed = !toolsCollapsed },
+                                paneRatio = sessionRatio,
+                                onPaneRatioChange = { sessionRatio = it },
                                 terminals = terminals,
                                 onNewTerminal = {
                                     terminals.openShell(rootPath.toFile())
-                                    toolTab = ToolTab.Terminal
+                                    showSession(ToolTab.Terminal)
                                 },
                                 onSelectTerminal = { id ->
                                     terminals.select(id)
-                                    toolTab = ToolTab.Terminal
+                                    showSession(ToolTab.Terminal)
                                 },
                                 onCloseTerminal = { terminals.close(it) },
                                 agents = agentSessions,
@@ -1392,41 +1450,46 @@ fun App(
                                     }
                                     val account = last ?: agentAccounts.singleOrNull()
                                     if (account != null) {
-                                        agentSessions.open(rootPath.toFile(), account)
+                                        agentSessions.open(
+                                            rootPath.toFile(),
+                                            account,
+                                            baselineSha = repo?.headSha(),
+                                        )
                                     } else {
                                         agentSessions.showPicker()
                                     }
-                                    toolTab = ToolTab.Agent
+                                    showSession(ToolTab.Agent)
                                 },
                                 onShowPicker = {
                                     agentSessions.showPicker()
-                                    toolTab = ToolTab.Agent
+                                    showSession(ToolTab.Agent)
                                 },
                                 onSelectAgent = { id ->
                                     agentSessions.select(id)
-                                    toolTab = ToolTab.Agent
+                                    showSession(ToolTab.Agent)
                                 },
                                 onCloseAgent = { agentSessions.close(it) },
                                 onRenameAgent = { id, name -> agentSessions.rename(id, name) },
                                 runs = runSessions,
                                 onSelectRun = { id ->
                                     runSessions.select(id)
-                                    toolTab = ToolTab.Run
+                                    showSession(ToolTab.Run)
                                 },
                                 onCloseRun = { id ->
                                     runSessions.close(id)
                                     // Nothing left to show and no "+" here to make another — the ▶
-                                    // menu is. Sitting on an empty Run panel would leave the tool
-                                    // panel pointing at a tab that is no longer in the strip, so
-                                    // fall back to the one it opens on.
-                                    if (runSessions.sessions.isEmpty() && toolTab == ToolTab.Run) {
-                                        toolTab = ToolTab.Commit
+                                    // menu is. Fall back to the agents, which is what an empty
+                                    // session pane holds: with no session selected that is the
+                                    // picker, which is the one thing in the pane that can start
+                                    // something.
+                                    if (runSessions.sessions.isEmpty() && sessionTab == ToolTab.Run) {
+                                        showSession(ToolTab.Agent)
                                     }
                                 },
                                 histories = historySessions,
                                 onSelectHistory = { id ->
                                     historySessions.select(id)
-                                    toolTab = ToolTab.History
+                                    showTool(ToolTab.History)
                                 },
                                 onCloseHistory = { id ->
                                     historySessions.close(id)
@@ -1435,7 +1498,7 @@ fun App(
                                     // to the tab the panel opens on rather than sit on a tab that
                                     // is no longer in the strip.
                                     if (historySessions.sessions.isEmpty() && toolTab == ToolTab.History) {
-                                        toolTab = ToolTab.Commit
+                                        showTool(ToolTab.Commit)
                                     }
                                 },
                                 terminal = { TerminalTabPanel(terminals, terminalCards) },
@@ -1444,27 +1507,76 @@ fun App(
                                         state = agentSessions,
                                         accounts = agentAccounts,
                                         readings = agentUsage,
-                                        sessions = pastAgentSessions,
+                                        // Minus the ones the strip already holds — since agent tabs
+                                        // come back at the next start, a restored session is both a
+                                        // tab and a past session, and clicking it here would resume
+                                        // the same conversation a second time beside the first.
+                                        sessions = pastAgentSessions.filterNot { past ->
+                                            agentSessions.sessions.any { it.sessionId == past.sessionId }
+                                        },
                                         cards = terminalCards,
                                         onLaunch = { account ->
-                                            agentSessions.open(rootPath.toFile(), account)
-                                            toolTab = ToolTab.Agent
+                                            // HEAD now is what the Diff tab's "session" base means
+                                            // for this tab from here on — see AgentSession.
+                                            agentSessions.open(
+                                                rootPath.toFile(),
+                                                account,
+                                                baselineSha = repo?.headSha(),
+                                            )
+                                            showSession(ToolTab.Agent)
                                         },
                                         onReopen = { past ->
                                             // Native resume, not a replay of a summary: the vendor
                                             // still has the real session, and landing back in it is
                                             // strictly better than landing in a description of it.
-                                            val account = agentAccounts.firstOrNull { it.name == past.lastAccount }
+                                            //
+                                            // A row that named a store rather than an account is
+                                            // resumed against that store — see PastSession.home.
+                                            // Sessions done outside nop are in the default config
+                                            // directory, which is deliberately not one of the
+                                            // configured accounts, so there is nothing to look up:
+                                            // the directory *is* the answer, and launching the CLI
+                                            // against it is what lands back in the conversation.
+                                            val account = past.home
+                                                ?.let { home ->
+                                                    Account(
+                                                        name = past.lastAccount ?: NativeSessions.DEFAULT_STORE_LABEL,
+                                                        provider = Provider.Anthropic,
+                                                        home = home,
+                                                    )
+                                                }
+                                                ?: agentAccounts.firstOrNull { it.name == past.lastAccount }
                                             if (account != null) {
                                                 agentSessions.open(
                                                     dir = rootPath.toFile(),
                                                     account = account,
                                                     resumeId = past.lastNativeSessionId,
+                                                    // Where the resumed work starts from nop's side.
+                                                    // The conversation is older than this tab; the
+                                                    // changes the user is about to watch are not.
+                                                    baselineSha = repo?.headSha(),
                                                 )
-                                                toolTab = ToolTab.Agent
+                                                showSession(ToolTab.Agent)
                                             }
                                         },
                                         onSettings = { showAccounts = true },
+                                    )
+                                },
+                                diff = {
+                                    DiffPanel(
+                                        repo = repo,
+                                        status = status,
+                                        // The same counter the editor's diff tabs re-read on, so
+                                        // the panel and a diff open beside it never disagree about
+                                        // what is on disk.
+                                        refreshKey = fsRefreshKey,
+                                        base = diffBase,
+                                        onBaseChange = { diffBase = it },
+                                        // Whichever agent is on the left, so "session" means the
+                                        // one the user is watching rather than the first one opened.
+                                        sessionBaselineSha = agentSessions.selected?.baselineSha,
+                                        splitRatio = diffRatio,
+                                        onSplitRatioChange = { diffRatio = it },
                                     )
                                 },
                                 commit = {
@@ -1746,7 +1858,7 @@ fun App(
                     // that didn't take.
                     showAccounts = false
                     terminals.open(Login.session(account))
-                    toolTab = ToolTab.Terminal
+                    showSession(ToolTab.Terminal)
                 },
                 onClose = { showAccounts = false },
             )

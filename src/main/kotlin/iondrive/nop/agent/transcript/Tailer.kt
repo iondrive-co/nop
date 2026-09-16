@@ -23,6 +23,17 @@ data class RunContext(
     val nativeSessionId: String?,
     /** Epoch millis the CLI was spawned. Used to ignore transcripts written before this run. */
     val startedAt: Long,
+    /**
+     * Whether a session id belongs to a *different* run nop is following — another agent tab on the
+     * same project, whose transcript sits in the same directory as this one's and is newer.
+     *
+     * A tailer asks before it adopts a file it did not open by name. Without it the two "find the
+     * newest one" rules below (`ClaudeTailer.switched`, `CodexTailer.locate`) cannot tell a tab that
+     * was opened a minute ago from a `/clear` typed inside this one. See [LiveTranscripts].
+     *
+     * Defaults to "nothing is foreign", which is what a test with one run wants.
+     */
+    val foreign: (String) -> Boolean = { false },
 )
 
 /**

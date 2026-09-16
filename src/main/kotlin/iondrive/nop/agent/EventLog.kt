@@ -141,6 +141,17 @@ data class PastSession(
     val lastProvider: String?,
     val lastAccount: String?,
     val lastNativeSessionId: String?,
+    /**
+     * The credential directory the session's transcript lives in, for a row that came from a
+     * vendor's own store rather than from one of nop's event logs — see [NativeSessions].
+     *
+     * Null means "look the account up by name", which is every session nop ran itself. It is set
+     * for the sessions nop did *not* run, because those name a store rather than an account: work
+     * done in a plain `claude` at a shell lands in the default config directory, which is usually
+     * not one of the accounts the user has configured, and resuming it means launching the CLI
+     * against that directory rather than picking a configured account to spend.
+     */
+    val home: String? = null,
 )
 
 /**

@@ -53,13 +53,22 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
             }
             return null
         }
-        return newestSince(dir, run.startedAt)?.also { currentSessionId = it.sessionId() }
+        // Only reached when nop did not mint an id, which it always does for Claude — kept honest
+        // anyway, so this never adopts the transcript of a tab opened beside it.
+        return newestSince(dir, run.startedAt, run.foreign)?.also { currentSessionId = it.sessionId() }
     }
 
     /**
      * A transcript that appeared after this one and is being written to — what a `/clear` inside
      * the TUI produces. Only a file newer than the one being followed counts, so the ordinary case
      * (the CLI appending to its own transcript) never trips it.
+     *
+     * A session another run is following is never it. Claude files every session in one project
+     * under one directory, so a second agent tab on the same project writes a file that matches this
+     * rule exactly as well as a `/clear` does — and the older tab would follow it, start logging
+     * someone else's turns, and take the name the CLI gave that session. With several tabs open they
+     * all chased the newest and ended up sharing its title. Only nop can tell the two apart, because
+     * only nop knows which sessions it started: see [RunContext.foreign].
      */
     override fun switched(run: RunContext, current: Path): Path? {
         val dir = projectDir(run)
@@ -68,6 +77,7 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
             Files.list(dir).use { stream ->
                 stream.filter { it.fileName.toString().endsWith(".jsonl") && it != current }
                     .filter { modified(it) > currentStamp && modified(it) >= run.startedAt }
+                    .filter { !run.foreign(it.sessionId()) }
                     .max(compareBy { modified(it) })
                     .orElse(null)
             }
@@ -206,9 +216,10 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
     private fun projectDir(run: RunContext): Path =
         configDir.resolve("projects").resolve(slug(run.projectDir))
 
-    private fun newestSince(dir: Path, since: Long): Path? = runCatching {
+    private fun newestSince(dir: Path, since: Long, foreign: (String) -> Boolean): Path? = runCatching {
         Files.list(dir).use { stream ->
             stream.filter { it.fileName.toString().endsWith(".jsonl") && modified(it) >= since }
+                .filter { !foreign(it.sessionId()) }
                 .max(compareBy { modified(it) })
                 .orElse(null)
         }

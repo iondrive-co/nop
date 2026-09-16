@@ -222,6 +222,42 @@ class ClaudeTailerTest {
         assertEquals("second", tailer.nativeSessionId(), "the new id is what a native reopen resumes")
     }
 
+    /**
+     * The other thing that puts a newer transcript in this directory: a second agent tab on the same
+     * project. It looks identical to a `/clear` on disk — a file that appeared after this run
+     * started and is being written to — and following it made the older tab log the newer session's
+     * turns and, because a tab is named from the transcript it follows, wear its title too. Several
+     * tabs open meant every one of them ending up with the newest one's name.
+     */
+    @Test
+    fun `a transcript another run is following is not mistaken for a fresh start`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val startedAt = System.currentTimeMillis()
+        val mine = dir.resolve("mine.jsonl")
+        Files.writeString(mine, "{}\n")
+        Files.setLastModifiedTime(mine, FileTime.fromMillis(startedAt))
+
+        // The tab next door, opened a moment later on the same project.
+        val neighbour = dir.resolve("neighbour.jsonl")
+        Files.writeString(neighbour, "{}\n")
+        Files.setLastModifiedTime(neighbour, FileTime.fromMillis(startedAt + 5_000))
+
+        val tailer = ClaudeTailer(config)
+        val run = RunContext(project, config, "mine", startedAt, foreign = { it == "neighbour" })
+        assertEquals(mine, tailer.locate(run))
+
+        assertNull(tailer.switched(run, mine), "that file belongs to another tab, not to a /clear")
+        assertEquals("mine", tailer.nativeSessionId(), "and this run is still its own session")
+
+        // A session nop is *not* following is still a fresh start, which is the case above.
+        val cleared = dir.resolve("cleared.jsonl")
+        Files.writeString(cleared, "{}\n")
+        Files.setLastModifiedTime(cleared, FileTime.fromMillis(startedAt + 9_000))
+        assertEquals(cleared, tailer.switched(run, mine))
+    }
+
     @Test
     fun `a transcript left over from before this run is not adopted`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").also { Files.createDirectories(it) }
