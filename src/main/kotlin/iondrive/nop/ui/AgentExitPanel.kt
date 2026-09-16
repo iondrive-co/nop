@@ -42,6 +42,7 @@ fun AgentExitPanel(
     readings: Map<String, UsageReading>,
     fromScreenOnly: Boolean,
     onReopen: () -> Unit,
+    onStartFresh: () -> Unit,
     onSwitch: (Account) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -86,7 +87,21 @@ fun AgentExitPanel(
         }
 
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            DefaultButton(onClick = onReopen) { Text("Reopen ${session.account.name}") }
+            // Two ways back onto the same account, because they are different things and only one
+            // of them used to be here. "Resume" lands in the conversation that just ended; "New
+            // session" starts the CLI as a fresh shell would. A session that ended *because* it was
+            // stuck, or because its work was done, wants the second one, and offering only the
+            // first made switching provider the sole way to get it.
+            //
+            // Resuming needs the vendor's own session id, and a run whose transcript was never
+            // located hasn't got one — so with nothing to resume, the fresh start is the only
+            // honest offer and takes the primary button.
+            if (session.run.nativeSessionId != null) {
+                DefaultButton(onClick = onReopen) { Text("Resume ${session.account.name}") }
+                OutlinedButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
+            } else {
+                DefaultButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
+            }
             others.forEach { account ->
                 key(account.name) {
                     OutlinedButton(onClick = { onSwitch(account) }) {

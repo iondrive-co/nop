@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
+import iondrive.nop.Settings
 import iondrive.nop.agent.transcript.ClaudeTailer
 import iondrive.nop.agent.transcript.CodexTailer
 import iondrive.nop.agent.transcript.RunContext
@@ -35,9 +36,14 @@ class AgentRun(
     /**
      * The native session id, once it is known. Claude's is minted before the spawn; Codex's only
      * exists after its first rollout line, so the tailer fills this in when it finds it.
+     *
+     * Compose state rather than a plain `@Volatile`, and written from the tailer thread the way
+     * [AgentSession.endedAt] is written from the watcher thread. Two things read it and both are
+     * wrong a moment after the spawn without it: the post-exit panel, which can only offer to resume
+     * a session the vendor has an id for, and the state file, whose row for a Codex session cannot
+     * be written until the CLI has named it.
      */
-    @Volatile
-    var nativeSessionId: String? = command.nativeSessionId
+    var nativeSessionId: String? by mutableStateOf(command.nativeSessionId)
 
     /** Why the run ended, set when it does. Null while it is still going. */
     @Volatile
@@ -69,9 +75,19 @@ class AgentSession(
     account: Account,
     seed: String? = null,
     resumeId: String? = null,
+    /**
+     * nop's own id for the session, distinct from any provider's. Names the event log file.
+     *
+     * Given rather than minted when a tab is being put back from the state file: the log the session
+     * already has is the one it should carry on writing, so a restart continues one piece of work
+     * rather than starting a second session that happens to resume the same conversation.
+     */
+    val sessionId: String = UUID.randomUUID().toString(),
+    /** What the tab was called when it was written down. Null for a session nobody has named yet. */
+    restoredTitle: String? = null,
+    /** Whether [restoredTitle] is a name the user typed. See [titleIsUsers]. */
+    titleByUser: Boolean = false,
 ) : TerminalTab {
-    /** nop's own id for the session, distinct from any provider's. Names the event log file. */
-    val sessionId: String = UUID.randomUUID().toString()
 
     /**
      * What happened in this session, in a vocabulary neither vendor uses — which is what makes a
@@ -134,17 +150,19 @@ class AgentSession(
      * tab is doing — while the settings dialog and the picker both already say it.
      *
      * Two better names replace it. The CLI writes a title into its own transcript a turn or two in
-     * ("AWS support"), and the user can right-click the tab and say so themselves.
+     * ("AWS support"), and the user can right-click the tab and say so themselves. A tab put back
+     * from the state file starts under whichever of those it had earned by the time nop exited.
      */
-    var title: String by mutableStateOf(DEFAULT_TITLE)
+    var title: String by mutableStateOf(restoredTitle?.takeIf { it.isNotBlank() } ?: DEFAULT_TITLE)
         private set
 
     /**
      * Whether the user named this tab themselves. Once they have, nothing else writes to [title] —
      * not a switch, not the CLI's own idea of what the session is about. A name you typed being
-     * quietly replaced a minute later is worse than no rename at all.
+     * quietly replaced a minute later is worse than no rename at all — including a minute later on
+     * the other side of a restart, which is why it is written to the state file beside the name.
      */
-    private var titleIsUsers by mutableStateOf(false)
+    private var titleIsUsers by mutableStateOf(titleByUser)
 
     /** Renames the tab. A blank name is ignored: the user who cleared the field meant to cancel. */
     fun rename(name: String) {
@@ -246,6 +264,42 @@ class AgentSession(
     /** Starts the same account again in this tab, resuming the vendor's own session where it left off. */
     fun reopen(resumeId: String? = run.nativeSessionId) {
         switchTo(account = run.account, resumeId = resumeId, reason = EndReason.Switched)
+    }
+
+    /**
+     * Starts the same account again in this tab with nothing carried over: no resume, no handoff —
+     * the CLI as it would come up from a fresh shell.
+     *
+     * The sibling [reopen] needs, and for a while was the only thing offered. Resuming is usually
+     * right, but not always: a session can end because the model has wedged itself, or because the
+     * work in it is finished and the next piece is unrelated, and in both of those landing back in
+     * the old conversation is the one thing the user did not want. Switching provider was the only
+     * escape, which made "start again on the same account" the one obvious choice nop couldn't make.
+     */
+    fun startFresh() {
+        switchTo(account = run.account, resumeId = null, reason = EndReason.Switched)
+    }
+
+    /**
+     * This session as a row for the state file, or null for one that should not come back.
+     *
+     * Two kinds decline. A session whose run has [ended] is one the user quit: the tab is still in
+     * the strip so its last frame can be read, but starting nop again is not a reason to start that
+     * CLI again — the picker lists it among the past sessions, which is where a deliberate return to
+     * it belongs. And a session with no [AgentRun.nativeSessionId] is one nop has no way back into;
+     * restoring it would be a tab in the right place with the wrong conversation behind it.
+     */
+    fun asOpenAgent(): Settings.OpenAgent? {
+        if (ended) return null
+        val native = run.nativeSessionId ?: return null
+        return Settings.OpenAgent(
+            sessionId = sessionId,
+            provider = account.provider.id,
+            account = account.name,
+            nativeSessionId = native,
+            title = title,
+            titleIsUsers = titleIsUsers,
+        )
     }
 
     /** Kills the PTY and everything under it. Idempotent; called when the tab or project closes. */

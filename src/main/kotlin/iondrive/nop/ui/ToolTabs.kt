@@ -89,16 +89,35 @@ enum class ToolTab(val label: String) {
     /** Rendered markdown for whichever .md file the editor is showing. */
     Preview("Preview"),
 
-    /** The launcher runs. */
+    /**
+     * The launcher runs. Like [Terminal] and [Agent] this is not one tab: each run started from the
+     * ▶ menu draws its own, and [RunSessions.selectedId] says which of them is on screen.
+     *
+     * No "+" beside them, unlike the other two. A run is a *named script*, so the thing that makes
+     * one is the launcher menu, which is where the names are; a "+" here would be a second entry
+     * point that still had to open that menu to ask which script it meant.
+     */
     Run("Run"),
+
+    /**
+     * The git logs. Like [Terminal], [Agent] and [Run] this is not one tab: each path whose log is
+     * open draws its own, and [HistorySessions.selectedId] says which of them is on screen.
+     *
+     * No "+" beside them, for the same reason the runs have none. A log is *of* a path, so the
+     * thing that opens one is the file — the tree's right-click menu, or the editor's — and a "+"
+     * here would be a second entry point that still had to ask which path it meant.
+     */
+    History("History"),
 }
 
 /**
- * The tabs with a fixed label. Terminals and agent sessions are both absent: they come and go, each
- * draws its own tab, and each has a "+" of its own to make another.
+ * The tabs with a fixed label. Terminals, agent sessions, launcher runs and git logs are all
+ * absent: they come and go, and each draws its own tab.
  */
 private val FIXED_TOOL_TABS: List<ToolTab> =
-    ToolTab.entries.filterNot { it == ToolTab.Terminal || it == ToolTab.Agent }
+    ToolTab.entries.filterNot {
+        it == ToolTab.Terminal || it == ToolTab.Agent || it == ToolTab.Run || it == ToolTab.History
+    }
 
 /** Caps how wide one tab may grow, so a long terminal name can't push the rest off the strip. */
 private val TAB_MAX_WIDTH = 160.dp
@@ -122,13 +141,27 @@ private const val TERMINAL_GLYPH = "⌨"
 private const val AGENT_GLYPH = "✦"
 
 /**
+ * Marks a launcher run's tab. Drawn here rather than kept in the session's name for the same reason
+ * the other two are — and for one more: a run tab restored at the next start is rebuilt from the
+ * launcher's own name, so a glyph baked into the title would come back doubled.
+ */
+private const val RUN_GLYPH = "▶"
+
+/**
+ * Marks a git log's tab. Drawn with the label like the other three, which here also keeps the tab
+ * reading as the file it is a log of: the label is the plain file name, so two logs of `build.gradle.kts`
+ * in different modules are told apart by position rather than by a decorated name.
+ */
+private const val HISTORY_GLYPH = "⎇"
+
+/**
  * The tabs in the tool panel on the window's right edge, and the panel under them.
  *
- * The strip is in three parts. The terminals come first — a shell at the project root, plus one for
- * every press of the "+" that follows them — then any open agent sessions; each of those is
- * closeable, because closing one is what kills the process behind it. After them come the fixed
- * tabs (Agent, Commit, Search, …), which are part of the chrome rather than a user-managed
- * collection and so have no ×.
+ * The strip is in two halves. The user's own collections come first — the terminals (a shell at the
+ * project root, plus one for every press of the "+" that follows them), then the agent sessions,
+ * then the launcher runs, then the git logs — and each of those is closeable, because each was
+ * asked for one at a time and the × is how you take it back. After them come the fixed tabs
+ * (Commit, Search, …), which are part of the chrome rather than a collection and so have no ×.
  *
  * Selection state lives in [App] so external triggers can flip to a tab without poking the panel —
  * Ctrl+Shift+F for Search, Alt+F7 for Usages, selecting a markdown file for Preview, and starting a
@@ -153,6 +186,12 @@ fun ToolTabs(
     onSelectAgent: (String) -> Unit,
     onCloseAgent: (String) -> Unit,
     onRenameAgent: (String, String) -> Unit,
+    runs: RunSessions,
+    onSelectRun: (String) -> Unit,
+    onCloseRun: (String) -> Unit,
+    histories: HistorySessions,
+    onSelectHistory: (String) -> Unit,
+    onCloseHistory: (String) -> Unit,
     terminal: @Composable () -> Unit,
     agent: @Composable () -> Unit,
     commit: @Composable () -> Unit,
@@ -161,6 +200,7 @@ fun ToolTabs(
     stash: @Composable () -> Unit,
     preview: @Composable () -> Unit,
     run: @Composable () -> Unit,
+    history: @Composable () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         ToolTabStrip(
@@ -176,6 +216,12 @@ fun ToolTabs(
             onSelectAgent = onSelectAgent,
             onCloseAgent = onCloseAgent,
             onRenameAgent = onRenameAgent,
+            runs = runs,
+            onSelectRun = onSelectRun,
+            onCloseRun = onCloseRun,
+            histories = histories,
+            onSelectHistory = onSelectHistory,
+            onCloseHistory = onCloseHistory,
         )
         Box(modifier = Modifier.fillMaxSize()) {
             when (selected) {
@@ -187,13 +233,15 @@ fun ToolTabs(
                 ToolTab.Stash -> stash()
                 ToolTab.Preview -> preview()
                 ToolTab.Run -> run()
+                ToolTab.History -> history()
             }
         }
     }
 }
 
 /**
- * The strip itself: terminals, the "+", then the fixed tabs, scrolling sideways under two arrows.
+ * The strip itself: terminals, the "+", the agents, the runs, the git logs, then the fixed tabs,
+ * scrolling sideways under two arrows.
  *
  * Drawn here rather than with Jewel's `TabStrip` for the same reason the editor bar is (see
  * [TabStripBar]): this strip is not a flat list of tabs. It has a button wedged between its two
@@ -216,6 +264,12 @@ private fun ToolTabStrip(
     onSelectAgent: (String) -> Unit,
     onCloseAgent: (String) -> Unit,
     onRenameAgent: (String, String) -> Unit,
+    runs: RunSessions,
+    onSelectRun: (String) -> Unit,
+    onCloseRun: (String) -> Unit,
+    histories: HistorySessions,
+    onSelectHistory: (String) -> Unit,
+    onCloseHistory: (String) -> Unit,
 ) {
     val style = JewelTheme.defaultTabStyle
     val isDark = JewelTheme.isDark
@@ -352,6 +406,70 @@ private fun ToolTabStrip(
                 onClick = onNewAgent,
                 modifier = Modifier.bringIntoViewRequester(agentPlus),
             )
+            // The launcher runs close the live-process half of the strip. They arrive from the ▶
+            // menu rather than from a "+" here, so there is no button after them — the fixed tabs
+            // follow straight on.
+            runs.sessions.forEach { run ->
+                key(run.id) {
+                    if (run.id == renamingId) {
+                        TabRenameField(
+                            initial = run.title,
+                            style = style,
+                            onCommit = { name ->
+                                runs.rename(run.id, name)
+                                renamingId = null
+                            },
+                            onCancel = { renamingId = null },
+                        )
+                    } else {
+                        // Starting a script selects its tab, and the ▶ menu that started it is at
+                        // the other end of the window — so the tab has to come to the user rather
+                        // than wait behind the scroll arrow for them to go and find it.
+                        val requester = remember { BringIntoViewRequester() }
+                        val isSelected = selected == ToolTab.Run && run.id == runs.selectedId
+                        // Not [RevealWhenSelected], which sits out the first pass so a project
+                        // doesn't open scrolled along to whatever was selected when it was laid
+                        // out. A run tab's first pass *is* the moment the user started it, and a
+                        // restored one is never the selected tab, so there is nothing to sit out.
+                        LaunchedEffect(isSelected) { if (isSelected) requester.bringIntoView() }
+                        ToolStripTab(
+                            label = "$RUN_GLYPH ${run.title}",
+                            selected = isSelected,
+                            isDark = isDark,
+                            style = style,
+                            onClick = { onSelectRun(run.id) },
+                            onClose = { onCloseRun(run.id) },
+                            onRename = { renamingId = run.id },
+                            modifier = Modifier.bringIntoViewRequester(requester),
+                        )
+                    }
+                }
+            }
+            // The git logs close the user's half of the strip. Like the runs they arrive from
+            // somewhere else — the tree's right-click menu, or the editor's — so there is no "+"
+            // after them either, and the fixed tabs follow straight on.
+            histories.sessions.forEach { log ->
+                key(log.id) {
+                    // Brought into view on selection for the same reason a run tab is: the menu
+                    // that opened it is at the other end of the window, so the tab has to come to
+                    // the user rather than wait behind a scroll arrow to be found.
+                    val requester = remember { BringIntoViewRequester() }
+                    val isSelected = selected == ToolTab.History && log.id == histories.selectedId
+                    LaunchedEffect(isSelected) { if (isSelected) requester.bringIntoView() }
+                    ToolStripTab(
+                        label = "$HISTORY_GLYPH ${log.title}",
+                        selected = isSelected,
+                        isDark = isDark,
+                        style = style,
+                        onClick = { onSelectHistory(log.id) },
+                        onClose = { onCloseHistory(log.id) },
+                        // No rename: the label is the path the log is *of*, and a log the user has
+                        // called something else is one they can no longer tell apart from the next.
+                        onRename = null,
+                        modifier = Modifier.bringIntoViewRequester(requester),
+                    )
+                }
+            }
             FIXED_TOOL_TABS.forEach { tab ->
                 key(tab) {
                     val requester = remember { BringIntoViewRequester() }

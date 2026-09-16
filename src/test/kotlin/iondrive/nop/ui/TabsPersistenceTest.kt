@@ -30,15 +30,14 @@ class TabsPersistenceTest {
     private fun tabRows(rows: List<SavedTab>) = rows.filter { it.kind != "group" }
 
     @Test
-    fun `save then load round-trips a FileView and a History tab`(@TempDir tmp: Path) {
+    fun `save then load round-trips a FileView and a LocalHistory tab`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
-        val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
         val viewed = tmp.resolve("a.kt").toFile().apply { writeText("") }
         val historyTarget = tmp.resolve("b.kt").toFile().apply { writeText("") }
 
         val tabs = listOf<Tab>(
             Tab.FileView(viewed),
-            Tab.History(historyTarget, repo),
+            Tab.LocalHistory(historyTarget),
         )
         TabsPersistence.save(target, snapshotOf(tabs, selectedId = tabs[1].id))
 
@@ -47,7 +46,7 @@ class TabsPersistenceTest {
         assertEquals("file", loaded[0].kind)
         assertEquals(viewed.absolutePath, loaded[0].path)
         assertEquals(false, loaded[0].selected)
-        assertEquals("history", loaded[1].kind)
+        assertEquals("localhistory", loaded[1].kind)
         assertEquals(true, loaded[1].selected)
     }
 
@@ -322,20 +321,20 @@ class TabsPersistenceTest {
     }
 
     @Test
-    fun `history tabs need a repoRoot to be restored`(@TempDir tmp: Path) {
+    fun `history rows written by an older build are skipped`(@TempDir tmp: Path) {
         val target = tmp.resolve("tabs.tsv")
         val file = tmp.resolve("x.kt").toFile().apply { writeText("") }
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
-        TabsPersistence.save(target, snapshotOf(listOf(Tab.History(file, repo))))
+        // The shape an older build wrote a git-log tab in. The log lives in the tool panel now and
+        // is persisted beside the other tool tabs, so the row names no tab in this strip — with or
+        // without a repo to rebuild it against — and must not resurrect one.
+        Files.writeString(target, "history\t${file.absolutePath}\t1\n")
 
-        // Without a repoRoot, the History tab can't be reconstructed; it should be silently dropped.
-        val stateNoRoot = TabsState()
-        TabsPersistence.restore(stateNoRoot, TabsPersistence.load(target), repoRoot = null)
-        assertTrue(stateNoRoot.tabs.isEmpty())
-
-        val stateWithRoot = TabsState()
-        TabsPersistence.restore(stateWithRoot, TabsPersistence.load(target), repoRoot = repo)
-        assertEquals(1, stateWithRoot.tabs.size)
+        for (root in listOf(null, repo)) {
+            val state = TabsState()
+            TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = root)
+            assertTrue(state.tabs.isEmpty(), "history rows belong to the tool panel now")
+        }
     }
 
     @Test

@@ -34,6 +34,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.git.ProjectGitPoller
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.ipc.SingleInstance
@@ -348,6 +349,20 @@ fun main(args: Array<String>) {
                 projectPoller.close()
                 repoWatcher.close()
             }
+        }
+        // The agent sessions are the one thing that outlives the window showing it (see
+        // AgentSessionStore), so they are also the one thing nop has to put down on the way out: a
+        // vendor CLI is a real process under a PTY, and quitting with one per tab still running would
+        // leave them going with nothing able to reach them.
+        DisposableEffect(Unit) { onDispose { AgentSessionStore.disposeAll() } }
+        // And the sessions of a project no window has a tab on any more. Parking a window is not
+        // that: [Workspaces.allProjects] counts a parked window's tabs, so an agent carries on
+        // working while the window it was started in is put away, and is still there when it comes
+        // back. Closing the last tab on a project is — that is the user saying they are done with it.
+        LaunchedEffect(Unit) {
+            snapshotFlow { Workspaces.allProjects(workspaces) }
+                .distinctUntilChanged()
+                .collect { projects -> AgentSessionStore.retain(projects) }
         }
         // collectLatest restarts the loop when tabs open or close and when a window changes what it
         // is showing — the poller needs to know which projects to leave alone — dropping stale flags

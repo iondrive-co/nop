@@ -529,4 +529,192 @@ class SettingsTest {
         assertEquals(windows, Settings.loadWorkspaces())
         assertEquals(listOf(a.toAbsolutePath().normalize()), Settings.loadRecentProjects())
     }
+
+    // The Run tabs a project had open. Stored per project under the config root, so every test
+    // below points configRoot at a temp directory and the real one is never touched.
+
+    @Test
+    fun `loadOpenRuns returns empty for a project that has never had one`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        assertTrue(Settings.loadOpenRuns(tmp.resolve("project")).isEmpty())
+    }
+
+    @Test
+    fun `open runs round-trip in strip order, carrying a renamed tab's name`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val runs = listOf(
+            Settings.OpenRun("release", "./scripts/release.sh", "release"),
+            Settings.OpenRun("test", "./gradlew test", "the slow one"),
+        )
+        Settings.saveOpenRuns(project, runs)
+        assertEquals(runs, Settings.loadOpenRuns(project))
+    }
+
+    /** Two checkouts with the same directory name must not read each other's tabs. */
+    @Test
+    fun `open runs are kept per project`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val one = tmp.resolve("one/frontend")
+        val two = tmp.resolve("two/frontend")
+        Settings.saveOpenRuns(one, listOf(Settings.OpenRun("dev", "npm run dev", "dev")))
+
+        assertEquals(1, Settings.loadOpenRuns(one).size)
+        assertTrue(Settings.loadOpenRuns(two).isEmpty())
+    }
+
+    @Test
+    fun `saving an empty list clears the project's runs`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        Settings.saveOpenRuns(project, listOf(Settings.OpenRun("dev", "npm run dev", "dev")))
+        Settings.saveOpenRuns(project, emptyList())
+        assertTrue(Settings.loadOpenRuns(project).isEmpty())
+    }
+
+    /**
+     * A tab or newline in a name would split the row it is written on, so both are flattened to a
+     * space rather than allowed to turn one run into two — or into none.
+     */
+    @Test
+    fun `a title carrying a separator survives as one row`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        Settings.saveOpenRuns(project, listOf(Settings.OpenRun("dev", "npm run dev", "a\tb\nc")))
+
+        assertEquals(
+            listOf(Settings.OpenRun("dev", "npm run dev", "a b c")),
+            Settings.loadOpenRuns(project),
+        )
+    }
+
+    /** A half-written file must cost the rows it truncated and nothing more. */
+    @Test
+    fun `a malformed row is skipped rather than fatal`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val file = Settings.projectDataDir(project).resolve("runs")
+        Files.createDirectories(file.parent)
+        Files.writeString(file, "dev\tnpm run dev\tdev\ntruncated\n\ttest\n")
+
+        assertEquals(
+            listOf(Settings.OpenRun("dev", "npm run dev", "dev")),
+            Settings.loadOpenRuns(project),
+        )
+    }
+
+    // The agent tabs a project had open. Stored per project beside the runs above.
+
+    @Test
+    fun `loadOpenAgents returns empty for a project that has never had one`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        assertTrue(Settings.loadOpenAgents(tmp.resolve("project")).isEmpty())
+    }
+
+    @Test
+    fun `open agents round-trip in strip order, keeping who named the tab`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val agents = listOf(
+            Settings.OpenAgent(
+                sessionId = "nop-1",
+                provider = "anthropic",
+                account = "claude-main",
+                nativeSessionId = "11111111-2222-3333-4444-555555555555",
+                title = "parser rewrite",
+                titleIsUsers = true,
+            ),
+            Settings.OpenAgent(
+                sessionId = "nop-2",
+                provider = "openai",
+                account = "codex",
+                nativeSessionId = "rollout-2026",
+                title = "AWS support",
+                titleIsUsers = false,
+            ),
+        )
+        Settings.saveOpenAgents(project, agents)
+        assertEquals(agents, Settings.loadOpenAgents(project))
+    }
+
+    /** Two checkouts with the same directory name must not resume each other's conversations. */
+    @Test
+    fun `open agents are kept per project`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val one = tmp.resolve("one/frontend")
+        val two = tmp.resolve("two/frontend")
+        Settings.saveOpenAgents(one, listOf(agentRow()))
+
+        assertEquals(1, Settings.loadOpenAgents(one).size)
+        assertTrue(Settings.loadOpenAgents(two).isEmpty())
+    }
+
+    @Test
+    fun `saving an empty list clears the project's agents`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        Settings.saveOpenAgents(project, listOf(agentRow()))
+        Settings.saveOpenAgents(project, emptyList())
+        assertTrue(Settings.loadOpenAgents(project).isEmpty())
+    }
+
+    /** A tab or a newline in a name would split the row it is written on. */
+    @Test
+    fun `an agent title carrying a separator survives as one row`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        Settings.saveOpenAgents(project, listOf(agentRow(title = "a\tb\nc")))
+
+        assertEquals(listOf(agentRow(title = "a b c")), Settings.loadOpenAgents(project))
+    }
+
+    /**
+     * The three fields a row cannot be guessed at without: nop's own id names the log to carry on
+     * writing, the account says whose CLI to run, and the vendor's id is the conversation itself.
+     */
+    @Test
+    fun `a row missing an id, an account or a conversation is skipped`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val file = Settings.projectDataDir(project).resolve("agents")
+        Files.createDirectories(file.parent)
+        Files.writeString(
+            file,
+            """
+            |	anthropic	claude-main	vendor-1	no id	0
+            |nop-2	anthropic		vendor-2	no account	0
+            |nop-3	anthropic	claude-main		no conversation	0
+            |nop-4	anthropic	claude-main	vendor-4	fine	0
+            |truncated
+            """.trimMargin() + "\n",
+        )
+
+        assertEquals(
+            listOf(agentRow(sessionId = "nop-4", nativeSessionId = "vendor-4", title = "fine")),
+            Settings.loadOpenAgents(project),
+        )
+    }
+
+    /** A tab nop never found a name for is written blank, and stays blank for the session to name. */
+    @Test
+    fun `a nameless agent tab round-trips as a nameless one`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        Settings.saveOpenAgents(project, listOf(agentRow(title = "")))
+
+        assertEquals("", Settings.loadOpenAgents(project).single().title)
+    }
+
+    private fun agentRow(
+        sessionId: String = "nop-1",
+        nativeSessionId: String = "vendor-1",
+        title: String = "parser rewrite",
+    ) = Settings.OpenAgent(
+        sessionId = sessionId,
+        provider = "anthropic",
+        account = "claude-main",
+        nativeSessionId = nativeSessionId,
+        title = title,
+        titleIsUsers = false,
+    )
 }

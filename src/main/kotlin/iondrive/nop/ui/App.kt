@@ -29,7 +29,7 @@ import iondrive.nop.Settings
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentConfig
 import iondrive.nop.agent.Accounts
-import iondrive.nop.agent.AgentSessions
+import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.EventLog
 import iondrive.nop.agent.Login
 import iondrive.nop.agent.PastSession
@@ -542,8 +542,39 @@ fun App(
     // so every run is killed when this project's composition goes away, which is a project-tab
     // switch or a closed window. Without that last part a switch would leave the PTY, its children
     // and whatever ports they hold alive with nothing left on screen able to reach them.
-    val runSessions = remember(projectPath) { RunSessions() }
+    val runSessions = remember(projectPath) {
+        // The tabs the project had last time come back with it, not running — see
+        // RunSessions.restore. Done here rather than in an effect so the strip is right on its
+        // first frame instead of growing tabs a moment after the window opens.
+        RunSessions().apply { restore(Settings.loadOpenRuns(rootPath), rootPath.toFile()) }
+    }
     DisposableEffect(runSessions) { onDispose { runSessions.disposeAll() } }
+    // Written back whenever the strip changes — a run started, closed or renamed. Keyed on the
+    // rows themselves rather than on a count, so a rename is saved too; recomputing the list is
+    // what reads the snapshot state that makes this effect re-run at all.
+    val openRunRows = runSessions.sessions.mapNotNull { it.asOpenRun() }
+    LaunchedEffect(rootPath, openRunRows) {
+        withContext(Dispatchers.IO) { Settings.saveOpenRuns(rootPath, openRunRows) }
+    }
+    // The git logs behind the History tabs. Owned here for the same reason as the runs: the tool
+    // panel composes one tab at a time, so a log remembered inside the panel would lose its scroll
+    // and its expanded commit every time the user opened one of the diffs it sent them to.
+    val historySessions = remember(projectPath) {
+        // The logs the project had last time come back with it, nothing selected — see
+        // HistorySessions.restore. Done here rather than in an effect so the strip is right on its
+        // first frame instead of growing tabs a moment after the window opens. A project with no
+        // repo restores none: there is no log to read without one.
+        HistorySessions().apply {
+            val root = repo?.rootDir?.toFile()
+            if (root != null) restore(Settings.loadOpenHistories(rootPath).map(::File), root)
+        }
+    }
+    // Written back whenever the strip changes — a log opened or closed. Keyed on the paths, which
+    // is also what reads the snapshot state that makes this effect re-run.
+    val openHistoryPaths = historySessions.sessions.map { it.file.absolutePath }
+    LaunchedEffect(rootPath, openHistoryPaths) {
+        withContext(Dispatchers.IO) { Settings.saveOpenHistories(rootPath, openHistoryPaths) }
+    }
     // The shells behind the terminal tabs at the head of the tool strip. A separate list from the
     // launcher runs above — those belong to the Run tab and come and go with the scripts that
     // started them, while these are the project's own terminals. The first one is opened here so
@@ -551,12 +582,14 @@ fun App(
     // spawns no PTY until the panel asks it for a widget.
     val terminals = remember(projectPath) { RunSessions().apply { openShell(rootPath.toFile()) } }
     DisposableEffect(terminals) { onDispose { terminals.disposeAll() } }
-    // The vendor agent sessions behind the Agent tab. Owned here for the same reasons as the
-    // terminals — a session must survive a look at the commit list, and must die with the project
-    // rather than leave a CLI running against a checkout nothing on screen can reach. Nothing is
-    // opened eagerly: a vendor CLI is a real account and real quota, so it starts when asked for.
-    val agentSessions = remember(projectPath) { AgentSessions() }
-    DisposableEffect(agentSessions) { onDispose { agentSessions.disposeAll() } }
+    // The vendor agent sessions behind the Agent tab. The one collection on this screen that is not
+    // owned here: it comes from a store that lives as long as nop does, because a composition is the
+    // wrong lifetime for a model half-way through a refactor — looking at another project, or moving
+    // this tab to another window, tears this composition down and used to take every running agent
+    // with it. See AgentSessionStore for what ends a session now (its tab, its project, or nop).
+    val agentSessions = remember(projectPath, rootPath) {
+        AgentSessionStore.of(root = rootPath, project = projectPath)
+    }
     // This project's earlier agent sessions, for the picker. Re-read whenever the open sessions
     // change, which is when a session that just ended becomes one of them.
     var pastAgentSessions by remember(projectPath) { mutableStateOf(emptyList<PastSession>()) }
@@ -570,6 +603,28 @@ fun App(
         if (agentConfig == null) agentConfig = withContext(Dispatchers.IO) { Accounts.load() }
     }
     val agentAccounts: List<Account> = agentConfig?.accounts.orEmpty()
+    // The agent tabs this project had when nop last exited, put back and then kept up to date.
+    //
+    // Restore first and watch afterwards, in one effect, exactly as the tab strip below does: two
+    // effects would race, and the one that lost would write the empty strip over the rows the other
+    // was about to read. Waits for the accounts for the same reason — a row names the account whose
+    // CLI to run, an empty list is "not read yet" as much as "none configured", and saving over the
+    // file before they arrive would cost the user every tab in it.
+    LaunchedEffect(rootPath, agentSessions, agentAccounts) {
+        if (agentAccounts.isEmpty()) return@LaunchedEffect
+        val saved = withContext(Dispatchers.IO) { Settings.loadOpenAgents(rootPath) }
+        // Guarded inside the store's collection, which outlives this composition: coming back to the
+        // project must not restore a second copy of every tab. See AgentSessions.restore.
+        agentSessions.restore(saved, rootPath.toFile(), agentAccounts)
+        // Not debounced, unlike the tab strip's: a session opens, closes, is renamed or learns its
+        // own name a handful of times an hour, and each of those is the only chance to write it down
+        // before nop is killed rather than closed.
+        snapshotFlow { agentSessions.sessions.mapNotNull { it.asOpenAgent() } }
+            .distinctUntilChanged()
+            .collectLatest { rows ->
+                withContext(Dispatchers.IO) { Settings.saveOpenAgents(rootPath, rows) }
+            }
+    }
     // How much room the usage strip at the bottom of the window is taking. Terminals are
     // heavyweight AWT components drawn over everything Compose paints, so each one has to stop
     // short of the strip by exactly this much or the strip is simply not on screen.
@@ -716,9 +771,10 @@ fun App(
 
     // Close any open tabs that point at the given file or anything under it (when it's a dir).
     // Saves the user from typing into a buffer whose underlying file just got removed.
-    // [includeHistoryTabs] false spares the two log panels, whose subject is a *path* rather than
-    // its content: a history tab reads fine for a file that has just stopped existing, and closing
-    // the one the user is acting from (see performRestore) would yank the panel out from under them.
+    // [includeHistoryTabs] false spares the log panels — the local-history tab here, and the git
+    // logs in the tool strip — whose subject is a *path* rather than its content: a log reads fine
+    // for a file that has just stopped existing, and closing the one the user is acting from (see
+    // performRestore) would yank the panel out from under them.
     fun closeTabsUnder(target: File, includeHistoryTabs: Boolean = true) {
         val targetPath = target.absolutePath
         val toClose = tabsState.tabs.filter { tab ->
@@ -727,7 +783,6 @@ fun App(
                 is Tab.Diff -> File(tab.repoRoot, tab.change.path)
                 is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
                 is Tab.RevisionDiff -> tab.file
-                is Tab.History -> tab.file.takeIf { includeHistoryTabs }
                 is Tab.LocalHistory -> tab.file.takeIf { includeHistoryTabs }
                 is Tab.LocalDiff -> tab.file
             }
@@ -738,6 +793,7 @@ fun App(
             editStore.close(tab.id)
             tabsState.close(tab.id)
         }
+        if (includeHistoryTabs) historySessions.closeUnder(target)
     }
 
     fun performDelete(targets: List<File>) {
@@ -1132,7 +1188,6 @@ fun App(
         is Tab.Diff -> File(t.repoRoot, t.change.path)
         is Tab.CommitDiff -> File(t.repoRoot, t.file.path)
         is Tab.RevisionDiff -> t.file
-        is Tab.History -> t.file
         is Tab.LocalHistory -> t.file
         is Tab.LocalDiff -> t.file
         null -> null
@@ -1144,7 +1199,6 @@ fun App(
             is Tab.Diff -> File(tab.repoRoot, tab.change.path)
             is Tab.CommitDiff -> File(tab.repoRoot, tab.file.path)
             is Tab.RevisionDiff -> tab.file
-            is Tab.History -> tab.file
             is Tab.LocalHistory -> tab.file
             is Tab.LocalDiff -> tab.file
         }
@@ -1212,7 +1266,10 @@ fun App(
                         canPaste = FileClipboard::hasFiles,
                         onMoveRequest = ::performMove,
                         onHistoryRequest = { file ->
-                            if (repo != null) tabsState.open(Tab.History(file, repo.rootDir.toFile()))
+                            if (repo != null) {
+                                historySessions.open(file, repo.rootDir.toFile())
+                                toolTab = ToolTab.History
+                            }
                         },
                         onCompareWithRevision = { pendingCompare = it },
                         gitEnabled = repo != null,
@@ -1294,7 +1351,12 @@ fun App(
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },
                                 onCompareWithRevision = { pendingCompare = it },
-                                onRevertCommit = ::askRevertCommit,
+                                onShowHistory = { file ->
+                                    if (repo != null) {
+                                        historySessions.open(file, repo.rootDir.toFile())
+                                        toolTab = ToolTab.History
+                                    }
+                                },
                             )
                         },
                         second = {
@@ -1346,6 +1408,36 @@ fun App(
                                 },
                                 onCloseAgent = { agentSessions.close(it) },
                                 onRenameAgent = { id, name -> agentSessions.rename(id, name) },
+                                runs = runSessions,
+                                onSelectRun = { id ->
+                                    runSessions.select(id)
+                                    toolTab = ToolTab.Run
+                                },
+                                onCloseRun = { id ->
+                                    runSessions.close(id)
+                                    // Nothing left to show and no "+" here to make another — the ▶
+                                    // menu is. Sitting on an empty Run panel would leave the tool
+                                    // panel pointing at a tab that is no longer in the strip, so
+                                    // fall back to the one it opens on.
+                                    if (runSessions.sessions.isEmpty() && toolTab == ToolTab.Run) {
+                                        toolTab = ToolTab.Commit
+                                    }
+                                },
+                                histories = historySessions,
+                                onSelectHistory = { id ->
+                                    historySessions.select(id)
+                                    toolTab = ToolTab.History
+                                },
+                                onCloseHistory = { id ->
+                                    historySessions.close(id)
+                                    // Nothing left to show, and like the runs there is no "+" here
+                                    // to make another — the file's right-click menu is. Fall back
+                                    // to the tab the panel opens on rather than sit on a tab that
+                                    // is no longer in the strip.
+                                    if (historySessions.sessions.isEmpty() && toolTab == ToolTab.History) {
+                                        toolTab = ToolTab.Commit
+                                    }
+                                },
                                 terminal = { TerminalTabPanel(terminals, terminalCards) },
                                 agent = {
                                     AgentPanel(
@@ -1570,6 +1662,14 @@ fun App(
                                     }
                                 },
                                 run = { RunPanel(runSessions, terminalCards) },
+                                history = {
+                                    HistoryPanel(
+                                        state = historySessions,
+                                        repo = repo,
+                                        tabsState = tabsState,
+                                        onRevertCommit = ::askRevertCommit,
+                                    )
+                                },
                                 stash = {
                                     StashPanel(
                                         stashes = stashes,

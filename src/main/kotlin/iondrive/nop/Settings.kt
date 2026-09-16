@@ -409,6 +409,170 @@ object Settings {
     }
 
     /**
+     * A launcher run that had a tab in the Run strip: which launcher it was, and whatever the tab
+     * was called by the time nop closed.
+     *
+     * The command is stored beside the name rather than looked up again from `.nop/launchers.txt`,
+     * so a tab survives its launcher being renamed or deleted between one run of nop and the next.
+     * A tab that pointed at nothing would be a label with no button under it.
+     */
+    data class OpenRun(val name: String, val command: String, val title: String)
+
+    /**
+     * The Run tabs this project had open when nop last exited, in strip order.
+     *
+     * Per project and outside it, like the commit-message history: which scripts someone had on
+     * screen is about how they were working, not about the repository, and a file in the working
+     * tree would be one more thing to gitignore.
+     */
+    fun loadOpenRuns(projectPath: Path): List<OpenRun> {
+        val f = projectDataDir(projectPath).resolve("runs")
+        if (!Files.isRegularFile(f)) return emptyList()
+        val text = runCatching { Files.readString(f) }.getOrNull() ?: return emptyList()
+        return text.lineSequence()
+            .mapNotNull { line ->
+                // Name, command, title — the launcher file's own format with the tab name added.
+                // A line short of three fields is from a half-written file and is simply skipped.
+                val parts = line.split('\t')
+                if (parts.size < 3) return@mapNotNull null
+                val name = parts[0].trim()
+                val command = parts[1].trim()
+                if (name.isEmpty() || command.isEmpty()) null
+                else OpenRun(name, command, parts[2].trim().ifEmpty { name })
+            }
+            .toList()
+    }
+
+    fun saveOpenRuns(projectPath: Path, runs: List<OpenRun>) {
+        val f = projectDataDir(projectPath).resolve("runs")
+        runCatching {
+            Files.createDirectories(f.parent)
+            // Tabs and newlines are the record separators, so a title carrying one is flattened on
+            // the way out rather than splitting the row it belongs to.
+            val body = runs.joinToString("\n") { run ->
+                "${flatten(run.name)}\t${flatten(run.command)}\t${flatten(run.title)}"
+            }
+            Files.writeString(f, if (body.isEmpty()) body else body + "\n")
+        }
+    }
+
+    /**
+     * The paths whose git log had a tab in the tool strip when nop last exited, in strip order.
+     *
+     * Per project and outside it, like the Run tabs above: which logs someone had open is about how
+     * they were working, not about the repository. One absolute path per line — a log needs nothing
+     * else to be rebuilt, because it is re-read from git when its tab is composed.
+     */
+    fun loadOpenHistories(projectPath: Path): List<String> {
+        val f = projectDataDir(projectPath).resolve("histories")
+        if (!Files.isRegularFile(f)) return emptyList()
+        val text = runCatching { Files.readString(f) }.getOrNull() ?: return emptyList()
+        return text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+    }
+
+    fun saveOpenHistories(projectPath: Path, paths: List<String>) {
+        val f = projectDataDir(projectPath).resolve("histories")
+        runCatching {
+            Files.createDirectories(f.parent)
+            // Newlines are the record separator, so a path carrying one — legal on unix, and the
+            // only way a row could split in two — is dropped rather than allowed to write a row
+            // that would load back as two paths that never existed.
+            val body = paths.filterNot { it.contains('\n') || it.contains('\r') }.joinToString("\n")
+            Files.writeString(f, if (body.isEmpty()) body else body + "\n")
+        }
+    }
+
+    /**
+     * An agent session that had a tab in the tool strip when nop last exited: nop's own id for it,
+     * the account whose CLI was running, the vendor's session id to resume, and what the tab was
+     * called.
+     *
+     * [nativeSessionId] is the row's reason for existing. It is what `claude --resume` and
+     * `codex resume` take, so it is the difference between a tab that comes back into the
+     * conversation it was in and a tab that comes back empty — and a session without one is left
+     * out of the file entirely rather than restored as the latter.
+     *
+     * [sessionId] is nop's own, not the vendor's, and it is written down so a restored tab keeps the
+     * event log it already had. Without it every restart would split one piece of work into a new
+     * session in the picker and a new log on disk, which is the same continuity a provider switch
+     * is careful to keep (see [iondrive.nop.agent.AgentSession]).
+     *
+     * [titleIsUsers] travels with [title] because the two mean different things to the CLI's own
+     * idea of what the session is about: a title nop inferred may be replaced by a better one after
+     * the resume, and a name the user typed may not.
+     */
+    data class OpenAgent(
+        val sessionId: String,
+        val provider: String,
+        val account: String,
+        val nativeSessionId: String,
+        val title: String,
+        val titleIsUsers: Boolean,
+    )
+
+    /**
+     * The agent tabs this project had open when nop last exited, in strip order.
+     *
+     * Per project and outside it, like the Run tabs and the git logs above. Six tab-separated
+     * fields; a row short of them, or missing one of the three that cannot be guessed at, is from a
+     * half-written file and is skipped rather than restored as a tab pointing at nothing.
+     */
+    fun loadOpenAgents(projectPath: Path): List<OpenAgent> {
+        val f = projectDataDir(projectPath).resolve("agents")
+        if (!Files.isRegularFile(f)) return emptyList()
+        val text = runCatching { Files.readString(f) }.getOrNull() ?: return emptyList()
+        return text.lineSequence()
+            .mapNotNull { line ->
+                val parts = line.split('\t')
+                if (parts.size < 6) return@mapNotNull null
+                val sessionId = parts[0].trim()
+                val provider = parts[1].trim()
+                val account = parts[2].trim()
+                val nativeSessionId = parts[3].trim()
+                if (sessionId.isEmpty() || account.isEmpty() || nativeSessionId.isEmpty()) {
+                    return@mapNotNull null
+                }
+                OpenAgent(
+                    sessionId = sessionId,
+                    provider = provider,
+                    account = account,
+                    nativeSessionId = nativeSessionId,
+                    // Blank is a legal title here and means "nop never found a better name for it".
+                    // What a nameless tab is called is the session's business, not this file's — see
+                    // AgentSession.DEFAULT_TITLE.
+                    title = parts[4].trim(),
+                    titleIsUsers = parts[5].trim() == "1",
+                )
+            }
+            .toList()
+    }
+
+    fun saveOpenAgents(projectPath: Path, agents: List<OpenAgent>) {
+        val f = projectDataDir(projectPath).resolve("agents")
+        runCatching {
+            Files.createDirectories(f.parent)
+            // Tabs and newlines are the record separators, so a title carrying one is flattened on
+            // the way out rather than splitting the row it belongs to. The ids and the account name
+            // go through [flatten] too — none of them can legally hold a separator, and a corrupted
+            // one costs its own row instead of the row after it.
+            val body = agents.joinToString("\n") { agent ->
+                listOf(
+                    flatten(agent.sessionId),
+                    flatten(agent.provider),
+                    flatten(agent.account),
+                    flatten(agent.nativeSessionId),
+                    flatten(agent.title),
+                    if (agent.titleIsUsers) "1" else "0",
+                ).joinToString("\t")
+            }
+            Files.writeString(f, if (body.isEmpty()) body else body + "\n")
+        }
+    }
+
+    private fun flatten(value: String): String =
+        value.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim()
+
+    /**
      * Per-project scratch directory under the nop config root. Used for derived data we don't
      * want to spray into the project itself — currently just the symbol index. Two projects
      * with the same final path segment (e.g. two `frontend/` checkouts) get separate dirs

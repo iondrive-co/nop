@@ -14,10 +14,9 @@ import java.nio.file.Path
  * here). We persist the tab kinds that survive across runs:
  *
  *   * [Tab.FileView]   — refers to a stable absolute path
- *   * [Tab.History]    — same; the repo root is implicit (we're inside a single project)
  *   * [Tab.CommitDiff] — a (sha, path, change type) triple; a commit's content is immutable, so
  *                        this rebuilds into exactly the diff that was on screen
- *   * [Tab.LocalHistory] — an absolute path, like [Tab.History]
+ *   * [Tab.LocalHistory] — an absolute path, like [Tab.FileView]
  *   * [Tab.LocalDiff]  — an absolute path plus the revision's timestamp, which is how a local-history
  *                        revision is named on disk (see [iondrive.nop.history.LocalHistory])
  *   * [Tab.RevisionDiff] — an absolute path plus the sha it is compared against; both sides are
@@ -62,13 +61,17 @@ data class TabsSnapshot(
 
 object TabsPersistence {
     private const val KIND_FILE = "file"
-    private const val KIND_HISTORY = "history"
     private const val KIND_COMMITDIFF = "commitdiff"
     private const val KIND_LOCALHISTORY = "localhistory"
     private const val KIND_LOCALDIFF = "localdiff"
     private const val KIND_REVISIONDIFF = "revisiondiff"
     private const val KIND_DIFF = "diff"
     private const val KIND_GROUP = "group"
+
+    // "history" rows are not written any more: the git log is a tool-panel tab now, persisted
+    // alongside the other tool tabs (see Settings.loadOpenHistories). A file written by an older
+    // build still carries them, and they fall through to the `else -> continue` below — the log
+    // comes back from the tool panel's own file, or not at all for a strip saved before this build.
 
     fun save(target: Path, snapshot: TabsSnapshot) {
         val rows = buildList {
@@ -102,7 +105,6 @@ object TabsPersistence {
         val selected = if (tab.id == selectedId) "1" else "0"
         val (kind, file) = when (tab) {
             is Tab.FileView -> KIND_FILE to tab.file
-            is Tab.History -> KIND_HISTORY to tab.file
             is Tab.LocalHistory -> KIND_LOCALHISTORY to tab.file
             // The timestamp *is* the revision's name in local history, so it restores by lookup.
             is Tab.LocalDiff -> return listOf(
@@ -138,7 +140,7 @@ object TabsPersistence {
             val path = parts[1]
             val selected = parts.getOrNull(2) == "1"
             when (kind) {
-                KIND_FILE, KIND_HISTORY, KIND_LOCALHISTORY -> out += SavedTab(kind, path, selected)
+                KIND_FILE, KIND_LOCALHISTORY -> out += SavedTab(kind, path, selected)
                 // The timestamp rides in the sha column; a row without one names no revision.
                 KIND_LOCALDIFF -> {
                     val stamp = parts.getOrNull(3)?.takeIf { it.toLongOrNull() != null } ?: continue
@@ -202,13 +204,6 @@ object TabsPersistence {
             }
             val tab: Tab = when (s.kind) {
                 KIND_FILE -> Tab.FileView(File(s.path).takeIf { it.isFile } ?: continue)
-                // History on a directory is valid (e.g. log for an entire role), so allow either
-                // file or directory existence.
-                KIND_HISTORY -> {
-                    val file = File(s.path).takeIf { it.exists() } ?: continue
-                    if (repoRoot == null) continue
-                    Tab.History(file, repoRoot)
-                }
                 // Local history needs no repo — it's nop's own record, and it's the only history an
                 // uncommitted (or untracked) file has.
                 KIND_LOCALHISTORY -> Tab.LocalHistory(File(s.path).takeIf { it.exists() } ?: continue)

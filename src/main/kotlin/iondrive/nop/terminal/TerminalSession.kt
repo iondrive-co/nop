@@ -9,6 +9,8 @@ import com.pty4j.PtyProcessBuilder
 import iondrive.nop.launchers.Launcher
 import java.awt.Color
 import java.awt.Container
+import java.awt.dnd.DnDConstants
+import java.awt.dnd.DropTarget
 import java.io.File
 import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
@@ -44,9 +46,27 @@ class TerminalSession private constructor(
      * tells it about. See [PtyTtyConnector].
      */
     private val outputTap: ((String) -> Unit)? = null,
+    /**
+     * The launcher this run came from, for a session built by [forLauncher] and null for anything
+     * else. Kept so the Run tabs can be written down and put back at the next start — a tab that
+     * came back with no way to say what it would run would be a label and nothing else.
+     */
+    val launcher: Launcher? = null,
+    deferred: Boolean = false,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(false)
+        private set
+
+    /**
+     * True for a run tab restored from the last time nop was open: the tab is back, the command has
+     * not been run again, and [start] is what runs it.
+     *
+     * Restored rather than re-run deliberately. A launcher is an arbitrary shell command — a
+     * deploy, a database migration, a release — and starting nop is not consent to run it. The tab
+     * is the useful half of remembering it; pressing Run is the user's half.
+     */
+    var deferred: Boolean by mutableStateOf(deferred)
         private set
 
     /**
@@ -84,10 +104,35 @@ class TerminalSession private constructor(
         // Must be installed before the process starts writing, or early output misses out: JediTerm
         // only runs the filters over a line as it is written.
         w.addHyperlinkFilter(UrlHyperlinkFilter())
+        // Dropped files are typed in as paths — see TerminalFileDrop. On the terminal panel rather
+        // than on the widget: the panel is what fills the widget, so it is what the pointer is over.
+        w.terminalPanel.dropTarget = DropTarget(
+            w.terminalPanel,
+            DnDConstants.ACTION_COPY,
+            TerminalFileDrop { paths ->
+                // A trailing space so a second drop doesn't run into the first, and focus so the
+                // next keystroke — usually Enter — goes to the terminal rather than to whatever the
+                // drag started from.
+                sendText(paths.joinToString(" ") { quoteForPrompt(it) } + " ")
+                w.requestFocusInWindow()
+            },
+        )
         settings = s
         widget = w
         attach(w, startProcess())
         return w
+    }
+
+    /**
+     * Runs a restored tab's command for the first time. No-op for a session that has already
+     * started one.
+     *
+     * Nothing happens here beyond clearing the flag: the host draws a placeholder in place of the
+     * terminal while [deferred] holds, so dropping it is what makes the host ask for a widget, and
+     * asking for a widget is what spawns the process.
+     */
+    fun start() {
+        deferred = false
     }
 
     /** Repaints the terminal in new theme colours; no-op if nothing changed or not yet created. */
@@ -156,6 +201,20 @@ class TerminalSession private constructor(
     }
 
     /**
+     * Types [text] into the terminal, exactly as the keyboard would: the bytes go to the PTY, so
+     * the child reads them from its stdin and the line discipline echoes them back onto the screen.
+     * Nothing happens if no process is running — there is nothing to type at.
+     */
+    fun sendText(text: String) {
+        val proc = process ?: return
+        runCatching {
+            val out = proc.outputStream
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.flush()
+        }
+    }
+
+    /**
      * Kills the child and everything under it, but leaves the widget — and so the last frame the
      * program drew — on screen.
      *
@@ -196,6 +255,7 @@ class TerminalSession private constructor(
         process = proc
         running = true
         exitCode = null
+        deferred = false
         // Daemon watcher flips `running` false the moment the child exits, so the header can swap
         // its Stop button for Re-run without polling.
         thread(isDaemon = true, name = "terminal-watch") {
@@ -253,14 +313,25 @@ class TerminalSession private constructor(
         private val isWindows: Boolean =
             System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")
 
-        /** Runs [launcher]'s command through a shell, mirroring the old runner's invocation. */
-        fun forLauncher(launcher: Launcher, dir: File): TerminalSession =
+        /**
+         * Runs [launcher]'s command through a shell, mirroring the old runner's invocation.
+         *
+         * No ▶ in the name, for the reason a shell carries no keyboard glyph: the tool strip draws
+         * the mark itself, so it survives a rename rather than being the first thing a rename
+         * deletes.
+         *
+         * [deferred] builds the tab without running anything — see [TerminalSession.deferred]. It is
+         * how a run tab comes back at the next start.
+         */
+        fun forLauncher(launcher: Launcher, dir: File, deferred: Boolean = false): TerminalSession =
             TerminalSession(
-                title = "▶ ${launcher.name}",
+                title = launcher.name,
                 command = if (isWindows) listOf("cmd.exe", "/c", launcher.command)
                 else listOf("sh", "-c", launcher.command),
                 workingDir = dir,
                 isLauncher = true,
+                launcher = launcher,
+                deferred = deferred,
             )
 
         /**

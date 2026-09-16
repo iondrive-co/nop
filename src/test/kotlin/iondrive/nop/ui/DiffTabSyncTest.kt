@@ -86,7 +86,7 @@ class DiffTabSyncTest {
             Tab.CommitDiff("abc123", "abc123", CommitFile("a.txt", CommitFileChange.MODIFIED), root),
             Tab.RevisionDiff(File("/repo/a.txt"), "abc123", "abc123", root),
             Tab.LocalDiff(File("/repo/a.txt"), 1_000L),
-            Tab.History(File("/repo/a.txt"), root),
+            Tab.LocalHistory(File("/repo/a.txt")),
         )
 
         val sync = syncDiffTabs(tabs, GitStatus.EMPTY, headMoved = true)

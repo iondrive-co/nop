@@ -56,7 +56,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
-import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
@@ -130,10 +129,9 @@ fun TabbedViewerPanel(
     // Ask the app to put up the revision picker for this file; picking one opens a
     // [Tab.RevisionDiff]. Handled up there because that's where the app's dialogs live.
     onCompareWithRevision: (File) -> Unit = {},
-    // Ask the app to back a commit's changes out of the working tree, from a history tab. Handled
-    // up there for the same reason: it raises a confirmation dialog, and it has to reconcile open
-    // buffers against the files the reversal rewrites.
-    onRevertCommit: (CommitInfo) -> Unit = {},
+    // Ask the app to open this file's git log. It opens as a tab in the tool panel on the right
+    // rather than here, so the log sits beside the diff it sends you to instead of replacing it.
+    onShowHistory: (File) -> Unit = {},
 ) {
     val selected = tabsState.selectedTab
 
@@ -159,9 +157,6 @@ fun TabbedViewerPanel(
                     // offer; anything outside the repo (or a project with no repo at all) gets the
                     // local-history entry alone.
                     val gitTracked = repo != null && repoRelativePath(repo, current.file) != null
-                    val showHistory: () -> Unit = {
-                        if (repo != null) tabsState.open(Tab.History(current.file, repo.rootDir.toFile()))
-                    }
                     FileEditView(
                         tab = current,
                         store = editStore,
@@ -178,7 +173,7 @@ fun TabbedViewerPanel(
                         repo = repo,
                         blameEnabled = blameEnabled,
                         onShowLocalHistory = { tabsState.open(Tab.LocalHistory(current.file)) },
-                        onShowHistory = showHistory,
+                        onShowHistory = { onShowHistory(current.file) },
                         onCompareWithRevision = { onCompareWithRevision(current.file) },
                         gitTracked = gitTracked,
                         // A blame line resolves to the commit that last touched it; open that
@@ -212,7 +207,6 @@ fun TabbedViewerPanel(
                     findTrigger = findInFileTrigger,
                     saveTrigger = saveTrigger,
                 )
-                is Tab.History -> if (repo != null) HistoryView(repo, current, tabsState, onRevertCommit)
                 is Tab.LocalHistory -> LocalHistoryView(
                     history = localHistory,
                     tab = current,
@@ -270,7 +264,7 @@ private fun spellcheckExtensionOf(tab: Tab?): String? = when (tab) {
     is Tab.CommitDiff -> File(tab.file.path).extension
     is Tab.RevisionDiff -> tab.file.extension
     is Tab.LocalDiff -> tab.file.extension
-    is Tab.History, is Tab.LocalHistory, null -> null
+    is Tab.LocalHistory, null -> null
 }
 
 /**
@@ -284,7 +278,6 @@ private fun labelFor(tab: Tab, editStore: FileEditStore): String = when (tab) {
     is Tab.FileView -> saveMarker(editStore.peek(tab.id)) + tab.file.name
     is Tab.Diff -> saveMarker(editStore.peek(Tab.FileView(File(tab.repoRoot, tab.change.path)).id)) + tab.title
     is Tab.CommitDiff -> tab.title
-    is Tab.History -> tab.title
     // A local-history revision is a snapshot of a file that may well be open and dirty beside it,
     // but the revision itself is fixed — no save marker, same as a commit diff.
     is Tab.LocalHistory, is Tab.LocalDiff, is Tab.RevisionDiff -> tab.title

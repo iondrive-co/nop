@@ -1,7 +1,9 @@
 package iondrive.nop.agent
 
+import iondrive.nop.Settings
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -180,4 +182,161 @@ class AgentSessionsTest {
         val started = session.log.events().filterIsInstance<AgentEvent.SessionStarted>().single()
         assertEquals(project.absolutePath, started.projectPath)
     }
+
+    // Tabs put back from the state file at the next start. Nothing is spawned here either: a restored
+    // session is a session, and a session starts no PTY until a panel asks it for a widget.
+
+    @Test
+    fun `restored agents come back in order, named as they were left`(@TempDir tmp: Path) {
+        val state = sessions()
+
+        state.restore(
+            listOf(row(title = "parser rewrite"), row(sessionId = "nop-2", title = "AWS support")),
+            tmp.toFile(),
+            listOf(account("claude-main")),
+        )
+
+        assertEquals(listOf("parser rewrite", "AWS support"), state.sessions.map { it.title })
+    }
+
+    /** The log the session already had is the one it carries on writing — see AgentSession.sessionId. */
+    @Test
+    fun `a restored agent keeps nop's own id, so its history stays one session`(@TempDir tmp: Path) {
+        val state = sessions()
+
+        state.restore(listOf(row(sessionId = "nop-1")), tmp.toFile(), listOf(account("claude-main")))
+
+        assertEquals("nop-1", state.sessions.single().sessionId)
+    }
+
+    /** Putting the strip back is one claim; deciding what the user wants to look at is another. */
+    @Test
+    fun `restoring selects nothing`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.restore(listOf(row()), tmp.toFile(), listOf(account("claude-main")))
+        assertNull(state.selected)
+    }
+
+    @Test
+    fun `a restored agent resumes the conversation it was in`(@TempDir tmp: Path) {
+        val state = sessions()
+
+        state.restore(
+            listOf(row(nativeSessionId = "11111111-2222-3333-4444-555555555555")),
+            tmp.toFile(),
+            listOf(account("claude-main")),
+        )
+
+        val argv = state.sessions.single().run.command.argv
+        assertTrue(
+            argv.windowed(2).any { it == listOf("--resume", "11111111-2222-3333-4444-555555555555") },
+            "expected a --resume in $argv",
+        )
+    }
+
+    /**
+     * This collection outlives the composition that draws it, so the restore has to be once per nop
+     * run rather than once per look at the project.
+     */
+    @Test
+    fun `restoring twice does not double the strip`(@TempDir tmp: Path) {
+        val state = sessions()
+        val rows = listOf(row())
+
+        state.restore(rows, tmp.toFile(), listOf(account("claude-main")))
+        state.restore(rows, tmp.toFile(), listOf(account("claude-main")))
+
+        assertEquals(1, state.sessions.size)
+    }
+
+    /** The row names which quota to spend. An account that has since been deleted is not nop's to pick. */
+    @Test
+    fun `a row whose account is gone is skipped rather than run on another`(@TempDir tmp: Path) {
+        val state = sessions()
+
+        state.restore(
+            listOf(row(account = "deleted"), row(sessionId = "nop-2", title = "kept")),
+            tmp.toFile(),
+            listOf(account("claude-main")),
+        )
+
+        assertEquals(listOf("kept"), state.sessions.map { it.title })
+    }
+
+    /** An account name is not enough on its own: the row has to name the provider it belongs to. */
+    @Test
+    fun `a row is not restored onto an account of the other provider`(@TempDir tmp: Path) {
+        val state = sessions()
+
+        state.restore(
+            listOf(row(provider = "openai")),
+            tmp.toFile(),
+            listOf(account("claude-main")),
+        )
+
+        assertTrue(state.sessions.isEmpty())
+    }
+
+    // What gets written down. A session describes itself, or declines to.
+
+    @Test
+    fun `a session describes itself for the state file`(@TempDir tmp: Path) {
+        val state = sessions()
+        val session = state.open(tmp.toFile(), account("claude-main"))
+        state.rename(session.sessionId, "parser rewrite")
+
+        assertEquals(
+            Settings.OpenAgent(
+                sessionId = session.sessionId,
+                provider = "anthropic",
+                account = "claude-main",
+                nativeSessionId = session.run.nativeSessionId!!,
+                title = "parser rewrite",
+                titleIsUsers = true,
+            ),
+            session.asOpenAgent(),
+        )
+    }
+
+    /** A name the CLI gave the session may be replaced by a better one after the resume. */
+    @Test
+    fun `a title the CLI chose is written down as the CLI's`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-main"))
+        session.titleFromTranscript("AWS support")
+
+        val row = session.asOpenAgent()!!
+        assertEquals("AWS support", row.title)
+        assertFalse(row.titleIsUsers)
+    }
+
+    /**
+     * The tab stays in the strip after the run ends so its last frame can be read, but starting nop
+     * again is not a reason to start that CLI again — the picker is where a deliberate return lives.
+     */
+    @Test
+    fun `a session the user quit is not written down`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-main"))
+
+        session.endRun(EndReason.Exited)
+
+        assertNull(session.asOpenAgent())
+    }
+
+    /** Nothing to resume means nothing to restore: the tab would come back with a blank CLI in it. */
+    @Test
+    fun `a session with no conversation behind it is not written down`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+
+        assertNull(session.run.nativeSessionId, "codex names its own session, a moment after it starts")
+        assertNull(session.asOpenAgent())
+    }
+
+    private fun row(
+        sessionId: String = "nop-1",
+        provider: String = "anthropic",
+        account: String = "claude-main",
+        nativeSessionId: String = "vendor-1",
+        title: String = "parser rewrite",
+        titleIsUsers: Boolean = false,
+    ) = Settings.OpenAgent(sessionId, provider, account, nativeSessionId, title, titleIsUsers)
 }

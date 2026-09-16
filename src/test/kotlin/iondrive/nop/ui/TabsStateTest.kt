@@ -123,7 +123,7 @@ class TabsStateTest {
         s.onFileOpened = { opened += it }
 
         s.open(fileTab("/x/a.txt"), record = false)
-        s.open(Tab.History(File("/x"), File("/x")))
+        s.open(Tab.LocalHistory(File("/x/a.txt")))
 
         assertEquals(emptyList<File>(), opened)
     }
@@ -629,7 +629,7 @@ class TabsStateTest {
 
         assertNull(jumpToSourceTarget(null))
         assertNull(jumpToSourceTarget(fileTab("/x/a.txt")))
-        assertNull(jumpToSourceTarget(Tab.History(repo, repo)))
+        assertNull(jumpToSourceTarget(Tab.LocalHistory(repo)))
         // Deleted by the commit being read, so there's no working file to jump to.
         assertNull(
             jumpToSourceTarget(

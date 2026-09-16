@@ -1,7 +1,6 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -13,15 +12,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import iondrive.nop.Log
+import iondrive.nop.Settings
+import iondrive.nop.launchers.Launcher
 import iondrive.nop.terminal.TerminalSession
 import java.io.File
 import javax.swing.JPanel
-import org.jetbrains.jewel.foundation.theme.JewelTheme
-import org.jetbrains.jewel.ui.component.SimpleTabContent
-import org.jetbrains.jewel.ui.component.TabData
-import org.jetbrains.jewel.ui.component.TabStrip
 import org.jetbrains.jewel.ui.component.Text
-import org.jetbrains.jewel.ui.theme.defaultTabStyle
 
 /**
  * One live terminal: a launcher invocation in the Run panel, or a plain shell behind one of the
@@ -42,6 +38,15 @@ class RunSession(override val session: TerminalSession) : TerminalTab {
      * name is a label on the tab, not something the process behind it knows or cares about.
      */
     var title: String by mutableStateOf(session.title)
+
+    /**
+     * This tab as a row for the state file, or null for a session with no launcher behind it — a
+     * plain shell, which is nothing to put back at the next start because there is no command to
+     * put back.
+     */
+    fun asOpenRun(): Settings.OpenRun? = session.launcher?.let {
+        Settings.OpenRun(name = it.name, command = it.command, title = title)
+    }
 }
 
 /**
@@ -95,6 +100,25 @@ class RunSessions {
      */
     fun openShell(dir: File): RunSession = open(TerminalSession.shell(dir))
 
+    /**
+     * Puts back the run tabs [runs] recorded, in order, without running any of them.
+     *
+     * Nothing is selected afterwards. Restoring tabs is about not losing the strip; deciding that
+     * the user was last looking at a script — and flipping the tool panel to it over the commit
+     * list — is a different claim, and the wrong one first thing after a start.
+     *
+     * A bad row is skipped rather than fatal: [Launcher] refuses a blank name or command, and a
+     * truncated state file must cost at most the tab it describes.
+     */
+    fun restore(runs: List<Settings.OpenRun>, dir: File) {
+        runs.forEach { row ->
+            val launcher = runCatching { Launcher(row.name, row.command) }.getOrNull() ?: return@forEach
+            val restored = RunSession(TerminalSession.forLauncher(launcher, dir, deferred = true))
+            restored.title = row.title
+            _sessions.add(restored)
+        }
+    }
+
     fun select(id: String) {
         if (_sessions.any { it.id == id }) selectedId = id
     }
@@ -132,12 +156,13 @@ class RunSessions {
 }
 
 /**
- * The Run tool tab: a strip of the terminals started from the launcher menu, over the selected
- * one's output.
+ * The Run tool tab: the output of whichever launcher run the tool strip has selected.
  *
- * The strip is a second, closeable tier inside a tool tab that is itself not closeable — the Run
- * tab is always there, what is in it comes and goes. Closing a run here is what stops it, so the
- * strip's × is a kill, not a hide.
+ * There used to be a second tab strip in here, one tab per run, under the tool strip's own. Two
+ * rows of tabs stacked on a panel a few hundred pixels wide is most of the panel gone before any
+ * output is drawn, and it made a run the one live process in the window that wasn't reachable from
+ * the strip everything else is on. The runs are tabs in the tool strip now, beside the terminals
+ * and the agent sessions they are a sibling of — see [ToolTabs].
  */
 @Composable
 fun RunPanel(state: RunSessions, cards: JPanel) {
@@ -146,22 +171,8 @@ fun RunPanel(state: RunSessions, cards: JPanel) {
         ToolPanelMessage("Run a script from the ▶ menu above the project tree to see its output here")
         return
     }
-
-    val tabs = state.sessions.map { run ->
-        TabData.Default(
-            selected = run.id == selected.id,
-            closable = true,
-            onClose = { state.close(run.id) },
-            onClick = { state.select(run.id) },
-            content = { tabState -> SimpleTabContent(label = run.title, state = tabState) },
-        )
-    }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        TabStrip(tabs = tabs, style = JewelTheme.defaultTabStyle)
-        Box(modifier = Modifier.fillMaxSize()) {
-            TerminalView(selected, cards)
-        }
+    Box(modifier = Modifier.fillMaxSize()) {
+        TerminalView(selected, cards)
     }
 }
 
@@ -184,7 +195,7 @@ fun TerminalTabPanel(state: RunSessions, cards: JPanel) {
 
 /** The centred line a tool panel shows in place of content it hasn't been given yet. */
 @Composable
-private fun ToolPanelMessage(text: String) {
+internal fun ToolPanelMessage(text: String) {
     Box(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         contentAlignment = Alignment.Center,

@@ -4,18 +4,23 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import iondrive.nop.Log
+import iondrive.nop.Settings
 import java.io.File
 
 /**
  * The agent sessions open in one project, and which of them the Agent tab is showing.
  *
- * The sibling of [RunSessions][iondrive.nop.ui.RunSessions], and held in the same place for the
- * same reason: the tool panel composes one tab at a time, so a session that lived inside the panel
- * would be killed the moment the user looked at the commit list. It is created per project in
- * `App`, and [disposeAll] runs when that project's composition goes away.
+ * A cousin of [RunSessions][iondrive.nop.ui.RunSessions] rather than a sibling, and the difference
+ * is the lifetime. The runs are owned by the composition that draws them, so they die with it; these
+ * are handed out by [AgentSessionStore] and live as long as nop does, because a model half-way
+ * through a refactor is not something to throw away because the user looked at another window. What
+ * ends a session is closing its tab, closing the project, or quitting nop — see [disposeAll].
  *
  * Unlike the terminals, nothing is opened eagerly. A vendor CLI is a real account and real quota,
- * so it starts when the user picks one — with no session, the Agent tab shows the picker.
+ * so it starts when the user picks one — with no session, the Agent tab shows the picker. The tabs
+ * that were open when nop last exited are the one exception, and even they run nothing until looked
+ * at: see [restore].
  */
 class AgentSessions {
     private val _sessions = mutableStateListOf<AgentSession>()
@@ -46,6 +51,54 @@ class AgentSessions {
 
     fun select(id: String?) {
         if (id == null || _sessions.any { it.sessionId == id }) selectedId = id
+    }
+
+    /**
+     * Whether [restore] has already run for this project. Once per nop run, not once per look at the
+     * project: this collection outlives the composition that draws it (see [AgentSessionStore]), so
+     * coming back to the project — or the accounts being re-read behind the settings dialog — must
+     * not put a second copy of every tab in the strip.
+     */
+    private var restored = false
+
+    /**
+     * Puts back the agent tabs [rows] records, in order, each resuming the conversation it was in.
+     *
+     * Nothing is selected afterwards, for the same reason a restored run or git log isn't: bringing
+     * the strip back is one claim, and deciding which session the user wants to be looking at first
+     * thing after a start is a different and worse one.
+     *
+     * Nothing is spawned here either, and that is not an accident of the implementation — a session
+     * starts no PTY until the panel asks it for a widget, so the CLI behind a restored tab is run
+     * when the user opens that tab and not before. Six sleeping tabs cost six event-log handles.
+     *
+     * A row whose account is no longer configured is skipped: the row names which quota to spend,
+     * and an account the user has since deleted is not one nop may pick a replacement for.
+     */
+    fun restore(rows: List<Settings.OpenAgent>, dir: File, accounts: List<Account>) {
+        if (restored) return
+        restored = true
+        rows.forEach { row ->
+            if (_sessions.any { it.sessionId == row.sessionId }) return@forEach
+            val account = accounts.firstOrNull {
+                it.name == row.account && it.provider.id == row.provider
+            }
+            if (account == null) {
+                Log.warn("not restoring agent tab ${row.title}: no account called ${row.account}")
+                return@forEach
+            }
+            Log.info("restoring agent tab ${row.title} on ${row.account}")
+            _sessions.add(
+                AgentSession(
+                    projectDir = dir,
+                    account = account,
+                    resumeId = row.nativeSessionId,
+                    sessionId = row.sessionId,
+                    restoredTitle = row.title,
+                    titleByUser = row.titleIsUsers,
+                ),
+            )
+        }
     }
 
     /**
@@ -87,7 +140,13 @@ class AgentSessions {
         if (selectedId == id) selectedId = null
     }
 
-    /** Kills every session — a project-tab switch, or a closed window. */
+    /**
+     * Kills every session in the project — the project's last tab closed, or nop exiting.
+     *
+     * Not a look at another window or another project tab, which is what this used to mean and what
+     * made a running agent something the user could lose by clicking on the wrong thing. See
+     * [AgentSessionStore] for what calls this now.
+     */
     fun disposeAll() {
         _sessions.forEach { it.dispose() }
         _sessions.clear()

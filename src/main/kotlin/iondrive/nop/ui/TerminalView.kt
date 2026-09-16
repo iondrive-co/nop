@@ -2,6 +2,7 @@ package iondrive.nop.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,8 +23,10 @@ import kotlin.math.roundToInt
 
 /**
  * Renders one [TerminalTab] — a launcher run, a shell, or an agent session. Launcher runs get a
- * slim Compose header (name · status + Stop/Re-run);
- * a plain shell fills the whole panel.
+ * slim Compose header (name · status + Run/Stop/Re-run); a plain shell fills the whole panel.
+ *
+ * A run tab restored from the last time nop was open has no terminal under that header until its
+ * command is run — see [TerminalSession.deferred][iondrive.nop.terminal.TerminalSession.deferred].
  *
  * All terminals share a *single* [cards] panel (a Swing [CardLayout]) hosted by one [SwingPanel].
  * This is deliberate: Compose Desktop embeds each `SwingPanel` as a heavyweight AWT component in
@@ -45,6 +48,7 @@ fun TerminalView(tab: TerminalTab, cards: JPanel) {
     val awtFg = fg.toAwt()
     val awtLink = link.toAwt()
 
+    val deferred = tab.session.deferred
     Column(modifier = Modifier.fillMaxSize().background(bg)) {
         if (tab.session.isLauncher) {
             Row(
@@ -54,15 +58,39 @@ fun TerminalView(tab: TerminalTab, cards: JPanel) {
             ) {
                 Text(tab.session.title, modifier = Modifier.weight(1f))
                 Text(
-                    if (tab.session.running) "running" else "exited",
-                    color = if (tab.session.running) ChangeColors.UNTRACKED else ChangeColors.REMOVED,
+                    when {
+                        deferred -> "not run"
+                        tab.session.running -> "running"
+                        else -> "exited"
+                    },
+                    color = when {
+                        deferred -> ChangeColors.MODIFIED
+                        tab.session.running -> ChangeColors.UNTRACKED
+                        else -> ChangeColors.REMOVED
+                    },
                 )
-                if (tab.session.running) {
-                    OutlinedButton(onClick = { tab.session.stop() }) { Text("Stop") }
-                } else {
-                    OutlinedButton(onClick = { tab.session.restart() }) { Text("Re-run") }
+                when {
+                    // "Run", not "Re-run": nothing has run in this tab yet. It came back from the
+                    // last time nop was open and the command behind it is still waiting to be said
+                    // yes to — see TerminalSession.deferred.
+                    deferred -> OutlinedButton(onClick = { tab.session.start() }) { Text("Run") }
+                    tab.session.running -> OutlinedButton(onClick = { tab.session.stop() }) { Text("Stop") }
+                    else -> OutlinedButton(onClick = { tab.session.restart() }) { Text("Re-run") }
                 }
             }
+        }
+        if (deferred) {
+            // No SwingPanel at all, which is the whole mechanism: a terminal spawns its process the
+            // moment the panel asks it for a widget, so the way to have a tab without a process is
+            // not to ask. Pressing Run clears the flag, this branch goes away, and the panel below
+            // starts the command on its first composition.
+            Box(
+                modifier = Modifier.fillMaxSize().padding(16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Press Run to start this script again", color = AgentMuted)
+            }
+            return@Column
         }
         SwingPanel(
             background = bg,

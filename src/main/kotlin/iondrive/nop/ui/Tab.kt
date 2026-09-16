@@ -24,13 +24,6 @@ sealed class Tab {
         override val title: String get() = File(change.path).name
     }
 
-    /** Git log restricted to [file] (which may be a directory). */
-    data class History(val file: File, val repoRoot: File) : Tab() {
-        override val id: String get() = "history:${file.absolutePath}"
-        override val title: String get() = "⎇ ${file.name}"
-        var expandedSha: String? by mutableStateOf(null)
-    }
-
     /** Diff of a single file within a historic commit (parent vs commit). */
     data class CommitDiff(val sha: String, val shortSha: String, val file: CommitFile, val repoRoot: File) : Tab() {
         override val id: String get() = "commitdiff:$sha:${file.path}"
@@ -39,8 +32,9 @@ sealed class Tab {
 
     /**
      * nop's own record of what [file] has contained — every version it saved, plus the ones outside
-     * writers left behind while the file was open. The git-independent half of [History], and the
-     * only history a file that has never been committed has.
+     * writers left behind while the file was open. The git-independent counterpart of the git log
+     * in the tool panel (see [HistorySessions]), and the only history a file that has never been
+     * committed has.
      */
     data class LocalHistory(val file: File) : Tab() {
         override val id: String get() = "localhistory:${file.absolutePath}"

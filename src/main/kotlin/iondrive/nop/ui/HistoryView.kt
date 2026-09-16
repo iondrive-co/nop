@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -33,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.CommitInfo
+import iondrive.nop.Log
 import iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -51,6 +53,124 @@ internal val COMMIT_DATE_FMT: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault())
 
 /**
+ * One open git log: the path it covers, and which commit in it the user has expanded.
+ *
+ * The id is the path, so asking a second time for a file whose log is already up lands back on that
+ * tab rather than stacking a duplicate of it beside the first.
+ */
+class HistorySession(val file: File, val repoRoot: File) {
+    val id: String = "history:${file.absolutePath}"
+
+    /** What the tab is called. The file's own name — a log is *of* a path and of nothing else. */
+    val title: String get() = file.name
+
+    /**
+     * The commit whose file list is open, if any. Held here rather than inside the panel because
+     * the tool panel composes one tab at a time: remembered in the view, the expansion would be
+     * lost every time the user looked at a diff and came back.
+     */
+    var expandedSha: String? by mutableStateOf(null)
+}
+
+/**
+ * The git logs open in the tool strip, and which of them is showing.
+ *
+ * Owned by [App] for the same reason [RunSessions] is — the panel under the strip exists only while
+ * its tab is selected, so anything that has to outlive a glance at the commit list cannot live in
+ * it. Unlike the terminals and the runs there is no process here, so closing a tab costs nothing
+ * but the scroll position, and reopening re-reads the log.
+ */
+class HistorySessions {
+    private val _sessions = mutableStateListOf<HistorySession>()
+    val sessions: List<HistorySession> get() = _sessions
+
+    var selectedId: String? by mutableStateOf(null)
+        private set
+
+    val selected: HistorySession? get() = _sessions.firstOrNull { it.id == selectedId }
+
+    /**
+     * Shows the log for [file], opening a tab for it if one isn't already up. A second ask for a
+     * path that is already open selects that tab instead of adding another: two logs of one path
+     * are the same log.
+     */
+    fun open(file: File, repoRoot: File): HistorySession {
+        // Breadcrumb, for the same reason TabsState.open logs one: the last thing opened is the
+        // most useful piece of context when nop dies with it on screen.
+        Log.info("open history ${file.absolutePath}")
+        val existing = _sessions.firstOrNull { it.file.absolutePath == file.absolutePath }
+        val session = existing ?: HistorySession(file, repoRoot).also { _sessions.add(it) }
+        selectedId = session.id
+        return session
+    }
+
+    fun select(id: String) {
+        if (_sessions.any { it.id == id }) selectedId = id
+    }
+
+    /** Drops the log behind [id] from the strip, selecting its neighbour if it was the one showing. */
+    fun close(id: String) {
+        val idx = _sessions.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        _sessions.removeAt(idx)
+        if (selectedId == id) {
+            selectedId = (_sessions.getOrNull(idx) ?: _sessions.getOrNull(idx - 1))?.id
+        }
+    }
+
+    /** Closes every log of [file], or of anything under it when [file] is a directory. */
+    fun closeUnder(file: File) {
+        val target = file.absolutePath
+        _sessions.filter {
+            val p = it.file.absolutePath
+            p == target || p.startsWith("$target${File.separator}")
+        }.forEach { close(it.id) }
+    }
+
+    /**
+     * Puts back the logs [files] records, in order, with nothing selected.
+     *
+     * Nothing selected for the same reason a restored run isn't: bringing the strip back is one
+     * claim, and deciding that a log is what the user wants to look at first thing after a start —
+     * over the commit list the panel opens on — is a different and worse one.
+     *
+     * A path that has since gone is skipped. Its log would still read, but a tab for a file that is
+     * no longer there is a puzzle offered to someone who didn't ask for it.
+     */
+    fun restore(files: List<File>, repoRoot: File) {
+        files.forEach { file ->
+            if (!file.exists()) return@forEach
+            if (_sessions.none { it.file.absolutePath == file.absolutePath }) {
+                _sessions.add(HistorySession(file, repoRoot))
+            }
+        }
+    }
+}
+
+/**
+ * The History tool tab: the git log of whichever path the tool strip has selected.
+ *
+ * Nothing selected means every log has been closed. There is no "+" here to open another — a log is
+ * *of* a path, so the thing that opens one is the file, in the tree's right-click menu or the
+ * editor's — so the panel says where that is rather than offering a button that would only have to
+ * ask which path it meant.
+ */
+@Composable
+fun HistoryPanel(
+    state: HistorySessions,
+    repo: GitRepo?,
+    tabsState: TabsState,
+    onRevertCommit: (CommitInfo) -> Unit = {},
+) {
+    val selected = state.selected
+    if (selected == null || repo == null) {
+        ToolPanelMessage("Right-click a file in the tree, or in the editor, and pick \"Show history\" to read its git log here")
+        return
+    }
+    HistoryView(repo, selected, tabsState, onRevertCommit)
+}
+
+/**
  * Git log for one path, newest first: click a commit to see what it touched, click one of those
  * files to read that commit's diff of it, and right-click a commit to back its changes out of the
  * working tree ([onRevertCommit]).
@@ -62,7 +182,7 @@ internal val COMMIT_DATE_FMT: DateTimeFormatter =
 @Composable
 fun HistoryView(
     repo: GitRepo,
-    tab: Tab.History,
+    tab: HistorySession,
     tabsState: TabsState,
     onRevertCommit: (CommitInfo) -> Unit = {},
 ) {
@@ -110,7 +230,7 @@ fun HistoryView(
 @Composable
 private fun CommitList(
     repo: GitRepo,
-    tab: Tab.History,
+    tab: HistorySession,
     commits: List<CommitInfo>,
     tabsState: TabsState,
     onRevertCommit: (CommitInfo) -> Unit,
