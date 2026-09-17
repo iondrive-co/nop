@@ -353,8 +353,13 @@ object Settings {
      *
      * Global rather than per project, like the split ratios beside it: it says how wide the user
      * wants their agent, which does not change with the repository they point it at.
+     *
+     * Folded away with nothing saved, which is the state a first run opens in: the tool panels are
+     * all *about* something the user has done — a commit to make, a diff to read, a search they
+     * ran — so there is nothing for one to show before then, and the agent gets the whole region
+     * until a tab is asked for.
      */
-    fun loadToolsCollapsed(): Boolean = load()["tools.collapsed"] == "1"
+    fun loadToolsCollapsed(): Boolean = load()["tools.collapsed"] != "0"
 
     fun saveToolsCollapsed(collapsed: Boolean) {
         val map = load()

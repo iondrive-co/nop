@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capture the two README screenshots, each from its own freshly-spawned, fully isolated nop
+# Capture the three README screenshots, each from its own freshly-spawned, fully isolated nop
 # instance pointed at synthetic state — so the shots are curated and reproducible instead of
 # depending on whatever the user happens to have open:
 #
@@ -11,14 +11,20 @@
 #   - A workspace/preview shot: a named window holding several synthetic project tabs along the top,
 #     with a few editor tabs open in the active project. NOTHING from the user's real workspace
 #     appears.
+#   - An agents shot: a Claude Code session running in the agent pane, with the Agent accounts
+#     dialog open over the editor and the usage strip along the bottom holding several made-up
+#     accounts across all three providers. Every account, home, model and usage figure is invented:
+#     the readings come from a fixture file (see UsageFixture.kt), so no provider is asked anything,
+#     and the session is a stand-in `claude` that draws a made-up conversation — no real CLI runs
+#     and no real account's numbers or conversations can end up in the README.
 #
-# The two shots are set up in opposite themes so the README demonstrates both. Output is
-# quantised to a 256-colour palette before saving, which trims the PNGs by ~3x with no
+# The diff and preview shots are set up in opposite themes so the README demonstrates both. Output
+# is quantised to a 256-colour palette before saving, which trims the PNGs by ~3x with no
 # visible difference vs. the truecolor capture.
 #
 # Designed to be invoked from inside nop (via the ▶ launcher). For local testing the output
 # locations can be redirected with NOP_SHOT_DIR / NOP_SHOT_README so a dry run doesn't touch
-# the checked-in screenshots or README.
+# the checked-in screenshots or README, and NOP_SHOT_BIN names the nop binary to launch.
 
 set -euo pipefail
 
@@ -48,7 +54,7 @@ mkdir -p "$SHOT_DIR"
 find "$SHOT_DIR" -maxdepth 1 -type f \
     \( -name '[0-9]*-diff.png' -o -name '[0-9]*-preview.png' \) -delete 2>/dev/null || true
 
-for cmd in wmctrl xdotool xwininfo import convert awk git mktemp sha1sum; do
+for cmd in wmctrl xdotool xwininfo xprop import convert awk git mktemp sha1sum; do
     if ! command -v "$cmd" >/dev/null; then
         echo "missing required tool: $cmd" >&2
         exit 1
@@ -59,6 +65,7 @@ done
 # ./scripts/install.sh), fall back to PATH for users who installed via DMG/MSI.
 NOP_BIN=""
 for candidate in \
+    "${NOP_SHOT_BIN:-}" \
     "$ROOT_DIR/build/compose/binaries/main/app/nop/bin/nop" \
     "$(command -v nop || true)"; do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
@@ -98,6 +105,104 @@ project_data_dir() {
     echo "$cfg/nop/projects/$safe-$short"
 }
 
+# Stand-ins for the vendor CLIs, first on every demo instance's PATH. The agent picker marks an
+# account whose CLI can't be found as "not installed", which would make the agents shot depend on
+# what this machine has installed; and nothing started against a made-up account may reach the
+# real CLI. codex and agy exit straight away.
+STUB_BIN="$TMP_PARENT/bin"
+mkdir -p "$STUB_BIN"
+for cli in codex agy; do
+    printf '#!/bin/sh\nexit 0\n' > "$STUB_BIN/$cli"
+    chmod +x "$STUB_BIN/$cli"
+done
+# claude is the one the agents shot opens a session on, so its stand-in draws one: a made-up
+# conversation about the demo project, laid out like the real TUI, redrawn whenever the terminal is
+# resized and then left on screen. It reads nothing, writes nothing and sends nothing. The files and
+# line counts it mentions match what scene 3 puts on disk.
+cat > "$STUB_BIN/claude" <<'STUB'
+#!/usr/bin/env bash
+stty -echo -icanon 2>/dev/null
+
+e=$'\e'
+off="$e[0m"; bold="$e[1m"; dim="$e[38;5;244m"; grey="$e[38;5;250m"
+green="$e[38;5;114m"; pink="$e[38;5;211m"; frame="$e[38;5;240m"
+del="$e[48;2;92;38;44m"; add="$e[48;2;36;78;48m"
+
+prompt() { printf '%s> %s%s\n' "$grey" "$1" "$off"; }
+asked()  { printf '%s  %s%s\n' "$grey" "$1" "$off"; }
+said()   { printf '● %s\n' "$1"; }
+more()   { printf '  %s\n' "$1"; }
+tool()   { printf '%s●%s %s%s%s(%s)\n' "$green" "$off" "$bold" "$1" "$off" "$2"; }
+result() { printf '  %s└  %s%s\n' "$dim" "$1" "$off"; }
+change() {
+    local bg=""
+    case "$2" in -) bg="$del" ;; +) bg="$add" ;; esac
+    printf '      %s%s%3s%s%s %s %-68s%s\n' "$bg" "$dim" "$1" "$off" "$bg" "$2" "$3" "$off"
+}
+
+session() {
+    prompt "Expired discount codes are still applied at checkout. Skip any code past its expiry"
+    asked "date, and add a test for it."
+    echo
+    tool Read src/DiscountCodes.kt
+    result "Read 18 lines"
+    echo
+    said "DiscountCodes.apply never checks expiresOn, so I'll filter there."
+    echo
+    tool Update src/DiscountCodes.kt
+    result "Updated src/DiscountCodes.kt with 6 additions and 2 removals"
+    change 15 - "class DiscountCodes(private val codes: List<DiscountCode>) {"
+    change 15 + "class DiscountCodes("
+    change 16 + "    private val codes: List<DiscountCode>,"
+    change 17 + "    private val today: () -> LocalDate = LocalDate::now,"
+    change 18 + ") {"
+    change 19 " " "    fun apply(subtotal: BigDecimal): BigDecimal ="
+    change 17 - "        codes.fold(subtotal) { sum, code -> code.applyTo(sum) }"
+    change 20 + "        codes.filterNot { it.expiresOn.isBefore(today()) }"
+    change 21 + "            .fold(subtotal) { sum, code -> code.applyTo(sum) }"
+    change 22 " " "}"
+    echo
+    tool Write test/DiscountCodesTest.kt
+    result "Wrote 22 lines to test/DiscountCodesTest.kt"
+    echo
+    tool Bash "gradle test --tests 'store.DiscountCodesTest'"
+    result "BUILD SUCCESSFUL in 6s"
+    echo
+    said "Expired codes are now skipped: DiscountCodes drops any code whose expiresOn is before"
+    more "today, and DiscountCodesTest checks an expired code next to one expiring today."
+}
+
+# The conversation, then the input box under it. A terminal too short for all of it shows the end,
+# as a scrolled session would.
+draw() {
+    local rows cols first=0
+    read -r rows cols < <(stty size 2>/dev/null)
+    rows=${rows:-40}; cols=${cols:-100}
+    local -a lines
+    mapfile -t lines < <(session)
+    local room=$(( rows - 5 ))
+    if (( room < 1 )); then room=1; fi
+    if (( ${#lines[@]} > room )); then first=$(( ${#lines[@]} - room )); fi
+    local rule
+    rule=$(printf '─%.0s' $(seq $(( cols - 4 ))))
+    printf '%s[2J%s[3J%s[H' "$e" "$e" "$e"
+    printf '%s\n' "${lines[@]:first}"
+    printf '\n%s╭%s╮%s\n' "$frame" "$rule" "$off"
+    printf '%s│%s > %*s%s│%s\n' "$frame" "$off" $(( cols - 7 )) "" "$frame" "$off"
+    printf '%s╰%s╯%s\n' "$frame" "$rule" "$off"
+    printf '  %s▸▸ bypass permissions on%s %s(shift+tab to cycle)%s' "$pink" "$off" "$dim" "$off"
+    # The cursor waits in the input box, where the real one would.
+    printf '%s[%d;5H' "$e" $(( ${#lines[@]} - first + 3 ))
+}
+
+trap draw WINCH
+sleep 0.3
+draw
+# Short sleeps so a resize is redrawn promptly; bounded, so a stray one can't outlive the run.
+for _ in $(seq 3600); do sleep 0.25; done
+STUB
+chmod +x "$STUB_BIN/claude"
+
 # Spawn an isolated nop. $1=XDG config dir, $2=exact window title to wait for, $3=optional project
 # arg (empty → restore the seeded window layout). A nop window is titled by the name its window was
 # given, or by the project it is showing when it has no name. Sets the global LAST_WID to its id.
@@ -111,15 +216,32 @@ launch_isolated() {
         echo "launching at $(date -Is): NOP_BIN=$NOP_BIN cfg=$cfg arg=$arg"
         echo "----- nop output -----"
     } > "$log"
+    # A scene that seeds no agent accounts gets an explicitly empty list. With no agent.json at all
+    # nop seeds one from the user's real vendor logins (Accounts.discover), which would put their
+    # account names — and live usage polls for them — into the shot.
+    [ -f "$cfg/nop/agent.json" ] || echo '{ "accounts": [] }' > "$cfg/nop/agent.json"
+    # The rest of the agent state is fenced off too: session logs under a private XDG_DATA_HOME,
+    # Claude's default store (past sessions "outside nop") pointed at an empty directory, the stub
+    # CLIs first on PATH, and usage always read from the scene's fixture — a file that doesn't
+    # exist just reads as no usage, so no scene can ever send a provider a request.
+    local -a demo_env=(
+        XDG_CONFIG_HOME="$cfg"
+        XDG_DATA_HOME="$cfg/data"
+        CLAUDE_CONFIG_DIR="$cfg/claude"
+        PATH="$STUB_BIN:$PATH"
+        NOP_USAGE_FIXTURE="$cfg/usage.json"
+    )
     # Strip _JPACKAGE_LAUNCHER so the fresh jpackage launcher treats this as a first-time start
     # (see the long-form note in install.sh) rather than forwarding raw args to JLI.
     if [ -n "$arg" ]; then
-        env -u _JPACKAGE_LAUNCHER XDG_CONFIG_HOME="$cfg" "$NOP_BIN" "$arg" >>"$log" 2>&1 &
+        env -u _JPACKAGE_LAUNCHER "${demo_env[@]}" "$NOP_BIN" "$arg" >>"$log" 2>&1 &
     else
-        env -u _JPACKAGE_LAUNCHER XDG_CONFIG_HOME="$cfg" "$NOP_BIN" >>"$log" 2>&1 &
+        env -u _JPACKAGE_LAUNCHER "${demo_env[@]}" "$NOP_BIN" >>"$log" 2>&1 &
     fi
     local pid=$!
     DEMO_PIDS+=("$pid")
+    # Out of the shell's job table, so the instances killed between scenes don't print "Killed".
+    disown "$pid" 2>/dev/null || true
 
     local wid=""
     for _ in $(seq 60); do
@@ -168,11 +290,11 @@ capture_to() {
 # near-zero for the empty "click a file…" placeholder. Used to pick the click offset that actually
 # opened the diff, so the shot doesn't silently capture a blank pane if the layout shifted. The
 # crop must stay inside the editor: right of the project tree (ends at SHOT_H_RATIO) and left of
-# the tool panel (starts at ~83% width with the split.tools seeded below) — the panel's change
-# list is itself full of ink and would mask a missed click.
+# the tool region (starts at ~71% width with the split.tools seeded below) — the agent pane's text
+# and the panel's change list are both full of ink and would mask a missed click.
 pane_ink() {
     local img="$1" w="$2" h="$3"
-    local cw=$(( w * 50 / 100 )) ch=$(( h * 22 / 100 ))
+    local cw=$(( w * 40 / 100 )) ch=$(( h * 22 / 100 ))
     local cx=$(( w * 25 / 100 )) cy=$(( h * 2 / 100 ))
     convert "$img" -crop "${cw}x${ch}+${cx}+${cy}" +repage -colorspace Gray \
         -format '%[fx:standard_deviation]' info: 2>/dev/null || echo 0
@@ -186,14 +308,19 @@ DIFF_CFG="$TMP_PARENT/diff-cfg"
 DIFF_PROJECT="$TMP_PARENT/$DIFF_BASENAME"
 mkdir -p "$DIFF_CFG/nop" "$DIFF_PROJECT"
 
-# split.tools gives the editor 80% of the width right of the tree; the tool panel keeps ~285px —
-# slim, but still wide enough that the commit-message row's buttons don't clip.
+# The tool region right of the editor holds the agent pane and the tool panel side by side. The
+# tools are unfolded (a first run starts them folded away) so the commit panel is there to click;
+# split.session=0 pins the agent pane at its minimum width, and split.tools gives the region just
+# enough for that plus a tool panel of ~285px — slim, but still wide enough that the
+# commit-message row's buttons don't clip. The editor keeps the rest.
 cat > "$DIFF_CFG/nop/state" <<EOF
 window.width=$SHOT_WIDTH
 window.height=$SHOT_HEIGHT
 theme=$opposite_theme
 split.h=$SHOT_H_RATIO
-split.tools=0.80
+split.tools=0.655
+split.session=0
+tools.collapsed=0
 EOF
 
 # Several files spread across a few directories so the tool panel groups them by directory:
@@ -477,14 +604,16 @@ diff_out="$SHOT_DIR/latest-diff.png"
 # Click the FIRST change row in the tool panel on the right edge — Greeting.kt, the long file
 # whose diff the shot is about. The x sits at 92% of the window width: past the row's checkbox
 # and kind prefix, inside the click-to-open area that spans the rest of the row (panel starts at
-# ~83% with the ratios seeded above). That first row sits ~245px below the window top (tab strip,
-# header, buttons, recent-messages dropdown, message box); the exact Y depends on render scale,
-# so the offsets cover the row's position at 1x through 1.5x. Each is only tried until one
-# lands: the ink probe stops the loop at the first capture whose editor pane clearly shows a
-# diff, because a later offset would hit a DIFFERENT row and put the wrong file in the shot.
+# ~83% with the ratios seeded above). That first row sits ~309px below the window top (project
+# tabs, tool tabs, header, buttons, recent-messages dropdown, message box, group header); the exact
+# Y depends on render scale, so the offsets are that row's position at 1x, 1.25x and 1.5x — and at
+# 1x the later two fall in the empty space under a group rather than on another file. Each is only
+# tried until one lands: the ink probe stops the loop at the first capture whose editor pane
+# clearly shows a diff, because a later offset could hit a DIFFERENT row and put the wrong file in
+# the shot.
 diff_row_x=$(( DX + DW * 92 / 100 ))
 best_ink="-1"
-for off in 245 215 300 330 365; do
+for off in 309 386 463; do
     DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$diff_wid" || true
     DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$diff_wid"
     sleep 0.2
@@ -626,17 +755,343 @@ sleep 1.0
 preview_out="$SHOT_DIR/latest-preview.png"
 capture_to "$preview_out" "$prev_wid"
 
+# ===========================================================================================
+# Scene 3 — agent accounts dialog over the usage strip (synthetic accounts and usage)
+# ===========================================================================================
+# The first two instances have been captured, and this shot is taken off the screen rather than
+# out of one window (it spans two), so neither may be left where it could overlap this one.
+cleanup
+DEMO_PIDS=()
+
+AGENT_BASENAME="acme-store"
+AGENT_CFG="$TMP_PARENT/agent-cfg"
+# Under a made-up home, so wherever nop names the directory a session runs in it reads as an
+# ordinary checkout (ShortPath keeps the last few segments) rather than naming the temp directory.
+AGENT_PROJECT="$TMP_PARENT/home/dev/projects/$AGENT_BASENAME"
+mkdir -p "$AGENT_CFG/nop" "$AGENT_PROJECT/src" "$AGENT_PROJECT/test" "$AGENT_PROJECT/docs"
+
+# Short lines and a shallow tree: the editor and the tree are both narrow in this layout, and a
+# horizontal scrollbar or a clipped filename would be most of what shows around the dialog.
+cat > "$AGENT_PROJECT/src/Checkout.kt" <<'EOF'
+package store
+
+import java.math.BigDecimal
+
+/** Totals a cart, then applies any valid discount codes. */
+class Checkout(val cart: Cart, val codes: DiscountCodes) {
+    fun total(): BigDecimal {
+        val subtotal = cart.lines.sumOf { it.lineTotal() }
+        return codes.apply(subtotal)
+    }
+}
+EOF
+cat > "$AGENT_PROJECT/src/Cart.kt" <<'EOF'
+package store
+
+import java.math.BigDecimal
+
+data class CartLine(val sku: String, val price: BigDecimal, val qty: Int) {
+    fun lineTotal(): BigDecimal = price * qty.toBigDecimal()
+}
+
+data class Cart(val lines: List<CartLine>)
+EOF
+cat > "$AGENT_PROJECT/README.md" <<'EOF'
+# acme-store
+
+A small synthetic project used for the nop screenshot.
+EOF
+cat > "$AGENT_PROJECT/docs/checkout.md" <<'EOF'
+# Checkout
+
+Discount codes are applied after the subtotal.
+EOF
+cat > "$AGENT_PROJECT/build.gradle.kts" <<'EOF'
+plugins {
+    kotlin("jvm") version "2.1.0"
+}
+EOF
+# DiscountCodes.kt as it was before the session in the claude stand-in: 18 lines, no expiry check.
+cat > "$AGENT_PROJECT/src/DiscountCodes.kt" <<'EOF'
+package store
+
+import java.math.BigDecimal
+import java.time.LocalDate
+
+data class DiscountCode(
+    val code: String,
+    val percentOff: Int,
+    val expiresOn: LocalDate,
+) {
+    fun applyTo(total: BigDecimal): BigDecimal =
+        total * BigDecimal(100 - percentOff).movePointLeft(2)
+}
+
+class DiscountCodes(private val codes: List<DiscountCode>) {
+    fun apply(subtotal: BigDecimal): BigDecimal =
+        codes.fold(subtotal) { sum, code -> code.applyTo(sum) }
+}
+EOF
+git -C "$AGENT_PROJECT" init --quiet
+git -C "$AGENT_PROJECT" config user.email "screenshot@nop.local"
+git -C "$AGENT_PROJECT" config user.name "nop screenshot"
+git -C "$AGENT_PROJECT" add -A
+git -C "$AGENT_PROJECT" commit --quiet -m "initial commit"
+
+# And the session's work, left uncommitted so the tree shows what it touched: the edit it drew as a
+# diff, and the 22-line test it says it wrote.
+cat > "$AGENT_PROJECT/src/DiscountCodes.kt" <<'EOF'
+package store
+
+import java.math.BigDecimal
+import java.time.LocalDate
+
+data class DiscountCode(
+    val code: String,
+    val percentOff: Int,
+    val expiresOn: LocalDate,
+) {
+    fun applyTo(total: BigDecimal): BigDecimal =
+        total * BigDecimal(100 - percentOff).movePointLeft(2)
+}
+
+class DiscountCodes(
+    private val codes: List<DiscountCode>,
+    private val today: () -> LocalDate = LocalDate::now,
+) {
+    fun apply(subtotal: BigDecimal): BigDecimal =
+        codes.filterNot { it.expiresOn.isBefore(today()) }
+            .fold(subtotal) { sum, code -> code.applyTo(sum) }
+}
+EOF
+cat > "$AGENT_PROJECT/test/DiscountCodesTest.kt" <<'EOF'
+package store
+
+import java.math.BigDecimal
+import java.time.LocalDate
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class DiscountCodesTest {
+    private val today = LocalDate.of(2026, 9, 18)
+
+    @Test
+    fun `expired codes are skipped`() {
+        val codes = DiscountCodes(
+            listOf(
+                DiscountCode("SPRING", 10, today.minusDays(1)),
+                DiscountCode("WELCOME", 20, today),
+            ),
+            today = { today },
+        )
+        assertEquals(BigDecimal("80.0000"), codes.apply(BigDecimal("100.00")))
+    }
+}
+EOF
+
+# Tools folded away, so the agent session has the tool region to itself and the usage strip (which
+# spans that region) fits every account on one line. split.tools leaves the region just wide enough
+# for that, and the editor beside it just wide enough for the dialog to sit over it without
+# covering the session.
+AGENT_TOOLS_RATIO=0.41
+cat > "$AGENT_CFG/nop/state" <<EOF
+window.width=$SHOT_WIDTH
+window.height=$SHOT_HEIGHT
+theme=$opposite_theme
+split.h=$SHOT_H_RATIO
+split.tools=$AGENT_TOOLS_RATIO
+tools.collapsed=1
+EOF
+
+AGENT_DATA=$(project_data_dir "$AGENT_CFG" "$AGENT_PROJECT")
+mkdir -p "$AGENT_DATA"
+{
+    printf 'file\t%s\t1\n' "$AGENT_PROJECT/src/DiscountCodes.kt"
+    printf 'file\t%s\t0\n' "$AGENT_PROJECT/src/Checkout.kt"
+} > "$AGENT_DATA/tabs.tsv"
+
+# Five made-up accounts across the three providers. The dialog has room for four rows, so the order
+# puts one of each provider in the first three. The homes are where nop would create them for a
+# user called "dev"; nothing reads them, because every reading comes from the fixture below.
+AGENT_HOMES="/home/dev/.local/share/nop/agent/homes"
+cat > "$AGENT_CFG/nop/agent.json" <<EOF
+{
+  "accounts": [
+    { "name": "claude-work", "provider": "anthropic", "home": "$AGENT_HOMES/claude-work",
+      "model": "claude-opus-5", "reasoning": "high", "handoverTo": "codex-work" },
+    { "name": "codex-work", "provider": "openai", "home": "$AGENT_HOMES/codex-work",
+      "model": "gpt-5.5-codex", "reasoning": "medium", "handoverTo": "antigravity" },
+    { "name": "antigravity", "provider": "antigravity", "home": "$AGENT_HOMES/antigravity",
+      "reasoning": "high" },
+    { "name": "claude-side", "provider": "anthropic", "home": "$AGENT_HOMES/claude-side",
+      "model": "claude-sonnet-5", "handoverTo": "claude-work" },
+    { "name": "codex-lab", "provider": "openai", "home": "$AGENT_HOMES/codex-lab",
+      "reasoning": "high" }
+  ]
+}
+EOF
+
+# The usage every account reports (see UsageFixture.kt). Spread across the strip's green / amber /
+# red bands, with resets at different points in their windows so the "now" markers differ too.
+cat > "$AGENT_CFG/usage.json" <<'EOF'
+{
+  "claude-work": {
+    "session": { "percent": 72, "resetsInMinutes": 108, "windowMinutes": 300 },
+    "weekly": { "percent": 41, "resetsInMinutes": 4380, "windowMinutes": 10080 },
+    "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+  },
+  "codex-work": {
+    "session": { "percent": 35, "resetsInMinutes": 191, "windowMinutes": 300 },
+    "weekly": { "percent": 57, "resetsInMinutes": 7300, "windowMinutes": 10080 }
+  },
+  "antigravity": {
+    "session": { "percent": 8, "resetsInMinutes": 290, "windowMinutes": 300 },
+    "weekly": { "percent": 19, "resetsInMinutes": 8900, "windowMinutes": 10080 }
+  },
+  "claude-side": {
+    "session": { "percent": 14, "resetsInMinutes": 262, "windowMinutes": 300 },
+    "weekly": { "percent": 88, "resetsInMinutes": 1500, "windowMinutes": 10080 },
+    "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+  },
+  "codex-lab": {
+    "session": { "percent": 93, "resetsInMinutes": 26, "windowMinutes": 300 },
+    "weekly": { "percent": 64, "resetsInMinutes": 3200, "windowMinutes": 10080 }
+  }
+}
+EOF
+
+launch_isolated "$AGENT_CFG" "$AGENT_BASENAME" "$AGENT_PROJECT"
+agent_wid="$LAST_WID"
+read AX AY AW AH < <(geometry_of "$agent_wid")
+echo "agents window $agent_wid at $AX,$AY ${AW}x${AH}"
+
+# Positions below are measured at 1x, where this window's client area is 1710px wide, and scaled by
+# however much wider it came out. The tool region's left edge follows from the seeded ratios.
+agent_scale=$(awk -v w="$AW" 'BEGIN {printf "%.4f", w / 1710}')
+scaled() { awk -v v="$1" -v s="$agent_scale" 'BEGIN {printf "%d", v * s}'; }
+tool_left=$(awk -v w="$AW" -v h="$SHOT_H_RATIO" -v t="$AGENT_TOOLS_RATIO" 'BEGIN {printf "%d", w * (h + (1 - h) * t)}')
+AGENT_TABS="$AGENT_DATA/agents"
+
+# Start a session on claude-work by clicking its row in the agent picker, which fills the tool
+# region at startup: the first row sits ~190px down. It runs the claude stand-in. nop writes every
+# open Claude session to the project's `agents` file as soon as it opens, which is how the script
+# knows the click landed. A single click, not a sweep of offsets like the diff shot's, because a
+# miss here would land on another account's row and start the wrong session.
+DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$agent_wid" 2>/dev/null || true
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + tool_left + $(scaled 120) )) $(( AY + $(scaled 190) ))
+sleep 0.15
+DISPLAY="$DISPLAY_SPEC" xdotool click 1
+for _ in $(seq 20); do
+    grep -q $'\tclaude-work\t' "$AGENT_TABS" 2>/dev/null && break
+    sleep 0.25
+done
+if ! grep -q $'\tclaude-work\t' "$AGENT_TABS" 2>/dev/null; then
+    echo "no claude-work session opened from the agent picker; log at $AGENT_CFG/nop.log" >&2
+    exit 7
+fi
+# Let the terminal take its size and the stand-in draw into it.
+sleep 2
+
+# Name the tab, as a session a turn or two in would be: the stand-in writes no transcript for nop to
+# take a title from, so it is renamed the way a user would, from the tab's right-click. The tab is
+# the first after the terminals' "+", ~150px into the region; the rename field opens with the old
+# name selected, so typing replaces it.
+AGENT_TITLE="Discount expiry"
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + tool_left + $(scaled 150) )) $(( AY + $(scaled 90) ))
+sleep 0.15
+DISPLAY="$DISPLAY_SPEC" xdotool click 3
+sleep 0.5
+DISPLAY="$DISPLAY_SPEC" xdotool type --delay 15 "$AGENT_TITLE"
+DISPLAY="$DISPLAY_SPEC" xdotool key Return
+for _ in $(seq 20); do
+    grep -qF "$AGENT_TITLE" "$AGENT_TABS" 2>/dev/null && break
+    sleep 0.25
+done
+if ! grep -qF "$AGENT_TITLE" "$AGENT_TABS" 2>/dev/null; then
+    # Not worth failing the run over: the tab keeps its default name and the shot is still right.
+    echo "warning: couldn't rename the agent tab; it keeps its default name" >&2
+fi
+
+# The dialog this instance opens: matched by being transient for its window, not by title alone,
+# so an accounts dialog the user has open in their own nop can't be picked up instead.
+dialog_of() {
+    local parent=$(( $1 )) id
+    for id in $(DISPLAY="$DISPLAY_SPEC" wmctrl -l 2>/dev/null | awk '/ Agent accounts$/ {print $1}'); do
+        local owner
+        owner=$(DISPLAY="$DISPLAY_SPEC" xprop -id "$id" WM_TRANSIENT_FOR 2>/dev/null | awk '/window id/ {print $NF}')
+        if [ -n "$owner" ] && [ $(( owner )) -eq "$parent" ]; then
+            echo "$id"
+            return
+        fi
+    done
+}
+
+# Open the dialog by clicking the usage strip, which is one big button onto it. Its right end is
+# empty strip past the last account, well clear of the bars' tooltips; the strip's vertical centre
+# sits ~21px above the window bottom at 1x, and the other offsets cover larger render scales. A
+# miss lands on the bottom of the session's terminal, where the stand-in ignores it.
+dialog_wid=""
+for off in 21 26 31 16; do
+    DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$agent_wid" 2>/dev/null || true
+    DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + AW - 60 )) $(( AY + AH - off ))
+    sleep 0.15
+    DISPLAY="$DISPLAY_SPEC" xdotool click 1
+    for _ in $(seq 10); do
+        dialog_wid=$(dialog_of "$agent_wid")
+        [ -n "$dialog_wid" ] && break
+        sleep 0.3
+    done
+    [ -n "$dialog_wid" ] && break
+done
+if [ -z "$dialog_wid" ]; then
+    echo "the Agent accounts dialog never opened; log at $AGENT_CFG/nop.log" >&2
+    exit 6
+fi
+
+# Move the dialog over the editor, right-aligned just short of the tool region, and vertically
+# centred: the session and the strip stay in view, and so does the project tree. WMs disagree
+# about whether a move positions the frame or the client, so the first move is measured and the
+# second corrects by whatever the frame added.
+read _ _ GW GH < <(geometry_of "$dialog_wid")
+want_x=$(( AX + tool_left - GW - 20 ))
+want_y=$(( AY + (AH - GH) / 2 + 12 ))
+if [ "$want_x" -lt $(( AX + 8 )) ]; then want_x=$(( AX + 8 )); fi
+DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$dialog_wid" -e "0,$want_x,$want_y,-1,-1"
+sleep 0.5
+read GX GY _ _ < <(geometry_of "$dialog_wid")
+if [ "$GX" -ne "$want_x" ] || [ "$GY" -ne "$want_y" ]; then
+    DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$dialog_wid" -e "0,$(( 2 * want_x - GX )),$(( 2 * want_y - GY )),-1,-1"
+    sleep 0.5
+fi
+DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$dialog_wid" -b add,above 2>/dev/null || true
+DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$dialog_wid" 2>/dev/null || true
+DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$dialog_wid" 2>/dev/null || true
+# Park the cursor over the project tree, clear of the dialog, so no hover state or tooltip shows.
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + AW * 6 / 100 )) $(( AY + AH * 80 / 100 ))
+sleep 1.0
+
+# Captured off the screen and cropped to the main window: `import -window` on either window alone
+# would lose the other one.
+agents_out="$SHOT_DIR/latest-agents.png"
+agents_raw="$(mktemp --suffix=.png)"
+DISPLAY="$DISPLAY_SPEC" import -window root "$agents_raw"
+convert "$agents_raw" -crop "${AW}x${AH}+${AX}+${AY}" +repage -strip -colors 256 -dither None \
+    -define png:compression-level=9 -define png:compression-filter=5 "$agents_out"
+rm -f "$agents_raw"
+
 cleanup
 DEMO_PIDS=()
 trap 'rm -rf "$TMP_PARENT"' EXIT INT TERM
 
 echo "wrote $diff_out ($(stat -c %s "$diff_out") bytes)"
 echo "wrote $preview_out ($(stat -c %s "$preview_out") bytes)"
+echo "wrote $agents_out ($(stat -c %s "$agents_out") bytes)"
 
 # Insert / replace the screenshot block in the README so the latest captures show up inline.
 block="$README_MARKER
 ![Diff view](docs/screenshots/latest-diff.png)
 ![Workspace preview](docs/screenshots/latest-preview.png)
+![Agent accounts and usage](docs/screenshots/latest-agents.png)
 $README_MARKER"
 
 if grep -q "$README_MARKER" "$README"; then

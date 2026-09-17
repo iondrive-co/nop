@@ -20,15 +20,53 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
-/** One rate-limit window: how much of it is spent, and when it rolls over. */
-data class UsageWindow(val percent: Double, val resetsAt: Instant?) {
-    /** "3h 12m" until the window resets, or null when nothing said when that is. */
+/**
+ * One rate-limit window: how much of it is spent, when it rolls over, and how long it runs for.
+ *
+ * [length] is the window's whole span — five hours, seven days — which is the piece that turns
+ * [resetsAt] into a position: spent against elapsed is the comparison that says whether a quota is
+ * being burnt faster than it refills, and neither number alone can make it. It is null only when
+ * the provider didn't say.
+ */
+data class UsageWindow(val percent: Double, val resetsAt: Instant?, val length: Duration? = null) {
+    /**
+     * "3h 12m" until the window resets, "5d" when that is days out, or null when nothing said when
+     * it is.
+     *
+     * The day form is for the weekly window, which resets up to a week away: "163h 12m" is a number
+     * the reader has to divide before it says anything, and to the hour is not a precision anyone
+     * plans a week's work to. The session window is always inside its five hours, so it keeps the
+     * minutes — those are what "wait for the reset or switch account" turns on.
+     */
     fun eta(now: Instant = Instant.now()): String? {
         val at = resetsAt ?: return null
         val seconds = Duration.between(now, at).seconds.coerceAtLeast(0)
         val hours = seconds / 3600
         val minutes = (seconds % 3600) / 60
-        return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
+        return when {
+            hours >= HOURS_IN_DAYS -> "${Math.round(hours / 24.0)}d"
+            hours > 0 -> "${hours}h ${minutes}m"
+            else -> "${minutes}m"
+        }
+    }
+
+    /**
+     * How far through the window the clock is, 0..1, or null when its span or its reset is unknown.
+     *
+     * The window started [length] before it resets — providers report the end, not the beginning —
+     * so this is what is left subtracted from the whole. A window whose reset has already passed
+     * reads as 1.0 rather than going negative: the next poll will have rolled it over.
+     */
+    fun elapsed(now: Instant = Instant.now()): Double? {
+        val at = resetsAt ?: return null
+        val span = length?.seconds?.takeIf { it > 0 } ?: return null
+        val remaining = Duration.between(now, at).seconds.coerceIn(0, span)
+        return (span - remaining).toDouble() / span
+    }
+
+    private companion object {
+        /** Past two days, the day count is the answer — the same line [iondrive.nop.Ago] draws. */
+        const val HOURS_IN_DAYS = 48
     }
 }
 
@@ -46,20 +84,66 @@ data class UsageReading(
     /** Set when the reading could not be taken at all — logged out, offline, never run. */
     val unavailable: String? = null,
 ) {
+    /**
+     * Whether this reading is consistent with the vendor refusing to serve the account: true when a
+     * window is at or past [SPENT_PERCENT], false when every window it knows about has room, and
+     * null when it cannot say.
+     *
+     * It exists to contradict the terminal. [QuotaWatcher] decides an account has run out by finding
+     * a phrase in the CLI's output, and output is not evidence about an account — a session that is
+     * reading a diff, grepping a log or writing a test about quota handling prints those phrases as
+     * *content*, and killing it for that is a false positive with no undo. This is the independent
+     * answer: the provider's own number for how much of the window is gone. Where it says there is
+     * room, the phrase on screen was something the agent was showing, not something the vendor said.
+     *
+     * Null is the honest answer more often than it looks. A Codex reading is scavenged from that
+     * account's last session transcript, so it can be days old and says nothing about now; so can a
+     * Claude reading nop has not managed to take. An answer nobody should act on is not one to guess
+     * at — null leaves the decision exactly where it was before this existed.
+     */
+    fun looksSpent(now: Instant = Instant.now()): Boolean? {
+        if (unavailable != null) return null
+        // A reading has to be about the present to contradict something happening in the present.
+        val taken = asOf ?: return null
+        if (Duration.between(taken, now) > FRESH_ENOUGH) return null
+        val worst = listOfNotNull(session?.percent, weekly?.percent).maxOrNull() ?: return null
+        return worst >= SPENT_PERCENT
+    }
+
     companion object {
         fun unavailable(why: String) = UsageReading(null, null, null, why)
+
+        /**
+         * How much of a window has to be gone before the vendor refusing is believable.
+         *
+         * Not 100. The percentage and the refusal come from different places — the usage endpoint
+         * and the model's own gate — and they round and lag differently, so an account genuinely out
+         * of quota can read 97%. The number only has to be high enough that an agent quoting a limit
+         * message while it still has most of a window left is not mistaken for one that has none.
+         */
+        const val SPENT_PERCENT: Double = 95.0
+
+        /**
+         * How old a reading may be and still be worth contradicting the screen with. Longer than the
+         * poll interval, so an account is not left ungoverned by one slow or failed poll, and far
+         * shorter than the five-hour window it describes.
+         */
+        val FRESH_ENOUGH: Duration = Duration.ofMinutes(20)
     }
 }
 
 /**
  * Reads each account's remaining quota.
  *
- * The two providers could hardly be less alike here. Claude answers a question: an HTTPS GET with
+ * The three providers could hardly be less alike here. Claude answers a question: an HTTPS GET with
  * the account's OAuth token, returning the live five-hour and seven-day windows. Codex answers
  * nothing — there is no endpoint — so its usage is scavenged from the `rate_limits` block the CLI
- * writes into its own session transcripts, which means **a Codex reading is only as fresh as that
- * account's last Codex session**. Both are surfaced with the age of the reading attached, because
- * a stale 4% and a live 4% are different facts.
+ * writes into its own session transcripts, which means **an OpenAI reading is only as fresh as that
+ * account's last Codex session**. Antigravity has no endpoint either, but it does have a `/usage`
+ * slash command, so its reading is taken by *running the account* — a CLI start of several seconds,
+ * which is why it happens on the poller's thread and nowhere else (see [Antigravity]). All three are
+ * surfaced with the age of the reading attached, because a stale 4% and a live 4% are different
+ * facts.
  *
  * The Claude path also refreshes expired OAuth tokens, which is the one piece of this feature that
  * can damage something outside nop: a malformed `.credentials.json` breaks the account for the real
@@ -98,9 +182,14 @@ object Usage {
     }
 
     /** Blocking; call it off the UI thread. */
-    fun read(account: Account): UsageReading = when (account.provider) {
-        Provider.Anthropic -> readClaude(account)
-        Provider.OpenAI -> readCodex(account)
+    fun read(account: Account): UsageReading {
+        // The screenshot's canned numbers, when it has set some — see UsageFixture.
+        UsageFixture.file?.let { return UsageFixture.read(it, account) }
+        return when (account.provider) {
+            Provider.Anthropic -> readClaude(account)
+            Provider.OpenAI -> readCodex(account)
+            Provider.Antigravity -> Antigravity.readUsage(account)
+        }
     }
 
     /** Whether the account's credentials still work — not merely whether the file is there. */
@@ -110,6 +199,25 @@ object Usage {
         // part the user can do anything about.
         Provider.Anthropic -> claudeToken(account) != null
         Provider.OpenAI -> codexAuth(account) != null
+        // The refresh token, for the same reason: the CLI spends it for a new access token on use.
+        Provider.Antigravity -> Antigravity.signedIn(account)
+    }
+
+    /**
+     * The models the picker should offer for [account], asked of whoever can answer.
+     *
+     * Claude's come from the Models API over the account's own token; Antigravity's from `agy
+     * models`, which is a CLI start and so costs seconds rather than milliseconds. Codex can be
+     * asked neither way and answers empty — "nothing was discovered", which is what leaves the
+     * picker on [Provider.fallbackModels] rather than overwriting it with a copy of itself.
+     */
+    fun discoverModels(account: Account): List<String> {
+        UsageFixture.file?.let { return UsageFixture.models(it, account) }
+        return when (account.provider) {
+            Provider.Anthropic -> discoverClaudeModels(account)
+            Provider.Antigravity -> Antigravity.models(account)
+            Provider.OpenAI -> emptyList()
+        }
     }
 
     // ── Claude ──
@@ -121,17 +229,22 @@ object Usage {
         val data = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
             ?: return UsageReading.unavailable("unreadable usage response")
         return UsageReading(
-            session = claudeWindow(data["five_hour"]),
-            weekly = claudeWindow(data["seven_day"]),
+            // The spans are named by the fields themselves and are not in the payload, so they are
+            // written down here rather than inferred from a reset that may be minutes away.
+            session = claudeWindow(data["five_hour"], Duration.ofHours(5)),
+            weekly = claudeWindow(data["seven_day"], Duration.ofDays(7)),
             asOf = Instant.now(),
         )
     }
 
-    private fun claudeWindow(element: kotlinx.serialization.json.JsonElement?): UsageWindow? {
+    private fun claudeWindow(
+        element: kotlinx.serialization.json.JsonElement?,
+        length: Duration,
+    ): UsageWindow? {
         val obj = element.obj() ?: return null
         val raw = obj["utilization"].double() ?: return null
         val resets = obj["resets_at"].str()?.let(::parseInstant)
-        return UsageWindow(normalizePercent(raw), resets)
+        return UsageWindow(normalizePercent(raw), resets, length)
     }
 
     /**
@@ -343,18 +456,24 @@ object Usage {
             val minutes = w["window_minutes"].long() ?: return@mapNotNull null
             minutes to w
         }
-        fun window(w: JsonObject): UsageWindow? {
+        fun window(entry: Pair<Long, JsonObject>): UsageWindow? {
+            val (minutes, w) = entry
             val used = w["used_percent"].double() ?: return null
             val resets = w["resets_at"].long()?.let(Instant::ofEpochSecond)
             // `used_percent` is a point in time. If the window has rolled over since the snapshot
             // was written, current usage in the new window is zero — reporting the old figure would
             // show a maxed-out account that has in fact been free for hours.
             val rolled = resets != null && !Instant.now().isBefore(resets)
-            return UsageWindow(if (rolled) 0.0 else used.coerceIn(0.0, 100.0), resets)
+            return UsageWindow(
+                percent = if (rolled) 0.0 else used.coerceIn(0.0, 100.0),
+                resetsAt = resets,
+                // `window_minutes` is the span, and the same field that sorted the two slots.
+                length = Duration.ofMinutes(minutes),
+            )
         }
         val short = windows.filter { it.first <= CODEX_SESSION_MAX_MINUTES }.minByOrNull { it.first }
         val long = windows.filter { it.first > CODEX_SESSION_MAX_MINUTES }.maxByOrNull { it.first }
-        return short?.second?.let(::window) to long?.second?.let(::window)
+        return short?.let(::window) to long?.let(::window)
     }
 
     /** Longer than this and it is a weekly-style pool, not the rolling session one. */

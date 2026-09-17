@@ -35,7 +35,34 @@ class AgentSessions {
 
     val selected: AgentSession? get() = _sessions.firstOrNull { it.sessionId == selectedId }
 
-    /** Launches [account] at [dir] as a new session and shows it. */
+    /**
+     * Who a session hands its work to when the account running it runs out — set by the window that
+     * owns the configured accounts, and handed to every session this collection makes.
+     *
+     * A function rather than the list itself, and set rather than passed, because both ends move:
+     * the accounts are edited in a dialog that is reachable while sessions run, and the sessions
+     * outlive the composition that draws them (see [AgentSessionStore]). A list captured at [open]
+     * would be the list as it stood when that tab was started, which is the one answer nobody wants
+     * an hour later.
+     */
+    var handoverTarget: (Account) -> Account? = { _ -> null }
+
+    /**
+     * Whether the poller's last reading agrees an account has run out, for the sessions to check
+     * before they believe their own terminals. Set from the same place as [handoverTarget], and for
+     * the same reason it is a function: the readings are refreshed on a timer that outlives nothing
+     * and belongs to nobody in particular. See [AgentSession.hasRunOut].
+     */
+    var hasRunOut: (Account) -> Boolean? = { _ -> null }
+
+    /**
+     * Launches [account] at [dir] as a new session and shows it, in the tab the picker was in.
+     *
+     * The picker is how a session is started, so the tab it was showing in is the tab the session
+     * belongs in: leaving it there as well would put two tabs in the strip for one press, the
+     * picker on one side of the new session and the "+" that opened it on the other. The "+" is how
+     * an empty one comes back — see [pickerTabVisible].
+     */
     fun open(
         dir: File,
         account: Account,
@@ -44,10 +71,18 @@ class AgentSessions {
         /** HEAD as the caller sees it now — see [AgentSession.baselineSha]. */
         baselineSha: String? = null,
     ): AgentSession {
-        val session = AgentSession(dir, account, seed, resumeId, baselineSha = baselineSha)
+        val session = AgentSession(
+            dir,
+            account,
+            seed,
+            resumeId,
+            baselineSha = baselineSha,
+            handoverTarget = { from -> handoverTarget(from) },
+            hasRunOut = { of -> hasRunOut(of) },
+        )
         _sessions.add(session)
         selectedId = session.sessionId
-        pickerTabVisible = true
+        pickerTabVisible = false
         return session
     }
 
@@ -103,6 +138,11 @@ class AgentSessions {
                     restoredTitle = row.title,
                     titleByUser = row.titleIsUsers,
                     baselineSha = row.baselineSha.takeIf { it.isNotBlank() },
+                    // Read through this collection's own property rather than out of [accounts]
+                    // above: that list is the one restoring matches names against, and a nomination
+                    // has to follow the settings as they stand whenever the wall is actually hit.
+                    handoverTarget = { from -> handoverTarget(from) },
+                    hasRunOut = { of -> hasRunOut(of) },
                 ),
             )
         }
@@ -118,12 +158,15 @@ class AgentSessions {
     }
 
     /**
-     * Whether the strip carries a tab for the picker — whether or not a session is running.
+     * Whether the strip carries an agent tab with no session in it yet — the picker.
+     *
+     * One at a time, because it is an *empty* tab rather than a panel: pressing "+" twice without
+     * choosing anything has nothing to make a second of. [open] spends it and [showPicker] makes
+     * another, which is what the "+" and the post-close fallback both do.
      *
      * It is drawn beside the sessions rather than only in place of them, because the picker is the
-     * one place an *earlier* session can be resumed from and the "+" starts a new one instead of
-     * opening it. Closing it takes it out, exactly as closing the last terminal leaves the strip
-     * with only its "+". Pressing "+" puts it back, and so does opening a session.
+     * one place an *earlier* session can be resumed from, and a session already running is not a
+     * reason to be unable to reach that list.
      */
     var pickerTabVisible: Boolean by mutableStateOf(true)
         private set
@@ -145,8 +188,13 @@ class AgentSessions {
         if (idx < 0) return
         _sessions.removeAt(idx).dispose()
         // Fall back to the picker rather than to a neighbour: after closing a session the useful
-        // next thing is almost always starting another, and the picker is where that lives.
-        if (selectedId == id) selectedId = null
+        // next thing is almost always starting another, and the picker is where that lives. Its tab
+        // comes with it — the pane is holding the picker, and a strip with nothing selected in it
+        // while the picker is on screen is a strip that disagrees with the panel beside it.
+        if (selectedId == id) {
+            selectedId = null
+            pickerTabVisible = true
+        }
     }
 
     /**

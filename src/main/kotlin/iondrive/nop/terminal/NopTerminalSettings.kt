@@ -103,6 +103,31 @@ class NopTerminalSettings(
      */
     override fun getBufferMaxLinesCount(): Int = 20_000
 
+    /**
+     * Disable predictive typeahead.
+     *
+     * JediTerm's typeahead attempts to predict typed characters and render them speculatively when
+     * process roundtrip latency exceeds 100ms. In local PTY sessions running interactive coding
+     * agents (Antigravity, Claude Code, Codex), the agent CLI frequently moves the cursor and
+     * rewrites lines via ANSI escape sequences while streaming output. When typeahead is enabled,
+     * incoming output chunks desynchronize the prediction manager, causing the user's typed text to
+     * jump between lines and move around the screen.
+     */
+    override fun getTypeAheadSettings(): com.jediterm.terminal.model.TerminalTypeAheadSettings =
+        com.jediterm.terminal.model.TerminalTypeAheadSettings(false, 0, null)
+
+    /**
+     * Disable arrow key simulation on mouse scroll when in the alternate screen buffer.
+     *
+     * JediTerm's default (`simulateMouseScrollWithArrowKeysInAlternativeScreen = true`) translates
+     * mouse wheel and trackpad scroll gestures in the alternate buffer into Up/Down arrow keystrokes
+     * and sends them to the child process's stdin. For full-screen TUIs like Antigravity (`agy`),
+     * which runs in the alternate screen buffer, this floods the CLI with arrow keys on every scroll,
+     * triggering endless command history cycling or cursor jumping ("infinite scroll").
+     */
+    override fun simulateMouseScrollWithArrowKeysInAlternativeScreen(): Boolean = false
+    override fun sendArrowKeysInAlternativeMode(): Boolean = false
+
     private fun Color.toJediColor() = com.jediterm.core.Color(red, green, blue)
 
     private companion object {

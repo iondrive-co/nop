@@ -23,6 +23,25 @@ class LoginTest {
             mapOf("HOME" to tmp.toString()),
             Login.env(account(Provider.OpenAI, tmp)),
         )
+        assertEquals(
+            mapOf("HOME" to tmp.toString()),
+            Login.env(account(Provider.Antigravity, tmp)),
+        )
+    }
+
+    /**
+     * `agy` has no login subcommand: it signs in when it starts with no token and opens a coding
+     * session when it starts with one. So "Sign in again" has to remove the token first, and in the
+     * command rather than before it — a flow the user abandons must not leave the old login gone
+     * *and* the new one unmade.
+     */
+    @Test
+    fun `antigravity clears its token first, so a signed-in account can sign in again`(@TempDir tmp: Path) {
+        val account = account(Provider.Antigravity, tmp)
+        val script = Login.command(account).last()
+
+        assertTrue(account.credentialFile.toString() in script, script)
+        assertTrue(script.indexOf("rm -f") < script.indexOf("exec"), script)
     }
 
     @Test

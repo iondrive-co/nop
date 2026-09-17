@@ -423,29 +423,43 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     /**
      * Discards local changes to a single file, restoring it to its last committed state — the
      * per-file counterpart to a rollback:
-     *  - a modified, deleted, or conflicted tracked file is reset to its HEAD content, overwriting
-     *    both the staged index entry and the working-tree copy (`git checkout HEAD -- path`);
-     *  - a newly added file (staged but not yet committed) is unstaged and removed from disk;
+     *  - a file HEAD still carries — modified, deleted, or conflicted — is reset to its HEAD
+     *    content, overwriting both the staged index entry and the working-tree copy
+     *    (`git checkout HEAD -- path`);
+     *  - a file HEAD does not carry is unstaged, if it was staged, and removed from disk;
      *  - an untracked file is simply deleted.
      * Destructive: any uncommitted edits to the file are lost and cannot be recovered.
      */
     fun revertFile(change: FileChange) {
-        when (change.kind) {
-            ChangeKind.UNTRACKED ->
-                File(rootDir.toFile(), change.path).delete()
-            ChangeKind.ADDED -> {
-                // Unstage the addition (rm --cached mirrors how stageAndCommit unstages and works
-                // even on an unborn branch with no HEAD), then delete the working-tree file.
+        if (change.kind == ChangeKind.UNTRACKED || !headHasPath(change.path)) {
+            // Unstage the addition (rm --cached mirrors how stageAndCommit unstages and works
+            // even on an unborn branch with no HEAD), then delete the working-tree file.
+            if (change.kind != ChangeKind.UNTRACKED) {
                 runCatching { git.rm().setCached(true).addFilepattern(change.path).call() }
-                File(rootDir.toFile(), change.path).delete()
             }
-            ChangeKind.MODIFIED, ChangeKind.REMOVED, ChangeKind.MISSING, ChangeKind.CONFLICT -> {
-                // Reset the index entry back to HEAD (this also clears any conflict stages), then
-                // write HEAD's content into the working tree, recreating a deleted file if needed.
-                git.reset().setRef("HEAD").addPath(change.path).call()
-                git.checkout().addPath(change.path).call()
-            }
+            File(rootDir.toFile(), change.path).delete()
+            return
         }
+        // Reset the index entry back to HEAD (this also clears any conflict stages), then
+        // write HEAD's content into the working tree, recreating a deleted file if needed.
+        git.reset().setRef("HEAD").addPath(change.path).call()
+        git.checkout().addPath(change.path).call()
+    }
+
+    /**
+     * Whether HEAD carries [path]. This, rather than the [ChangeKind] the caller is holding,
+     * decides whether reverting a path restores it or removes it: `git checkout -- <path>` has
+     * nothing to restore a path HEAD does not have, so a revert that trusts the kind leaves such a
+     * file on disk. JGit reports a path staged as an addition and then edited again in BOTH its
+     * added and its modified bucket, and a change list the panel holds can be stale, so a kind of
+     * MODIFIED is not evidence that HEAD has the file.
+     */
+    private fun headHasPath(path: String): Boolean {
+        val headId = repository.resolve(Constants.HEAD) ?: return false
+        RevWalk(repository).use { walk ->
+            TreeWalk.forPath(repository, path, walk.parseCommit(headId).tree)?.use { return true }
+        }
+        return false
     }
 
     /**
@@ -459,7 +473,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      */
     fun revertFiles(changes: Collection<FileChange>) {
         val (fresh, tracked) = changes.partition {
-            it.kind == ChangeKind.UNTRACKED || it.kind == ChangeKind.ADDED
+            it.kind == ChangeKind.UNTRACKED || !headHasPath(it.path)
         }
         if (tracked.isNotEmpty()) {
             val reset = git.reset().setRef("HEAD")
@@ -471,7 +485,7 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         }
         // Staged additions must leave the index before their file goes; untracked ones only exist
         // on disk. rm --cached mirrors revertFile and works on an unborn branch with no HEAD.
-        val staged = fresh.filter { it.kind == ChangeKind.ADDED }
+        val staged = fresh.filter { it.kind != ChangeKind.UNTRACKED }
         if (staged.isNotEmpty()) {
             val rm = git.rm().setCached(true)
             staged.forEach { rm.addFilepattern(it.path) }
@@ -890,9 +904,9 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     fun loadStatus(): GitStatus {
         val status = git.status().call()
         val changes = buildList {
+            status.added.forEach { add(FileChange(it, ChangeKind.ADDED)) }
             status.modified.forEach { add(FileChange(it, ChangeKind.MODIFIED)) }
             status.changed.forEach { add(FileChange(it, ChangeKind.MODIFIED)) }
-            status.added.forEach { add(FileChange(it, ChangeKind.ADDED)) }
             status.untracked.forEach { add(FileChange(it, ChangeKind.UNTRACKED)) }
             status.removed.forEach { add(FileChange(it, ChangeKind.REMOVED)) }
             status.missing.forEach { add(FileChange(it, ChangeKind.MISSING)) }
@@ -902,7 +916,8 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
             // arbitrary and — worse — shifts as the sets are rebuilt: editing one file could send
             // an unrelated one to the top of the change list. Sort so a file stays where the user
             // last saw it, and so files in a folder stay together. distinctBy runs first: it keeps
-            // the earliest entry for a path, which is how modified/changed wins over the rest.
+            // the earliest entry for a path, which is how added wins over the modified/changed a
+            // staged-then-edited new file is also reported under, and modified/changed over the rest.
             .sortedWith(compareBy(PathOrder) { it.path })
         val branch = repository.branch
         return GitStatus(branch = branch, changes = changes)

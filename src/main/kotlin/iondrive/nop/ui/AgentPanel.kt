@@ -14,6 +14,7 @@ import iondrive.nop.agent.AgentSessions
 import iondrive.nop.agent.Handoff
 import iondrive.nop.agent.PastSession
 import iondrive.nop.agent.UsageReading
+import java.nio.file.Path
 import javax.swing.JPanel
 
 /**
@@ -40,6 +41,8 @@ fun AgentPanel(
     accounts: List<Account>,
     readings: Map<String, UsageReading>,
     sessions: List<PastSession>,
+    /** The directory a session launched or resumed from here runs in. See [AgentPicker]. */
+    projectDir: Path,
     cards: JPanel,
     onLaunch: (Account) -> Unit,
     onReopen: (PastSession) -> Unit,
@@ -51,6 +54,7 @@ fun AgentPanel(
             accounts = accounts,
             readings = readings,
             sessions = sessions,
+            projectDir = projectDir,
             onLaunch = onLaunch,
             onReopen = onReopen,
             onSettings = onSettings,

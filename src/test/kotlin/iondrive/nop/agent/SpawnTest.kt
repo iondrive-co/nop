@@ -45,6 +45,14 @@ class SpawnTest {
         reasoning = reasoning,
     )
 
+    private fun antigravity(model: String? = null, reasoning: String? = null) = Account(
+        name = "google-main",
+        provider = Provider.Antigravity,
+        home = "/home/dev/.chad/antigravity-homes/google-main",
+        model = model,
+        reasoning = reasoning,
+    )
+
     @Test
     fun `the environment matches what chad's builder produced for every account and reasoning level`() {
         val text = checkNotNull(javaClass.getResourceAsStream("/agent/chad-env-capture.json"))
@@ -152,20 +160,111 @@ class SpawnTest {
         )
     }
 
+    /**
+     * `HOME`, and nothing else. This is the assertion the whole provider rests on: `agy` keeps its
+     * login under the home it is given, and three accounts that share a home share one login.
+     */
+    @Test
+    fun `an antigravity run is isolated by its own home`() {
+        val command = Spawn.command(antigravity(), projectDir)
+
+        assertEquals(mapOf("HOME" to "/home/dev/.chad/antigravity-homes/google-main"), command.env)
+    }
+
+    @Test
+    fun `an antigravity run skips permissions and is given the project as a workspace`() {
+        val command = Spawn.command(antigravity(), projectDir)
+
+        assertTrue("--dangerously-skip-permissions" in command.argv)
+        // Without --add-dir the CLI treats the directory as untrusted and works in a scratch
+        // workspace of its own — a run that reports success having never touched the project.
+        assertEquals(projectDir.absolutePath, command.argv.after("--add-dir"))
+        // Like Codex, it names its own conversation; nothing is known until it opens one.
+        assertEquals(null, command.nativeSessionId)
+    }
+
+    @Test
+    fun `an explicit antigravity model reaches the CLI`() {
+        val command = Spawn.command(antigravity(model = "gemini-3.1-pro-high"), projectDir)
+
+        assertEquals("gemini-3.1-pro-high", command.argv.after("--model"))
+    }
+
+    /**
+     * An effort with no model of its own: this is the case the Thinking picker exists for on this
+     * provider, and it is the CLI's default model whose effort it sets.
+     */
+    @Test
+    fun `an antigravity effort on the default model reaches the CLI`() {
+        val command = Spawn.command(antigravity(reasoning = "high"), projectDir)
+
+        assertEquals("high", command.argv.after("--effort"))
+        assertFalse("--model" in command.argv)
+    }
+
+    /**
+     * The CLI refuses a run whose `--effort` disagrees with the effort named in its `--model`, and
+     * every id it offers names one. Sending both is a tab that opens on
+     * `invalid model selection` instead of a session.
+     */
+    @Test
+    fun `a named antigravity model carries its own effort, so none is sent beside it`() {
+        val command = Spawn.command(antigravity(model = "gemini-3.1-pro-low", reasoning = "high"), projectDir)
+
+        assertEquals("gemini-3.1-pro-low", command.argv.after("--model"))
+        assertFalse("--effort" in command.argv, "the CLI rejects this pair: ${command.argv}")
+    }
+
+    @Test
+    fun `a default antigravity model or effort passes no flag at all`() {
+        val command = Spawn.command(antigravity(model = DEFAULT_CHOICE, reasoning = DEFAULT_CHOICE), projectDir)
+
+        assertFalse("--model" in command.argv)
+        assertFalse("--effort" in command.argv)
+    }
+
+    @Test
+    fun `resuming antigravity names the conversation and mints nothing`() {
+        val command = Spawn.command(antigravity(), projectDir, resumeId = "conv-7")
+
+        assertEquals("conv-7", command.argv.after("--conversation"))
+        assertEquals("conv-7", command.nativeSessionId)
+    }
+
+    /**
+     * `-i` and not `-p`: print mode answers once and exits, which is a script, not a session. The
+     * distinction is invisible in the argv and total in the result.
+     */
+    @Test
+    fun `a seeded antigravity run stays in its TUI`() {
+        val command = Spawn.command(antigravity(), projectDir, seed = "Carry on from Claude Code.")
+
+        assertEquals("Carry on from Claude Code.", command.argv.after("-i"))
+        assertFalse("-p" in command.argv)
+        assertFalse("--print" in command.argv)
+    }
+
     @Test
     fun `a seed prompt is the last argument, so long text can't be mistaken for a flag value`() {
         val seed = "Continue the task handed over from Claude Code."
 
-        for (account in listOf(claude(model = "m", reasoning = "high"), codex(model = "m", reasoning = "high"))) {
+        val accounts = listOf(
+            claude(model = "m", reasoning = "high"),
+            codex(model = "m", reasoning = "high"),
+            antigravity(model = "m", reasoning = "high"),
+        )
+        for (account in accounts) {
             val argv = Spawn.command(account, projectDir, seed = seed).argv
-            assertEquals(seed, argv.last(), "seed should be positional and last for ${account.provider.id}")
+            assertEquals(seed, argv.last(), "the seed should come last for ${account.provider.id}")
         }
     }
 
     @Test
     fun `a blank seed adds no empty argument`() {
-        val argv = Spawn.command(claude(), projectDir, seed = "   ").argv
-        assertFalse(argv.any { it.isBlank() }, "a blank seed must not become an empty prompt: $argv")
+        for (account in listOf(claude(), codex(), antigravity())) {
+            val argv = Spawn.command(account, projectDir, seed = "   ").argv
+            assertFalse(argv.any { it.isBlank() }, "a blank seed must not become an empty prompt: $argv")
+        }
     }
 
     /** The value following [flag], or null when the flag isn't there. */

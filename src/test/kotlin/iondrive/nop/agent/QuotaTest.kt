@@ -55,6 +55,19 @@ class QuotaTest {
         assertNull(fire("The selected model is at capacity. Retrying...\n"))
         assertNull(fire("overloaded_error: the API is overloaded, retrying\n"))
         assertNull(fire("Service is temporarily overloaded\n"))
+        assertNull(fire("Encountered retryable error: model capacity exhausted\n"))
+    }
+
+    /**
+     * A limit on something that is not the model. `agy` has a separate allowance for generating
+     * images, and its wording — both sentences it has for it — matches the generic quota patterns
+     * word for word. Ending a coding session with hours of its own quota left, because a picture
+     * could not be drawn, is the same damage as a false positive on an overload.
+     */
+    @Test
+    fun `a limit on a side feature is not the account running out`() {
+        assertNull(fire("image generation quota exceeded, try again later: deadline\n"))
+        assertNull(fire("Your image generation quota has been exceeded. Please try again later.\n"))
     }
 
     @Test
@@ -138,5 +151,19 @@ class QuotaTest {
             "hello world",
             QuotaWatcher.stripAnsi("[2J[H[1;32mhello [0mworld\r"),
         )
+    }
+
+    /**
+     * The phrase alone, separate from the line it sat on. It is what gets looked for in the
+     * transcript to decide whether the vendor said it or the agent was showing it — see [QuotaEcho]
+     * — and the surrounding line, full of gutters and box drawing, would never be found there.
+     */
+    @Test
+    fun `a hit carries the phrase that matched, not just the line it was on`() {
+        val hit = fire("  173 +        assertNotNull(fire(\"You've hit your usage limit\"))\n")
+
+        assertNotNull(hit)
+        assertEquals("You've hit your usage limit", hit!!.matched)
+        assertTrue("173" in hit.line, "the line keeps its context, got: ${hit.line}")
     }
 }

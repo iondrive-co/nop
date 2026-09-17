@@ -88,4 +88,24 @@ class NopTerminalSettingsTest {
     fun `scrollback holds a long build log`() {
         assertTrue(settings().bufferMaxLinesCount >= 20_000, "scrollback too short for a build log")
     }
+
+    @Test
+    fun `typeahead is disabled to prevent text jumping during agent output`() {
+        org.junit.jupiter.api.Assertions.assertFalse(
+            settings().typeAheadSettings.isEnabled,
+            "typeahead should be disabled in local terminal sessions",
+        )
+    }
+
+    @Test
+    fun `mouse scroll does not simulate arrow keys in alternate screen`() {
+        org.junit.jupiter.api.Assertions.assertFalse(
+            settings().simulateMouseScrollWithArrowKeysInAlternativeScreen(),
+            "mouse scroll should not send arrow keys in alternate screen",
+        )
+        org.junit.jupiter.api.Assertions.assertFalse(
+            settings().sendArrowKeysInAlternativeMode(),
+            "arrow keys should not be sent in alternative mode",
+        )
+    }
 }

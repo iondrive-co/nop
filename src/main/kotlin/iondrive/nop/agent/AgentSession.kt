@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.agent.transcript.AntigravityTailer
 import iondrive.nop.agent.transcript.ClaudeTailer
 import iondrive.nop.agent.transcript.CodexTailer
 import iondrive.nop.agent.transcript.LiveTranscripts
@@ -15,9 +16,17 @@ import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalTab
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import javax.swing.SwingUtilities
 
 /** Why a run stopped. Only [Exited] is the user simply quitting the TUI. */
 enum class EndReason { Exited, Quota, Switched, Killed }
+
+/**
+ * A handover nop made on its own, once it has been made: who ran out, who took over, and what the
+ * vendor called the wall. Shown once and dismissed — see [AgentSession.autoHandover].
+ */
+data class AutoHandover(val from: String, val to: String, val kind: String)
 
 /**
  * One run of one account's CLI inside a session: the argv and environment it was started with, the
@@ -52,6 +61,16 @@ class AgentRun(
 
     /** Follows this run's transcript. Null when the provider has no tailer nop can use. */
     var follower: TranscriptFollower? = null
+
+    /**
+     * The transcript the follower settled on, once it has found one.
+     *
+     * Kept because it is the other channel: what the CLI recorded, as against what it drew. Deciding
+     * whether a limit phrase on the screen came from the vendor or from the agent's own output means
+     * looking for it here — see [QuotaEcho].
+     */
+    @Volatile
+    var transcriptPath: java.nio.file.Path? = null
 
     /** What the vendor said as it ran out, when that is why the run ended. */
     @Volatile
@@ -99,6 +118,24 @@ class AgentSession(
      * user most wants to see what changed.
      */
     val baselineSha: String? = null,
+    /**
+     * Who the work goes to when the account running it says it will not continue, or null for
+     * nobody — which leaves the choice on screen, where it has always been.
+     *
+     * A question asked at the wall rather than an answer captured at the start, because the
+     * settings dialog is reachable the whole time a session is running: an account nominated ten
+     * minutes into a session is the one the session should use.
+     */
+    private val handoverTarget: (Account) -> Account? = { _ -> null },
+    /**
+     * Whether the poller's last reading agrees that [account] has run out — true when it does,
+     * false when it says there is quota left, null when it cannot say. See
+     * [UsageReading.looksSpent], which is where the reasoning for this lives.
+     *
+     * It is here to be allowed to say no. Everything else about a quota wall is inferred from text
+     * on a screen the agent itself is writing to, and that is not evidence about an account.
+     */
+    private val hasRunOut: (Account) -> Boolean? = { _ -> null },
 ) : TerminalTab {
 
     /**
@@ -123,20 +160,28 @@ class AgentSession(
      *
      * Declared before [run], and it has to be: property initialisers run in declaration order, and
      * initialising `run` starts a run that installs this as its output tap. Below `run` it is still
-     * null at that moment. The lambda's own reference back to `run` is safe the other way round —
-     * nothing reaches it until the PTY starts, which is when the panel first asks for a widget.
+     * null at that moment. What the lambda calls reaching back into the session is safe the other
+     * way round — nothing reaches it until the PTY starts, which is when the panel first asks for a
+     * widget, and later still now that the decision is taken on the UI thread.
      */
     private val quotaWatcher: QuotaWatcher = QuotaWatcher { hit ->
-        val current = run
-        if (current.endReason != null) return@QuotaWatcher
-        Log.info("agent quota wall on ${current.account.name}: ${hit.line}")
-        current.quota = hit
-        endRun(EndReason.Quota)
-        // Killed rather than left sitting at its own error — the session is over either way. Killed
-        // and not disposed, so the dead TUI keeps its last frame under the panel, which is usually
-        // the thing that says whether switching is the right call.
-        current.session.kill()
+        // Off the PTY's reader thread before anything is decided. What happens next may be a
+        // handover, and a handover disposes the very terminal whose output is calling us and starts
+        // another in its place — which is the UI thread's work, and exactly what the Hand over
+        // button already does there.
+        SwingUtilities.invokeLater { onQuotaWall(hit) }
     }
+
+    /**
+     * The accounts that have already hit a wall in this session.
+     *
+     * A handover chain has to be able to stop. Two accounts nominating each other is the obvious
+     * arrangement for someone with one of each provider, and without this, the pair would trade a
+     * dead session back and forth for as long as nop was open — each switch spawning a CLI that
+     * reads the summary, asks for a turn, is refused, and hands on again. An account that has been
+     * refused once in this session is not offered the same work twice.
+     */
+    private val spent: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
      * Bumped for each run so the terminal card panel — which files widgets under [id] — sees a
@@ -207,6 +252,23 @@ class AgentSession(
         private set
 
     /**
+     * The handover this session made by itself, for the session bar to own up to. Null until one
+     * happens, and again once the user has read it.
+     *
+     * A provider changing under a running tab is the one thing this feature does that the user did
+     * not ask for at the moment it happens, so it says so. Without this the only evidence is the
+     * account name in the bar quietly reading something else than it did a minute ago, which is
+     * indistinguishable from having misremembered which tab you were in.
+     */
+    var autoHandover: AutoHandover? by mutableStateOf(null)
+        private set
+
+    /** Forgets the note above, once it has been read. */
+    fun dismissAutoHandover() {
+        autoHandover = null
+    }
+
+    /**
      * Kills the current run and starts [account]'s CLI in its place, optionally seeded with a
      * prompt or resuming a native session. The session id, tab and history entry all stay put.
      */
@@ -233,6 +295,9 @@ class AgentSession(
         runIndex += 1
         run = start(account, seed, resumeId, seededFromHandoff)
         endedAt = 0
+        // Whatever the last run had to own up to belongs to that run. A switch the user made by
+        // hand should not arrive carrying an explanation of one nop made ten minutes ago.
+        autoHandover = null
     }
 
     /**
@@ -274,6 +339,91 @@ class AgentSession(
             handoffPath = written.path.toString(),
         )
         return written
+    }
+
+    /**
+     * What happens when the vendor says it will not continue.
+     *
+     * Either the work moves to the account this one nominated, or — with nobody nominated, or with
+     * everyone nominated already refused in this session — the run ends and the post-exit panel puts
+     * the choice in front of the user, which is what always used to happen.
+     *
+     * Internal rather than private so its own test can drive it. Reaching it for real means a PTY
+     * printing a limit message, which is not something a test can arrange; the parsing that leads
+     * here has [QuotaWatcher]'s tests, and what is decided here has its own.
+     */
+    internal fun onQuotaWall(hit: QuotaHit) {
+        val current = run
+        // Anything may have happened between the watcher firing and this reaching the UI thread —
+        // the user quitting the TUI, or handing the work on themselves. A run that is already over
+        // is not one to end again.
+        if (current.endReason != null) return
+
+        // The screen said the account has run out; the provider's own numbers get to disagree.
+        //
+        // This is the difference between a session that ends because the vendor stopped serving it
+        // and one that ends because it was *reading about* a vendor that stopped serving somebody.
+        // A diff, a log, a test fixture, a message being replayed on resume — each of those puts a
+        // limit message on the screen while the CLI is working perfectly, and acting on it kills a
+        // session mid-turn with no undo. Worse, it does not end there: the text that triggered it is
+        // in the conversation, so every resume replays it and is killed again within seconds, and
+        // the session becomes one nop cannot get back into at all.
+        //
+        // Only a reading that actively contradicts the screen stops this. Not knowing (null) is left
+        // to behave exactly as it always did — see [UsageReading.looksSpent].
+        if (hasRunOut(current.account) == false) {
+            Log.warn(
+                "ignoring a usage-limit phrase on ${current.account.name}: the account still has " +
+                    "quota, so this is output the agent was showing rather than the vendor " +
+                    "refusing — ${hit.line}",
+            )
+            // Armed again for the rest of the run, and with the tail it matched on dropped so the
+            // same text cannot re-fire the moment the next byte lands.
+            quotaWatcher.reset()
+            return
+        }
+
+        // And the transcript gets to disagree too, whoever the provider is.
+        //
+        // The usage reading above is the strongest answer there is, but only one provider offers one
+        // worth having: Codex's is scavenged from its last session and is usually too old to mean
+        // anything, and a provider added later may have none at all. This test needs nothing from the
+        // vendor beyond the transcript nop already follows to build a handoff — if the phrase is in
+        // the conversation, the screen was showing it rather than the vendor saying it. See
+        // [QuotaEcho] for why a miss here is the right way round to be wrong.
+        if (QuotaEcho.isEchoed(current.transcriptPath, hit.matched)) {
+            Log.warn(
+                "ignoring a usage-limit phrase on ${current.account.name}: \"${hit.matched}\" is in " +
+                    "this session's own transcript, so it is output the agent was showing rather " +
+                    "than the vendor refusing",
+            )
+            quotaWatcher.reset()
+            return
+        }
+
+        Log.info("agent quota wall on ${current.account.name}: ${hit.line}")
+        current.quota = hit
+        spent += current.account.name
+
+        val target = handoverTarget(current.account)?.takeIf { it.name !in spent }
+        if (target == null) {
+            endRun(EndReason.Quota)
+            // Killed rather than left sitting at its own error — the session is over either way.
+            // Killed and not disposed, so the dead TUI keeps its last frame under the panel, which
+            // is usually the thing that says whether switching is the right call.
+            current.session.kill()
+            return
+        }
+
+        Log.info("${current.account.name} ran out; handing over to ${target.name}")
+        handOver(target, EndReason.Quota)
+        // After the switch, so the note describes a handover that has actually happened — and after
+        // [switchTo] has cleared it, which is what stops a previous one hanging over this run.
+        autoHandover = AutoHandover(
+            from = current.account.name,
+            to = target.name,
+            kind = hit.kind,
+        )
     }
 
     /** Starts the same account again in this tab, resuming the vendor's own session where it left off. */
@@ -323,9 +473,10 @@ class AgentSession(
      * not named it yet.
      *
      * It exists because nop cannot make a session visible to a bare `claude` and should not pretend
-     * otherwise. Both CLIs keep a session's transcript in the same directory as the credentials for
-     * the account that wrote it — `$CLAUDE_CONFIG_DIR/projects/<slug>/` for one, `$CODEX_HOME/
-     * sessions/` for the other — with no setting that separates the two. So running several
+     * otherwise. Every one of them keeps a session's transcript in the same directory as the
+     * credentials for the account that wrote it — `$CLAUDE_CONFIG_DIR/projects/<slug>/`,
+     * `$CODEX_HOME/sessions/`, `$HOME/.gemini/antigravity-cli/conversations/` — with no setting
+     * that separates the two. So running several
      * accounts side by side, which is the point of the picker, splits the transcripts as a side
      * effect: a session nop ran under `claude-work` is not in the store a plain `claude` reads, and
      * no amount of work on nop's side changes where that CLI looks.
@@ -339,6 +490,7 @@ class AgentSession(
         return when (account.provider) {
             Provider.Anthropic -> "CLAUDE_CONFIG_DIR=$home claude --resume $native"
             Provider.OpenAI -> "CODEX_HOME=$home/.codex codex resume $native"
+            Provider.Antigravity -> "HOME=$home agy --conversation $native"
         }
     }
 
@@ -389,6 +541,7 @@ class AgentSession(
             AgentEvent.RunStarted(
                 provider = account.provider.id,
                 account = account.name,
+                home = account.home,
                 model = account.model,
                 reasoning = account.reasoning,
                 nativeSessionId = command.nativeSessionId,
@@ -423,6 +576,7 @@ class AgentSession(
             // for a provider that names its own session — the id simply do not exist yet when the
             // CLI is launched. Everything that reads runs takes the last one.
             onLocated = { path, offset ->
+                newRun.transcriptPath = path
                 val previous = newRun.nativeSessionId
                 newRun.nativeSessionId = tailer.nativeSessionId() ?: previous
                 // The id can change under a run twice: a Codex session is named only once its first
@@ -437,6 +591,7 @@ class AgentSession(
                     AgentEvent.RunStarted(
                         provider = account.provider.id,
                         account = account.name,
+                        home = account.home,
                         model = account.model,
                         reasoning = account.reasoning,
                         nativeSessionId = newRun.nativeSessionId,
@@ -461,6 +616,7 @@ class AgentSession(
     private fun tailerFor(account: Account): Tailer = when (account.provider) {
         Provider.Anthropic -> ClaudeTailer(account.homePath)
         Provider.OpenAI -> CodexTailer(account.homePath)
+        Provider.Antigravity -> AntigravityTailer(account.homePath)
     }
 
     companion object {

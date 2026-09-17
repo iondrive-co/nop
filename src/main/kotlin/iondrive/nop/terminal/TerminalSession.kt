@@ -117,6 +117,11 @@ class TerminalSession private constructor(
                 w.requestFocusInWindow()
             },
         )
+        // Shift+Enter writes a line feed rather than submitting the line — see [ShiftEnterNewline].
+        // Added before the widget is started, which is what puts it in front of JediTerm's own key
+        // handler in the panel's listener list: the panel adds that one when the session connects,
+        // and only a listener that runs first can take the event off it.
+        w.terminalPanel.addCustomKeyListener(ShiftEnterNewline { sendText(it) })
         settings = s
         widget = w
         attach(w, startProcess())

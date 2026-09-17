@@ -9,7 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 
-/** One piece of an assistant turn, in the vocabulary both providers are mapped into. */
+/** One piece of an assistant turn, in the vocabulary every provider is mapped into. */
 @Serializable
 sealed interface Block {
     @Serializable @SerialName("text")
@@ -40,7 +40,8 @@ data class TokenUsage(
  * both to be read into one shape first.
  *
  * It is a fresh format rather than an inherited one, designed around what the tailers can actually
- * produce: a `ToolFinished` carries an exit code because both CLIs record one, and an
+ * produce: a `ToolFinished` carries an exit code because the CLIs that report tool calls at all
+ * report one, and an
  * `AssistantMessage` carries `stopReason` because that is how you tell a turn that finished from a
  * turn that was cut off.
  */
@@ -63,6 +64,18 @@ sealed interface AgentEvent {
     data class RunStarted(
         val provider: String,
         val account: String,
+        /**
+         * The credential directory this run's CLI was pointed at.
+         *
+         * Recorded beside the account's *name* because the two are not interchangeable. A session
+         * resumed out of a store rather than an account runs under a label no configured account
+         * answers to — "outside nop" is the one nop coins itself — so a row rebuilt from the name
+         * alone resolves to nothing, and the click asking for it is silently dropped. The directory
+         * is what a resume actually needs; see [PastSession.home].
+         *
+         * Null in a log written before this was recorded.
+         */
+        val home: String? = null,
         val model: String? = null,
         val reasoning: String? = null,
         val nativeSessionId: String? = null,
@@ -152,7 +165,38 @@ data class PastSession(
      * against that directory rather than picking a configured account to spend.
      */
     val home: String? = null,
-)
+) {
+    /**
+     * The account reopening this session would run, or null when nop has no way back into it.
+     *
+     * One rule, in one place, because two of them disagreeing is what a dead row looks like: the
+     * picker decides from this whether the row is clickable at all, and the click itself resolves
+     * the same way. They used to differ — the row asked only whether the session named an account,
+     * the click asked whether that name was one of [configured] — so a session run under a store
+     * label offered itself, accepted the press and did nothing with it.
+     *
+     * A configured account wins over the recorded directory even when both are there: they are the
+     * same credentials either way, and only the configured one carries the model and reasoning the
+     * user chose for it.
+     */
+    fun accountIn(configured: List<Account>): Account? {
+        if (lastNativeSessionId == null) return null
+        val name = lastAccount ?: return null
+        configured.firstOrNull { it.name == name }?.let { return it }
+        // No account by that name, so the row names a store. That is resumable only if nop wrote
+        // down which directory it was — a row from a log older than that field cannot be placed,
+        // and guessing at a credential directory is not something to do on the user's behalf.
+        val dir = home ?: return null
+        return Account(
+            name = name,
+            // Every row that got this far names one. Claude is the fallback because it is the only
+            // provider whose store nop reads directly, so an id from a version that knew about
+            // more of them is a Claude session or nothing.
+            provider = lastProvider?.let(Provider::byId) ?: Provider.Anthropic,
+            home = dir,
+        )
+    }
+}
 
 /**
  * One session's log: a JSONL file under `~/.local/share/nop/agent/sessions/<id>.jsonl`.
@@ -269,6 +313,10 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
         private fun summarise(file: Path, projectPath: String): PastSession? {
             var started: AgentEvent.SessionStarted? = null
             var lastRun: AgentEvent.RunStarted? = null
+            // The spawn record of the last run, which is the one with no transcript yet: it is
+            // when the CLI was started, where [lastRun] is when its transcript was found. See
+            // [resumeId], which needs the difference.
+            var lastSpawn: AgentEvent.RunStarted? = null
             var titled: String? = null
             var firstPrompt: String? = null
 
@@ -288,7 +336,10 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                         }.getOrNull() ?: continue
                         when (event) {
                             is AgentEvent.SessionStarted -> started = started ?: event
-                            is AgentEvent.RunStarted -> lastRun = event
+                            is AgentEvent.RunStarted -> {
+                                lastRun = event
+                                if (event.transcriptPath == null) lastSpawn = event
+                            }
                             is AgentEvent.SessionTitled -> titled = event.title
                             is AgentEvent.UserMessage -> firstPrompt = firstPrompt ?: event.text
                             else -> Unit
@@ -308,8 +359,112 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 title = titled ?: firstPrompt?.firstLine() ?: "Untitled session",
                 lastProvider = lastRun?.provider,
                 lastAccount = lastRun?.account,
-                lastNativeSessionId = lastRun?.nativeSessionId,
+                lastNativeSessionId = resumeId(lastRun, lastSpawn?.at ?: session.at),
+                home = lastRun?.home ?: storeOf(lastRun),
             )
+        }
+
+        /**
+         * The credential directory a run's transcript is sitting inside, for a log written before
+         * that directory was recorded beside it.
+         *
+         * Claude files a session at `<configDir>/projects/<slug>/<id>.jsonl`, so the store is three
+         * directories up — and the transcript path is the one piece of it every located run has
+         * written down since long before [AgentEvent.RunStarted.home] existed. Without this, every
+         * session in an existing log whose account is a store label rather than a configured
+         * account stays unreachable for good: the row cannot be placed, the picker greys it out,
+         * and recording the store from now on only helps the sessions that have not happened yet.
+         *
+         * Claude only, and only for a path shaped the way Claude shapes one. Codex nests its
+         * rollouts by date under `<home>/.codex/sessions/`, where the same arithmetic lands on a
+         * directory that is not a home at all — and a CLI pointed at the wrong credentials is a
+         * worse answer than a row that admits it does not know.
+         */
+        private fun storeOf(run: AgentEvent.RunStarted?): String? {
+            if (run?.provider != Provider.Anthropic.id) return null
+            val path = run.transcriptPath ?: return null
+            return runCatching {
+                val projects = Path.of(path).parent?.parent ?: return null
+                if (projects.fileName?.toString() != "projects") return null
+                projects.parent?.toString()
+            }.getOrNull()
+        }
+
+        /**
+         * The vendor session a row resumes, or null when there is nothing on disk to resume.
+         *
+         * nop picks Claude's session id before the CLI starts and writes it down at the spawn, so
+         * the id in the log exists from the first moment — while the conversation it names does
+         * not. Open a session, close it without typing anything, and no transcript is ever filed
+         * under that id; the picker still listed it as resumable, and the CLI answered the click
+         * with "No conversation found with session ID".
+         *
+         * So the id only counts once a tailer has found the transcript it belongs to and that file
+         * is still there. The located run is the one carrying a [AgentEvent.RunStarted.transcriptPath]
+         * — logged a second time, on top of the spawn's own record, exactly when the file turns up.
+         *
+         * Nulling it also puts the session back in reach the other way round: the picker suppresses
+         * a vendor's own row when one of these claims the same id, and a row that no longer claims
+         * it stops hiding a transcript that is genuinely there. See [NativeSessions].
+         */
+        private fun resumeId(run: AgentEvent.RunStarted?, spawnedAt: Long): String? {
+            val path = run?.transcriptPath ?: return null
+            val followed = runCatching { Path.of(path) }.getOrNull() ?: return null
+            val id = run.nativeSessionId
+            val asked = askedFor(run)
+            // The run ended up somewhere other than where nop pointed it. Typing `/clear` does
+            // that, and so did a tailer adopting a conversation somebody else was already in — see
+            // ClaudeTailer.switched, which no longer makes that mistake but cannot unwrite the logs
+            // that recorded it. A conversation this run started began after this run did; one it
+            // merely walked into was already going.
+            if (asked != null && id != null && id != asked && !beganAfter(followed, spawnedAt)) {
+                val its = followed.resolveSibling("$asked.jsonl")
+                return asked.takeIf { Files.isRegularFile(its) }
+            }
+            return id?.takeIf { Files.isRegularFile(followed) }
+        }
+
+        /**
+         * The session a run was pointed at when it was spawned, read off its own argv.
+         *
+         * The one id in a run's record that is not a guess: nop wrote that command line itself.
+         * Everything else about which conversation a run was in is something a tailer worked out by
+         * looking at files, which is exactly the part that can be wrong.
+         */
+        private fun askedFor(run: AgentEvent.RunStarted): String? {
+            // Each CLI names the same thing differently: Codex takes a subcommand, Claude a flag,
+            // agy a flag of its own. Matched per provider rather than by looking for any of them,
+            // because a bare word is also what a seed prompt is.
+            val flags = when (run.provider) {
+                Provider.OpenAI.id -> setOf("resume")
+                Provider.Antigravity.id -> setOf("--conversation")
+                else -> setOf("--resume", "--session-id")
+            }
+            val at = run.argv.indexOfFirst { it in flags }
+            return if (at >= 0) run.argv.getOrNull(at + 1)?.takeIf { it.isNotBlank() } else null
+        }
+
+        /**
+         * Whether the conversation in [file] began at or after [at] — how a `/clear` is told from a
+         * transcript that was already being written when this run started.
+         *
+         * Reads to the first record carrying a time and stops, which is the second or third line of
+         * the file. Only reached when a run's id moved off the one nop asked for, which is three
+         * sessions in a hundred, so the whole cost is a few lines of a file the picker would
+         * otherwise not open at all.
+         */
+        private fun beganAfter(file: Path, at: Long): Boolean {
+            val began = runCatching {
+                Files.newBufferedReader(file).use { reader ->
+                    reader.lineSequence().take(HEAD_LINES).firstNotNullOfOrNull { line ->
+                        val stamp = runCatching {
+                            JSON.parseToJsonElement(line).obj()?.get("timestamp").str()
+                        }.getOrNull() ?: return@firstNotNullOfOrNull null
+                        runCatching { java.time.Instant.parse(stamp).toEpochMilli() }.getOrNull()
+                    }
+                }
+            }.getOrNull() ?: return false
+            return began >= at
         }
 
         private fun String.firstLine(): String =

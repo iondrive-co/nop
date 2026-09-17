@@ -127,8 +127,9 @@ Nothing reads `~/.chad.conf` or `~/.chad/logs`. See D2 for what happens to the e
 |---|---|---|---|
 | claude | `$CLAUDE_CONFIG_DIR/projects/<slug>/<sessionId>.jsonl`, slug = cwd with `/` and `.` → `-` (`/home/dev/nop` → `-home-dev-nop`) | JSONL; record `type` ∈ user, assistant, attachment, queue-operation, custom-title, last-prompt; `message.content` blocks ∈ text, thinking, tool_use, tool_result; every assistant record carries `message.usage` and `message.stop_reason`; user records carrying tool results also have `toolUseResult`; `cwd`, `gitBranch`, `sessionId`, `parentUuid` on every record | **verified** on a 517-line real session |
 | codex | `$HOME/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | JSONL; `session_meta` (id, cwd, cli_version), `turn_context` (model, effort), `response_item` payloads message / function_call / function_call_output / custom_tool_call / reasoning / web_search_call, `event_msg` types user_message, agent_message, agent_reasoning, exec_command_end (command, exit_code, duration), task_started/complete, **token_count with rate_limits**, turn_aborted | **verified** across 2,574 rollouts |
+| agy | `$HOME/.gemini/antigravity-cli/conversations/<id>.db` — and `history.jsonl` + `cache/last_conversations.json` beside it | SQLite. `steps.step_payload` is a **protobuf blob** against Google's internal schema, so the turn itself is unreadable without reverse-engineering it. `history.jsonl` is plain JSONL — `display`, `timestamp`, `workspace`, `conversationId` — one line per prompt *submitted*; `cache/last_conversations.json` maps a workspace to the conversation last opened there | **verified** on a real home: 44 conversation DBs, 53 history lines |
 
-### 2.4 Where the credentials live — and why only two providers ship first
+### 2.4 Where the credentials live
 
 **verified** by inspection of the existing account homes:
 
@@ -136,15 +137,20 @@ Nothing reads `~/.chad.conf` or `~/.chad/logs`. See D2 for what happens to the e
 |---|---|---|
 | claude | `$CLAUDE_CONFIG_DIR/.credentials.json` | `CLAUDE_CONFIG_DIR` — a file, so pointing the env var at a per-account directory is complete isolation |
 | codex | `$HOME/.codex/auth.json` | `HOME` — likewise |
-| agy | **the OS keyring**, one fixed `gemini`/`antigravity` slot shared by every account | nothing. `HOME` has no effect on it |
+| agy | `$HOME/.gemini/antigravity-cli/antigravity-oauth-token` | `HOME` — but only while the CLI believes its keyring is unusable. See below |
 
-`agy` is why antigravity is deferred (D3). Isolating it means owning that keyring slot: keeping each
-account's credential in a file and writing the right one in immediately before spawn. Worse, the
-slot is not reachable through the obvious API — `providers.py:1337-1344` documents that the CLI
-writes to the *login* collection while `python-keyring` only searches the one the Secret Service
-calls *default*, so chad had to walk every collection over DBus. A JVM implementation has to
-replicate that, and both collections on this machine are locked at present, so agy is not currently
-working either.
+`agy` was the reason antigravity was deferred, and it is no longer true of the CLI that ships today
+— see D3, which records what changed and what was measured. In short: `agy` 1.2.4 carries a
+`compositeTokenStorage` over a keyring store *and* a file store, decides between them at startup,
+and records "the keyring was not usable" in `cache/antigravity-keyring-unavailable`, a file stamped
+with the time it decided. While that stamp is recent it reads and writes the token file above, and
+`HOME` is then complete isolation exactly as it is for codex.
+
+The catch is that this is a decision, not a setting: left alone it holds on a machine whose keyring
+is locked and lapses the day one is unlocked, at which point every account shares one slot again.
+So nop writes that marker itself, with the current time, immediately before every run and every
+login (`Antigravity.prepareHome`). It is the account's own home, the CLI's own file and its own
+format — voting in an election the CLI already runs rather than reaching into anything.
 
 ### 2.5 What the CLIs accept
 
@@ -152,6 +158,7 @@ working either.
 |---|---|---|---|---|
 | claude 2.1.270 | positional `claude "<prompt>"` starts the REPL and submits it | `--resume <id>`, `--continue`, `--session-id <uuid>` picks the id up front | `--permission-mode bypassPermissions` | `CLAUDE_CONFIG_DIR` |
 | codex 0.153.4 | `codex [OPTIONS] [PROMPT]` | `codex resume <id>` | `--dangerously-bypass-approvals-and-sandbox` | `HOME` |
+| agy 1.2.4 | `-i "<prompt>"` (`--prompt-interactive`) submits it and stays in the TUI; `-p` answers once and exits | `--conversation <id>` | `--dangerously-skip-permissions` | `HOME` |
 
 All **verified** from `--help`. Both YOLO flags stay: this is a YOLO launcher by design.
 
@@ -162,12 +169,16 @@ the seed prompt in §4.11 points at a file instead of carrying the text.
 
 ## 3. Scope
 
-**v1 covers claude and codex.** That is four of the five configured accounts, both with verified
-transcript formats, both isolated by a file, neither touching the keyring — and it is the pair that
-makes provider switching real.
+**v1 covered claude and codex** — four of the five configured accounts, both with verified
+transcript formats, both isolated by a file, neither touching the keyring, and the pair that makes
+provider switching real.
 
-Antigravity is deferred (D3). Qwen and local are not in scope: there is no account for either, so
-nothing about them could be tested.
+**Antigravity was added afterwards** (D3, reversed), which is the fifth. It is isolated the same way
+codex is, and it is the one provider whose transcript nop cannot read: the prompts come through and
+the replies do not.
+
+Qwen and local are still out of scope: there is no account for either, so nothing about them could
+be tested.
 
 ---
 
@@ -181,6 +192,7 @@ src/main/kotlin/iondrive/nop/
 │   ├── Accounts.kt          # account model, JSON config, load/save
 │   ├── Passphrase.kt        # PBKDF2 hash + verify; gates the settings dialog
 │   ├── Provider.kt          # the enum and its per-provider knowledge
+│   ├── Antigravity.kt       # the one provider whose quirks don't fit a `when` arm (D3)
 │   ├── Spawn.kt             # argv + env per provider (from build_agent_command)
 │   ├── CliTools.kt          # locate / install the vendor binary
 │   ├── Login.kt             # run the vendor's own login in a PTY
@@ -194,7 +206,8 @@ src/main/kotlin/iondrive/nop/
 │       ├── Tailer.kt        # the interface + the shared follow loop
 │       ├── Normalize.kt     # the one tool vocabulary
 │       ├── ClaudeTailer.kt
-│       └── CodexTailer.kt
+│       ├── CodexTailer.kt
+│       └── AntigravityTailer.kt   # prompts and the conversation id; the rest is protobuf
 └── ui/
     ├── AgentPanel.kt        # the ToolTab.Agent panel: picker or terminal
     ├── AgentPicker.kt       # accounts + this project's sessions
@@ -464,10 +477,34 @@ tab appears and the exit panel offers the other account.
   `~/.chad.conf` or the 4,709 logs in `~/.chad/logs`, which become dead files to archive or delete.
   But each account's `home` is declared explicitly, so the five existing accounts point at their
   current credential directories and **no account needs logging in again**.
-- **D3 — antigravity is deferred.** Supporting it means owning a shared OS-keyring slot through the
-  Secret Service over DBus, walking every collection because the obvious API searches the wrong one
-  (§2.4). That is the fiddliest code in the project and only one provider needs it. Both keyring
-  collections on this machine are currently locked, so agy is not working today either.
+- **D3 — antigravity was deferred, and this was reversed on 2026-09-17.** The decision was right
+  about the CLI it was taken against and wrong about the one installed now. It said supporting
+  antigravity meant owning a shared OS-keyring slot through the Secret Service over DBus, walking
+  every collection because the obvious API searches the wrong one — the fiddliest code in the
+  project, for one provider.
+
+  `agy` 1.2.4 does not keep the login there. It has a file store beside the keyring one and falls
+  back to it, which makes the whole DBus problem disappear. What was measured before writing any of
+  it, on this machine:
+
+  - a token file at `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`, 0600, the same JSON
+    chad kept as `credential.json`;
+  - `agy -p "/usage"` run with `HOME` pointed at an otherwise **empty** directory holding nothing
+    but that file: it authenticated, answered, and built the rest of the home from scratch. No
+    keyring involved;
+  - the same with a four-day-stale credential: it refreshed the token and wrote the new one **back
+    into that isolated home**, leaving the source untouched. That is the isolation property, end to
+    end;
+  - `compositeTokenStorage`, `fileTokenStorage`, `shouldBypassKeyring` and a
+    `cache/antigravity-keyring-unavailable` marker in the binary, which is the mechanism behind it.
+
+  The residual risk is that the fallback is a decision the CLI re-takes, not a mode it is put in —
+  §2.4 has what nop does about that, and it is the thing to check first if two accounts are ever
+  seen sharing a login. Two further limits that came with the reversal, both deliberate:
+  **the transcript is write-only to nop** (protobuf in SQLite; only the prompts are readable, via
+  `history.jsonl`), and **model and effort are one choice, not two** — `agy`'s model ids name their
+  own effort and it refuses a run where `--effort` disagrees, so a named model wins and the Thinking
+  picker only reaches the CLI for an account on the default model.
 - **D4 — the passphrase gates the settings dialog and nothing else.** There is nothing left to
   encrypt: every provider keeps its own OAuth token in its own home. A launch from an
   already-configured account never prompts. It is a PBKDF2 hash, not a key.

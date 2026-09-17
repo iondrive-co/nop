@@ -11,7 +11,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
 /**
- * The one thing nop has to put in a vendor's own config before its TUI will run.
+ * Whatever nop has to put in a vendor's own config before its TUI will run.
  *
  * Claude Code decides whether to show its first-run flow — theme picker, then sign in — from
  * `hasCompletedOnboarding` in `$CLAUDE_CONFIG_DIR/.claude.json`, and not from whether it has a
@@ -31,13 +31,21 @@ internal object VendorConfig {
 
     /** Does whatever [account]'s provider needs before an interactive run. Safe to call every time. */
     fun prepareForInteractive(account: Account) {
-        if (account.provider != Provider.Anthropic) return
-        if (!Files.isRegularFile(account.credentialFile)) return
-        markOnboarded(account.homePath.resolve(".claude.json"))
+        when (account.provider) {
+            Provider.Anthropic -> {
+                if (!Files.isRegularFile(account.credentialFile)) return
+                markOnboarded(account.homePath.resolve(".claude.json"))
+            }
+            // The same first-run problem and more besides — which token store the CLI will use is
+            // also decided at startup, and that decision is what isolates the account at all.
+            Provider.Antigravity -> Antigravity.prepareHome(account)
+            // Codex asks for nothing: it reads its own auth.json and starts.
+            Provider.OpenAI -> Unit
+        }
     }
 
     /**
-     * Adds the flag to [file], leaving every other key exactly as it was.
+     * Adds Claude Code's onboarding flag to [file], leaving every other key exactly as it was.
      *
      * This is someone else's config: the rewrite re-reads the whole document, adds one key, and
      * lands through a temp file and an atomic rename, so a crash mid-write cannot cost the user

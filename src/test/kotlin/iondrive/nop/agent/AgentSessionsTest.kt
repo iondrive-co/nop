@@ -24,7 +24,15 @@ class AgentSessionsTest {
     @AfterEach
     fun cleanUp() {
         opened.forEach { state ->
-            state.sessions.forEach { runCatching { Files.deleteIfExists(it.log.file) } }
+            state.sessions.forEach { session ->
+                runCatching { Files.deleteIfExists(session.log.file) }
+                // A handover writes its summary beside the log, under the session's own directory.
+                runCatching {
+                    val dir = Accounts.dataRoot().resolve("handoffs").resolve(session.sessionId)
+                    Files.list(dir).use { it.forEach { file -> Files.deleteIfExists(file) } }
+                    Files.deleteIfExists(dir)
+                }
+            }
             state.disposeAll()
         }
     }
@@ -145,33 +153,312 @@ class AgentSessionsTest {
     }
 
     /**
+     * The point of nominating an account: the work carries on without anybody being at the keyboard
+     * to press the button. The wall itself is a phrase in a vendor's terminal output, which no test
+     * can arrange — [QuotaWatcher] has its own tests for the parsing that leads here, and this
+     * drives what is decided once it has fired.
+     */
+    @Test
+    fun `an account that runs out hands its work to the one it nominated`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "you have hit your usage limit"))
+
+        assertEquals("codex", session.account.name)
+        assertFalse(
+            session.ended,
+            "the tab carries on in the new account rather than stopping at the post-exit choices",
+        )
+        assertEquals("claude-main", session.autoHandover?.from, "the bar has to be able to own up to it")
+        assertEquals("codex", session.autoHandover?.to)
+    }
+
+    @Test
+    fun `with nobody nominated, running out leaves the choice where it has always been`(@TempDir tmp: Path) {
+        val state = sessions()
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.onQuotaWall(QuotaHit("usage limit", "you have hit your usage limit"))
+
+        assertTrue(session.ended, "the post-exit panel is what asks the user which account instead")
+        assertEquals(EndReason.Quota, session.run.endReason)
+        assertNull(session.autoHandover, "nothing happened by itself, so there is nothing to own up to")
+    }
+
+    /**
+     * One of each provider, each nominating the other, is the arrangement this feature is for — and
+     * the one that would ring. Without a memory of who has already been refused, the pair would trade
+     * a dead session back and forth for as long as nop was open.
+     */
+    @Test
+    fun `an account already refused once is not handed the same work again`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex", handoverTo = "claude-main")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "claude-main is out"))
+        assertEquals("codex", session.account.name)
+
+        session.onQuotaWall(QuotaHit("usage limit", "codex is out"))
+
+        assertEquals("codex", session.account.name, "claude-main ran out already; it is not asked twice")
+        assertTrue(session.ended, "with everybody spent, the run ends and the user is asked")
+    }
+
+    /** A wall reported for a run that is already over is news about nothing. */
+    @Test
+    fun `a wall hit after the run has ended changes nothing`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        val session = state.open(tmp.toFile(), claude)
+        session.endRun(EndReason.Exited)
+
+        session.onQuotaWall(QuotaHit("usage limit", "you have hit your usage limit"))
+
+        assertEquals("claude-main", session.account.name, "the user quit; nop does not restart them elsewhere")
+        assertNull(session.autoHandover)
+    }
+
+    /**
+     * The bug this guard exists for, and it is worth spelling out because the symptom was nothing
+     * like the cause.
+     *
+     * A session editing nop's own quota code printed the phrases those tests are built from, the
+     * watcher read its own fixtures off the screen, and the run was killed mid-turn. Resuming made
+     * it worse rather than better: the text is in the conversation, so every resume replayed it and
+     * was killed again within seconds, and the session became one nop could not get back into at
+     * all — the user had to copy the resume command out to a terminal. Output is not evidence about
+     * an account; the provider's own number is, and it gets to say no.
+     */
+    @Test
+    fun `a limit phrase the agent merely printed does not kill a session with quota left`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { false }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.onQuotaWall(QuotaHit("usage limit", """fire("You've hit your usage limit")"""))
+
+        assertFalse(session.ended, "the account had quota; the phrase was something it was showing")
+        assertNull(session.run.quota)
+        assertNull(session.run.endReason)
+    }
+
+    @Test
+    fun `a limit phrase is still acted on when the account really has run out`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { true }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your usage limit"))
+
+        assertTrue(session.ended)
+        assertEquals(EndReason.Quota, session.run.endReason)
+    }
+
+    /**
+     * Not knowing must behave exactly as it did before there was anything to know — a Codex reading
+     * is days old and a Claude one may not have arrived yet, and neither is a reason to sit on a
+     * wall the CLI has plainly hit.
+     */
+    @Test
+    fun `with no usable reading the wall is believed, as it always was`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { null }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your usage limit"))
+
+        assertTrue(session.ended)
+        assertEquals(EndReason.Quota, session.run.endReason)
+    }
+
+    /** An ignored phrase must not leave the watcher spent: the run has hours left to go wrong in. */
+    @Test
+    fun `ignoring a phrase leaves the watcher armed for the rest of the run`(@TempDir tmp: Path) {
+        val state = sessions()
+        var spent = false
+        state.hasRunOut = { spent }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.onQuotaWall(QuotaHit("usage limit", "a diff the agent was reading"))
+        assertFalse(session.ended)
+
+        spent = true
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your usage limit"))
+
+        assertTrue(session.ended, "the same run must still be able to hit a real wall afterwards")
+    }
+
+    /** A nomination is no reason to act on a phrase the account's own numbers contradict. */
+    @Test
+    fun `a session with quota left is not handed over on a phrase either`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        state.hasRunOut = { false }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your usage limit"))
+
+        assertEquals("claude-main", session.account.name, "nothing ran out, so nothing changes hands")
+        assertNull(session.autoHandover)
+    }
+
+    /**
+     * The same protection without asking the vendor anything, which is what Codex — and whatever is
+     * added after it — needs. Only one provider offers a usage reading worth contradicting a screen
+     * with; every provider nop can run writes a transcript.
+     */
+    @Test
+    fun `a phrase echoed from the session's own transcript does not kill it, whatever the provider`(
+        @TempDir tmp: Path,
+    ) {
+        val state = sessions()
+        // No usage reading at all — this is the guard that has to stand on its own.
+        state.hasRunOut = { null }
+        val session = state.open(tmp.toFile(), account("codex", Provider.OpenAI))
+        session.run.transcriptPath = tmp.resolve("rollout.jsonl").also {
+            Files.writeString(it, """{"text":"wrote fire(\"You've hit your usage limit\") to the test"}""")
+        }
+
+        session.onQuotaWall(
+            QuotaHit("usage limit", "173 + fire(...)", matched = "You've hit your usage limit"),
+        )
+
+        assertFalse(session.ended, "the phrase is in the conversation, so the agent put it on screen")
+        assertNull(session.run.quota)
+    }
+
+    @Test
+    fun `a phrase the conversation never mentions is the vendor's, and still ends the run`(
+        @TempDir tmp: Path,
+    ) {
+        val state = sessions()
+        state.hasRunOut = { null }
+        val session = state.open(tmp.toFile(), account("codex", Provider.OpenAI))
+        session.run.transcriptPath = tmp.resolve("rollout.jsonl").also {
+            Files.writeString(it, """{"text":"refactor the stash path"}""")
+        }
+
+        session.onQuotaWall(
+            QuotaHit("usage limit", "You've hit your usage limit", matched = "You've hit your usage limit"),
+        )
+
+        assertTrue(session.ended)
+        assertEquals(EndReason.Quota, session.run.endReason)
+    }
+
+    /**
+     * The whole reason the session became unreachable: resuming replays the conversation, so the text
+     * that triggered the first kill is on screen again within seconds of every restart.
+     */
+    @Test
+    fun `a resumed run is not killed again by the text that killed the first one`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { null }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+        val replayed = QuotaHit(
+            "usage limit",
+            "173 + fire(...)",
+            matched = "You've hit your usage limit",
+        )
+        val transcript = tmp.resolve("session.jsonl").also {
+            Files.writeString(it, """{"text":"fire(\"You've hit your usage limit\")"}""")
+        }
+        session.run.transcriptPath = transcript
+
+        repeat(3) {
+            session.onQuotaWall(replayed)
+            assertFalse(session.ended, "resume must not walk back into the same kill")
+            session.reopen(resumeId = "native-1")
+            session.run.transcriptPath = transcript
+        }
+
+        assertFalse(session.ended)
+    }
+
+    /**
      * The picker's tab closes the way a terminal's does: it goes out of the strip. There is no
      * process behind it to kill — closing the last terminal leaves the strip with only its "+", and
      * this is the same gesture with the same result.
      */
     @Test
-    fun `closing the picker tab takes it out of the strip, and opening one puts it back`(@TempDir tmp: Path) {
+    fun `closing the picker tab takes it out of the strip, and the + puts one back`(@TempDir tmp: Path) {
         val state = sessions()
         assertTrue(state.pickerTabVisible)
 
         state.hidePickerTab()
-        assertTrue(!state.pickerTabVisible)
+        assertFalse(state.pickerTabVisible)
 
         state.showPicker()
         assertTrue(state.pickerTabVisible, "the + has to be able to bring it back")
     }
 
+    /**
+     * The picker is a tab with no session in it yet, so the session it starts belongs in that tab.
+     * Leaving it there as well put two tabs in the strip for one press — the picker on one side of
+     * the new session and the "+" that opened it on the other.
+     */
     @Test
-    fun `starting a session brings the picker tab back for next time`(@TempDir tmp: Path) {
+    fun `starting a session uses up the picker's tab rather than adding one beside it`(@TempDir tmp: Path) {
         val state = sessions()
-        state.hidePickerTab()
+        assertTrue(state.pickerTabVisible)
 
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        assertFalse(state.pickerTabVisible, "the picker's tab is the session's tab now")
+        assertEquals(session.sessionId, state.selectedId)
+    }
+
+    /** Twice over: one press of the "+" is one new tab, however many sessions are already running. */
+    @Test
+    fun `the + makes one empty tab at a time`(@TempDir tmp: Path) {
+        val state = sessions()
         state.open(tmp.toFile(), account("claude-main"))
 
-        assertTrue(
-            state.pickerTabVisible,
-            "closing it once should not hide it for the rest of the project's life",
-        )
+        state.showPicker()
+        state.showPicker()
+
+        assertTrue(state.pickerTabVisible)
+        assertNull(state.selectedId, "the empty tab is what is on screen after the +")
+    }
+
+    /**
+     * The pane falls back to the picker when the session on screen is closed, so the strip has to
+     * have a tab for it — a strip with nothing selected beside a panel showing the picker is a
+     * strip that disagrees with the panel.
+     */
+    @Test
+    fun `closing the session on screen brings the picker's tab back with it`(@TempDir tmp: Path) {
+        val state = sessions()
+        val session = state.open(tmp.toFile(), account("claude-main"))
+        assertFalse(state.pickerTabVisible)
+
+        state.close(session.sessionId)
+
+        assertTrue(state.pickerTabVisible)
+    }
+
+    /** Closing a tab the user is not looking at moves nothing: the strip is theirs to arrange. */
+    @Test
+    fun `closing a session in the background leaves the strip alone`(@TempDir tmp: Path) {
+        val state = sessions()
+        val first = state.open(tmp.toFile(), account("claude-main"))
+        val second = state.open(tmp.toFile(), account("codex", Provider.OpenAI))
+
+        state.close(first.sessionId)
+
+        assertEquals(second.sessionId, state.selectedId)
+        assertFalse(state.pickerTabVisible, "an empty tab nobody asked for is still a tab")
     }
 
     /**

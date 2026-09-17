@@ -258,6 +258,38 @@ class ClaudeTailerTest {
         assertEquals(cleared, tailer.switched(run, mine))
     }
 
+    /**
+     * The file that is neither a `/clear` nor another nop tab: a `claude` somebody started from a
+     * shell in the same checkout. [RunContext.foreign] cannot see it, because it only knows the
+     * sessions nop is running — so this run walked into a conversation that was already going,
+     * logged its turns, took its name, and left the picker offering to resume a stranger's session
+     * under this one's title.
+     */
+    @Test
+    fun `a session already under way when this run started is not adopted`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val startedAt = System.currentTimeMillis()
+        val mine = dir.resolve("mine.jsonl")
+        Files.writeString(mine, "{}\n")
+        Files.setLastModifiedTime(mine, FileTime.fromMillis(startedAt))
+        // Theirs, open in a terminal since yesterday and nothing to do with this tab.
+        val theirs = dir.resolve("theirs.jsonl")
+        Files.writeString(theirs, "{}\n")
+        Files.setLastModifiedTime(theirs, FileTime.fromMillis(startedAt - 86_400_000))
+
+        val tailer = ClaudeTailer(config)
+        val run = RunContext(project, config, "mine", startedAt)
+        assertEquals(mine, tailer.locate(run))
+
+        // They type something, and their transcript becomes the newest file in the project.
+        Files.setLastModifiedTime(theirs, FileTime.fromMillis(startedAt + 5_000))
+
+        assertNull(tailer.switched(run, mine), "that conversation was here before this run was")
+        assertEquals("mine", tailer.nativeSessionId(), "so this run is still its own session")
+    }
+
     @Test
     fun `a transcript left over from before this run is not adopted`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").also { Files.createDirectories(it) }

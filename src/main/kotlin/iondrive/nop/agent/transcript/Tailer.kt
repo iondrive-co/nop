@@ -39,11 +39,16 @@ data class RunContext(
 /**
  * Turns one vendor's own transcript into [AgentEvent]s.
  *
- * Each CLI already writes a full record of its session to disk — Claude's carries thinking, tool
- * calls, token usage and stop reasons — so nop reads that rather than trying to reconstruct it from
- * the screen. The interface exists so the two providers' very different formats meet in one place,
- * and so a format that changes (Codex is already migrating to sqlite) can be replaced without
- * touching anything that consumes the events.
+ * Most of these CLIs already write a full record of their session to disk — Claude's carries
+ * thinking, tool calls, token usage and stop reasons — so nop reads that rather than trying to
+ * reconstruct it from the screen. The interface exists so their very different formats meet in one
+ * place, and so a format that changes (Codex is already migrating to sqlite) can be replaced
+ * without touching anything that consumes the events.
+ *
+ * Not every provider has one to read. Antigravity writes its conversations as protobuf inside
+ * SQLite, so its tailer produces the prompts and nothing else, and the rest of that session is only
+ * ever on the screen — which is what the second channel, and the screen tail a handoff falls back
+ * to, are for.
  */
 interface Tailer {
     /** The file to follow, or null until the CLI has created it. Called repeatedly until it isn't. */

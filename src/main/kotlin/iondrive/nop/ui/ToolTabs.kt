@@ -212,7 +212,6 @@ fun ToolTabs(
     onSelectTerminal: (String) -> Unit,
     onCloseTerminal: (String) -> Unit,
     agents: AgentSessions,
-    onNewAgent: () -> Unit,
     onShowPicker: () -> Unit,
     onSelectAgent: (String) -> Unit,
     onCloseAgent: (String) -> Unit,
@@ -281,7 +280,6 @@ fun ToolTabs(
             onSelectTerminal = onSelectTerminal,
             onCloseTerminal = onCloseTerminal,
             agents = agents,
-            onNewAgent = onNewAgent,
             onShowPicker = onShowPicker,
             onSelectAgent = onSelectAgent,
             onCloseAgent = onCloseAgent,
@@ -311,7 +309,13 @@ fun ToolTabs(
  *
  * The chevron sits outside the scrolling half so it is reachable whatever the strip is scrolled to
  * — it is the one control in the strip that is about the *region* rather than about a tab, and one
- * that scrolls off the end is one the user cannot use to get the tools back.
+ * that scrolls off the end is one the user cannot use to get the tools back. It is no longer the
+ * only way back, though: clicking the tab that is already showing folds the panel away too, which
+ * is the gesture that is already under the pointer when the user decides they want the columns.
+ *
+ * Folded away, no tab draws as the current one — there is no panel for it to be current in, and a
+ * highlighted tab over an empty half of the region reads as a panel that has failed to draw.
+ * [selected] is still the tab that comes back, so the strip forgets nothing by showing nothing.
  */
 @Composable
 private fun ToolStrip(
@@ -341,7 +345,8 @@ private fun ToolStrip(
                 // end of the window, so the tab has to come to the user rather than wait behind a
                 // scroll arrow to be found.
                 val requester = remember { BringIntoViewRequester() }
-                val isSelected = selected == ToolTab.History && log.id == histories.selectedId
+                val isSelected =
+                    !collapsed && selected == ToolTab.History && log.id == histories.selectedId
                 LaunchedEffect(isSelected) { if (isSelected) requester.bringIntoView() }
                 ToolStripTab(
                     label = "$HISTORY_GLYPH ${log.title}",
@@ -360,10 +365,11 @@ private fun ToolStrip(
         FIXED_TOOL_TABS.forEach { tab ->
             key(tab) {
                 val requester = remember { BringIntoViewRequester() }
-                RevealWhenSelected(requester, selected == tab)
+                val isSelected = !collapsed && selected == tab
+                RevealWhenSelected(requester, isSelected)
                 ToolStripTab(
                     label = tab.label,
-                    selected = selected == tab,
+                    selected = isSelected,
                     isDark = isDark,
                     style = style,
                     onClick = { onSelect(tab) },
@@ -390,7 +396,6 @@ private fun SessionStrip(
     onSelectTerminal: (String) -> Unit,
     onCloseTerminal: (String) -> Unit,
     agents: AgentSessions,
-    onNewAgent: () -> Unit,
     onShowPicker: () -> Unit,
     onSelectAgent: (String) -> Unit,
     onCloseAgent: (String) -> Unit,
@@ -415,12 +420,15 @@ private fun SessionStrip(
         if (now > openTerminals) plus.bringIntoView()
         openTerminals = now
     }
+    // The agents' "+" does the same, and counts the empty tab the picker sits in as one of them:
+    // pressing it when no account can be guessed makes a tab like any other, and a tab the user
+    // cannot see is one they will press the button for a second time.
     val agentPlus = remember { BringIntoViewRequester() }
-    var openAgents by remember { mutableStateOf(agents.sessions.size) }
-    LaunchedEffect(agents.sessions.size) {
-        val now = agents.sessions.size
-        if (now > openAgents) agentPlus.bringIntoView()
-        openAgents = now
+    val agentTabs = agents.sessions.size + if (agents.pickerTabVisible) 1 else 0
+    var openAgents by remember { mutableStateOf(agentTabs) }
+    LaunchedEffect(agentTabs) {
+        if (agentTabs > openAgents) agentPlus.bringIntoView()
+        openAgents = agentTabs
     }
 
     StripRow(style = style, isDark = isDark) {
@@ -456,31 +464,6 @@ private fun SessionStrip(
             onClick = onNewTerminal,
             modifier = Modifier.bringIntoViewRequester(plus),
         )
-        // Running or not, there is a tab called "Agent", and it is always the first of them: the
-        // strip should look the same whether or not a session happens to be open, the way the
-        // terminals' does, and a shape that appears and disappears is one the eye has to re-find.
-        // Clicking it shows the picker, which is what the pane holds with nothing selected.
-        //
-        // Drawn whatever else is in the strip, and not — as it was — only when nothing is running.
-        // The picker is the one place a *past* session can be resumed from, and the "+" beside
-        // these tabs starts a new session rather than opening it, so hiding this tab the moment a
-        // session existed left the user with no way back to the list at all.
-        if (agents.pickerTabVisible) {
-            ToolStripTab(
-                label = "$AGENT_GLYPH ${AgentSession.DEFAULT_TITLE}",
-                // Only when the pane is actually holding the picker. Without the second half this
-                // tab and the selected session's would both draw as the current one.
-                selected = sessionTab == ToolTab.Agent && agents.selectedId == null,
-                isDark = isDark,
-                style = style,
-                onClick = onShowPicker,
-                // Closes like a terminal's does, and reserves the same room whether or not the × is
-                // showing. What it closes is the tab and nothing else — no session hangs off it —
-                // which is the same thing closing the last terminal does to the strip. The "+" puts
-                // it back, and so does starting a session.
-                onClose = { agents.hidePickerTab() },
-            )
-        }
         agents.sessions.forEach { agentSession ->
             key(agentSession.sessionId) {
                 if (agentSession.sessionId == renamingId) {
@@ -507,9 +490,36 @@ private fun SessionStrip(
                 }
             }
         }
+        // The empty agent tab, holding the picker, which the "+" beside it makes and starting a
+        // session spends — see [AgentSessions.pickerTabVisible]. It draws *after* the sessions and
+        // not before them because it is the newest tab in the strip rather than a fixture of it:
+        // the one the "+" just made, in the place a new tab appears.
+        //
+        // Reachable while a session is running, and that is the point of it having a tab at all.
+        // The picker is the one place a *past* session can be resumed from, so an agent panel that
+        // only ever showed it in place of a running session left the user no way back to the list.
+        if (agents.pickerTabVisible) {
+            ToolStripTab(
+                label = "$AGENT_GLYPH ${AgentSession.DEFAULT_TITLE}",
+                // Only when the pane is actually holding the picker. Without the second clause this
+                // tab and the selected session's would both draw as the current one; the first
+                // covers a pane that has not been pointed anywhere yet, which is a fresh project —
+                // the picker is what such a pane holds, so this is the tab it is holding it in.
+                selected = (sessionTab == null || sessionTab == ToolTab.Agent) &&
+                    agents.selectedId == null,
+                isDark = isDark,
+                style = style,
+                onClick = onShowPicker,
+                // Closes like a terminal's does, and reserves the same room whether or not the × is
+                // showing. What it closes is the tab and nothing else — no session hangs off it —
+                // which is the same thing closing the last terminal does to the strip. The "+" puts
+                // another one there.
+                onClose = { agents.hidePickerTab() },
+            )
+        }
         NewAgentButton(
             isDark = isDark,
-            onClick = onNewAgent,
+            onClick = onShowPicker,
             modifier = Modifier.bringIntoViewRequester(agentPlus),
         )
         // The launcher runs close the strip. They arrive from the ▶ menu rather than from a "+"
@@ -796,12 +806,15 @@ private fun NewTerminalButton(isDark: Boolean, onClick: () -> Unit, modifier: Mo
     }
 }
 
-/** The "+" after the agent sessions: starts another one. Drawn exactly as the terminals' is. */
+/**
+ * The "+" after the agent sessions: an empty agent tab, holding the picker, which becomes a session
+ * once an account is chosen in it. Drawn exactly as the terminals' is.
+ */
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun NewAgentButton(isDark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
-    Tooltip(tooltip = { Text("New agent session") }) {
+    Tooltip(tooltip = { Text("New agent tab") }) {
         Box(
             modifier = modifier.fillMaxHeight().width(24.dp).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,

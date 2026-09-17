@@ -35,6 +35,72 @@ class AccountsTest {
     }
 
     @Test
+    fun `the account nominated to take over round-trips through the config file`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val config = AgentConfig(
+            accounts = listOf(
+                Account("claude-main", Provider.Anthropic, "/homes/cw", handoverTo = "codex-main"),
+                Account("codex-main", Provider.OpenAI, "/homes/cx"),
+            ),
+        )
+
+        Accounts.save(config)
+
+        assertEquals("codex-main", Accounts.load().accounts.first().handoverTo)
+    }
+
+    /**
+     * A config written before this setting existed has no field for it, and must still read as a
+     * perfectly good list of accounts that nobody has nominated anything for.
+     */
+    @Test
+    fun `a config from before the setting existed reads as nobody nominated`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        Files.createDirectories(Accounts.configFile.parent)
+        Files.writeString(
+            Accounts.configFile,
+            """{"accounts": [{"name": "a", "provider": "anthropic", "home": "/h"}]}""",
+        )
+
+        assertNull(Accounts.load().accounts.single().handoverTo)
+    }
+
+    @Test
+    fun `a nomination resolves to the account it names`() {
+        val claude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/h2")
+
+        assertEquals(codex, listOf(claude, codex).handoverTarget(claude))
+    }
+
+    @Test
+    fun `an account nobody nominated anything for hands over to nobody`() {
+        val claude = Account("claude-main", Provider.Anthropic, "/h")
+
+        assertNull(listOf(claude).handoverTarget(claude))
+    }
+
+    /**
+     * The settings dialog clears a nomination when its target is removed, so this is the belt behind
+     * that brace: an `agent.json` edited by hand must not be able to arm a handover that cannot
+     * happen. Null here puts the choice back in front of the user, where it started.
+     */
+    @Test
+    fun `a nomination naming an account that is gone resolves to nobody`() {
+        val claude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "deleted")
+
+        assertNull(listOf(claude).handoverTarget(claude))
+    }
+
+    /** Starting the exhausted account again is the one move that certainly does not help. */
+    @Test
+    fun `an account cannot hand its work to itself`() {
+        val claude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "claude-main")
+
+        assertNull(listOf(claude).handoverTarget(claude))
+    }
+
+    @Test
     fun `providers are stored under the names chad used`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         Accounts.save(AgentConfig(listOf(Account("a", Provider.Anthropic, "/h"))))
@@ -142,8 +208,8 @@ class AccountsTest {
     }
 
     /**
-     * Antigravity keeps its login in one OS-keyring slot every account shares, so nop cannot isolate
-     * it. Listing it and then refusing to launch it would be worse than leaving it out.
+     * chad configured providers nop does not launch — qwen, kimi, and a local llama-server. Listing
+     * one and then refusing to launch it would be worse than leaving it out.
      */
     @Test
     fun `an account for a provider nop cannot run is left out`(@TempDir tmp: Path) {
@@ -151,13 +217,49 @@ class AccountsTest {
             tmp,
             """
             {"accounts": {
-              "google-one": {"provider": "antigravity"},
+              "qwen-one": {"provider": "qwen"},
               "claude-one": {"provider": "anthropic"}
             }}
             """.trimIndent(),
         )
 
         assertEquals(listOf("claude-one"), withHome(tmp) { Accounts.discover() }.map { it.name })
+    }
+
+    /**
+     * Antigravity was one of those until `agy` moved its login out of the shared OS-keyring slot and
+     * into a file under its own home. An account chad configured now comes through pointing at the
+     * home chad made for it, which is what lets nop run it without signing it in again.
+     */
+    @Test
+    fun `an antigravity account from chad points at the home chad made for it`(@TempDir tmp: Path) {
+        chadConfig(
+            tmp,
+            """
+            {"accounts": {"google-one": {"provider": "antigravity", "model": "gemini-3.1-pro-high"}}}
+            """.trimIndent(),
+        )
+
+        val found = withHome(tmp) { Accounts.discover() }.single()
+
+        assertEquals("google-one", found.name)
+        assertEquals(Provider.Antigravity, found.provider)
+        assertEquals(tmp.resolve(".chad/antigravity-homes/google-one").toString(), found.home)
+        assertEquals("gemini-3.1-pro-high", found.model)
+    }
+
+    /**
+     * And its credential is the file `agy` reads, not the copy chad kept beside it — the whole
+     * point of the provider being launchable at all. See [Antigravity].
+     */
+    @Test
+    fun `an antigravity account's credential is the file the CLI reads`(@TempDir tmp: Path) {
+        val account = Account("google-one", Provider.Antigravity, tmp.toString())
+
+        assertEquals(
+            tmp.resolve(".gemini/antigravity-cli/antigravity-oauth-token"),
+            account.credentialFile,
+        )
     }
 
     @Test

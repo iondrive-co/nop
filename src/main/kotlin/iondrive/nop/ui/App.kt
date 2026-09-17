@@ -16,12 +16,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
@@ -37,6 +40,7 @@ import iondrive.nop.agent.PastSession
 import iondrive.nop.agent.Provider
 import iondrive.nop.agent.Usage
 import iondrive.nop.agent.UsageReading
+import iondrive.nop.agent.handoverTarget
 import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
@@ -551,6 +555,20 @@ fun App(
         toolsCollapsed = false
     }
 
+    /**
+     * What a click on a tool tab does: shows it, or folds the panel away when it is the one already
+     * showing.
+     *
+     * A tab is a claim on half the region, and the region's other half is a full-screen TUI — so the
+     * gesture that asks for the diff has to be the gesture that gives those columns back, without
+     * hunting for the chevron at the far end of the strip. Collapsed, the selection is kept but
+     * drawn as unselected (see [ToolTabs]), so the next click on that tab brings the same panel back
+     * rather than a different one.
+     */
+    fun toggleTool(tab: ToolTab) {
+        if (toolTab == tab && !toolsCollapsed) toolsCollapsed = true else showTool(tab)
+    }
+
     /** Shows [tab]'s collection in the session pane on the left. */
     fun showSession(tab: ToolTab) {
         sessionTab = tab
@@ -636,6 +654,13 @@ fun App(
         if (agentConfig == null) agentConfig = withContext(Dispatchers.IO) { Accounts.load() }
     }
     val agentAccounts: List<Account> = agentConfig?.accounts.orEmpty()
+    // Who a session hands its work to when the account running it runs out. Pushed into the
+    // collection rather than passed to each session, because the sessions outlive this composition
+    // and the accounts are edited in a dialog that is open while they run — re-pushed whenever the
+    // settings change, so a nomination made mid-session is the one that session uses.
+    LaunchedEffect(agentSessions, agentAccounts) {
+        agentSessions.handoverTarget = { from -> agentAccounts.handoverTarget(from) }
+    }
     // Two sources, because "the sessions on this project" is not the same set as "the sessions nop
     // ran on this project". nop's own event logs know the account and carry the name the user gave
     // a tab; the vendor's store is where a `claude` run from a shell in this checkout ends up, and
@@ -650,7 +675,15 @@ fun App(
     LaunchedEffect(projectPath, agentSessions.sessions.size, agentAccounts) {
         pastAgentSessions = withContext(Dispatchers.IO) {
             val own = EventLog.sessions(rootPath)
-            val seen = own.mapNotNull { it.lastNativeSessionId }.toSet()
+            // Only a row that can actually be reopened is allowed to stand in for the vendor's own
+            // copy of the same conversation. nop's side knows more about a session — which
+            // configured account, and the name the user gave the tab — but a row it cannot place
+            // knows less than the transcript does, and hiding the transcript behind it is how a
+            // conversation that is sitting right there on disk becomes unreachable. Which is what a
+            // log written before the store was recorded is: see PastSession.accountIn.
+            val seen = own.filter { it.accountIn(agentAccounts) != null }
+                .mapNotNull { it.lastNativeSessionId }
+                .toSet()
             val native = NativeSessions.claude(rootPath, NativeSessions.stores(agentAccounts))
                 .filterNot { it.sessionId in seen }
             (own + native).sortedByDescending { it.startedAt }
@@ -682,6 +715,11 @@ fun App(
     // heavyweight AWT components drawn over everything Compose paints, so each one has to stop
     // short of the strip by exactly this much or the strip is simply not on screen.
     var usageStripHeight by remember { mutableStateOf(0.dp) }
+    // And how wide the tool region is, which is how wide the strip draws itself: the accounts want
+    // one line, and one line's worth of room is the agent pane plus the panel beside it. Measured
+    // rather than derived from the two split ratios, which would have to be re-derived here every
+    // time either of them moved.
+    var toolRegionWidth by remember { mutableStateOf(0.dp) }
     // Whether the accounts dialog is up.
     // Once per nop run, not once per opening: re-asking every time turns a lock into a nuisance and
     // trains the user to keep the dialog open, which is the opposite of what it is for.
@@ -705,8 +743,11 @@ fun App(
                 // worth taking the window down for, and an uncaught throw here would.
                 runCatching {
                     agentUsage[account.name] = withContext(Dispatchers.IO) { Usage.read(account) }
-                    if (account.provider == Provider.Anthropic && account.name !in agentModels) {
-                        val models = withContext(Dispatchers.IO) { Usage.discoverClaudeModels(account) }
+                    // Only until it answers: a live model list is a fact about the account, not
+                    // about the moment, and the providers that can be asked for one are asked
+                    // through a CLI start or an HTTPS GET that the poll should not repeat forever.
+                    if (account.name !in agentModels) {
+                        val models = withContext(Dispatchers.IO) { Usage.discoverModels(account) }
                         if (models.isNotEmpty()) agentModels[account.name] = models
                     }
                 }.onFailure { failure ->
@@ -716,6 +757,12 @@ fun App(
             }
             delay(USAGE_POLL_INTERVAL_MS)
         }
+    }
+    // The other half of believing a quota wall: the provider's own number for what is left. Read
+    // out of the poller's map at the moment a session asks, so it is the freshest reading there is
+    // rather than whatever had arrived when the tab was opened. See [UsageReading.looksSpent].
+    SideEffect {
+        agentSessions.hasRunOut = { account -> agentUsage[account.name]?.looksSpent() }
     }
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
     // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in
@@ -1413,6 +1460,15 @@ fun App(
                             )
                         },
                         second = {
+                            // The strip is drawn over the whole window rather than inside this
+                            // region, so it cannot measure the region it spans — see
+                            // UsageIndicator's spanWidth. This is where that width exists.
+                            val density = LocalDensity.current
+                            Box(
+                                modifier = Modifier.fillMaxSize().onSizeChanged {
+                                    toolRegionWidth = with(density) { it.width.toDp() }
+                                },
+                            ) {
                             // Every terminal in the window is inside this panel, and each has to
                             // stop short of the usage strip floating over the window's bottom-right
                             // corner — see LocalTerminalBottomInset.
@@ -1421,7 +1477,7 @@ fun App(
                             ) {
                             ToolTabs(
                                 selected = toolTab,
-                                onSelect = { showTool(it) },
+                                onSelect = { toggleTool(it) },
                                 sessionTab = sessionTab,
                                 collapsed = toolsCollapsed,
                                 onToggleCollapsed = { toolsCollapsed = !toolsCollapsed },
@@ -1438,28 +1494,11 @@ fun App(
                                 },
                                 onCloseTerminal = { terminals.close(it) },
                                 agents = agentSessions,
-                                onNewAgent = {
-                                    // Starts a session, the way the terminals' "+" starts a shell.
-                                    // The account is the one this project used last — read off the
-                                    // session logs, so it survives a restart — or the only one
-                                    // configured. With several accounts and no history there is
-                                    // nothing to infer, so it asks instead of guessing which quota
-                                    // to spend.
-                                    val last = pastAgentSessions.firstNotNullOfOrNull { past ->
-                                        agentAccounts.firstOrNull { it.name == past.lastAccount }
-                                    }
-                                    val account = last ?: agentAccounts.singleOrNull()
-                                    if (account != null) {
-                                        agentSessions.open(
-                                            rootPath.toFile(),
-                                            account,
-                                            baselineSha = repo?.headSha(),
-                                        )
-                                    } else {
-                                        agentSessions.showPicker()
-                                    }
-                                    showSession(ToolTab.Agent)
-                                },
+                                // Both the "+" and the picker's own tab. The "+" opens an empty
+                                // agent tab rather than a session on the account used last: which
+                                // quota the next hour comes out of is a choice, and the same tab is
+                                // where an earlier session is resumed from. Choosing in it is what
+                                // turns it into the session's tab — see AgentSessions.open.
                                 onShowPicker = {
                                     agentSessions.showPicker()
                                     showSession(ToolTab.Agent)
@@ -1488,8 +1527,16 @@ fun App(
                                 },
                                 histories = historySessions,
                                 onSelectHistory = { id ->
-                                    historySessions.select(id)
-                                    showTool(ToolTab.History)
+                                    // Clicking the log already on screen folds the panel away, the
+                                    // way clicking the selected Commit or Diff tab does — a log is
+                                    // a tab in the same strip and the gesture cannot mean two
+                                    // things depending on which of them the user pressed.
+                                    if (toolTab == ToolTab.History && historySessions.selectedId == id) {
+                                        toggleTool(ToolTab.History)
+                                    } else {
+                                        historySessions.select(id)
+                                        showTool(ToolTab.History)
+                                    }
                                 },
                                 onCloseHistory = { id ->
                                     historySessions.close(id)
@@ -1514,6 +1561,9 @@ fun App(
                                         sessions = pastAgentSessions.filterNot { past ->
                                             agentSessions.sessions.any { it.sessionId == past.sessionId }
                                         },
+                                        // The same path every launch below is given, so the picker
+                                        // cannot name one directory and start the CLI in another.
+                                        projectDir = rootPath,
                                         cards = terminalCards,
                                         onLaunch = { account ->
                                             // HEAD now is what the Diff tab's "session" base means
@@ -1531,21 +1581,10 @@ fun App(
                                             // strictly better than landing in a description of it.
                                             //
                                             // A row that named a store rather than an account is
-                                            // resumed against that store — see PastSession.home.
-                                            // Sessions done outside nop are in the default config
-                                            // directory, which is deliberately not one of the
-                                            // configured accounts, so there is nothing to look up:
-                                            // the directory *is* the answer, and launching the CLI
-                                            // against it is what lands back in the conversation.
-                                            val account = past.home
-                                                ?.let { home ->
-                                                    Account(
-                                                        name = past.lastAccount ?: NativeSessions.DEFAULT_STORE_LABEL,
-                                                        provider = Provider.Anthropic,
-                                                        home = home,
-                                                    )
-                                                }
-                                                ?: agentAccounts.firstOrNull { it.name == past.lastAccount }
+                                            // resumed against that store — see PastSession.home
+                                            // and accountIn, which is also what decides whether
+                                            // the row was clickable in the first place.
+                                            val account = past.accountIn(agentAccounts)
                                             if (account != null) {
                                                 agentSessions.open(
                                                     dir = rootPath.toFile(),
@@ -1557,6 +1596,15 @@ fun App(
                                                     baselineSha = repo?.headSha(),
                                                 )
                                                 showSession(ToolTab.Agent)
+                                            } else {
+                                                // Unreachable through the picker, which draws such a
+                                                // row as unclickable. Logged rather than dropped
+                                                // because a press that does nothing at all is the
+                                                // one failure the user cannot report anything about.
+                                                Log.warn(
+                                                    "nothing to reopen for ${past.title}: " +
+                                                        "account=${past.lastAccount} home=${past.home}",
+                                                )
                                             }
                                         },
                                         onSettings = { showAccounts = true },
@@ -1820,6 +1868,7 @@ fun App(
                                 },
                             )
                             }
+                            }
                         },
                     )
                 },
@@ -1835,6 +1884,7 @@ fun App(
             readings = agentUsage,
             onClick = { showAccounts = true },
             onHeight = { usageStripHeight = it },
+            spanWidth = toolRegionWidth,
             modifier = Modifier.align(androidx.compose.ui.Alignment.BottomEnd),
         )
 

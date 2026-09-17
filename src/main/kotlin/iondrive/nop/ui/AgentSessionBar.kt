@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.Canvas
+import iondrive.nop.ShortPath
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentSession
 import iondrive.nop.agent.UsageReading
@@ -42,6 +43,10 @@ import org.jetbrains.jewel.ui.component.Text
  * left, because "which one instead" is the same question the usage strip answers. The list is drawn
  * inline rather than in a popup: the terminal below is a heavyweight AWT component, and Compose
  * composites popups underneath it, so a menu opened here would simply not be on screen.
+ *
+ * It is also where a handover nop made *by itself* owns up to having made one — see
+ * [AgentSession.autoHandover]. A tab whose provider changed under it while the user was in another
+ * window is otherwise indistinguishable from a tab they have misremembered.
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -73,6 +78,19 @@ fun AgentSessionBar(
                 color = AgentMuted,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+            // Which checkout the CLI is actually running in, which nothing on this screen used to
+            // say. A session is started from whichever project tab is in front, the panel below is
+            // the vendor's own full-screen UI, and the tab above it is named after the conversation
+            // — so an agent launched from the wrong project looked exactly like one launched from
+            // the right one, and stayed that way for as long as nobody checked. It takes the slack
+            // in the row rather than the account name: the account is a short label that is always
+            // whole, and a path is the thing that needs the room.
+            Text(
+                ShortPath.of(session.projectDir.toPath()),
+                color = AgentMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             // The one thing nop cannot do for you, offered as the command that does it. A vendor
@@ -100,6 +118,29 @@ fun AgentSessionBar(
                     Text("Hand over", color = AgentMuted)
                     Canvas(Modifier.size(9.dp)) { drawDisclosure(tint, collapsed = !expanded) }
                 }
+            }
+        }
+
+        // Above the list rather than below it: it is news about the run that is on screen now, and
+        // it explains why the account named in the row above is not the one this tab was started
+        // on. Dismissed by reading it, which is all there is to do about it.
+        session.autoHandover?.let { note ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "${note.from} hit its ${note.kind} — ${note.to} picked the work up from a " +
+                        "summary of that run.",
+                    color = ChangeColors.MODIFIED,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "Dismiss",
+                    color = AgentMuted,
+                    modifier = Modifier.clickable { session.dismissAutoHandover() },
+                )
             }
         }
 

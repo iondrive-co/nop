@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 import java.time.Instant
 
 /**
@@ -149,6 +150,42 @@ class UsageTest {
         assertEquals("45m", window.eta(Instant.parse("2026-09-15T11:15:00Z")))
         assertEquals("0m", window.eta(Instant.parse("2026-09-15T13:00:00Z")), "a passed reset is not negative time")
         assertNull(UsageWindow(50.0, null).eta())
+
+        // The weekly window resets days out, where the hour count is arithmetic rather than an
+        // answer — see UsageWindow.eta.
+        val week = UsageWindow(50.0, Instant.parse("2026-09-21T12:00:00Z"))
+        assertEquals("5d", week.eta(Instant.parse("2026-09-16T12:00:00Z")))
+        assertEquals("47h 0m", week.eta(Instant.parse("2026-09-19T13:00:00Z")), "still hours at two days")
+    }
+
+    @Test
+    fun `elapsed says how far through the window the clock is`() {
+        // Five hours long, resetting at noon, so it opened at seven.
+        val window = UsageWindow(50.0, Instant.parse("2026-09-15T12:00:00Z"), Duration.ofHours(5))
+
+        assertEquals(0.0, window.elapsed(Instant.parse("2026-09-15T07:00:00Z")))
+        assertEquals(0.5, window.elapsed(Instant.parse("2026-09-15T09:30:00Z")))
+        assertEquals(
+            1.0,
+            window.elapsed(Instant.parse("2026-09-15T13:00:00Z")),
+            "a passed reset is the end of the window, not past it",
+        )
+    }
+
+    @Test
+    fun `elapsed is unknown without both a reset and a length`() {
+        assertNull(UsageWindow(50.0, null, Duration.ofHours(5)).elapsed(), "no reset says where the window ends")
+        assertNull(UsageWindow(50.0, Instant.now()).elapsed(), "no length says where it began")
+        assertNull(UsageWindow(50.0, Instant.now(), Duration.ZERO).elapsed(), "a window of no length has no position")
+    }
+
+    /** Without it, the mark showing how far through a window we are has nothing to sit on. */
+    @Test
+    fun `a codex window carries the span it was reported over`(@TempDir tmp: Path) {
+        val future = Instant.now().plusSeconds(3600).epochSecond
+        rollout(tmp, "rollout-a.jsonl", tokenCount(44.0, 300, future))
+
+        assertEquals(Duration.ofMinutes(300), Usage.read(codexAccount(tmp)).session?.length)
     }
 
     // ── Claude: percentages ──
@@ -288,5 +325,68 @@ class UsageTest {
             stream.map { it.fileName.toString() }.filter { it != ".credentials.json" }.toList()
         }
         assertTrue(strays.isEmpty(), "expected only the credentials file, found $strays")
+    }
+
+    /**
+     * The reading's job here is to be allowed to contradict the terminal: a session printing a limit
+     * message while the account still has most of its window is showing that text, not hitting it.
+     */
+    @Test
+    fun `a window with room says the account has not run out`() {
+        val reading = UsageReading(
+            session = UsageWindow(12.0, Instant.now().plus(Duration.ofHours(3))),
+            weekly = UsageWindow(40.0, Instant.now().plus(Duration.ofDays(4))),
+            asOf = Instant.now(),
+        )
+
+        assertEquals(false, reading.looksSpent())
+    }
+
+    @Test
+    fun `a window at the wall says it has`() {
+        val reading = UsageReading(
+            session = UsageWindow(99.0, Instant.now().plus(Duration.ofMinutes(20))),
+            weekly = UsageWindow(40.0, null),
+            asOf = Instant.now(),
+        )
+
+        assertEquals(true, reading.looksSpent())
+    }
+
+    /** Either window being gone is enough — a spent week refuses just as firmly as a spent hour. */
+    @Test
+    fun `a spent weekly window counts even with the session window fresh`() {
+        val reading = UsageReading(
+            session = UsageWindow(3.0, null),
+            weekly = UsageWindow(100.0, null),
+            asOf = Instant.now(),
+        )
+
+        assertEquals(true, reading.looksSpent())
+    }
+
+    /**
+     * A Codex reading is scavenged from that account's last session, so it can be days old. Saying
+     * "there is room" from that would be guessing, and the guess would veto a real wall.
+     */
+    @Test
+    fun `a stale reading declines to answer rather than guessing`() {
+        val reading = UsageReading(
+            session = UsageWindow(5.0, null),
+            weekly = null,
+            asOf = Instant.now().minus(Duration.ofHours(6)),
+        )
+
+        assertNull(reading.looksSpent())
+    }
+
+    @Test
+    fun `a reading that could not be taken declines to answer`() {
+        assertNull(UsageReading.unavailable("not signed in").looksSpent())
+    }
+
+    @Test
+    fun `a reading with no windows in it declines to answer`() {
+        assertNull(UsageReading(null, null, Instant.now()).looksSpent())
     }
 }

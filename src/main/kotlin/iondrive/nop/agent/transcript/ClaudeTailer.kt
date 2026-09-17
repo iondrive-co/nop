@@ -40,10 +40,20 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
     @Volatile
     private var currentSessionId: String? = null
 
+    /**
+     * The sessions already filed in this project when the run started — the ones this run cannot
+     * possibly have created, and so cannot possibly have moved into.
+     *
+     * Taken once, on the first look, and never refreshed. See [switched] for what it is for.
+     */
+    @Volatile
+    private var alreadyThere: Set<String>? = null
+
     override fun nativeSessionId(): String? = currentSessionId
 
     override fun locate(run: RunContext): Path? {
         val dir = projectDir(run)
+        rememberWhatWasAlreadyThere(dir)
         val id = run.nativeSessionId
         if (id != null) {
             val exact = dir.resolve("$id.jsonl")
@@ -69,14 +79,29 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
      * someone else's turns, and take the name the CLI gave that session. With several tabs open they
      * all chased the newest and ended up sharing its title. Only nop can tell the two apart, because
      * only nop knows which sessions it started: see [RunContext.foreign].
+     *
+     * And neither is a session that was already filed here before this run began. That guard only
+     * covers the tabs nop is running, and a `claude` started from a shell in the same checkout is
+     * invisible to it: a run of *this* tab adopted a conversation somebody else was in the middle
+     * of, logged its turns, took its name, and — because the id it moved to is what the picker
+     * writes down — offered to resume that stranger's session under this one's title. A `/clear`
+     * and an in-TUI `/resume` both land in a file this run has just created, so "it was here before
+     * I started" separates the case this exists for from the case that broke it.
+     *
+     * The cost is following a `/resume` typed into the TUI that picks an *older* session, which
+     * appends to a file that was already here. The tab then keeps the name and the id of the
+     * conversation nop opened it on, which is a stale answer rather than somebody else's.
      */
     override fun switched(run: RunContext, current: Path): Path? {
         val dir = projectDir(run)
+        rememberWhatWasAlreadyThere(dir)
+        val already = alreadyThere.orEmpty()
         val currentStamp = modified(current)
         val candidate = runCatching {
             Files.list(dir).use { stream ->
                 stream.filter { it.fileName.toString().endsWith(".jsonl") && it != current }
                     .filter { modified(it) > currentStamp && modified(it) >= run.startedAt }
+                    .filter { it.sessionId() !in already }
                     .filter { !run.foreign(it.sessionId()) }
                     .max(compareBy { modified(it) })
                     .orElse(null)
@@ -84,6 +109,26 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
         }.getOrNull() ?: return null
         currentSessionId = candidate.sessionId()
         return candidate
+    }
+
+    /**
+     * Takes the one snapshot [switched] compares against, on the first look at the directory.
+     *
+     * The first look is the tailer's first [locate], which the follower makes as soon as the CLI is
+     * spawned — before a person could have typed anything into it, which is what makes the snapshot
+     * mean "not this run's doing". A directory that is not there yet is an empty set and stays one:
+     * the project has no sessions, so nothing in it can be somebody else's.
+     */
+    private fun rememberWhatWasAlreadyThere(dir: Path) {
+        if (alreadyThere != null) return
+        alreadyThere = runCatching {
+            Files.list(dir).use { stream ->
+                stream.filter { it.fileName.toString().endsWith(".jsonl") }
+                    .map { it.sessionId() }
+                    .toList()
+                    .toSet()
+            }
+        }.getOrDefault(emptySet())
     }
 
     override fun parse(line: String): List<AgentEvent> {

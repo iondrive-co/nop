@@ -30,6 +30,16 @@ data class Account(
     val home: String,
     val model: String? = null,
     val reasoning: String? = null,
+    /**
+     * The account to carry this one's work on when it runs out of usage mid-session, by name, or
+     * null to be asked at the time.
+     *
+     * A name and not an [Account], because this is written to a config file that the accounts
+     * themselves live in: a copy embedded here would be the second place a model or a home is
+     * recorded, and the two would disagree the first time either was edited. Resolved through
+     * [handoverTarget], which is also where a name that no longer matches anything goes quiet.
+     */
+    val handoverTo: String? = null,
 ) {
     val homePath: Path get() = Path.of(home)
 
@@ -37,12 +47,32 @@ data class Account(
      * The file this account's login is kept in. Its presence is a necessary condition for being
      * logged in, never a sufficient one — a Claude token can be there and long dead, which is why
      * [Usage] re-checks rather than trusting the file.
+     *
+     * Antigravity's is the one nop has to hold the CLI to: `agy` writes it there only while it
+     * believes the OS keyring is unusable, which is a belief [Antigravity] keeps current.
      */
     val credentialFile: Path
         get() = when (provider) {
             Provider.Anthropic -> homePath.resolve(".credentials.json")
             Provider.OpenAI -> homePath.resolve(".codex").resolve("auth.json")
+            Provider.Antigravity -> Antigravity.tokenFile(homePath)
         }
+}
+
+/**
+ * Who [from] hands its work to when it hits its wall, or null when nobody has been nominated and
+ * the choice belongs to the user.
+ *
+ * Two answers are deliberately null rather than an error. A nomination naming an account that has
+ * since been removed resolves to nothing, because a handover that cannot happen should end up in
+ * front of the user rather than in a log; and an account nominating *itself* resolves to nothing
+ * too, since starting the same exhausted account again is the one move that certainly does not
+ * help. The settings dialog prevents both, so this is the belt behind that brace — an `agent.json`
+ * edited by hand, or written by a version that allowed it, must not be able to wedge a session.
+ */
+fun List<Account>.handoverTarget(from: Account): Account? {
+    val nominated = from.handoverTo?.takeIf { it != from.name } ?: return null
+    return firstOrNull { it.name == nominated }
 }
 
 /**
@@ -154,7 +184,7 @@ object Accounts {
         return fromChadConfig(home).ifEmpty { defaultLogins(home) }
     }
 
-    /** The accounts `~/.chad.conf` declares, for the two providers nop can actually run. */
+    /** The accounts `~/.chad.conf` declares, for the providers nop can actually run. */
     private fun fromChadConfig(home: Path): List<Account> {
         val file = home.resolve(".chad.conf")
         if (!Files.isRegularFile(file)) return emptyList()
@@ -164,8 +194,8 @@ object Accounts {
 
         return accounts.mapNotNull { (name, value) ->
             val entry = value.obj() ?: return@mapNotNull null
-            // Anything nop cannot run is silently left out rather than listed and then refused —
-            // antigravity above all, whose login lives in a keyring slot every account shares.
+            // Anything nop cannot run is silently left out rather than listed and then refused.
+            // chad also configured qwen, kimi and a local llama-server, none of which nop launches.
             val provider = Provider.byId(entry["provider"].str()) ?: return@mapNotNull null
             Account(
                 name = name,
@@ -177,10 +207,18 @@ object Accounts {
         }.sortedBy { it.name }
     }
 
-    /** Where chad kept each provider's per-account credentials. */
+    /**
+     * Where chad kept each provider's per-account credentials.
+     *
+     * The antigravity homes are the odd ones: chad could not point the CLI at a credential file, so
+     * it kept its own copy as `credential.json` at the root of the home and wrote it into the
+     * keyring before each run. Pointing at the same home is still right — [Antigravity] moves that
+     * copy to where `agy` now reads it, which is what saves signing the account in again.
+     */
     private fun chadHome(home: Path, provider: Provider, name: String): Path = when (provider) {
         Provider.Anthropic -> home.resolve(".chad/claude-configs").resolve(name)
         Provider.OpenAI -> home.resolve(".chad/codex-homes").resolve(name)
+        Provider.Antigravity -> home.resolve(".chad/antigravity-homes").resolve(name)
     }
 
     /**

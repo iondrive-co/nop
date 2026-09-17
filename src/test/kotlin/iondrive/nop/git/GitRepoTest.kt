@@ -554,6 +554,51 @@ class GitRepoTest {
     }
 
     @Test
+    fun `revertFile removes a staged new file that was edited again`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "kept.txt").writeText("kept\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        (tmp / "fresh.txt").writeText("staged\n")
+        runShell(tmp, "git add fresh.txt")
+        (tmp / "fresh.txt").writeText("and edited again\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        repo.revertFile(repo.loadStatus().changes.single { it.path == "fresh.txt" })
+        assertTrue(!(tmp / "fresh.txt").toFile().exists(), "a file HEAD never had should be removed, not checked out")
+        assertTrue(repo.loadStatus().isClean, "clean after revert, got ${repo.loadStatus().changes}")
+        repo.close()
+    }
+
+    @Test
+    fun `stash create takes a staged new file that was edited again off disk`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "old.txt").writeText("old\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        // A rename staged with `git mv`, then rewritten on disk: the new path is an addition in the
+        // index AND a modification against it, so status reports it in both buckets.
+        runShell(tmp, "git mv old.txt new.txt")
+        (tmp / "new.txt").writeText("rewritten\n")
+
+        val repo = GitRepo.discover(tmp)!!
+        val pending = repo.loadStatus()
+        assertEquals(ChangeKind.ADDED, pending.byPath["new.txt"], "a path absent from HEAD is an addition")
+
+        repo.stashCreate("rename", pending.changes)
+        assertTrue(repo.loadStatus().isClean, "clean after stash, got ${repo.loadStatus().changes}")
+        assertTrue(!(tmp / "new.txt").toFile().exists(), "the staged new path should be off disk")
+        assertEquals("old\n", (tmp / "old.txt").toFile().readText(), "the rename should be undone")
+
+        // The pop has to write the new path back. Left on disk by the stash, it would sit in the
+        // way of that checkout as an untracked file, and the pop would fail against it instead.
+        repo.stashPop(repo.stashList().single())
+        assertEquals("rewritten\n", (tmp / "new.txt").toFile().readText(), "the rename should come back")
+        assertTrue(!(tmp / "old.txt").toFile().exists(), "the old path should be gone again")
+        repo.close()
+    }
+
+    @Test
     fun `stash create leaves a staged path it was not given out of the shelf`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         (tmp / "picked.txt").writeText("v1\n")

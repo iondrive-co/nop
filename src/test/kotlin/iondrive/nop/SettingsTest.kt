@@ -693,12 +693,13 @@ class SettingsTest {
     @Test
     fun `the collapsed tool panel is remembered`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
-        // Nothing saved reads as "showing", so a first run opens with both halves on screen.
-        assertEquals(false, Settings.loadToolsCollapsed())
-        Settings.saveToolsCollapsed(true)
+        // Nothing saved reads as "folded away", so a first run gives the whole region to the agent
+        // and a tool panel is something the user asks for.
         assertEquals(true, Settings.loadToolsCollapsed())
         Settings.saveToolsCollapsed(false)
-        assertEquals(false, Settings.loadToolsCollapsed())
+        assertEquals(false, Settings.loadToolsCollapsed(), "showing has to survive a restart too")
+        Settings.saveToolsCollapsed(true)
+        assertEquals(true, Settings.loadToolsCollapsed())
     }
 
     /** A tab or a newline in a name would split the row it is written on. */

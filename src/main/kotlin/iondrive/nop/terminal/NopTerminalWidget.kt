@@ -37,22 +37,21 @@ internal class NopTerminalWidget(
 }
 
 /**
- * The terminal's scrollbar: nothing at all until the buffer is taller than the screen, then a thin
- * thumb in the terminal's own colours.
+ * The terminal's scrollbar: a thin thumb in the terminal's own colours that paints only when the
+ * buffer extends beyond the visible screen.
  *
- * Hidden means *gone*, not blank: JediTerm's layout hands every child the width it asks for without
- * consulting `isVisible`, so a bar that merely stopped painting would still hold its strip of the
- * terminal. Reporting a zero preferred width is what gives those columns back to the text.
- *
- * The bar re-checks itself on adjustment events. Swing raises one for *any* change to the model, not
- * just a moved thumb — including the range changes that happen as lines scroll off the top — which
- * is exactly when "is there anything to scroll to" can change, and the listener list survives
- * JediTerm swapping in the terminal's own model after construction.
+ * It keeps a fixed width of [WIDTH_PX] down the right edge rather than resizing between 0 and 10px.
+ * Toggling preferred width dynamically between 0 and 10px causes the terminal panel beside it to
+ * lose and gain a column every time output runs off the top of the viewport, sending `SIGWINCH`
+ * to the running process and triggering an infinite layout/redraw loop with TUIs like Antigravity.
+ * When the buffer fits on screen, the gutter blends seamlessly into the terminal background; when
+ * scrollable, the thumb appears.
  */
 private class TerminalScrollBar(private val settings: NopTerminalSettings) : JScrollBar(VERTICAL) {
 
     /** Whether the buffer currently extends past the visible screen. */
-    private var scrollable = false
+    var scrollable: Boolean = false
+        private set
 
     init {
         isOpaque = false
@@ -63,7 +62,7 @@ private class TerminalScrollBar(private val settings: NopTerminalSettings) : JSc
 
     override fun getPreferredSize(): Dimension {
         val height = super.getPreferredSize().height
-        return if (scrollable) Dimension(WIDTH_PX, height) else Dimension(0, height)
+        return Dimension(WIDTH_PX, height)
     }
 
     private fun refresh() {
@@ -71,11 +70,7 @@ private class TerminalScrollBar(private val settings: NopTerminalSettings) : JSc
         val needed = model.maximum - model.minimum > model.extent
         if (needed == scrollable) return
         scrollable = needed
-        isVisible = needed
-        // The terminal beside it grows or shrinks by the bar's width, so the whole widget has to be
-        // laid out again — revalidating the bar alone would leave the text where it was.
-        parent?.revalidate()
-        parent?.repaint()
+        repaint()
     }
 
     private companion object {
@@ -109,6 +104,8 @@ private class TerminalScrollBarUI(private val settings: NopTerminalSettings) : B
     }
 
     override fun paintThumb(g: Graphics, c: JComponent, bounds: Rectangle) {
+        val bar = scrollbar as? TerminalScrollBar
+        if (bar != null && !bar.scrollable) return
         if (bounds.isEmpty || !scrollbar.isEnabled) return
         val g2 = g.create() as Graphics2D
         try {

@@ -41,6 +41,7 @@ object Spawn {
     ): AgentCommand = when (account.provider) {
         Provider.Anthropic -> claude(account, seed, resumeId)
         Provider.OpenAI -> codex(account, projectDir, seed, resumeId)
+        Provider.Antigravity -> antigravity(account, projectDir, seed, resumeId)
     }
 
     private fun claude(account: Account, seed: String?, resumeId: String?): AgentCommand {
@@ -61,6 +62,54 @@ object Spawn {
         val env = mutableMapOf("CLAUDE_CONFIG_DIR" to account.home)
         CLAUDE_THINKING_BUDGETS[account.reasoning]?.let { env["MAX_THINKING_TOKENS"] = it.toString() }
         return AgentCommand(argv, env, sessionId)
+    }
+
+    /**
+     * `agy`, whose isolation is `HOME` exactly as Codex's is — the difference is that the file that
+     * variable leads to is one the CLI only writes while it believes the keyring is unusable. See
+     * [Antigravity], which is what keeps that belief true, and is called on the way to every run.
+     *
+     * `--add-dir` is not a nicety. Without it the CLI decides the directory is untrusted and works
+     * in a scratch workspace of its own, which looks from the outside like an agent that reported
+     * success having never touched the project.
+     *
+     * Like Codex and unlike Claude there is no id to mint up front: the conversation is named by
+     * the CLI, and nop learns the name from
+     * [the tailer][iondrive.nop.agent.transcript.AntigravityTailer].
+     */
+    private fun antigravity(account: Account, projectDir: File, seed: String?, resumeId: String?): AgentCommand {
+        val argv = mutableListOf(
+            CliTools.resolve(Provider.Antigravity),
+            "--dangerously-skip-permissions",
+            "--add-dir",
+            projectDir.absolutePath,
+        )
+
+        // The model and the effort are one choice here, not two. `agy`'s model ids carry the effort
+        // inside them — `gemini-3.1-pro-low` *is* the low-effort build of that model — and the CLI
+        // refuses to start when `--effort` disagrees with the id it was given, or when the model has
+        // no effort dimension at all:
+        //
+        //     error: invalid model selection (--model "gemini-3.1-pro-low" --effort "high"):
+        //     --model gemini-3.1-pro-low conflicts with --effort=high
+        //     error: ... --effort is not supported for model "claude-sonnet-4-6"
+        //
+        // A refused spawn is a tab that opens on an error, so the named model wins and its own
+        // effort comes with it. The Thinking picker is then what sets the effort of the CLI's
+        // default model, which is the only case where nop has an effort to choose at all.
+        val model = account.model?.takeIf { it != DEFAULT_CHOICE }
+        if (model != null) {
+            argv += listOf("--model", model)
+        } else {
+            account.reasoning?.takeIf { it != DEFAULT_CHOICE }?.let { argv += listOf("--effort", it) }
+        }
+        if (resumeId != null) argv += listOf("--conversation", resumeId)
+
+        // `-i` and not a positional: `--prompt-interactive` is the flag that submits a prompt and
+        // *stays* in the TUI. Bare `--print` would answer once and exit, which is not a session.
+        seed?.takeIf { it.isNotBlank() }?.let { argv += listOf("-i", it) }
+
+        return AgentCommand(argv, mapOf("HOME" to account.home), resumeId)
     }
 
     private fun codex(account: Account, projectDir: File, seed: String?, resumeId: String?): AgentCommand {

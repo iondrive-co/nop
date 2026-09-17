@@ -1,7 +1,14 @@
 package iondrive.nop.agent
 
-/** A quota wall the vendor's own output announced, and the line that announced it. */
-data class QuotaHit(val kind: String, val line: String)
+/**
+ * A quota wall the vendor's own output announced, the line that announced it, and the phrase that
+ * actually matched.
+ *
+ * [matched] is the phrase alone, where [line] is everything around it — the gutters, the box drawing,
+ * whatever else the TUI had on that row. The phrase is what can be looked for somewhere else, which
+ * is how nop decides whether the vendor said it or the agent was showing it: see [QuotaEcho].
+ */
+data class QuotaHit(val kind: String, val line: String, val matched: String = "")
 
 /**
  * Watches a vendor CLI's terminal output for the moment it runs out of quota.
@@ -29,7 +36,7 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
      * Called from the connector's read path, which is the thread feeding the terminal, so it does as
      * little as possible: strip escapes, keep the last few KiB, and run two regexes over it.
      */
-    fun feed(text: String) {
+    fun feed(text: String) = synchronized(this) {
         if (fired || text.isEmpty()) return
         tail.append(stripAnsi(text))
         if (tail.length > WINDOW) tail.delete(0, tail.length - WINDOW)
@@ -44,14 +51,28 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         }
         val match = QUOTA.find(window) ?: return
         fired = true
-        onHit(QuotaHit(kind = kindOf(match.value), line = lineAround(window, match.range.first)))
+        onHit(
+            QuotaHit(
+                kind = kindOf(match.value),
+                line = lineAround(window, match.range.first),
+                matched = match.value,
+            ),
+        )
     }
 
     /** Plain text of whatever the watcher has seen most recently. Used by its tests. */
-    internal fun recentText(): String = tail.toString()
+    internal fun recentText(): String = synchronized(this) { tail.toString() }
 
-    /** Lets a fresh run reuse the watcher after a switch. */
-    fun reset() {
+    /**
+     * Lets a fresh run reuse the watcher, and re-arms one whose hit was judged to be the agent's own
+     * output rather than the vendor's — see [AgentSession.onQuotaWall].
+     *
+     * Synchronised with [feed], which is called from the PTY's reader thread while this is called
+     * from the UI thread: [tail] is a plain StringBuilder, and truncating one mid-append is how a
+     * rare, unreproducible crash gets into a path whose whole job is not to disturb a running
+     * session.
+     */
+    fun reset() = synchronized(this) {
         fired = false
         tail.setLength(0)
     }
@@ -75,8 +96,15 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         fun stripAnsi(text: String): String = ANSI.replace(text, "")
 
         /**
-         * A provider temporarily unable to serve a model. Transient, retried by the CLI itself, and
-         * matched before the quota patterns because several of them would otherwise claim it.
+         * Something that is not the account running out, matched before the quota patterns because
+         * several of them would otherwise claim it.
+         *
+         * Two kinds. A provider temporarily unable to serve a model — transient, and retried by the
+         * CLI itself. And a limit on something that is not the model at all: `agy` says "image
+         * generation quota exceeded, try again later", which is a separate allowance on a side
+         * feature, and reading it as the coding quota would end a session that has hours of it
+         * left. Both would be the worst bug this feature could have, which is a session killed for
+         * working.
          */
         private val OVERLOAD = Regex(
             listOf(
@@ -85,6 +113,8 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 """\b(?:api|service|server)\s+is\s+overloaded\b""",
                 """\boverloaded_error\b""",
                 """\btemporarily\s+overloaded\b""",
+                """\bmodel\s+capacity\s+exhausted\b""",
+                """\bimage\s+generation\s+quota\b""",
             ).joinToString("|") { "($it)" },
             RegexOption.IGNORE_CASE,
         )
