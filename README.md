@@ -9,29 +9,20 @@ Download the latest installer for your platform from the
 
 ### Run coding agents beside your code
 
-Claude Code, Codex and Antigravity sessions run in tabs next to the editor, each on whichever of
-your accounts you choose. The strip along the bottom shows every account's session and weekly
+Claude Code, Codex and Antigravity with session handover between them. The strip along the bottom shows every account's session and weekly
 usage.
 
 ![A Claude Code session, with every account's usage along the bottom](docs/screenshots/latest-agents.png)
 
-### Review what changed
+![The agent accounts settings](docs/screenshots/latest-accounts.png)
 
-Every change opens as a side-by-side diff, with a revert on each hunk and a stripe marking where
-the rest of the file's changes are.
+### Visual review built on Jetbrains Compose framework
 
 ![A side-by-side diff](docs/screenshots/latest-diff.png)
 
-### Manage all your accounts in one place
+### Multiple project tabs per window
 
-Set each account's model and thinking level, sign it in or out, and choose which account takes
-over its work when it runs out.
-
-![The agent accounts settings](docs/screenshots/latest-accounts.png)
-
-### Keep projects in tabs
-
-Open several projects in one window, each with its own file tree and editor tabs.
+Multiple tabs for different views / agents on the same project, or different projects. Multiple windows for different project groups.
 
 ![Several projects open as tabs](docs/screenshots/latest-preview.png)
 
