@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-# Capture the three README screenshots, each from its own freshly-spawned, fully isolated nop
-# instance pointed at synthetic state — so the shots are curated and reproducible instead of
-# depending on whatever the user happens to have open:
+# Capture the README screenshots from freshly-spawned, fully isolated nop instances pointed at
+# synthetic state — so the shots are curated and reproducible instead of depending on whatever the
+# user happens to have open — and write them into the README under a heading and a caption each:
 #
-#   - A diff-view shot: a repo with several committed-then-modified files across a few directories,
-#     so the tool panel on the right lists the changes grouped by directory (source dirs, tests,
-#     config, docs), with one file opened to its side-by-side diff in the editor beside it. The
-#     opened file is long enough to scroll past the window bottom, with its hunks spread far
-#     apart, so the change stripe beside the diff shows separate blocks marking where they are.
-#   - A workspace/preview shot: a named window holding several synthetic project tabs along the top,
-#     with a few editor tabs open in the active project. NOTHING from the user's real workspace
-#     appears.
-#   - An agents shot: a Claude Code session running in the agent pane, with the Agent accounts
-#     dialog open over the editor and the usage strip along the bottom holding several made-up
-#     accounts across all three providers. Every account, home, model and usage figure is invented:
-#     the readings come from a fixture file (see UsageFixture.kt), so no provider is asked anything,
-#     and the session is a stand-in `claude` that draws a made-up conversation — no real CLI runs
-#     and no real account's numbers or conversations can end up in the README.
+#   - An agents shot: a Claude Code session running in the agent pane, with the usage strip along
+#     the bottom holding several made-up accounts across all three providers.
+#   - A diff shot: a file opened from the commit panel to its side-by-side diff. The file is long
+#     enough to scroll past the window bottom, with its hunks spread far apart, so the change
+#     stripe beside the diff shows separate blocks marking where they are.
+#   - An accounts shot: the Agent accounts dialog for those same accounts.
+#   - A workspace shot: a named window holding several synthetic project tabs along the top.
 #
-# The diff and preview shots are set up in opposite themes so the README demonstrates both. Output
-# is quantised to a 256-colour palette before saving, which trims the PNGs by ~3x with no
-# visible difference vs. the truecolor capture.
+# NOTHING from the user's real workspace or accounts appears. Every account, home, model and usage
+# figure is invented: the readings come from a fixture file (see UsageFixture.kt), so no provider is
+# asked anything, and the session is a stand-in `claude` that draws a made-up conversation — no
+# real CLI runs.
+#
+# Each shot is cropped to the part of the window it is about, and no wider than ~840px: GitHub
+# draws README images at most as wide as its text column (~840px) and scales anything wider down,
+# which is what left whole-window shots unreadable. At that width they are shown pixel for pixel.
+#
+# The shots use both themes so the README demonstrates both. Output is quantised to a 256-colour
+# palette before saving, which trims the PNGs by ~3x with no visible difference vs. the truecolor
+# capture.
 #
 # Designed to be invoked from inside nop (via the ▶ launcher). For local testing the output
 # locations can be redirected with NOP_SHOT_DIR / NOP_SHOT_README so a dry run doesn't touch
@@ -38,13 +40,15 @@ STATE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/nop/state"
 # When testing on a headless Xvfb, give the screen comfortable margin over these dimensions
 # (e.g. 2100x1200): the WM places the window at an offset, and any part hanging past the screen
 # edge is silently missing from `import` captures — the shot comes out cropped, not failed.
-# Wide window + slim side panels: the editor is the subject of both shots, so it gets the width —
-# each half of the side-by-side diff must fit its code lines untruncated.
+# Every window is this size; what each shot keeps of it is decided by the ratios its scene seeds.
 SHOT_WIDTH=1720
 SHOT_HEIGHT=900
 # Project-pane width as a fraction of total width (~290px): enough for the demo tree's deepest
 # filenames without wrapping, no more.
 SHOT_H_RATIO=0.17
+# The window's client area at 1x, which the pixel offsets below are measured against: a window
+# that comes out wider is rendering at a larger scale, and they are scaled to match.
+SHOT_CLIENT_WIDTH=1710
 
 mkdir -p "$SHOT_DIR"
 
@@ -277,24 +281,48 @@ geometry_of() {
         END {print x, y, w, h}'
 }
 
+# Saves [image] to [out], cropped to "WxH+X+Y" when a geometry is given, quantised as described at
+# the top.
+save_png() {
+    local image="$1" out="$2" crop="${3:-}"
+    local -a cropping=()
+    [ -n "$crop" ] && cropping=(-crop "$crop" +repage)
+    convert "$image" ${cropping[@]+"${cropping[@]}"} -strip -colors 256 -dither None \
+        -define png:compression-level=9 -define png:compression-filter=5 "$out"
+}
+
 capture_to() {
-    local out="$1" wid="$2"
+    local out="$1" wid="$2" crop="${3:-}"
     local raw; raw="$(mktemp --suffix=.png)"
     DISPLAY="$DISPLAY_SPEC" import -window "$wid" "$raw"
-    convert "$raw" -strip -colors 256 -dither None \
-        -define png:compression-level=9 -define png:compression-filter=5 "$out"
+    save_png "$raw" "$out" "$crop"
     rm -f "$raw"
 }
+
+# A length measured at 1x, scaled to a window whose client area is $2 pixels wide.
+scaled_to() {
+    awk -v v="$1" -v w="$2" -v base="$SHOT_CLIENT_WIDTH" 'BEGIN {printf "%d", v * w / base}'
+}
+
+# The x at which a split at ratio $3 of the area right of the project tree falls, in a window $1
+# wide whose tree takes ratio $2: the editor's right edge, and the tool region's left one.
+split_x() {
+    awk -v w="$1" -v h="$2" -v t="$3" 'BEGIN {printf "%d", w * (h + (1 - h) * t)}'
+}
+
+# Nop draws a 4px divider between its panes, and a 30px project bar along the top of the window.
+PANE_DIVIDER=4
+PROJECT_BAR=30
 
 # Visual "ink" of the editor pane's top band: high when a diff (gutter + coloured code) is showing,
 # near-zero for the empty "click a file…" placeholder. Used to pick the click offset that actually
 # opened the diff, so the shot doesn't silently capture a blank pane if the layout shifted. The
 # crop must stay inside the editor: right of the project tree (ends at SHOT_H_RATIO) and left of
-# the tool region (starts at ~71% width with the split.tools seeded below) — the agent pane's text
+# the tool region (starts at ~66% width with the split.tools seeded below) — the agent pane's text
 # and the panel's change list are both full of ink and would mask a missed click.
 pane_ink() {
     local img="$1" w="$2" h="$3"
-    local cw=$(( w * 40 / 100 )) ch=$(( h * 22 / 100 ))
+    local cw=$(( w * 38 / 100 )) ch=$(( h * 22 / 100 ))
     local cx=$(( w * 25 / 100 )) cy=$(( h * 2 / 100 ))
     convert "$img" -crop "${cw}x${ch}+${cx}+${cy}" +repage -colorspace Gray \
         -format '%[fx:standard_deviation]' info: 2>/dev/null || echo 0
@@ -308,17 +336,17 @@ DIFF_CFG="$TMP_PARENT/diff-cfg"
 DIFF_PROJECT="$TMP_PARENT/$DIFF_BASENAME"
 mkdir -p "$DIFF_CFG/nop" "$DIFF_PROJECT"
 
-# The tool region right of the editor holds the agent pane and the tool panel side by side. The
-# tools are unfolded (a first run starts them folded away) so the commit panel is there to click;
-# split.session=0 pins the agent pane at its minimum width, and split.tools gives the region just
-# enough for that plus a tool panel of ~285px — slim, but still wide enough that the
-# commit-message row's buttons don't clip. The editor keeps the rest.
+# The shot is the editor alone, so split.tools makes the editor ~840px — the width the README shows
+# pixel for pixel — and gives the tool region the rest. The tools are unfolded (a first run starts
+# them folded away) so the commit panel is there to click, and split.session=0 pins the agent pane
+# beside it at its minimum width, leaving the panel room for its rows.
+DIFF_TOOLS_RATIO=0.592
 cat > "$DIFF_CFG/nop/state" <<EOF
 window.width=$SHOT_WIDTH
 window.height=$SHOT_HEIGHT
 theme=$opposite_theme
 split.h=$SHOT_H_RATIO
-split.tools=0.655
+split.tools=$DIFF_TOOLS_RATIO
 split.session=0
 tools.collapsed=0
 EOF
@@ -327,7 +355,8 @@ EOF
 # a "ui" source group (2 files), a "model" group, then tests / config / docs. Each file is
 # committed as a baseline, then edited, so every one shows up as a modification with a real diff.
 # Greeting.kt — the file the shot opens — is long enough to scroll past the window bottom, with
-# its edits spread far apart, so the diff's change stripe shows several separate blocks.
+# its edits spread far apart, so the diff's change stripe shows several separate blocks. Its lines
+# are kept to 44 characters, which is what each half of an ~840px side-by-side diff has room for.
 (
     cd "$DIFF_PROJECT"
     git init --quiet
@@ -341,76 +370,86 @@ EOF
 package iondrive.nop.ui
 
 /**
- * Builds the greeting lines shown in the demo UI.
+ * Builds the greeting lines shown in
+ * the demo UI.
  *
- * The service is deliberately small and readable: each function
- * does one thing, and the companion holds the couple of knobs the
- * banner rendering needs.
+ * Deliberately small: each function
+ * does one thing, and the companion
+ * holds the banner settings.
  */
-class GreetingService(private val locale: String) {
+class GreetingService(
+    private val locale: String,
+) {
 
-    /** Greets a single user by name. */
+    /** Greets one user by name. */
     fun greet(name: String): String {
         val message = "Hello, $name"
         return decorate(message)
     }
 
-    /** Greets every user in [names], one line each. */
-    fun greetAll(names: List<String>): String =
-        names.joinToString("\n") { greet(it) }
+    /** Greets several users at once. */
+    fun greetAll(names: List<String>) =
+        names.map(::greet).joinToString()
 
     /**
-     * Says goodbye. Mirrors [greet] so the two read the same way
-     * in calling code.
+     * Says goodbye. Mirrors [greet] so
+     * the two read alike when called.
      */
     fun farewell(name: String): String {
         val message = "Goodbye, $name"
         return decorate(message)
     }
 
-    /** Title-cases a raw name for display. */
-    fun formatName(raw: String): String =
-        raw.trim().split(Regex("\\s+")).joinToString(" ") {
-            it.replaceFirstChar(Char::uppercaseChar)
-        }
+    /** Title-cases a raw name. */
+    fun formatName(raw: String) = raw
+        .trim()
+        .split(" ")
+        .map(::capitalize)
+        .joinToString(" ")
 
-    /** True when [name] can be greeted at all. */
-    fun canGreet(name: String): Boolean =
+    /** True when [name] can be greeted. */
+    fun canGreet(name: String) =
         name.isNotBlank()
 
     /**
-     * Wraps a message with the locale's decorations. The plain
-     * locale adds nothing; every other locale gets a full stop.
+     * Adds the locale's decoration. Plain
+     * adds nothing; every other locale
+     * ends in a full stop.
      */
-    private fun decorate(message: String): String {
-        if (locale == "plain") return message
-        return "$message."
-    }
+    private fun decorate(text: String) =
+        when (locale) {
+            "plain" -> text
+            else -> "$text."
+        }
+
+    private fun capitalize(w: String) =
+        w.replaceFirstChar(Char::uppercase)
 
     /**
-     * Summarises how many users were greeted, for the status bar
-     * at the bottom of the demo window.
+     * Sums up how many users were greeted,
+     * for the demo window's status bar.
      */
-    fun summary(count: Int): String = when (count) {
+    fun summary(count: Int) = when (count) {
         0 -> "Nobody greeted yet"
         1 -> "Greeted one user"
         else -> "Greeted $count users"
     }
 
-    /** Longest name that still fits the banner. */
-    fun fitsBanner(name: String): Boolean =
+    /** Whether [name] fits the banner. */
+    fun fitsBanner(name: String) =
         name.length <= BANNER_WIDTH
 
-    /** Pads [name] so banner lines align in a mono column. */
-    fun padForBanner(name: String): String =
+    /** Pads [name] to the banner width. */
+    fun padForBanner(name: String) =
         name.padEnd(BANNER_WIDTH)
 
     companion object {
-        /** Banner column budget, in characters. */
+        /** Banner width, in characters. */
         const val BANNER_WIDTH = 42
 
-        /** Locales the demo ships translations for. */
-        val SUPPORTED = listOf("en", "plain")
+        /** Locales with translations. */
+        val SUPPORTED =
+            listOf("en", "plain")
     }
 }
 EOF
@@ -468,79 +507,91 @@ EOF
 package iondrive.nop.ui
 
 /**
- * Builds the greeting lines shown in the demo UI.
+ * Builds the greeting lines shown in
+ * the demo UI.
  *
- * The service is deliberately small and readable: each function
- * does one thing, and the companion holds the couple of knobs the
- * banner rendering needs.
+ * Deliberately small: each function
+ * does one thing, and the companion
+ * holds the banner settings.
  */
-class GreetingService(private val locale: String) {
+class GreetingService(
+    private val locale: String,
+) {
 
-    /** Greets a single user by name, optionally excitedly. */
-    fun greet(name: String, excited: Boolean = false): String {
-        val punctuation = if (excited) "!" else ""
-        val message = "Hello, $name$punctuation"
+    /** Greets one user, maybe excitedly. */
+    fun greet(
+        name: String,
+        excited: Boolean = false,
+    ): String {
+        val mark = if (excited) "!" else ""
+        val message = "Hello, $name$mark"
         return decorate(message)
     }
 
-    /** Greets every user in [names], one line each. */
-    fun greetAll(names: List<String>): String =
-        names.joinToString("\n") { greet(it) }
+    /** Greets several users at once. */
+    fun greetAll(names: List<String>) =
+        names.map(::greet).joinToString()
 
     /**
-     * Says goodbye. Mirrors [greet] so the two read the same way
-     * in calling code.
+     * Says goodbye. Mirrors [greet] so
+     * the two read alike when called.
      */
     fun farewell(name: String): String {
         val message = "See you later, $name"
         return decorate(message)
     }
 
-    /** Title-cases a raw name for display. */
-    fun formatName(raw: String): String =
-        raw.trim().split(Regex("\\s+")).joinToString(" ") {
-            it.replaceFirstChar(Char::uppercaseChar)
-        }
+    /** Title-cases a raw name. */
+    fun formatName(raw: String) = raw
+        .trim()
+        .split(" ")
+        .map(::capitalize)
+        .joinToString(" ")
 
-    /** True when [name] can be greeted at all. */
-    fun canGreet(name: String): Boolean =
+    /** True when [name] can be greeted. */
+    fun canGreet(name: String) =
         name.isNotBlank()
 
     /**
-     * Wraps a message with the locale's decorations. The plain
-     * locale adds nothing, shout upper-cases the whole line, and
-     * every other locale gets a full stop.
+     * Adds the locale's decoration. Plain
+     * adds nothing, shout upper-cases the
+     * line; others end in a full stop.
      */
-    private fun decorate(message: String): String {
-        if (locale == "plain") return message
-        if (locale == "shout") return message.uppercase()
-        return "$message."
-    }
+    private fun decorate(text: String) =
+        when (locale) {
+            "plain" -> text
+            "shout" -> text.uppercase()
+            else -> "$text."
+        }
+
+    private fun capitalize(w: String) =
+        w.replaceFirstChar(Char::uppercase)
 
     /**
-     * Summarises how many users were greeted, for the status bar
-     * at the bottom of the demo window.
+     * Sums up how many users were greeted,
+     * for the demo window's status bar.
      */
-    fun summary(count: Int): String = when (count) {
+    fun summary(count: Int) = when (count) {
         0 -> "No greetings sent yet"
         1 -> "Greeted one user"
         else -> "Greeted $count users"
     }
 
-    /** Longest name that still fits the banner. */
-    fun fitsBanner(name: String): Boolean =
+    /** Whether [name] fits the banner. */
+    fun fitsBanner(name: String) =
         name.length <= BANNER_WIDTH
 
-    /** Pads [name] so banner lines align in a mono column. */
-    fun padForBanner(name: String): String =
+    /** Pads [name] to the banner width. */
+    fun padForBanner(name: String) =
         name.padEnd(BANNER_WIDTH)
 
     companion object {
-        /** Banner column budget, in characters. */
+        /** Banner width, in characters. */
         const val BANNER_WIDTH = 48
 
-        /** Locales the demo ships translations for. */
-        val SUPPORTED = listOf("en", "plain", "shout")
+        /** Locales with translations. */
+        val SUPPORTED =
+            listOf("en", "plain", "shout")
     }
 }
 EOF
@@ -604,7 +655,7 @@ diff_out="$SHOT_DIR/latest-diff.png"
 # Click the FIRST change row in the tool panel on the right edge — Greeting.kt, the long file
 # whose diff the shot is about. The x sits at 92% of the window width: past the row's checkbox
 # and kind prefix, inside the click-to-open area that spans the rest of the row (panel starts at
-# ~83% with the ratios seeded above). That first row sits ~309px below the window top (project
+# ~78% with the ratios seeded above). That first row sits ~309px below the window top (project
 # tabs, tool tabs, header, buttons, recent-messages dropdown, message box, group header); the exact
 # Y depends on render scale, so the offsets are that row's position at 1x, 1.25x and 1.5x — and at
 # 1x the later two fall in the empty space under a group rather than on another file. Each is only
@@ -612,6 +663,11 @@ diff_out="$SHOT_DIR/latest-diff.png"
 # clearly shows a diff, because a later offset could hit a DIFFERENT row and put the wrong file in
 # the shot.
 diff_row_x=$(( DX + DW * 92 / 100 ))
+# What is kept: the editor, between the tree's divider and the tool region's, below the project bar.
+diff_left=$(( $(split_x "$DW" "$SHOT_H_RATIO" 0) + PANE_DIVIDER ))
+diff_right=$(( $(split_x "$DW" "$SHOT_H_RATIO" "$DIFF_TOOLS_RATIO") - 2 ))
+diff_top=$(scaled_to "$PROJECT_BAR" "$DW")
+diff_crop="$(( diff_right - diff_left ))x$(( DH - diff_top ))+${diff_left}+${diff_top}"
 best_ink="-1"
 for off in 309 386 463; do
     DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$diff_wid" || true
@@ -629,8 +685,7 @@ for off in 309 386 463; do
     keep=$(awk -v a="$ink" -v b="$best_ink" 'BEGIN{print (a>b)?1:0}')
     if [ "$keep" = "1" ]; then
         best_ink="$ink"
-        convert "$cand" -strip -colors 256 -dither None \
-            -define png:compression-level=9 -define png:compression-filter=5 "$diff_out"
+        save_png "$cand" "$diff_out" "$diff_crop"
     fi
     rm -f "$cand"
     # A blank editor pane probes near zero and an open diff ~0.09+, so 0.05 separates them
@@ -642,15 +697,16 @@ echo "diff shot ink=$best_ink"
 # ===========================================================================================
 # Scene 2 — workspace / preview (synthetic tabs + tab groups, NOT the user's workspace)
 # ===========================================================================================
-PREV_BASENAME="webapp-$$"
 # The name the preview shot's window goes by — its title, and how launch_isolated finds it.
 PREV_WINDOW="WORK"
 PREV_CFG="$TMP_PARENT/prev-cfg"
 mkdir -p "$PREV_CFG/nop"
 
-WEBAPP="$TMP_PARENT/$PREV_BASENAME"
-API="$TMP_PARENT/api-server-$$"
-BLOG="$TMP_PARENT/blog-$$"
+# Plain names, because the project tabs they label are what the shot is of. The window is found by
+# its name rather than by these, so they don't have to be unique on the screen.
+WEBAPP="$TMP_PARENT/projects/webapp"
+API="$TMP_PARENT/projects/api-server"
+BLOG="$TMP_PARENT/projects/blog"
 mkdir -p "$WEBAPP/src" "$API" "$BLOG"
 
 cat > "$WEBAPP/src/App.kt" <<'EOF'
@@ -752,14 +808,15 @@ echo "preview window $prev_wid at $PX,$PY ${PW}x${PH}"
 DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( PX + PW * 60 / 100 )) $(( PY + PH * 30 / 100 ))
 sleep 1.0
 
+# The top-left corner: the project tabs, the tree, and the open file's code, ~834x320 at 1x.
 preview_out="$SHOT_DIR/latest-preview.png"
-capture_to "$preview_out" "$prev_wid"
+capture_to "$preview_out" "$prev_wid" "$(scaled_to 834 "$PW")x$(scaled_to 320 "$PW")+0+0"
 
 # ===========================================================================================
-# Scene 3 — agent accounts dialog over the usage strip (synthetic accounts and usage)
+# Scene 3 — an agent session over the usage strip, and the accounts dialog (synthetic accounts)
 # ===========================================================================================
-# The first two instances have been captured, and this shot is taken off the screen rather than
-# out of one window (it spans two), so neither may be left where it could overlap this one.
+# The first two instances have been captured. Closed rather than left behind, so neither can sit
+# over the dialog this scene opens wherever the window manager puts it.
 cleanup
 DEMO_PIDS=()
 
@@ -889,10 +946,9 @@ class DiscountCodesTest {
 }
 EOF
 
-# Tools folded away, so the agent session has the tool region to itself and the usage strip (which
-# spans that region) fits every account on one line. split.tools leaves the region just wide enough
-# for that, and the editor beside it just wide enough for the dialog to sit over it without
-# covering the session.
+# Tools folded away, so the agent session has the tool region to itself — the region is the shot —
+# and split.tools makes the region ~835px: the width the README shows pixel for pixel, and still
+# wide enough for the usage strip (which spans it) to fit every account on one line.
 AGENT_TOOLS_RATIO=0.41
 cat > "$AGENT_CFG/nop/state" <<EOF
 window.width=$SHOT_WIDTH
@@ -965,11 +1021,10 @@ agent_wid="$LAST_WID"
 read AX AY AW AH < <(geometry_of "$agent_wid")
 echo "agents window $agent_wid at $AX,$AY ${AW}x${AH}"
 
-# Positions below are measured at 1x, where this window's client area is 1710px wide, and scaled by
-# however much wider it came out. The tool region's left edge follows from the seeded ratios.
-agent_scale=$(awk -v w="$AW" 'BEGIN {printf "%.4f", w / 1710}')
-scaled() { awk -v v="$1" -v s="$agent_scale" 'BEGIN {printf "%d", v * s}'; }
-tool_left=$(awk -v w="$AW" -v h="$SHOT_H_RATIO" -v t="$AGENT_TOOLS_RATIO" 'BEGIN {printf "%d", w * (h + (1 - h) * t)}')
+# Positions below are measured at 1x and scaled to the window. The tool region's left edge follows
+# from the seeded ratios.
+scaled() { scaled_to "$1" "$AW"; }
+tool_left=$(split_x "$AW" "$SHOT_H_RATIO" "$AGENT_TOOLS_RATIO")
 AGENT_TABS="$AGENT_DATA/agents"
 
 # Start a session on claude-work by clicking its row in the agent picker, which fills the tool
@@ -1012,6 +1067,16 @@ if ! grep -qF "$AGENT_TITLE" "$AGENT_TABS" 2>/dev/null; then
     echo "warning: couldn't rename the agent tab; it keeps its default name" >&2
 fi
 
+# The session shot: the tool region, from its divider to the window's right edge and from under the
+# project bar to the bottom — the session's tab, the conversation, and the usage strip. Taken before
+# the dialog opens, with the cursor parked over the project tree, outside it.
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + AW * 5 / 100 )) $(( AY + AH * 85 / 100 ))
+sleep 1.0
+agents_left=$(( tool_left + PANE_DIVIDER + 1 ))
+agents_top=$(scaled "$PROJECT_BAR")
+agents_out="$SHOT_DIR/latest-agents.png"
+capture_to "$agents_out" "$agent_wid" "$(( AW - agents_left ))x$(( AH - agents_top ))+${agents_left}+${agents_top}"
+
 # The dialog this instance opens: matched by being transient for its window, not by title alone,
 # so an accounts dialog the user has open in their own nop can't be picked up instead.
 dialog_of() {
@@ -1047,51 +1112,61 @@ if [ -z "$dialog_wid" ]; then
     echo "the Agent accounts dialog never opened; log at $AGENT_CFG/nop.log" >&2
     exit 6
 fi
-
-# Move the dialog over the editor, right-aligned just short of the tool region, and vertically
-# centred: the session and the strip stay in view, and so does the project tree. WMs disagree
-# about whether a move positions the frame or the client, so the first move is measured and the
-# second corrects by whatever the frame added.
-read _ _ GW GH < <(geometry_of "$dialog_wid")
-want_x=$(( AX + tool_left - GW - 20 ))
-want_y=$(( AY + (AH - GH) / 2 + 12 ))
-if [ "$want_x" -lt $(( AX + 8 )) ]; then want_x=$(( AX + 8 )); fi
-DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$dialog_wid" -e "0,$want_x,$want_y,-1,-1"
-sleep 0.5
-read GX GY _ _ < <(geometry_of "$dialog_wid")
-if [ "$GX" -ne "$want_x" ] || [ "$GY" -ne "$want_y" ]; then
-    DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$dialog_wid" -e "0,$(( 2 * want_x - GX )),$(( 2 * want_y - GY )),-1,-1"
-    sleep 0.5
-fi
 DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$dialog_wid" -b add,above 2>/dev/null || true
 DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$dialog_wid" 2>/dev/null || true
 DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$dialog_wid" 2>/dev/null || true
-# Park the cursor over the project tree, clear of the dialog, so no hover state or tooltip shows.
-DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + AW * 6 / 100 )) $(( AY + AH * 80 / 100 ))
-sleep 1.0
 
-# Captured off the screen and cropped to the main window: `import -window` on either window alone
-# would lose the other one.
-agents_out="$SHOT_DIR/latest-agents.png"
-agents_raw="$(mktemp --suffix=.png)"
-DISPLAY="$DISPLAY_SPEC" import -window root "$agents_raw"
-convert "$agents_raw" -crop "${AW}x${AH}+${AX}+${AY}" +repage -strip -colors 256 -dither None \
-    -define png:compression-level=9 -define png:compression-filter=5 "$agents_out"
-rm -f "$agents_raw"
+# The accounts shot: the dialog's own window, which is already about as wide as the README shows
+# pixel for pixel. The cursor goes just outside whichever side of it has room, so nothing in it is
+# hovered.
+read GX GY GW GH < <(geometry_of "$dialog_wid")
+if [ "$GX" -gt 40 ]; then park_x=$(( GX - 20 )); else park_x=$(( GX + GW + 20 )); fi
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$park_x" $(( GY + GH / 2 ))
+sleep 1.0
+accounts_out="$SHOT_DIR/latest-accounts.png"
+capture_to "$accounts_out" "$dialog_wid"
 
 cleanup
 DEMO_PIDS=()
 trap 'rm -rf "$TMP_PARENT"' EXIT INT TERM
 
-echo "wrote $diff_out ($(stat -c %s "$diff_out") bytes)"
-echo "wrote $preview_out ($(stat -c %s "$preview_out") bytes)"
-echo "wrote $agents_out ($(stat -c %s "$agents_out") bytes)"
+for out in "$agents_out" "$diff_out" "$accounts_out" "$preview_out"; do
+    echo "wrote $out ($(stat -c %s "$out") bytes)"
+done
 
-# Insert / replace the screenshot block in the README so the latest captures show up inline.
+# Insert / replace the screenshot block in the README so the latest captures show up inline. Each
+# shot gets a heading and a sentence, so someone skimming the README learns what it is for from the
+# headings alone and what they are looking at from the caption.
 block="$README_MARKER
-![Diff view](docs/screenshots/latest-diff.png)
-![Workspace preview](docs/screenshots/latest-preview.png)
-![Agent accounts and usage](docs/screenshots/latest-agents.png)
+
+### Run coding agents beside your code
+
+Claude Code, Codex and Antigravity sessions run in tabs next to the editor, each on whichever of
+your accounts you choose. The strip along the bottom shows every account's session and weekly
+usage.
+
+![A Claude Code session, with every account's usage along the bottom](docs/screenshots/latest-agents.png)
+
+### Review what changed
+
+Every change opens as a side-by-side diff, with a revert on each hunk and a stripe marking where
+the rest of the file's changes are.
+
+![A side-by-side diff](docs/screenshots/latest-diff.png)
+
+### Manage all your accounts in one place
+
+Set each account's model and thinking level, sign it in or out, and choose which account takes
+over its work when it runs out.
+
+![The agent accounts settings](docs/screenshots/latest-accounts.png)
+
+### Keep projects in tabs
+
+Open several projects in one window, each with its own file tree and editor tabs.
+
+![Several projects open as tabs](docs/screenshots/latest-preview.png)
+
 $README_MARKER"
 
 if grep -q "$README_MARKER" "$README"; then
