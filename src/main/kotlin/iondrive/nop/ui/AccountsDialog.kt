@@ -19,17 +19,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.LocalTextContextMenu
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -42,18 +39,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
-import androidx.compose.ui.window.rememberDialogState
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentConfig
 import iondrive.nop.agent.Accounts
@@ -62,11 +53,6 @@ import iondrive.nop.agent.Login
 import iondrive.nop.agent.Provider
 import iondrive.nop.agent.UsageReading
 import org.jetbrains.jewel.foundation.theme.JewelTheme
-import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
-import org.jetbrains.jewel.intui.standalone.theme.darkThemeDefinition
-import org.jetbrains.jewel.intui.standalone.theme.default
-import org.jetbrains.jewel.intui.standalone.theme.lightThemeDefinition
-import org.jetbrains.jewel.ui.ComponentStyling
 import org.jetbrains.jewel.ui.Orientation
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.Divider
@@ -432,71 +418,6 @@ private fun AddAccountDialog(existing: List<String>, onAdd: (Account) -> Unit, o
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
             OutlinedButton(onClick = onCancel) { Text("Cancel") }
             DefaultButton(onClick = ::submit) { Text("Add and sign in") }
-        }
-    }
-}
-
-/**
- * The window every agent dialog is drawn in.
- *
- * A real one — an AWT dialog of its own — and not the centred `Popup` the rest of nop's dialogs
- * use, which is the whole reason this exists separately. These are the dialogs opened from the
- * Agent tab and from the usage strip, and what is usually on screen behind them is a running vendor
- * TUI: a heavyweight AWT component that Compose Desktop composites *above* everything it draws
- * itself. A popup there is not merely hard to read, it is not on screen at all — including its
- * close button, which is how a settings dialog became something that could be opened and not shut.
- * The same reason the login flow is sent to a terminal tab rather than run in here, and the same
- * reason the usage strip makes the terminal give a strip of height back.
- *
- * Being a window buys the rest for free: the platform's own title bar and close button, somewhere
- * to move it to, and a place above the terminal to stay.
- */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
-@Composable
-private fun DialogFrame(
-    title: String,
-    onClose: () -> Unit,
-    size: DpSize,
-    onSubmit: (() -> Unit)? = null,
-    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
-) {
-    // Read out here, in the composition that opens the dialog, because the theme is re-applied
-    // inside a window that hosts its own: see below.
-    val isDark = JewelTheme.isDark
-    DialogWindow(
-        onCloseRequest = onClose,
-        state = rememberDialogState(size = size),
-        title = title,
-        onPreviewKeyEvent = { event ->
-            if (event.type != KeyEventType.KeyDown) return@DialogWindow false
-            when (event.key) {
-                Key.Escape -> { onClose(); true }
-                Key.Enter, Key.NumPadEnter -> onSubmit?.let { it(); true } ?: false
-                else -> false
-            }
-        },
-    ) {
-        // Applied again rather than inherited. A window composes its content in a sub-composition of
-        // its own, and Jewel's components take their colours, metrics and typography from the theme
-        // in scope where they are drawn — so a dialog that leaned on the main window's would be one
-        // upstream change away from opening unstyled. Cheap insurance for something the user cannot
-        // work around from inside.
-        IntUiTheme(
-            theme = if (isDark) JewelTheme.darkThemeDefinition() else JewelTheme.lightThemeDefinition(),
-            styling = ComponentStyling.default(),
-        ) {
-            // nop's own text-field context menu, the same one the main window provides — see
-            // [NopTextContextMenu].
-            CompositionLocalProvider(LocalTextContextMenu provides NopTextContextMenu) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(JewelTheme.globalColors.panelBackground)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    content = content,
-                )
-            }
         }
     }
 }

@@ -1143,7 +1143,8 @@ block="$README_MARKER
 
 Claude Code, Codex and Antigravity sessions run in tabs next to the editor, each on whichever of
 your accounts you choose. The strip along the bottom shows every account's session and weekly
-usage.
+usage. Every agent shares one memory file, \`~/.local/share/nop/agent/memory/memory.md\`, so what
+one session learns reaches the next, whichever account or tool it runs on.
 
 ![A Claude Code session, with every account's usage along the bottom](docs/screenshots/latest-agents.png)
 

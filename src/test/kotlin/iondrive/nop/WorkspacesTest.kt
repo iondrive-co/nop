@@ -332,6 +332,72 @@ class WorkspacesTest {
         assertEquals(listOf("new", "old"), Workspaces.parked(list).map { it.name })
     }
 
+    // --- quitting by closing the windows one at a time -------------------------------------------
+
+    @Test
+    fun `windows closed one after another on the way to quitting open again with it`() {
+        val list = listOf(
+            ws(0, "work", "/p/a", open = false).copy(closedAt = 1_000),
+            ws(1, "games", "/p/b", open = false).copy(closedAt = 4_000),
+            ws(2, "media", "/p/c", open = false).copy(closedAt = 9_000),
+            ws(3, "last", "/p/d"),
+        )
+        val out = Workspaces.quitting(list, nowMs = 12_000)
+
+        assertTrue(out.all { it.open })
+        assertTrue(out.all { it.closedAt == null })
+        // Nothing else about them changes: tabs, names and places are what comes back.
+        assertEquals(list.map { it.copy(open = true, closedAt = null) }, out)
+    }
+
+    @Test
+    fun `the run is measured between closes, so a slow shutdown still counts as one`() {
+        // Each close is under the gap from the next, though the first is well over it from the quit.
+        val list = listOf(
+            ws(0, "work", "/p/a", open = false).copy(closedAt = 0),
+            ws(1, "games", "/p/b", open = false).copy(closedAt = 8_000),
+            ws(2, "media", "/p/c", open = false).copy(closedAt = 16_000),
+            ws(3, "last", "/p/d"),
+        )
+        assertTrue(Workspaces.quitting(list, nowMs = 24_000).all { it.open })
+    }
+
+    @Test
+    fun `a window parked a while before the shutdown began stays parked`() {
+        val list = listOf(
+            ws(0, "parked", "/p/a", open = false).copy(closedAt = 1_000),
+            ws(1, "games", "/p/b", open = false).copy(closedAt = 60_000),
+            ws(2, "last", "/p/c"),
+        )
+        val out = Workspaces.quitting(list, nowMs = 62_000)
+
+        assertEquals(listOf(false, true, true), out.map { it.open })
+        assertEquals(1_000L, out[0].closedAt)
+    }
+
+    @Test
+    fun `a gap in the run ends it, even with windows closed close together before the gap`() {
+        val list = listOf(
+            ws(0, "a", "/p/a", open = false).copy(closedAt = 1_000),
+            ws(1, "b", "/p/b", open = false).copy(closedAt = 2_000),
+            ws(2, "c", "/p/c", open = false).copy(closedAt = 50_000),
+            ws(3, "last", "/p/d"),
+        )
+        assertEquals(listOf(false, false, true, true), Workspaces.quitting(list, nowMs = 51_000).map { it.open })
+    }
+
+    @Test
+    fun `quitting long after the last park leaves every parked window where it is`() {
+        val list = listOf(ws(0, "games", "/p/b", open = false).copy(closedAt = 1_000), ws(1, "last", "/p/c"))
+        assertEquals(list, Workspaces.quitting(list, nowMs = 100_000))
+    }
+
+    @Test
+    fun `a parked window with no closing time on record is never swept up in a quit`() {
+        val list = listOf(ws(0, "old", "/p/a", open = false), ws(1, "last", "/p/b"))
+        assertEquals(list, Workspaces.quitting(list, nowMs = 5_000))
+    }
+
     @Test
     fun `discard throws a window away for good`() {
         val list = listOf(ws(0, "work", "/p/a"), ws(1, "games", "/p/b", open = false))

@@ -217,6 +217,9 @@ class TerminalSession private constructor(
             out.write(text.toByteArray(Charsets.UTF_8))
             out.flush()
         }
+        SwingUtilities.invokeLater {
+            (widget as? NopTerminalWidget)?.scrollToBottom()
+        }
     }
 
     /**

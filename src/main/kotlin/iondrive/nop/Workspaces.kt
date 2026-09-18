@@ -13,7 +13,9 @@ import java.nio.file.Paths
  * Closing a window parks it rather than discarding it: [open] goes false, [closedAt] records when,
  * and the workspace stays on the list with its tabs, waiting in the window picker for the user to
  * pick it up again. A curated set of tabs can't be lost to a stray click on the title bar's close
- * button — only [Workspaces.discard] throws one away, and only when the user says so.
+ * button — only [Workspaces.discard] throws one away, and only when the user says so. Windows closed
+ * in quick succession on the way to quitting nop aren't left parked, though: they were nop being put
+ * away, and they open again with it (see [Workspaces.quitting]).
  *
  * [id] is a runtime identity for keying windows and addressing one for a rename or a move; it isn't
  * persisted, since nothing outside a single run refers to a workspace by anything but its position.
@@ -95,6 +97,30 @@ object Workspaces {
         val window = byId(list, id) ?: return list
         if (window.tabs.isEmpty()) return list.filter { it.id != id }
         return update(list, id) { it.copy(open = false, closedAt = nowMs) }
+    }
+
+    /**
+     * The window list to save as nop quits at [nowMs], its last window on screen having just been
+     * closed: the windows closed on the way to that are marked open again, so the next launch puts
+     * the whole desktop back rather than only whichever window happened to go last.
+     *
+     * Putting nop away one window at a time looks, window by window, exactly like parking them — it
+     * only shows at the end, when the last one goes too. So the run is read backwards from the quit:
+     * a window closed within [CLOSED_TOGETHER_MS] of the next close after it (the quit counting as
+     * the last) was part of putting nop away, and so is every window before it that chains on the
+     * same way. The first gap longer than that ends the run; a window parked further back than it
+     * was put away on its own, and stays in the picker.
+     */
+    fun quitting(list: List<Workspace>, nowMs: Long): List<Workspace> {
+        val revive = mutableSetOf<Long>()
+        var next = nowMs
+        for (ws in parked(list)) {
+            val at = ws.closedAt ?: break
+            if (next - at > CLOSED_TOGETHER_MS) break
+            revive += ws.id
+            next = at
+        }
+        return list.map { if (it.id in revive) it.copy(open = true, closedAt = null) else it }
     }
 
     /** Throws a window away for good, tabs and all. Only ever from the picker's discard. */
@@ -310,3 +336,10 @@ data class WindowOverhead(val width: Int, val height: Int) {
 
 /** How far down and across each window in a cascade sits from the one before it, in dp. */
 private const val CASCADE_STEP = 32
+
+/**
+ * The longest pause between one window closing and the next for the two to count as the same
+ * shutdown in [Workspaces.quitting]. Long enough to reach across the monitors to the next window's
+ * close button; short enough that a window parked on purpose a while before quitting stays parked.
+ */
+private const val CLOSED_TOGETHER_MS = 10_000L

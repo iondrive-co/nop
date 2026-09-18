@@ -186,7 +186,7 @@ fun ProjectBar(
     }
 
     if (picking) {
-        WindowPickerPopup(
+        WindowPickerDialog(
             parked = parked,
             thisWindow = thisWindow,
             onOpenWindow = onShowWindow,

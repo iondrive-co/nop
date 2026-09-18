@@ -31,10 +31,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.Ago
 import iondrive.nop.Workspace
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -54,7 +54,7 @@ import org.jetbrains.jewel.ui.component.Text
  *
  * It shows in two places, which between them cover every way a user can end up wanting a window
  * back: [WindowPickerPanel] fills a window that has no project tabs (there is nothing else for that
- * window to show, and everything worth doing next is on this card), and [WindowPickerPopup] is the
+ * window to show, and everything worth doing next is on this card), and [WindowPickerDialog] is the
  * same card raised over a working window from the bar's windows button.
  */
 @Composable
@@ -70,12 +70,19 @@ fun WindowPickerPanel(
     // The panel raises its own rename prompt: it fills the window rather than floating over it, so
     // there is no popup underneath for a second one to fight with.
     var renaming by remember { mutableStateOf<Workspace?>(null) }
+    val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
 
     Box(
         modifier = Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground),
         contentAlignment = Alignment.Center,
     ) {
         WindowPickerCard(
+            modifier = Modifier
+                .width(460.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(JewelTheme.globalColors.panelBackground)
+                .border(1.dp, border, RoundedCornerShape(8.dp))
+                .padding(20.dp),
             parked = parked,
             thisWindow = thisWindow,
             onOpenWindow = onOpenWindow,
@@ -103,9 +110,15 @@ fun WindowPickerPanel(
     }
 }
 
-/** The picker over a window that is already showing a project, dismissed by clicking away. */
+/**
+ * The picker over a window that is already showing a project.
+ *
+ * A window of its own, not a popup over nop's. The button that raises it sits above the tool
+ * region, and a terminal there is drawn over any popup in the window: the card came up with
+ * everything right of the editor missing. See [DialogFrame].
+ */
 @Composable
-fun WindowPickerPopup(
+fun WindowPickerDialog(
     parked: List<Workspace>,
     thisWindow: Workspace?,
     onOpenWindow: (Long) -> Unit,
@@ -116,11 +129,8 @@ fun WindowPickerPopup(
     onOpenProject: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    Popup(
-        popupPositionProvider = NewEntryPositionProvider,
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
-    ) {
+    // Its height follows the list of closed windows, so only the width is fixed.
+    DialogFrame(title = "Open a window", onClose = onDismiss, size = DpSize(460.dp, Dp.Unspecified)) {
         WindowPickerCard(
             parked = parked,
             thisWindow = thisWindow,
@@ -144,23 +154,14 @@ private fun WindowPickerCard(
     onDiscardWindow: (Long) -> Unit,
     onNewWindow: () -> Unit,
     onOpenProject: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val isDark = JewelTheme.isDark
-    val border = if (isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
-    val muted = if (isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
+    val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
     // The window a discard is being confirmed for. One at a time, and clicking anything else in the
     // card puts the question away — a destructive answer should need the click it asked for.
     var confirming by remember { mutableStateOf<Long?>(null) }
 
-    Column(
-        modifier = Modifier
-            .width(460.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(JewelTheme.globalColors.panelBackground)
-            .border(1.dp, border, RoundedCornerShape(8.dp))
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Open a window", fontSize = 15.sp, fontWeight = FontWeight.Bold)
         Text(
             text = if (parked.isEmpty()) {

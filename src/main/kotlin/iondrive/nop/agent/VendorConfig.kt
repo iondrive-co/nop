@@ -37,8 +37,12 @@ internal object VendorConfig {
                 markOnboarded(account.homePath.resolve(".claude.json"))
             }
             // The same first-run problem and more besides — which token store the CLI will use is
-            // also decided at startup, and that decision is what isolates the account at all.
-            Provider.Antigravity -> Antigravity.prepareHome(account)
+            // also decided at startup, and that decision is what isolates the account at all. Then
+            // the shared memory's instructions, which this CLI takes only as a rule in its home.
+            Provider.Antigravity -> {
+                Antigravity.prepareHome(account)
+                SharedMemory.installRule(account.homePath)
+            }
             // Codex asks for nothing: it reads its own auth.json and starts.
             Provider.OpenAI -> Unit
         }

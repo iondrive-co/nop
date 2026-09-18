@@ -33,8 +33,13 @@ class QuotaTest {
         // this sentence.
         assertNotNull(fire("You've hit your usage limit. Your limit will reset at 3pm.\n"))
         assertNotNull(fire("You have reached your limit for Claude Opus.\n"))
+        // The 429's own text, which Claude Code prints and files against the refused request.
+        assertNotNull(fire("You've hit your session limit · resets 8:10pm (Australia/Melbourne)\n"))
         assertNotNull(fire("5-hour limit reached\n"))
         assertNotNull(fire("Weekly limit reached · resets Sunday\n"))
+        val hit = fire("● Usage limit reached · continuing automatically at 2:30am · esc or type to cancel\n")
+        assertNotNull(hit)
+        assertEquals("usage limit", hit!!.kind)
     }
 
     @Test

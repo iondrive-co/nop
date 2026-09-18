@@ -226,6 +226,32 @@ tasks.register("installDesktopEntry") {
     }
 }
 
+// When this build began. The image stamp is dated to it rather than to when the build finished, so
+// an edit that lands while the build is running still counts as not yet in the image.
+val buildStartedAt = System.currentTimeMillis()
+
+// Records that the app image holds the sources as they stood when this build began. The Claude Code
+// hooks in .claude/ read it: a session that changed build inputs isn't let finish while the image is
+// older than those changes. Runs whenever createDistributable does, including when that was up to
+// date (an edit reverted leaves nothing to rebuild, and must still count as built), and not when it
+// failed.
+val stampImage = tasks.register("stampImage") {
+    group = "distribution"
+    description = "Mark the app image as built from the sources as of this build's start"
+    val createDistributable = tasks.named("createDistributable")
+    val stamp = layout.buildDirectory.file("nop-image.stamp")
+    onlyIf { createDistributable.get().state.failure == null }
+    doLast {
+        val file = stamp.get().asFile
+        file.parentFile.mkdirs()
+        file.writeText("The app image was built from the sources as they stood at this file's mtime.\n")
+        file.setLastModified(buildStartedAt)
+    }
+}
+tasks.configureEach {
+    if (name == "createDistributable") finalizedBy(stampImage)
+}
+
 // Convenience: runs continuous mode + a desktop notification on every successful rebuild,
 // so you can `./gradlew watch` once and forget about it. Continuous mode watches the inputs
 // of installDesktopEntry (which transitively includes src/) and re-runs on save.

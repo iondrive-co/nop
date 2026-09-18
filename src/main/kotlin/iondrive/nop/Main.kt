@@ -269,10 +269,18 @@ fun main(args: Array<String>) {
          * Closing a window puts it away rather than throwing it out: the workspace keeps its tabs and
          * comes back from any other window's picker. The last window on screen is different — there
          * is nowhere left to reopen it from, so closing that one quits nop, and it stays marked open
-         * so the next launch starts where this one left off.
+         * so the next launch starts where this one left off. So do the windows closed in quick
+         * succession just before it: that was nop being put away a window at a time, not each of
+         * them being parked (see [Workspaces.quitting]).
          */
         fun closeWindow(id: Long) {
             if (workspaces.count { it.open } <= 1) {
+                val quitting = Workspaces.quitting(workspaces.toList(), System.currentTimeMillis())
+                quitting.forEachIndexed { i, ws -> if (workspaces[i] != ws) workspaces[i] = ws }
+                // Written here rather than left to the save that follows every change: that runs on
+                // the composition, which quitting takes down before it gets the chance. Marking the
+                // windows open doesn't flash them up either — the exit lands in the same frame.
+                Settings.saveWorkspaces(quitting)
                 exitApplication()
             } else {
                 windowRefs.remove(id)

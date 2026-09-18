@@ -108,4 +108,30 @@ class NopTerminalSettingsTest {
             "arrow keys should not be sent in alternative mode",
         )
     }
+
+    @Test
+    fun `scrollToBottom resets vertical scroll value to zero`() {
+        val s = settings()
+        val widget = NopTerminalWidget(80, 24, s)
+        val model = widget.terminalPanel.verticalScrollModel
+        model.setRangeProperties(-10, 24, -100, 24, false)
+        assertEquals(-10, model.value)
+
+        widget.scrollToBottom()
+        assertEquals(0, model.value, "scrollToBottom should reset scroll to 0")
+    }
+
+    @Test
+    fun `leaving alternate screen buffer resets viewport scroll to bottom`() {
+        val s = settings()
+        val widget = NopTerminalWidget(80, 24, s)
+        val model = widget.terminalPanel.verticalScrollModel
+        model.setRangeProperties(-15, 24, -100, 24, false)
+
+        widget.terminalPanel.useAlternateScreenBuffer(true)
+        widget.terminalPanel.useAlternateScreenBuffer(false)
+        javax.swing.SwingUtilities.invokeAndWait { }
+
+        assertEquals(0, model.value, "leaving alternate screen should restore scroll to bottom")
+    }
 }

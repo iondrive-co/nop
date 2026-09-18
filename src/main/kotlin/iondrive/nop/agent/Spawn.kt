@@ -54,6 +54,10 @@ object Spawn {
         val sessionId = resumeId ?: UUID.randomUUID().toString()
         if (resumeId != null) argv += listOf("--resume", resumeId) else argv += listOf("--session-id", sessionId)
 
+        // The text itself, not --append-system-prompt-file: the CLI carries appended text into a fork
+        // of the session, but refuses to fork one whose system prompt came from a file.
+        argv += listOf("--append-system-prompt", SharedMemory.instructions())
+
         // Positional, not piped: with a TTY on stdin the CLI reads the terminal, so anything
         // written to the PTY before the UI is up is lost. Long text goes in a file the seed points
         // at (see Handoff) — Linux caps one argv element at 128 KiB.
@@ -83,6 +87,10 @@ object Spawn {
             "--dangerously-skip-permissions",
             "--add-dir",
             projectDir.absolutePath,
+            // The shared memory's own directory, or the CLI won't open a file outside the project.
+            // The instructions that point at it arrive as a rule — see SharedMemory.installRule.
+            "--add-dir",
+            SharedMemory.dir().toString(),
         )
 
         // The model and the effort are one choice here, not two. `agy`'s model ids carry the effort
@@ -109,7 +117,14 @@ object Spawn {
         // *stays* in the TUI. Bare `--print` would answer once and exit, which is not a session.
         seed?.takeIf { it.isNotBlank() }?.let { argv += listOf("-i", it) }
 
-        return AgentCommand(argv, mapOf("HOME" to account.home), resumeId)
+        return AgentCommand(
+            argv,
+            mapOf(
+                "HOME" to account.home,
+                "AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS" to "1",
+            ),
+            resumeId,
+        )
     }
 
     private fun codex(account: Account, projectDir: File, seed: String?, resumeId: String?): AgentCommand {
@@ -122,11 +137,33 @@ object Spawn {
         account.model?.takeIf { it != DEFAULT_CHOICE }?.let { argv += listOf("-m", it) }
         account.reasoning?.takeIf { it != DEFAULT_CHOICE }
             ?.let { argv += listOf("-c", "model_reasoning_effort=\"$it\"") }
+        // A developer message is Codex's one per-run way in for extra instructions. It replaces any
+        // `developer_instructions` in the account's own config.toml for runs nop starts.
+        argv += listOf("-c", "developer_instructions=${tomlString(SharedMemory.instructions())}")
 
         // `resume` is a subcommand, so it follows the options rather than joining them.
         if (resumeId != null) argv += listOf("resume", resumeId)
         seed?.takeIf { it.isNotBlank() }?.let { argv += it }
 
         return AgentCommand(argv, mapOf("HOME" to account.home), resumeId)
+    }
+
+    /**
+     * [text] as a TOML basic string, which is how `-c` reads a value: anything that doesn't parse as
+     * TOML is taken literally instead, so a stray quote would silently change what the model is told.
+     */
+    internal fun tomlString(text: String): String = buildString {
+        append('"')
+        for (c in text) {
+            when {
+                c == '\\' -> append("\\\\")
+                c == '"' -> append("\\\"")
+                c == '\n' -> append("\\n")
+                c == '\t' -> append("\\t")
+                c < ' ' || c == '\u007f' -> append("\\u%04x".format(c.code))
+                else -> append(c)
+            }
+        }
+        append('"')
     }
 }

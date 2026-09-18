@@ -512,6 +512,8 @@ class AgentSession(
         // whether it has a token — so an account inherited with a perfectly good login would be
         // asked to sign in again. See VendorConfig.
         VendorConfig.prepareForInteractive(account)
+        // Every run is told to read the shared memory first, so it has to be there to read.
+        SharedMemory.ensure()
         Log.info("agent run ${account.provider.id}/${account.name} in ${projectDir.name}")
         quotaWatcher.reset()
         val newRun: AgentRun

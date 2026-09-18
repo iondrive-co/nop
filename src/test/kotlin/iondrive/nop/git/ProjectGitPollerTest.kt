@@ -54,7 +54,12 @@ class ProjectGitPollerTest {
 
                 // Inside the interval nothing is walked however much the tree moves — this is what
                 // stops a checkout an agent is writing to from costing what every open project used to.
+                // Both halves need the watcher to have seen the write first. It reports on its own
+                // thread, and a sweep that runs before then finds a quiet tree: the first assertion
+                // passes without testing anything, and the second fails whenever the machine is busy.
+                val seen = watcher.generation(project)
                 (project / "more.txt").writeText("also uncommitted\n")
+                awaitGenerationPast(watcher, project, seen)
                 clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS / 2)
                 assertEquals(
                     emptyMap<Path, Boolean>(), poller.sweep(active = emptySet()),
@@ -145,10 +150,7 @@ class ProjectGitPollerTest {
         while (System.currentTimeMillis() < deadline) {
             clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS * 2)
             sweeps++
-            if (poller.sweep(active = emptySet()).isEmpty()) {
-                println("INSTR quiet after $sweeps sweeps, ${System.currentTimeMillis() - (deadline - TIMEOUT_MS)}ms")
-                return sweeps
-            }
+            if (poller.sweep(active = emptySet()).isEmpty()) return sweeps
             Thread.sleep(POLL_MS)
         }
         error("poller never went quiet")
@@ -160,13 +162,21 @@ class ProjectGitPollerTest {
         while (System.currentTimeMillis() < deadline) {
             clock.advance(ProjectGitPoller.BACKGROUND_INTERVAL_MS * 2)
             val swept = poller.sweep(active = emptySet())
-            if (swept.isNotEmpty()) {
-                println("INSTR awaitSweep took ${System.currentTimeMillis() - (deadline - TIMEOUT_MS)}ms")
-                return swept
-            }
+            if (swept.isNotEmpty()) return swept
             Thread.sleep(POLL_MS)
         }
         error("poller never walked the change")
+    }
+
+    /** Waits for the watcher to report a change to [root] since it last read [seen]. */
+    private fun awaitGenerationPast(watcher: RepoWatcher, root: Path, seen: Long) {
+        val deadline = System.currentTimeMillis() + TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            val now = watcher.generation(root)
+            if (now != RepoWatcher.UNKNOWN && now > seen) return
+            Thread.sleep(POLL_MS)
+        }
+        error("the watcher never saw the write")
     }
 
     private fun initRepo(dir: Path): Path {

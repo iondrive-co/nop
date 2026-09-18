@@ -168,7 +168,13 @@ class SpawnTest {
     fun `an antigravity run is isolated by its own home`() {
         val command = Spawn.command(antigravity(), projectDir)
 
-        assertEquals(mapOf("HOME" to "/home/dev/.chad/antigravity-homes/google-main"), command.env)
+        assertEquals(
+            mapOf(
+                "HOME" to "/home/dev/.chad/antigravity-homes/google-main",
+                "AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS" to "1",
+            ),
+            command.env,
+        )
     }
 
     @Test
@@ -242,6 +248,48 @@ class SpawnTest {
         assertEquals("Carry on from Claude Code.", command.argv.after("-i"))
         assertFalse("-p" in command.argv)
         assertFalse("--print" in command.argv)
+    }
+
+    @Test
+    fun `antigravity disables escape sequence optimizations to avoid rendering artifacts in jediterm`() {
+        val command = Spawn.command(antigravity(), projectDir)
+        assertEquals("1", command.env["AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS"])
+    }
+
+    /**
+     * Each CLI is told where the shared memory is in the one way it takes extra instructions. `agy`
+     * takes them as a rule instead (see SharedMemoryTest), and needs the memory's directory as a
+     * second workspace before it will open the file; the project stays the first.
+     */
+    @Test
+    fun `every run is pointed at the shared memory`() {
+        val instructions = SharedMemory.instructions()
+
+        assertEquals(instructions, Spawn.command(claude(), projectDir).argv.after("--append-system-prompt"))
+        assertTrue(
+            "developer_instructions=${Spawn.tomlString(instructions)}" in Spawn.command(codex(), projectDir).argv,
+        )
+        val agy = Spawn.command(antigravity(), projectDir).argv
+        assertEquals(
+            listOf(projectDir.absolutePath, SharedMemory.dir().toString()),
+            agy.indices.filter { agy[it] == "--add-dir" }.map { agy[it + 1] },
+        )
+    }
+
+    @Test
+    fun `the codex developer message stays one TOML string whatever the path holds`() {
+        assertEquals(
+            "\"say \\\"hi\\\" at C:\\\\nop\\nthen\\ttab\\u0001\"",
+            Spawn.tomlString("say \"hi\" at C:\\nop\nthen\ttab\u0001"),
+        )
+    }
+
+    @Test
+    fun `a resumed codex run still gets the developer message ahead of the subcommand`() {
+        val argv = Spawn.command(codex(), projectDir, resumeId = "roll-7").argv
+
+        val message = argv.indexOfFirst { it.startsWith("developer_instructions=") }
+        assertTrue(message in 1 until argv.indexOf("resume"), "options must precede the subcommand: $argv")
     }
 
     @Test

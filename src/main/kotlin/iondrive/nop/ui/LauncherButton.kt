@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +23,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.LayoutDirection
@@ -199,47 +204,53 @@ private fun LauncherAddDialog(
     val nameText = nameState.text.toString().trim()
     val commandText = commandState.text.toString().trim()
     val nameClash = nameText in existingNames
-    val canSubmit = nameText.isNotEmpty() && commandText.isNotEmpty() && !nameClash &&
-        '\t' !in nameText && '\n' !in nameText && '\n' !in commandText
+    val canSubmit = canAddLauncher(nameText, commandText, existingNames)
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
 
-    Popup(
-        popupPositionProvider = CenterPopupProvider,
-        onDismissRequest = onCancel,
-        // Don't auto-dismiss on click-outside: the same click that opened the dialog by selecting
-        // the menu item would otherwise be re-interpreted as an outside click and close us instantly.
-        properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = false),
+    // Reads the fields afresh rather than using the values above. The `::submit` handed to
+    // DialogFrame for Enter keeps the values from the dialog's first composition, when both fields
+    // were empty, so a submit that trusted them could never be made from the keyboard.
+    fun submit() {
+        val name = nameState.text.toString().trim()
+        val command = commandState.text.toString().trim()
+        if (canAddLauncher(name, command, existingNames)) onSubmit(Launcher(name, command))
+    }
+
+    // A window rather than a centred popup: the middle of nop's window is often the tool region,
+    // and a terminal there — an agent session, most of the time — is drawn over any popup. All
+    // that showed of this one was whatever overhung the editor, and since it still held the
+    // keyboard and ignored clicks outside it, a dialog hidden entirely behind the terminal left
+    // the window looking frozen. See [DialogFrame].
+    DialogFrame(
+        title = "Add launcher",
+        onClose = onCancel,
+        size = DpSize(420.dp, 270.dp),
+        onSubmit = ::submit,
     ) {
-        Column(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(JewelTheme.globalColors.panelBackground)
-                .width(420.dp)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+        Text("Add launcher", fontWeight = FontWeight.SemiBold)
+        LabeledField("Name", nameState, Modifier.focusRequester(focus))
+        LabeledField("Command", commandState)
+        if (nameClash) Text("A launcher with that name already exists", color = ChangeColors.REMOVED)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
         ) {
-            Text("Add launcher")
-            LabeledField("Name", nameState)
-            LabeledField("Command", commandState)
-            if (nameClash) Text("A launcher with that name already exists", color = ChangeColors.REMOVED)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-            ) {
-                OutlinedButton(onClick = onCancel) { Text("Cancel") }
-                DefaultButton(
-                    onClick = { onSubmit(Launcher(nameText, commandText)) },
-                    enabled = canSubmit,
-                ) { Text("Add") }
-            }
+            OutlinedButton(onClick = onCancel) { Text("Cancel") }
+            DefaultButton(onClick = ::submit, enabled = canSubmit) { Text("Add") }
         }
     }
 }
 
+private fun canAddLauncher(name: String, command: String, existingNames: Set<String>): Boolean =
+    name.isNotEmpty() && command.isNotEmpty() && name !in existingNames &&
+        '\t' !in name && '\n' !in name && '\n' !in command
+
 @Composable
-private fun LabeledField(label: String, state: TextFieldState) {
+private fun LabeledField(label: String, state: TextFieldState, modifier: Modifier = Modifier) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(label)
-        TextField(state = state, modifier = Modifier.fillMaxWidth())
+        TextField(state = state, modifier = modifier.fillMaxWidth())
     }
 }
 
@@ -255,17 +266,4 @@ private val BelowAnchorProvider: PopupPositionProvider = object : PopupPositionP
         val y = (anchorBounds.bottom).coerceAtMost(windowSize.height - popupContentSize.height).coerceAtLeast(0)
         return IntOffset(x, y)
     }
-}
-
-/** Centers a popup in the window — used for the add-launcher dialog. */
-private val CenterPopupProvider: PopupPositionProvider = object : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset = IntOffset(
-        x = (windowSize.width - popupContentSize.width) / 2,
-        y = (windowSize.height - popupContentSize.height) / 3,
-    )
 }

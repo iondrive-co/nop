@@ -129,9 +129,13 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
          */
         private val QUOTA = Regex(
             listOf(
-                // Claude Code's own TUI wording.
-                """you(?:'ve| have)\s+hit\s+your\s+(?:usage\s+)?limit""",
-                """you(?:'ve| have)\s+reached\s+your\s+(?:usage\s+)?limit""",
+                // Claude Code's own TUI wording. The qualifiers are listed rather than left open
+                // because the sentence is the one place a limit on something else would read the
+                // same: "session" and "weekly" are the windows the plan actually has, and the 429
+                // itself is the source of the first — "You've hit your session limit · resets 8:10pm"
+                // is the text Claude Code files against the refused request.
+                """you(?:'ve| have)\s+hit\s+your\s+(?:usage\s+|session\s+|weekly\s+)?limit""",
+                """you(?:'ve| have)\s+reached\s+your\s+(?:usage\s+|session\s+|weekly\s+)?limit""",
                 """approaching\s+your\s+usage\s+limit.*resets""",
                 """\b5-hour\s+limit\s+reached\b""",
                 """\bweekly\s+limit\s+reached\b""",
@@ -153,7 +157,7 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 """\binsufficient\s+quota\b""",
                 """\bout\s+of\s+credits?\b""",
                 """\bcredits?\s+exhausted\b""",
-                """\busage\s+limit\s+exceeded\b""",
+                """\busage\s+limit\s+(?:exceeded|reached)\b""",
                 """\bbilling\s+limit\s+(?:exceeded|reached)\b""",
                 """\bpayment\s+required\b""",
                 """\baccount\s+(?:has\s+been\s+)?(?:suspended|disabled)\b""",

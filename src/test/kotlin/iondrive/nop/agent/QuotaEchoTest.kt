@@ -34,6 +34,68 @@ class QuotaEchoTest {
         assertTrue(QuotaEcho.isEchoed(file, "You've hit your usage limit"))
     }
 
+    /**
+     * The wall Claude Code files against the refused request. It wears the assistant's role so the
+     * TUI can redraw it, but the model did not say it — the 429 did, and this is the vendor refusing.
+     *
+     * Real record text, from the incident this fixes: the account ran out at 17:57, nop matched the
+     * phrase on screen 154ms later, and found the CLI had already written it here.
+     */
+    @Test
+    fun `the API error the CLI recorded is the vendor's, not the agent's`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"user","message":{"content":"carry on with the gate"}}""",
+            """{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"message":""" +
+                """{"content":[{"type":"text","text":"You've hit your session limit · resets 8:10pm"}]}}""",
+        )
+
+        assertFalse(QuotaEcho.isEchoed(file, "You've hit your session limit"))
+    }
+
+    /** And the banner under it, which Claude Code files as one of its own notices. */
+    @Test
+    fun `the CLI's own notice is the vendor's, not the agent's`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"system","subtype":"informational","level":"notice","content":""" +
+                """"Usage limit reached · continuing automatically at 8:10pm · esc or type to cancel"}""",
+        )
+
+        assertFalse(QuotaEcho.isEchoed(file, "Usage limit reached"))
+    }
+
+    /**
+     * The same sentence, in a tool result — the agent reading nop's own log back. Skipping the
+     * vendor's records must not cost the guard the case it exists for.
+     */
+    @Test
+    fun `the same sentence in a tool result is still the agent showing it`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"system","subtype":"informational","content":"Usage limit reached · resets 8:10pm"}""",
+            """{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1",""" +
+                """"content":"nop.log: agent quota wall — Usage limit reached · resets 8:10pm"}]}}""",
+        )
+
+        assertTrue(QuotaEcho.isEchoed(file, "Usage limit reached"))
+    }
+
+    /**
+     * A record is a line, and only its own line. Flattening the whole file let a needle be assembled
+     * out of two unrelated records, which is a veto nobody's output earned.
+     */
+    @Test
+    fun `a phrase is not assembled from two separate records`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your"}]}}""",
+            """{"type":"user","message":{"content":"usage limit of four tabs per project"}}""",
+        )
+
+        assertFalse(QuotaEcho.isEchoed(file, "You've hit your usage limit"))
+    }
+
     /** The case that must still fire: the vendor's own chrome is not conversation. */
     @Test
     fun `a phrase that is nowhere in the conversation is the vendor's own`(@TempDir tmp: Path) {
