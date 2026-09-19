@@ -87,7 +87,7 @@ compose.desktop {
             // which the dev build never shows because a full JDK has the module anyway.
             modules("java.management", "java.compiler", "jdk.compiler", "java.net.http")
             packageName = "nop"
-            packageVersion = "0.69.0"
+            packageVersion = "0.70.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
