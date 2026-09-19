@@ -15,6 +15,7 @@ import iondrive.nop.agent.transcript.TranscriptFollower
 import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalTab
 import java.io.File
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.swing.SwingUtilities
@@ -42,7 +43,20 @@ class AgentRun(
     val session: TerminalSession,
     /** Set when this run was started from a handoff summary rather than from scratch. */
     val seededFromHandoff: Boolean,
+    /**
+     * What this run's CLI has said about whether it is working — see [ActivityTracker]. Per run,
+     * because a title or an open tool call belongs to the CLI that wrote it: a question the last
+     * provider was asking is not one the next is.
+     */
+    internal val tracker: ActivityTracker = ActivityTracker(),
 ) {
+    /**
+     * When nop started this run. What the CLI filed before it — the wall that ended the last run,
+     * replayed by a resume — is history rather than something the vendor is saying now; see
+     * [QuotaEcho.judge].
+     */
+    val startedAt: Instant = Instant.now()
+
     /**
      * The native session id, once it is known. Claude's is minted before the spawn; Codex's only
      * exists after its first rollout line, so the tailer fills this in when it finds it.
@@ -252,6 +266,117 @@ class AgentSession(
         private set
 
     /**
+     * What the tab is doing — see [Activity].
+     *
+     * Two of the answers come from the terminal rather than the CLI. [Activity.Ended] is this
+     * session's own record of the run stopping, and [Activity.Asleep] is a PTY that has never been
+     * started: the state a restored tab stays in until somebody opens it.
+     */
+    val activity: Activity
+        get() = when {
+            ended -> Activity.Ended
+            !run.session.running && run.session.exitCode == null -> Activity.Asleep
+            else -> live
+        }
+
+    /** What the running CLI is doing, as its title and transcript say — see [ActivityTracker]. */
+    private var live: Activity by mutableStateOf(Activity.Running)
+
+    /** When [activity] last changed, in epoch millis — how long a question has been waiting. */
+    var activitySince: Long by mutableStateOf(System.currentTimeMillis())
+        private set
+
+    /**
+     * Whether the current run has done any work yet. An [Activity.Idle] CLI that has not is one that
+     * has just come up — a fresh tab, or one resumed at start — and "finished its turn" would be
+     * describing a turn that never happened.
+     */
+    var hasWorked: Boolean by mutableStateOf(false)
+        private set
+
+    /**
+     * Whether the tab has stopped since anyone last looked at it: asked a question, finished its
+     * turn, or ended, while it was not on screen.
+     *
+     * This is what the strip marks loudly, and it is the difference between a tab and a state. A tab
+     * the user is watching finish needs no flag; one that finished behind another tab at 21:03 needs
+     * to still say so at 08:48. Only a change *from* working counts — see [noteChange] — so a restart
+     * does not bring the strip back with every tab announcing itself at once.
+     */
+    var unseen: Boolean by mutableStateOf(false)
+        private set
+
+    /** How many strips are showing this session's TUI now. See [watch]. */
+    @Volatile
+    private var watchers = 0
+
+    /** Re-reads the activity once a title has had time to settle. Created on first use, on the EDT. */
+    private var settleTimer: javax.swing.Timer? = null
+
+    /**
+     * Says the session's TUI is on screen, until the matching [unwatch]. While it is, nothing it does
+     * is [unseen] — the user is looking at it happen.
+     *
+     * A count rather than a flag because two windows can hold tabs on one project, and a window that
+     * stops showing the session must not unmark it for the one that still is.
+     */
+    fun watch() {
+        watchers += 1
+        unseen = false
+    }
+
+    /** The other half of [watch]. */
+    fun unwatch() {
+        watchers = (watchers - 1).coerceAtLeast(0)
+    }
+
+    /**
+     * Reads what [tracker] says now into [activity], and arms a re-read for when a title that has not
+     * said anything yet will have stood still long enough to. On the UI thread.
+     *
+     * A tracker that is not the current run's is ignored: a title arriving from a TUI that a switch
+     * has just replaced is news about a run that no longer exists.
+     */
+    internal fun refreshActivity(tracker: ActivityTracker, now: Long = System.currentTimeMillis()) {
+        if (tracker !== run.tracker || ended) return
+        val (next, settles) = synchronized(tracker) { tracker.activity(now) to tracker.settlesAt() }
+        val was = live
+        if (next != was) {
+            live = next
+            activitySince = now
+            if (next == Activity.Working) hasWorked = true
+            noteChange(was, next)
+        }
+        if (settles != null && settles > now) {
+            val timer = settleTimer ?: javax.swing.Timer(0) { refreshActivity(run.tracker) }
+                .apply { isRepeats = false }
+                .also { settleTimer = it }
+            timer.initialDelay = (settles - now + SETTLE_SLACK_MS).toInt()
+            timer.restart()
+        }
+    }
+
+    /**
+     * Whether a change of [activity] is something the user has not seen.
+     *
+     * Only a change away from work counts: a tab that was working and has now stopped — whether on a
+     * question, at the end of its turn, or dead — is news. A tab starting up, or put back asleep, is
+     * not. A question is news from anywhere, because nothing moves until it is answered.
+     */
+    private fun noteChange(was: Activity, next: Activity) {
+        unseen = when {
+            watchers > 0 -> false
+            // Back at work by itself — a background task finishing, say — so whatever it stopped
+            // for last time has been dealt with.
+            next == Activity.Working -> false
+            next == Activity.Asking -> true
+            next == Activity.Idle || next == Activity.Ended ->
+                unseen || was == Activity.Working || was == Activity.Asking
+            else -> unseen
+        }
+    }
+
+    /**
      * The handover this session made by itself, for the session bar to own up to. Null until one
      * happens, and again once the user has read it.
      *
@@ -295,6 +420,10 @@ class AgentSession(
         runIndex += 1
         run = start(account, seed, resumeId, seededFromHandoff)
         endedAt = 0
+        // The new CLI has said nothing yet. What the last one was doing is not what this one is.
+        live = Activity.Running
+        activitySince = System.currentTimeMillis()
+        hasWorked = false
         // Whatever the last run had to own up to belongs to that run. A switch the user made by
         // hand should not arrive carrying an explanation of one nop made ten minutes ago.
         autoHandover = null
@@ -318,6 +447,8 @@ class AgentSession(
         LiveTranscripts.release(run.nativeSessionId)
         log.append(AgentEvent.RunEnded(run.session.exitCode, reason, System.currentTimeMillis()))
         endedAt = System.currentTimeMillis()
+        activitySince = endedAt
+        noteChange(live, Activity.Ended)
     }
 
     /**
@@ -370,8 +501,9 @@ class AgentSession(
         // the session becomes one nop cannot get back into at all.
         //
         // Only a reading that actively contradicts the screen stops this. Not knowing (null) is left
-        // to behave exactly as it always did — see [UsageReading.looksSpent].
-        if (hasRunOut(current.account) == false) {
+        // to the transcript below — see [UsageReading.looksSpent].
+        val runOut = hasRunOut(current.account)
+        if (runOut == false) {
             Log.warn(
                 "ignoring a usage-limit phrase on ${current.account.name}: the account still has " +
                     "quota, so this is output the agent was showing rather than the vendor " +
@@ -383,25 +515,39 @@ class AgentSession(
             return
         }
 
-        // And the transcript gets to disagree too, whoever the provider is.
+        // And the transcript gets its say when the reading has none, whoever the provider is.
         //
         // The usage reading above is the strongest answer there is, but only one provider offers one
         // worth having: Codex's is scavenged from its last session and is usually too old to mean
         // anything, and a provider added later may have none at all. This test needs nothing from the
-        // vendor beyond the transcript nop already follows to build a handoff — if the phrase is in
-        // the conversation, the screen was showing it rather than the vendor saying it. See
-        // [QuotaEcho] for why a miss here is the right way round to be wrong.
-        if (QuotaEcho.isEchoed(current.transcriptPath, hit.matched)) {
-            Log.warn(
-                "ignoring a usage-limit phrase on ${current.account.name}: \"${hit.matched}\" is in " +
-                    "this session's own transcript, so it is output the agent was showing rather " +
-                    "than the vendor refusing",
-            )
-            quotaWatcher.reset()
-            return
+        // vendor beyond the transcript nop already follows to build a handoff — a refusal the CLI
+        // filed just now settles it, and failing that, a phrase that is in the conversation was
+        // being shown rather than said. See [QuotaEcho] for why a miss here is the right way round to
+        // be wrong.
+        //
+        // Not asked when the reading says the account is spent. The screen and the provider's own
+        // number then agree, and the transcript's "the agent could be showing this" is weaker than
+        // either: every session nop hands over reads a handoff quoting the wall that ended the last
+        // one, so it would veto the very next wall in exactly the sessions that need it.
+        val why = if (runOut == true) {
+            "its usage reading is spent"
+        } else {
+            when (QuotaEcho.judge(current.transcriptPath, hit.matched, since = current.startedAt)) {
+                QuotaEcho.Verdict.Refused -> "the CLI filed the refusal"
+                QuotaEcho.Verdict.Unrecorded -> "nothing in the transcript disputes it"
+                QuotaEcho.Verdict.Shown -> {
+                    Log.warn(
+                        "ignoring a usage-limit phrase on ${current.account.name}: \"${hit.matched}\" " +
+                            "is in this session's own transcript and the CLI has filed no refusal this " +
+                            "run, so it is output the agent was showing rather than the vendor refusing",
+                    )
+                    quotaWatcher.reset()
+                    return
+                }
+            }
         }
 
-        Log.info("agent quota wall on ${current.account.name}: ${hit.line}")
+        Log.info("agent quota wall on ${current.account.name} ($why): ${hit.line}")
         current.quota = hit
         spent += current.account.name
 
@@ -497,6 +643,7 @@ class AgentSession(
     /** Kills the PTY and everything under it. Idempotent; called when the tab or project closes. */
     fun dispose() {
         endRun(EndReason.Killed)
+        settleTimer?.stop()
         run.session.dispose()
         log.close()
     }
@@ -517,27 +664,35 @@ class AgentSession(
         Log.info("agent run ${account.provider.id}/${account.name} in ${projectDir.name}")
         quotaWatcher.reset()
         val newRun: AgentRun
+        val tracker = ActivityTracker()
+        // Only ever touched from the PTY's reader thread, which is the one thread the tap runs on.
+        val titles = TitleReader()
         val terminal = TerminalSession.agent(
             command = command.argv,
             env = command.env,
             dir = projectDir,
             title = account.name,
-            // Two jobs, one copy of the output, and neither of them touches what is drawn. The
+            // Three jobs, one copy of the output, and none of them touches what is drawn. The
             // quota watcher is how nop learns the CLI has hit a wall — it announces that in its own
             // UI and nowhere else — and the screen tail is the fallback a handoff is built from
-            // when the provider's transcript cannot be read.
+            // when the provider's transcript cannot be read. The title is where the CLI says
+            // whether it is working, which is what the tab's mark shows — see [activity].
             outputTap = { text ->
                 quotaWatcher.feed(text)
                 log.appendScreenTail(QuotaWatcher.stripAnsi(text))
+                titles.feed(text)?.let { title ->
+                    synchronized(tracker) { tracker.onTitle(title, System.currentTimeMillis()) }
+                    SwingUtilities.invokeLater { refreshActivity(tracker) }
+                }
             },
         )
-        newRun = AgentRun(account, command, terminal, seededFromHandoff)
+        newRun = AgentRun(account, command, terminal, seededFromHandoff, tracker)
         // Claimed here rather than when the transcript turns up, because the gap between the two is
         // exactly when a tab opened beside this one would mistake this session's file for a `/clear`
         // of its own. Claude's id is known before the spawn; Codex's is claimed in [onLocated]
         // below, as soon as the CLI has named it.
         LiveTranscripts.claim(command.nativeSessionId)
-        val startedAt = System.currentTimeMillis()
+        val startedAt = newRun.startedAt.toEpochMilli()
         log.beginRun()
         log.append(
             AgentEvent.RunStarted(
@@ -572,6 +727,14 @@ class AgentSession(
                 // The CLI names its own session a turn or two in. That name says far more about
                 // which of three open tabs this is than the account does.
                 if (event is AgentEvent.SessionTitled) titleFromTranscript(event.title)
+                // A question is an open tool call, and a new prompt is a new turn — see
+                // [ActivityTracker]. Nothing else in the transcript changes what the tab is doing.
+                if (event is AgentEvent.ToolStarted || event is AgentEvent.ToolFinished ||
+                    event is AgentEvent.UserMessage
+                ) {
+                    synchronized(tracker) { tracker.onEvent(event) }
+                    SwingUtilities.invokeLater { refreshActivity(tracker) }
+                }
             },
             // A second RunStarted, logged the moment the transcript is found rather than at spawn.
             // Deliberate, not a duplicate: the log is append-only, and the path, the offset and —
@@ -624,5 +787,8 @@ class AgentSession(
     companion object {
         /** What an agent tab is called before anything better is known. See [title]. */
         const val DEFAULT_TITLE: String = "Agent"
+
+        /** Past the moment a title settles, so the re-read lands after it rather than just before. */
+        private const val SETTLE_SLACK_MS = 50L
     }
 }

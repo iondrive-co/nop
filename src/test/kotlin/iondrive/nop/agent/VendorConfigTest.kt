@@ -18,7 +18,7 @@ import java.nio.file.Path
  * interactively asked the user to sign in to an account that was already signed in.
  *
  * These guard the narrowness of the fix as much as the fix: it is someone else's config file, and
- * nop writes exactly one key into it.
+ * nop writes two keys into it and only when they are missing — that, and the diff sidebar's default.
  */
 class VendorConfigTest {
 
@@ -75,12 +75,37 @@ class VendorConfigTest {
     fun `a config that already says so is not rewritten`(@TempDir tmp: Path) {
         val account = anthropic(tmp)
         val file = tmp.resolve(".claude.json")
-        Files.writeString(file, """{"hasCompletedOnboarding":true,"theme":"dark"}""")
+        Files.writeString(file, """{"hasCompletedOnboarding":true,"diffSidebarOpen":false,"theme":"dark"}""")
         val before = Files.readString(file)
 
         VendorConfig.prepareForInteractive(account)
 
         assertEquals(before, Files.readString(file), "an untouched config should stay byte-identical")
+    }
+
+    /**
+     * Claude Code opens its diff sidebar by itself in any wide terminal on a repository, which an
+     * agent pane always is — beside nop's own Diff tab, and at the expense of the conversation.
+     */
+    @Test
+    fun `the CLI's diff sidebar starts closed`(@TempDir tmp: Path) {
+        val account = anthropic(tmp)
+        Files.writeString(tmp.resolve(".claude.json"), """{"hasCompletedOnboarding":true}""")
+
+        VendorConfig.prepareForInteractive(account)
+
+        assertEquals("false", config(tmp)["diffSidebarOpen"])
+    }
+
+    /** `/diff` writes the user's own answer to the same key. nop's default never overrides it. */
+    @Test
+    fun `a sidebar the user opened with diff stays their choice`(@TempDir tmp: Path) {
+        val account = anthropic(tmp)
+        Files.writeString(tmp.resolve(".claude.json"), """{"hasCompletedOnboarding":true,"diffSidebarOpen":true}""")
+
+        VendorConfig.prepareForInteractive(account)
+
+        assertEquals("true", config(tmp)["diffSidebarOpen"])
     }
 
     /** Overwriting something unparseable would turn a puzzling prompt into lost configuration. */

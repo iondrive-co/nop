@@ -387,6 +387,90 @@ class AgentSessionsTest {
     }
 
     /**
+     * The 19:48 wall. A session nop has handed over reads a handoff quoting the wall that ended the
+     * last run, so the phrase is in its conversation from its first turn — and its own wall, when it
+     * came, was vetoed as an echo of that one. The refusal the CLI filed for it says otherwise.
+     */
+    @Test
+    fun `a handed-over session hands over again at its own wall`(@TempDir tmp: Path) {
+        val iondrive = Account(
+            "claude-iondrive",
+            Provider.Anthropic,
+            "/homes/claude-iondrive",
+            handoverTo = "claude-aloancloud",
+        )
+        val aloancloud = Account("claude-aloancloud", Provider.Anthropic, "/homes/claude-aloancloud")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(iondrive, aloancloud).handoverTarget(from) }
+        state.hasRunOut = { null }
+        val session = state.open(tmp.toFile(), iondrive)
+        val wall = "You've hit your session limit"
+        session.run.transcriptPath = tmp.resolve("session.jsonl").also {
+            Files.writeString(
+                it,
+                listOf(
+                    """{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1",""" +
+                        """"content":"The previous agent's last message was: $wall · resets 8:10pm"}]}}""",
+                    """{"type":"assistant","isApiErrorMessage":true,"timestamp":"${session.run.startedAt}",""" +
+                        """"message":{"content":[{"type":"text","text":"$wall · resets 11pm"}]}}""",
+                ).joinToString("\n"),
+            )
+        }
+
+        session.onQuotaWall(QuotaHit("usage limit", "$wall · resets 11pm", matched = wall))
+
+        assertEquals("claude-aloancloud", session.account.name)
+        assertEquals("claude-iondrive", session.autoHandover?.from)
+    }
+
+    /**
+     * When the account's own number says it is spent, the screen and the provider agree, and the
+     * conversation quoting a wall is no reason to sit at one — a user pasting a wall to ask about
+     * it puts the phrase there as surely as a handoff does.
+     */
+    @Test
+    fun `a spent reading is not argued with by the conversation`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { true }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+        val wall = "You've hit your session limit"
+        session.run.transcriptPath = tmp.resolve("session.jsonl").also {
+            Files.writeString(it, """{"type":"user","message":{"content":"pasted: $wall · resets 8:10pm"}}""")
+        }
+
+        session.onQuotaWall(QuotaHit("usage limit", wall, matched = wall))
+
+        assertTrue(session.ended)
+        assertEquals(EndReason.Quota, session.run.endReason)
+    }
+
+    /**
+     * A resume redraws the wall that ended the last run. With no reading to say whether the account
+     * has reset since, that is history on a screen, and the run is left to hit a wall of its own —
+     * which, if the account is still out, it does the moment it is asked for anything.
+     */
+    @Test
+    fun `a resume is not ended by redrawing the wall that ended the last run`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { null }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+        val wall = "You've hit your session limit"
+        val lastRun = session.run.startedAt.minusSeconds(3600)
+        session.run.transcriptPath = tmp.resolve("session.jsonl").also {
+            Files.writeString(
+                it,
+                """{"type":"assistant","isApiErrorMessage":true,"timestamp":"$lastRun",""" +
+                    """"message":{"content":[{"type":"text","text":"$wall · resets 8:10pm"}]}}""",
+            )
+        }
+
+        session.onQuotaWall(QuotaHit("usage limit", "$wall · resets 8:10pm", matched = wall))
+
+        assertFalse(session.ended)
+        assertNull(session.run.quota)
+    }
+
+    /**
      * The picker's tab closes the way a terminal's does: it goes out of the strip. There is no
      * process behind it to kill — closing the last terminal leaves the strip with only its "+", and
      * this is the same gesture with the same result.

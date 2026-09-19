@@ -83,6 +83,13 @@ data class UsageReading(
     val asOf: Instant?,
     /** Set when the reading could not be taken at all — logged out, offline, never run. */
     val unavailable: String? = null,
+    /**
+     * Set when these are not a fresh answer: why the provider was not asked again or did not reply,
+     * such as the usage API rate-limiting nop. The windows are the last good reading, if there was
+     * one, and keep its [asOf]. A reading with no windows and only a note is still signed in. It is
+     * not [unavailable], which the accounts dialog shows as signed out.
+     */
+    val note: String? = null,
 ) {
     /**
      * Whether this reading is consistent with the vendor refusing to serve the account: true when a
@@ -181,6 +188,17 @@ object Usage {
         refusedAt.clear()
     }
 
+    /**
+     * Rations the asks that cost something: the Claude usage API and the Antigravity CLI start.
+     *
+     * Every project tab and every window polls for itself, and a project switch starts a new poll
+     * at once, so a few quick switches used to send a burst of requests per account. Anthropic's
+     * usage endpoint answers a burst with 429 and `Retry-After`, and nop showed that as "no answer
+     * from the usage API" until the next poll. The gate stands between all of those callers and
+     * the provider. See [UsageGate].
+     */
+    private val gate = UsageGate()
+
     /** Blocking; call it off the UI thread. */
     fun read(account: Account): UsageReading {
         // The screenshot's canned numbers, when it has set some — see UsageFixture.
@@ -188,9 +206,12 @@ object Usage {
         return when (account.provider) {
             Provider.Anthropic -> readClaude(account)
             Provider.OpenAI -> readCodex(account)
-            Provider.Antigravity -> Antigravity.readUsage(account)
+            Provider.Antigravity -> gate.held(gateKey(account))
+                ?: gate.answered(gateKey(account), Antigravity.readUsage(account))
         }
     }
+
+    private fun gateKey(account: Account) = "${account.provider.name}:${account.home}"
 
     /** Whether the account's credentials still work — not merely whether the file is there. */
     fun signedIn(account: Account): Boolean = when (account.provider) {
@@ -213,27 +234,59 @@ object Usage {
      */
     fun discoverModels(account: Account): List<String> {
         UsageFixture.file?.let { return UsageFixture.models(it, account) }
-        return when (account.provider) {
+        // Kept for the life of nop once found. The poller in each project tab used to ask again
+        // after every project switch: another HTTPS GET for Claude, another CLI start for Antigravity.
+        val key = gateKey(account)
+        discovered[key]?.let { return it }
+        val now = Instant.now()
+        val lastTry = modelsTriedAt[key]
+        if (lastTry != null && Duration.between(lastTry, now) < UsageGate.HOLD) return emptyList()
+        modelsTriedAt[key] = now
+        val found = when (account.provider) {
             Provider.Anthropic -> discoverClaudeModels(account)
             Provider.Antigravity -> Antigravity.models(account)
             Provider.OpenAI -> emptyList()
         }
+        if (found.isNotEmpty()) discovered[key] = found
+        return found
     }
+
+    private val discovered = ConcurrentHashMap<String, List<String>>()
+    private val modelsTriedAt = ConcurrentHashMap<String, Instant>()
 
     // ── Claude ──
 
     private fun readClaude(account: Account): UsageReading {
+        val key = gateKey(account)
+        gate.held(key)?.let { return it }
+        // Signed out is a local answer, from the credentials file, so it is not held: the first
+        // poll after a sign-in should ask.
         val token = claudeToken(account) ?: return UsageReading.unavailable("not signed in")
-        val body = get(USAGE_URL, token, mapOf("anthropic-beta" to OAUTH_BETA))
-            ?: return UsageReading.unavailable("no answer from the usage API")
-        val data = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
-            ?: return UsageReading.unavailable("unreadable usage response")
-        return UsageReading(
-            // The spans are named by the fields themselves and are not in the payload, so they are
-            // written down here rather than inferred from a reset that may be minutes away.
-            session = claudeWindow(data["five_hour"], Duration.ofHours(5)),
-            weekly = claudeWindow(data["seven_day"], Duration.ofDays(7)),
-            asOf = Instant.now(),
+        fun unanswered(why: String, retryAfter: Duration? = null): UsageReading {
+            Log.info("usage for ${account.name}: $why" + (retryAfter?.let { " (Retry-After ${it.seconds}s)" } ?: ""))
+            return gate.unanswered(key, why, retryAfter)
+        }
+        val answer = get(USAGE_URL, token, mapOf("anthropic-beta" to OAUTH_BETA))
+            ?: return unanswered("no answer from the usage API")
+        when (answer.status) {
+            200 -> {}
+            429 -> return unanswered("usage API rate-limited", answer.retryAfter)
+            // The token was accepted for a refresh but refused here, which only signing in again
+            // fixes. Held, so a dead token is not sent every poll.
+            401, 403 -> return gate.answered(key, UsageReading.unavailable("usage API refused the sign-in"))
+            else -> return unanswered("usage API error ${answer.status}", answer.retryAfter)
+        }
+        val data = runCatching { json.parseToJsonElement(answer.body).jsonObject }.getOrNull()
+            ?: return unanswered("unreadable usage response")
+        return gate.answered(
+            key,
+            UsageReading(
+                // The spans are named by the fields themselves and are not in the payload, so they
+                // are written down here rather than inferred from a reset that may be minutes away.
+                session = claudeWindow(data["five_hour"], Duration.ofHours(5)),
+                weekly = claudeWindow(data["seven_day"], Duration.ofDays(7)),
+                asOf = Instant.now(),
+            ),
         )
     }
 
@@ -266,6 +319,7 @@ object Usage {
         if (account.provider != Provider.Anthropic) return account.provider.fallbackModels
         val token = claudeToken(account) ?: return emptyList()
         val body = get(MODELS_URL, token, mapOf("anthropic-version" to "2023-06-01", "anthropic-beta" to OAUTH_BETA))
+            ?.takeIf { it.status == 200 }?.body
             ?: return emptyList()
         return runCatching {
             json.parseToJsonElement(body).jsonObject["data"]!!.jsonArray
@@ -487,14 +541,22 @@ object Usage {
 
     // ── HTTP ──
 
-    private fun get(url: String, token: String, headers: Map<String, String>): String? {
+    /** A reply from the provider, whatever its status. Null from [get] means there was none. */
+    private class Answer(val status: Int, val body: String, val retryAfter: Duration?)
+
+    private fun get(url: String, token: String, headers: Map<String, String>): Answer? {
         val builder = HttpRequest.newBuilder(URI.create(url))
             .header("Authorization", "Bearer $token")
             .header("User-Agent", USER_AGENT)
             .timeout(Duration.ofSeconds(10))
             .GET()
         headers.forEach { (k, v) -> builder.header(k, v) }
-        return send(builder.build())
+        return runCatching {
+            val response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString())
+            val retryAfter = response.headers().firstValue("Retry-After").orElse(null)
+                ?.trim()?.toLongOrNull()?.let(Duration::ofSeconds)
+            Answer(response.statusCode(), response.body(), retryAfter)
+        }.getOrNull()
     }
 
     private fun send(request: HttpRequest): String? = runCatching {

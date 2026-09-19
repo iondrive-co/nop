@@ -90,6 +90,8 @@ fun ProjectBar(
     tabs: List<ProjectTab>,
     activeTab: Long?,
     dirtyProjects: Set<Path>,
+    /** What each project's agents have to say — see [projectAgentNews]. A project with none is absent. */
+    agentNews: Map<Path, ProjectAgentNews>,
     windows: List<Workspace>,
     windowId: Long,
     onSelect: (Long) -> Unit,
@@ -147,6 +149,7 @@ fun ProjectBar(
                             tab = tab,
                             active = tab.id == activeTab,
                             dirty = tab.path in dirtyProjects,
+                            agentNews = agentNews[tab.path],
                             windows = otherWindows,
                             isDark = isDark,
                             onClick = { onSelect(tab.id) },
@@ -381,6 +384,7 @@ private fun ProjectTabView(
     tab: ProjectTab,
     active: Boolean,
     dirty: Boolean,
+    agentNews: ProjectAgentNews?,
     windows: List<Workspace>,
     isDark: Boolean,
     onClick: () -> Unit,
@@ -459,6 +463,20 @@ private fun ProjectTabView(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.widthIn(max = TAB_MAX_WIDTH),
                     )
+                    // An agent in this project waiting on the user, or finished while nobody was
+                    // looking — the same mark its own tab carries in the strip, so a question asked in
+                    // hermes is visible from nop. Only while there is something to say: unlike the
+                    // dirty dot, no room is kept for it, because it comes and goes far less often
+                    // than the pointer crosses the bar.
+                    if (agentNews != null) {
+                        AgentStatusMark(
+                            activity = agentNews.activity,
+                            unseen = agentNews.unseen,
+                            since = 0L,
+                            isDark = isDark,
+                            size = 12.dp,
+                        )
+                    }
                     // Reserve the close-affordance zone whether or not it's showing, so the name
                     // doesn't shift as the pointer moves across the bar. Shown on hover or active.
                     Box(modifier = Modifier.size(16.dp), contentAlignment = Alignment.Center) {

@@ -1,11 +1,12 @@
 package iondrive.nop.agent
 
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertTrue
+import iondrive.nop.agent.QuotaEcho.Verdict
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
 
 /**
  * The provider-independent half of deciding a quota wall: did the vendor say it, or was the agent
@@ -19,66 +20,162 @@ import java.nio.file.Path
  */
 class QuotaEchoTest {
 
+    /** When the run began, and the moment it is being judged: the times of the 19:48 wall. */
+    private val since = Instant.parse("2026-09-18T08:14:28Z")
+    private val now = Instant.parse("2026-09-18T09:48:59Z")
+
     private fun transcript(dir: Path, vararg lines: String): Path =
         dir.resolve("session.jsonl").also { Files.writeString(it, lines.joinToString("\n")) }
 
-    /** The case that bit: a test fixture the agent wrote, read back off its own screen. */
+    private fun judge(file: Path?, phrase: String) = QuotaEcho.judge(file, phrase, since = since, now = now)
+
+    /** The 429 Claude Code files against the refused request, at [at]. Real record text. */
+    private fun apiError(at: Instant, text: String = "You've hit your session limit · resets 11pm") =
+        """{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"timestamp":"$at",""" +
+            """"message":{"content":[{"type":"text","text":"$text"}]}}"""
+
+    /** And the banner under it, which Claude Code files as one of its own notices. */
+    private fun notice(at: Instant) =
+        """{"type":"system","subtype":"informational","level":"notice","timestamp":"$at",""" +
+            """"content":"Usage limit reached · continuing automatically at 11pm · esc or type to cancel"}"""
+
+    /** The case that bit first: a test fixture the agent wrote, read back off its own screen. */
     @Test
-    fun `a phrase the agent wrote is found in the transcript`(@TempDir tmp: Path) {
+    fun `a phrase the agent wrote is being shown`(@TempDir tmp: Path) {
         val file = transcript(
             tmp,
             """{"type":"assistant","message":{"content":[{"type":"tool_use","input":""" +
                 """{"file_path":"/p/QuotaTest.kt","content":"fire(\"You've hit your usage limit\")"}}]}}""",
         )
 
-        assertTrue(QuotaEcho.isEchoed(file, "You've hit your usage limit"))
+        assertEquals(Verdict.Shown, judge(file, "You've hit your usage limit"))
     }
 
     /**
-     * The wall Claude Code files against the refused request. It wears the assistant's role so the
-     * TUI can redraw it, but the model did not say it — the 429 did, and this is the vendor refusing.
-     *
-     * Real record text, from the incident this fixes: the account ran out at 17:57, nop matched the
-     * phrase on screen 154ms later, and found the CLI had already written it here.
+     * The wall itself. It wears the assistant's role so the TUI can redraw it, but the model did not
+     * say it — the 429 did, and this is the vendor refusing. The record lands within milliseconds of
+     * the words on screen: 72ms before nop matched them, at 19:48.
      */
     @Test
-    fun `the API error the CLI recorded is the vendor's, not the agent's`(@TempDir tmp: Path) {
+    fun `a refusal the CLI filed moments ago is the vendor's`(@TempDir tmp: Path) {
         val file = transcript(
             tmp,
             """{"type":"user","message":{"content":"carry on with the gate"}}""",
-            """{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"message":""" +
-                """{"content":[{"type":"text","text":"You've hit your session limit · resets 8:10pm"}]}}""",
+            apiError(now.minusMillis(72)),
         )
 
-        assertFalse(QuotaEcho.isEchoed(file, "You've hit your session limit"))
+        assertEquals(Verdict.Refused, judge(file, "You've hit your session limit"))
     }
 
-    /** And the banner under it, which Claude Code files as one of its own notices. */
     @Test
-    fun `the CLI's own notice is the vendor's, not the agent's`(@TempDir tmp: Path) {
-        val file = transcript(
-            tmp,
-            """{"type":"system","subtype":"informational","level":"notice","content":""" +
-                """"Usage limit reached · continuing automatically at 8:10pm · esc or type to cancel"}""",
-        )
+    fun `so is the notice it files under the refusal`(@TempDir tmp: Path) {
+        val file = transcript(tmp, notice(now.minusMillis(70)))
 
-        assertFalse(QuotaEcho.isEchoed(file, "Usage limit reached"))
+        assertEquals(Verdict.Refused, judge(file, "Usage limit reached"))
     }
 
     /**
-     * The same sentence, in a tool result — the agent reading nop's own log back. Skipping the
-     * vendor's records must not cost the guard the case it exists for.
+     * The 19:48 wall, and the reason the second version of this guard still never handed a thing
+     * over. The session was itself a handover: its first act was to read a handoff whose last line
+     * was the previous account's wall, word for word. With the phrase in the conversation from then
+     * on, its own wall was vetoed as an echo of that one — nine times over, as the user kept typing
+     * into a dead session. The refusal the CLI filed is what settles it.
+     */
+    @Test
+    fun `a fresh refusal outweighs the same words quoted in the conversation`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"user","timestamp":"${since.plusSeconds(4)}","message":{"content":""" +
+                """[{"type":"tool_result","tool_use_id":"t1","content":"## Remaining Work\n""" +
+                """The previous agent's last message was:\n\nYou've hit your session limit · """ +
+                """resets 8:10pm (Australia/Melbourne)"}]}}""",
+            apiError(now.minusMillis(72)),
+            notice(now.minusMillis(70)),
+        )
+
+        assertEquals(Verdict.Refused, judge(file, "You've hit your session limit"))
+        assertEquals(Verdict.Refused, judge(file, "Usage limit reached"))
+    }
+
+    /**
+     * A resume redraws the conversation, the wall that ended the last run among it. That record was
+     * the vendor speaking then; now it is text on a screen, and the account may well have reset.
+     */
+    @Test
+    fun `a refusal from before this run is being shown, not said`(@TempDir tmp: Path) {
+        val file = transcript(tmp, apiError(since.minusSeconds(3600)), notice(since.minusSeconds(3600)))
+
+        assertEquals(Verdict.Shown, judge(file, "You've hit your session limit"))
+        assertEquals(Verdict.Shown, judge(file, "Usage limit reached"))
+    }
+
+    /**
+     * Claude Code waits out a reset in place and carries on in the same run, so a wall it has
+     * already weathered is still in this run's transcript hours later. It vouches for nothing now.
+     */
+    @Test
+    fun `a refusal this run weathered long ago is being shown, not said`(@TempDir tmp: Path) {
+        val file = transcript(tmp, apiError(now.minus(QuotaEcho.FRESH).minusSeconds(1)))
+
+        assertEquals(Verdict.Shown, judge(file, "You've hit your session limit"))
+    }
+
+    /** One that cannot be placed in time cannot be told from one a resume is redrawing. */
+    @Test
+    fun `a refusal with no timestamp is not taken as fresh`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"assistant","isApiErrorMessage":true,"message":""" +
+                """{"content":[{"type":"text","text":"You've hit your session limit · resets 11pm"}]}}""",
+        )
+
+        assertEquals(Verdict.Shown, judge(file, "You've hit your session limit"))
+    }
+
+    /**
+     * The CLI files plenty about itself that is not a wall. An overloaded API is transient and
+     * retried; it is no confirmation of a limit phrase the screen happened to show at the same time.
+     */
+    @Test
+    fun `the CLI's own records only confirm a wall when they carry one`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            apiError(now.minusSeconds(1), text = "API Error: Repeated 529 Overloaded errors · overloaded_error"),
+            """{"type":"system","subtype":"turn_duration","timestamp":"${now.minusSeconds(1)}","durationMs":5000}""",
+        )
+
+        assertEquals(Verdict.Unrecorded, judge(file, "You've hit your usage limit"))
+    }
+
+    /**
+     * The same sentence in a tool result — the agent reading nop's own log back — with no refusal
+     * this run. Believing the vendor's records must not cost the guard the case it exists for.
      */
     @Test
     fun `the same sentence in a tool result is still the agent showing it`(@TempDir tmp: Path) {
         val file = transcript(
             tmp,
-            """{"type":"system","subtype":"informational","content":"Usage limit reached · resets 8:10pm"}""",
             """{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1",""" +
                 """"content":"nop.log: agent quota wall — Usage limit reached · resets 8:10pm"}]}}""",
         )
 
-        assertTrue(QuotaEcho.isEchoed(file, "Usage limit reached"))
+        assertEquals(Verdict.Shown, judge(file, "Usage limit reached"))
+    }
+
+    /**
+     * Nor may the agent forge one. A tool result quoting a refusal record — the agent grepping a
+     * transcript, as this very fix was built by doing — is conversation, whatever it contains.
+     */
+    @Test
+    fun `a refusal record quoted inside a tool result is not the CLI's own`(@TempDir tmp: Path) {
+        val quoted = apiError(now.minusSeconds(1)).replace("\"", "\\\"")
+        val file = transcript(
+            tmp,
+            """{"type":"user","timestamp":"${now.minusSeconds(1)}","message":{"content":""" +
+                """[{"type":"tool_result","tool_use_id":"t1","content":"$quoted"}]}}""",
+        )
+
+        assertEquals(Verdict.Shown, judge(file, "You've hit your session limit"))
     }
 
     /**
@@ -93,19 +190,19 @@ class QuotaEchoTest {
             """{"type":"user","message":{"content":"usage limit of four tabs per project"}}""",
         )
 
-        assertFalse(QuotaEcho.isEchoed(file, "You've hit your usage limit"))
+        assertEquals(Verdict.Unrecorded, judge(file, "You've hit your usage limit"))
     }
 
-    /** The case that must still fire: the vendor's own chrome is not conversation. */
+    /** The case that must still fire when a provider files nothing nop recognises. */
     @Test
-    fun `a phrase that is nowhere in the conversation is the vendor's own`(@TempDir tmp: Path) {
+    fun `a phrase that is nowhere in the transcript is unrecorded`(@TempDir tmp: Path) {
         val file = transcript(
             tmp,
             """{"type":"user","message":{"content":"add a test for the stash path"}}""",
             """{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}""",
         )
 
-        assertFalse(QuotaEcho.isEchoed(file, "You've hit your usage limit"))
+        assertEquals(Verdict.Unrecorded, judge(file, "You've hit your usage limit"))
     }
 
     /**
@@ -116,7 +213,7 @@ class QuotaEchoTest {
     fun `wrapping and case differences between the screen and the transcript do not hide it`(@TempDir tmp: Path) {
         val file = transcript(tmp, """{"text":"You've hit your usage limit for Claude Opus"}""")
 
-        assertTrue(QuotaEcho.isEchoed(file, "you've   hit\n  your usage    limit"))
+        assertEquals(Verdict.Shown, judge(file, "you've   hit\n  your usage    limit"))
     }
 
     /**
@@ -125,7 +222,7 @@ class QuotaEchoTest {
      */
     @Test
     fun `with no transcript nothing is claimed`() {
-        assertFalse(QuotaEcho.isEchoed(null, "You've hit your usage limit"))
+        assertEquals(Verdict.Unrecorded, judge(null, "You've hit your usage limit"))
     }
 
     /** An empty phrase would be found in every transcript and would veto every wall. */
@@ -133,14 +230,14 @@ class QuotaEchoTest {
     fun `an empty phrase matches nothing`(@TempDir tmp: Path) {
         val file = transcript(tmp, """{"text":"anything at all"}""")
 
-        assertFalse(QuotaEcho.isEchoed(file, ""))
-        assertFalse(QuotaEcho.isEchoed(file, "   "))
+        assertEquals(Verdict.Unrecorded, judge(file, ""))
+        assertEquals(Verdict.Unrecorded, judge(file, "   "))
     }
 
     /** A transcript that has just been rotated, or was never written, must not take a session down. */
     @Test
     fun `a transcript that cannot be read is not an error`(@TempDir tmp: Path) {
-        assertFalse(QuotaEcho.isEchoed(tmp.resolve("never-written.jsonl"), "You've hit your usage limit"))
+        assertEquals(Verdict.Unrecorded, judge(tmp.resolve("never-written.jsonl"), "You've hit your usage limit"))
     }
 
     /**
@@ -153,15 +250,16 @@ class QuotaEchoTest {
         val file = tmp.resolve("long.jsonl")
         Files.writeString(file, "You've hit your usage limit" + "-".repeat(400) + "near the end")
 
-        assertTrue(
-            QuotaEcho.isEchoed(file, "near the end", maxRead = 64),
-            "the tail is what gets read",
-        )
-        assertFalse(
-            QuotaEcho.isEchoed(file, "You've hit your usage limit", maxRead = 64),
+        fun judge(phrase: String, maxRead: Long = QuotaEcho.MAX_READ) =
+            QuotaEcho.judge(file, phrase, since = since, now = now, maxRead = maxRead)
+
+        assertEquals(Verdict.Shown, judge("near the end", maxRead = 64), "the tail is what gets read")
+        assertEquals(
+            Verdict.Unrecorded,
+            judge("You've hit your usage limit", maxRead = 64),
             "and everything before the cap is out of reach, by design",
         )
         // The same file, read whole under the real cap, has both.
-        assertTrue(QuotaEcho.isEchoed(file, "You've hit your usage limit"))
+        assertEquals(Verdict.Shown, judge("You've hit your usage limit"))
     }
 }

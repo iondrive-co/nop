@@ -69,9 +69,10 @@ interface TerminalTab {
  * launcher runs behind the Run tool tab, and the shells behind the terminal tabs at the head of
  * the tool strip.
  *
- * Held in [App] rather than inside the panel because the tool panel composes one tab at a time: a
- * run has to keep going — and keep its scrollback — while the user is reading the commit list or
- * searching, and it must survive being switched away from and back to.
+ * Held in [TerminalStore] rather than inside the panel because the tool panel composes one tab at a
+ * time: a run has to keep going — and keep its scrollback — while the user is reading the commit
+ * list or searching, and it must survive being switched away from and back to. That includes
+ * switching to another project, which rebuilds [App].
  */
 class RunSessions {
     private val _sessions = mutableStateListOf<RunSession>()
@@ -144,9 +145,9 @@ class RunSessions {
     }
 
     /**
-     * Kills every run. Called when the project's composition goes away (a project-tab switch, a
-     * closed window) — a PTY nothing can reach any more would otherwise keep its child process,
-     * and whatever ports it holds, for the rest of the session.
+     * Kills every run. Called when no window has a tab on the project any more, and when nop exits
+     * (see [TerminalStore]). A PTY nothing can reach any more would otherwise keep its child
+     * process, and whatever ports it holds, for the rest of the session.
      */
     fun disposeAll() {
         _sessions.forEach { it.session.dispose() }

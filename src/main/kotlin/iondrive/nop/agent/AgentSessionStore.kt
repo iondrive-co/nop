@@ -1,5 +1,8 @@
 package iondrive.nop.agent
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import iondrive.nop.Log
 import java.nio.file.Path
 
@@ -57,8 +60,27 @@ object AgentSessionStore {
     @Synchronized
     fun of(root: Path, project: Path): AgentSessions {
         val entry = byRoot.getOrPut(norm(root)) { Entry(AgentSessions()) }
-        entry.projects.add(norm(project))
+        if (entry.projects.add(norm(project))) generation += 1
         return entry.sessions
+    }
+
+    /**
+     * Bumped whenever a project gains or loses its sessions, so a composable that read [sessionsFor]
+     * before the project had any is told to read it again. The map itself is not Compose state, and
+     * the project bar asks about every tab in the window, most of which have never been opened.
+     */
+    private var generation by mutableIntStateOf(0)
+
+    /**
+     * The agent sessions a project tab at [project] leads to, or none — what the project bar reads to
+     * mark a project whose agent is waiting on the user while another project is in front.
+     */
+    @Synchronized
+    fun sessionsFor(project: Path): List<AgentSession> {
+        // Read for what reading it does: subscribes the caller to the next change of the map.
+        @Suppress("UNUSED_VARIABLE") val subscribed = generation
+        val key = norm(project)
+        return byRoot.values.firstOrNull { key in it.projects }?.sessions?.sessions.orEmpty()
     }
 
     /**
@@ -79,6 +101,7 @@ object AgentSessionStore {
             entry.sessions.disposeAll()
             byRoot.remove(root)
         }
+        if (closed.isNotEmpty()) generation += 1
     }
 
     /**

@@ -96,6 +96,14 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         fun stripAnsi(text: String): String = ANSI.replace(text, "")
 
         /**
+         * The phrase in [text] that says an account is out, or null — the test [feed] puts to the
+         * screen, for text that came from somewhere else. [QuotaEcho] asks it of the records the CLI
+         * files about itself, to tell a refusal from every other notice it writes.
+         */
+        internal fun limitPhraseIn(text: String): String? =
+            if (OVERLOAD.containsMatchIn(text)) null else QUOTA.find(text)?.value
+
+        /**
          * Something that is not the account running out, matched before the quota patterns because
          * several of them would otherwise claim it.
          *

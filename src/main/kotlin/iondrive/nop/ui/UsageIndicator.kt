@@ -34,6 +34,10 @@ import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.Tooltip
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * Every configured account's remaining quota, in the window's bottom-right corner, whatever tab is
@@ -149,13 +153,19 @@ private fun UsageChip(account: Account, reading: UsageReading?) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            reading.session == null && reading.weekly == null -> Text("—", color = AgentMuted)
+            reading.session == null && reading.weekly == null -> Text(
+                reading.note ?: "—",
+                color = AgentMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             else -> {
                 // Session first, week second, and both places drawn even when the account answered
                 // about only one of them: with no labels, position is the only thing that says
                 // which window a bar is, so the pair cannot close up around a missing one.
                 UsageBar("session", reading.session)
                 UsageBar("week", reading.weekly)
+                if (reading.note != null) StaleMark(reading)
             }
         }
     }
@@ -214,6 +224,35 @@ internal fun UsageBar(label: String, window: UsageWindow?) {
 private fun DrawScope.drawTrack(color: Color) {
     drawRoundRect(color = color, cornerRadius = CornerRadius(size.height / 2, size.height / 2))
 }
+
+/**
+ * How old the bars beside it are, for a reading the provider did not refresh — see
+ * [UsageReading.note]. The bars look the same fresh or stale, and a stale 4% and a live 4% are
+ * different facts.
+ */
+@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun StaleMark(reading: UsageReading) {
+    Tooltip(tooltip = { Text(staleLine(reading) ?: "") }) {
+        Text(staleAge(reading), color = AgentMuted, maxLines = 1)
+    }
+}
+
+/** "12m old", or "old" when the reading does not say when it was taken. */
+internal fun staleAge(reading: UsageReading, now: Instant = Instant.now()): String {
+    val at = reading.asOf ?: return "old"
+    val minutes = Duration.between(at, now).toMinutes().coerceAtLeast(0)
+    return if (minutes < 60) "${minutes}m old" else "${minutes / 60}h old"
+}
+
+/** "as of 14:02, usage API rate-limited", or null for a fresh reading. */
+internal fun staleLine(reading: UsageReading): String? {
+    val note = reading.note ?: return null
+    val at = reading.asOf ?: return note
+    return "as of ${CLOCK.format(at.atZone(ZoneId.systemDefault()))}, $note"
+}
+
+private val CLOCK = DateTimeFormatter.ofPattern("HH:mm")
 
 /** One bar's numbers, for the hover that asks what it is actually showing. */
 internal fun tooltipLine(label: String, window: UsageWindow): String {
@@ -277,5 +316,6 @@ internal fun usageLine(reading: UsageReading?): String {
         reading.session?.let { add("${it.percent.toInt()}% session" + (it.eta()?.let { e -> " · $e" } ?: "")) }
         reading.weekly?.let { add("${it.percent.toInt()}% week" + (it.eta()?.let { e -> " · $e" } ?: "")) }
     }
-    return if (parts.isEmpty()) "no usage recorded" else parts.joinToString("   ")
+    if (parts.isEmpty()) return reading.note ?: "no usage recorded"
+    return parts.joinToString("   ") + (staleLine(reading)?.let { "   ($it)" } ?: "")
 }

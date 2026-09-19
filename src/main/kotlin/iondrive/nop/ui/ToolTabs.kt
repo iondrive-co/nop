@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -36,9 +37,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -51,8 +55,10 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSession
 import iondrive.nop.agent.AgentSessions
 import kotlinx.coroutines.launch
@@ -149,8 +155,9 @@ private val RENAME_FIELD_WIDTH = 120.dp
 private const val TERMINAL_GLYPH = "⌨"
 
 /**
- * Marks an agent session's tab. Like [TERMINAL_GLYPH] it is drawn with the label rather than stored
- * in it, so a session renamed by the CLI's own title is still visibly an agent.
+ * Marks the empty agent tab, the one holding the picker. A session's own tab carries its status mark
+ * in this place instead — see [AgentStatusMark] — which says it is an agent and what it is doing at
+ * once, and like this glyph is drawn beside the label rather than stored in it.
  */
 private const val AGENT_GLYPH = "✦"
 
@@ -406,6 +413,7 @@ private fun SessionStrip(
 ) {
     val style = JewelTheme.defaultTabStyle
     val isDark = JewelTheme.isDark
+    val palette = remember(isDark) { StripPalette(isDark) }
     // The tab currently being renamed in place, if any.
     var renamingId by remember { mutableStateOf<String?>(null) }
 
@@ -477,15 +485,38 @@ private fun SessionStrip(
                         onCancel = { renamingId = null },
                     )
                 } else {
+                    val selected = sessionTab == ToolTab.Agent &&
+                        agentSession.sessionId == agents.selectedId
+                    // The tab on screen is the one being watched: nothing it does is news to anyone.
+                    // See [AgentSession.unseen].
+                    DisposableEffect(agentSession, selected) {
+                        if (selected) agentSession.watch()
+                        onDispose { if (selected) agentSession.unwatch() }
+                    }
+                    val activity = agentSession.activity
+                    val unseen = agentSession.unseen && !selected
+                    val colors = remember(isDark) { AgentStatusColors(isDark) }
+                    val emphasis = if (unseen) colors.label(activity, isDark) ?: palette.selectedText else null
                     ToolStripTab(
-                        label = "$AGENT_GLYPH ${agentSession.title}",
-                        selected = sessionTab == ToolTab.Agent &&
-                            agentSession.sessionId == agents.selectedId,
+                        label = agentSession.title,
+                        selected = selected,
                         isDark = isDark,
                         style = style,
                         onClick = { onSelectAgent(agentSession.sessionId) },
                         onClose = { onCloseAgent(agentSession.sessionId) },
                         onRename = { renamingId = agentSession.sessionId },
+                        leading = {
+                            AgentStatusMark(
+                                activity = activity,
+                                unseen = unseen,
+                                since = agentSession.activitySince,
+                                isDark = isDark,
+                            )
+                        },
+                        emphasis = emphasis,
+                        // A question nobody has seen tints the whole tab, not only its name: it is the
+                        // one state where the agent can do nothing at all until somebody comes.
+                        wash = if (unseen && activity == Activity.Asking) colors.asking.copy(alpha = 0.16f) else null,
                     )
                 }
             }
@@ -588,11 +619,21 @@ private fun StripRow(
     val overflowing = scroll.maxValue in 1 until Int.MAX_VALUE
     val step = (scroll.viewportSize * 3 / 4).coerceAtLeast(MIN_SCROLL_STEP)
 
+    val palette = remember(isDark) { StripPalette(isDark) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(style.metrics.tabHeight)
-            .background(style.colors.background),
+            .background(palette.strip)
+            .drawWithContent {
+                drawContent()
+                drawLine(
+                    palette.divider,
+                    Offset(0f, size.height - 0.5f),
+                    Offset(size.width, size.height - 0.5f),
+                    strokeWidth = 1f,
+                )
+            },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (overflowing) {
@@ -634,8 +675,34 @@ private fun CollapseToolsButton(collapsed: Boolean, isDark: Boolean, onClick: ()
 }
 
 /**
- * One tab in the strip: its label, an accent underline while selected, and — for a terminal — a
- * close "x" once the pointer is on it and [onRename] on a right-click.
+ * The strips' own colours, in place of the theme's tab style.
+ *
+ * The theme's selected tab is a shade off its neighbours with a thin rule under it, and on a strip
+ * of agent tabs all called after their conversations that was not enough: the user lost track of
+ * which one they were in. So the strip sits a step darker than the panels, the tabs are divided from
+ * each other, and the selected one is lifted to the panel's own colour, set in bold, and ruled in
+ * the accent — three marks at once, any one of which would say it.
+ */
+internal class StripPalette(isDark: Boolean) {
+    val strip = if (isDark) Color(0xFF1E1F22) else Color(0xFFE8EAED)
+    val selected = if (isDark) Color(0xFF2B2D30) else Color(0xFFFFFFFF)
+    val hovered = if (isDark) Color(0xFF26282B) else Color(0xFFDDE0E4)
+    val divider = if (isDark) Color(0xFF393B40) else Color(0xFFCDD0D5)
+    val text = if (isDark) Color(0xFF8B8F99) else Color(0xFF5E636B)
+    val selectedText = if (isDark) Color(0xFFDFE1E5) else Color(0xFF1F2329)
+    val accent = if (isDark) Color(0xFF548AF7) else Color(0xFF3574F0)
+}
+
+/** The accent rule under the selected tab. Heavier than the theme's, which is the point of it. */
+private val SELECTED_RULE = 3.dp
+
+/**
+ * One tab in the strip: its label, the selected marks (see [StripPalette]), and — for a closeable
+ * one — a close "x" once the pointer is on it, and [onRename] on a right-click.
+ *
+ * [leading] is drawn in front of the label: an agent tab's status mark. [emphasis] colours the label
+ * and sets it in bold whether or not the tab is selected, and [wash] tints the whole tab — both for a
+ * tab that has something to say that nobody has seen yet.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -648,25 +715,27 @@ private fun ToolStripTab(
     onClose: (() -> Unit)?,
     onRename: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    leading: (@Composable () -> Unit)? = null,
+    emphasis: Color? = null,
+    wash: Color? = null,
 ) {
+    val palette = remember(isDark) { StripPalette(isDark) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     val background = when {
-        selected -> style.colors.backgroundSelected
-        hovered -> style.colors.backgroundHovered
-        else -> style.colors.background
+        selected -> palette.selected
+        wash != null -> wash
+        hovered -> palette.hovered
+        else -> Color.Transparent
     }
-    val content = when {
-        selected -> style.colors.contentSelected
-        hovered -> style.colors.contentHovered
-        else -> style.colors.content
-    }
+    val content = emphasis ?: if (selected) palette.selectedText else palette.text
 
     Box(
         modifier = modifier
             .fillMaxHeight()
             .background(background)
-            .tabUnderline(selected, style.colors.underlineSelected, style.metrics.underlineThickness)
+            .tabUnderline(selected, palette.accent, SELECTED_RULE)
+            .let { m -> if (selected) m else m.tabDivider(palette.divider) }
             .hoverable(interaction)
             // Right-click, caught on the Initial pass so it is seen before `clickable` below claims
             // the press — and consumed there, so the tab doesn't also select itself.
@@ -676,13 +745,15 @@ private fun ToolStripTab(
             .clickable(onClick = onClick),
     ) {
         Row(
-            modifier = Modifier.fillMaxHeight().padding(horizontal = 8.dp),
+            modifier = Modifier.fillMaxHeight().padding(start = 10.dp, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(style.metrics.closeContentGap),
         ) {
+            if (leading != null) leading()
             Text(
                 text = label,
                 color = content,
+                fontWeight = if (selected || emphasis != null) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(max = TAB_MAX_WIDTH),
@@ -693,9 +764,22 @@ private fun ToolStripTab(
                 Box(modifier = Modifier.size(16.dp), contentAlignment = Alignment.Center) {
                     if (hovered || selected) CloseButton(isDark = isDark, onClose = onClose)
                 }
+            } else {
+                Box(modifier = Modifier.width(4.dp))
             }
         }
     }
+}
+
+/**
+ * A hairline down a tab's right edge, stopping short of top and bottom, so neighbouring tabs read as
+ * separate things rather than one run of text. Painted for the reason [tabUnderline] is.
+ */
+private fun Modifier.tabDivider(color: Color): Modifier = drawWithContent {
+    drawContent()
+    val inset = size.height * 0.25f
+    val x = size.width - 0.5f
+    drawLine(color, Offset(x, inset), Offset(x, size.height - inset), strokeWidth = 1f)
 }
 
 /**
@@ -735,6 +819,7 @@ private fun TabRenameField(
     onCancel: () -> Unit,
 ) {
     val state = rememberTextFieldState(initial, TextRange(0, initial.length))
+    val palette = StripPalette(JewelTheme.isDark)
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
     // The field is composed unfocused and asks for focus a beat later, so "lost focus" only means
@@ -745,8 +830,8 @@ private fun TabRenameField(
     Box(
         modifier = Modifier
             .fillMaxHeight()
-            .background(style.colors.backgroundSelected)
-            .tabUnderline(true, style.colors.underlineSelected, style.metrics.underlineThickness)
+            .background(palette.selected)
+            .tabUnderline(true, palette.accent, SELECTED_RULE)
             .padding(horizontal = 8.dp),
         contentAlignment = Alignment.CenterStart,
     ) {

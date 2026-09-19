@@ -39,10 +39,11 @@ import org.jetbrains.jewel.ui.component.Text
  * post-exit panel, so the only route was to quit the CLI first — and quitting is precisely what you
  * do *not* want to do when the reason to switch is that this provider is going badly.
  *
- * Collapsed it is a single line naming the account. Expanded it lists the others with what each has
- * left, because "which one instead" is the same question the usage strip answers. The list is drawn
- * inline rather than in a popup: the terminal below is a heavyweight AWT component, and Compose
- * composites popups underneath it, so a menu opened here would simply not be on screen.
+ * Collapsed it is a single line saying what the agent is doing and naming the account. Expanded it
+ * lists the others with what each has left, because "which one instead" is the same question the
+ * usage strip answers. The list is drawn inline rather than in a popup: the terminal below is a
+ * heavyweight AWT component, and Compose composites popups underneath it, so a menu opened here would
+ * simply not be on screen.
  *
  * It is also where a handover nop made *by itself* owns up to having made one — see
  * [AgentSession.autoHandover]. A tab whose provider changed under it while the user was in another
@@ -73,6 +74,24 @@ fun AgentSessionBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // What the agent is doing, in words and with a time, first in the row. The strip's mark
+            // says the same in a glyph; this is where "since when" fits, which is the half of it that
+            // says whether a question has been waiting a minute or all night.
+            val isDark = JewelTheme.isDark
+            val activity = session.activity
+            val statusColors = remember(isDark) { AgentStatusColors(isDark) }
+            AgentStatusMark(
+                activity = activity,
+                unseen = false,
+                since = session.activitySince,
+                isDark = isDark,
+            )
+            Text(
+                activityText(activity, session.activitySince, rememberNow(), session.hasWorked),
+                color = statusColors.label(activity, isDark) ?: AgentMuted,
+                maxLines = 1,
+            )
+            Text("·", color = AgentMuted)
             Text(
                 session.account.name,
                 color = AgentMuted,

@@ -97,6 +97,9 @@ private const val COMMIT_MESSAGE_HISTORY_CAP = 20
  */
 private const val USAGE_POLL_INTERVAL_MS = 5 * 60 * 1000L
 
+/** How often to poll while some account's reading is stale. See iondrive.nop.agent.UsageGate. */
+private const val USAGE_RETRY_INTERVAL_MS = 60 * 1000L
+
 // A pending project-tree creation/copy dialog. NewX carry the parent directory the entry will be
 // created in; CopyFile carries the source file being duplicated.
 /**
@@ -529,6 +532,25 @@ fun App(
         if (fileSearchTrigger > fileSearchBaseline) fileSearchOpen = true
     }
 
+    // This project's terminals: the launcher runs behind the Run tab, and the shells behind the
+    // terminal tabs at the head of the tool strip. Not owned here. They come from a store that lives
+    // as long as nop does, so a project switch leaves them running with their scrollback, and coming
+    // back finds them where they were. See TerminalStore for what ends them.
+    val projectTerminals = remember(projectPath, rootPath) {
+        TerminalStore.of(root = rootPath, project = projectPath) {
+            TerminalStore.Terminals(
+                // The first shell is opened up front so the tab is there from the start. It costs
+                // nothing until it is looked at, because a session spawns no PTY until the panel
+                // asks it for a widget.
+                shells = RunSessions().apply { openShell(rootPath.toFile()) },
+                // The run tabs the project had last time come back with it, not running — see
+                // RunSessions.restore. Done here rather than in an effect so the strip is right on
+                // its first frame instead of growing tabs a moment after the window opens.
+                runs = RunSessions().apply { restore(Settings.loadOpenRuns(rootPath), rootPath.toFile()) },
+            )
+        }
+    }
+    val runSessions = projectTerminals.runs
     // The tool region holds two selections, one per side — see [ToolTabs]. This is the right-hand
     // one (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we flip the tool panel to
     // Search and forward the trigger into SearchPanel so it requests focus on its input field.
@@ -541,7 +563,7 @@ fun App(
      * empty pane holds, and a session restored into the strip is deliberately not selected by the
      * restore (see [AgentSessions.restore]).
      */
-    var sessionTab by remember(projectPath) { mutableStateOf<ToolTab?>(null) }
+    var sessionTab by remember(projectPath) { mutableStateOf(projectTerminals.sessionTab) }
 
     /**
      * Shows [tab] on the right, unfolding the tool panel if it was collapsed.
@@ -569,9 +591,13 @@ fun App(
         if (toolTab == tab && !toolsCollapsed) toolsCollapsed = true else showTool(tab)
     }
 
-    /** Shows [tab]'s collection in the session pane on the left. */
+    /**
+     * Shows [tab]'s collection in the session pane on the left. Written into the store as well, so
+     * that coming back to this project shows the same collection. Its terminals are still running.
+     */
     fun showSession(tab: ToolTab) {
         sessionTab = tab
+        projectTerminals.sessionTab = tab
     }
 
     /** What the Diff tab dates its "session" base from — see [DiffPanel]. */
@@ -592,18 +618,6 @@ fun App(
         }
     }
 
-    // The terminals behind the Run tab. Owned here, above the tool panel, so a script keeps running
-    // (and keeps its scrollback) while the user is reading the commit list or a search result — and
-    // so every run is killed when this project's composition goes away, which is a project-tab
-    // switch or a closed window. Without that last part a switch would leave the PTY, its children
-    // and whatever ports they hold alive with nothing left on screen able to reach them.
-    val runSessions = remember(projectPath) {
-        // The tabs the project had last time come back with it, not running — see
-        // RunSessions.restore. Done here rather than in an effect so the strip is right on its
-        // first frame instead of growing tabs a moment after the window opens.
-        RunSessions().apply { restore(Settings.loadOpenRuns(rootPath), rootPath.toFile()) }
-    }
-    DisposableEffect(runSessions) { onDispose { runSessions.disposeAll() } }
     // Written back whenever the strip changes — a run started, closed or renamed. Keyed on the
     // rows themselves rather than on a count, so a rename is saved too; recomputing the list is
     // what reads the snapshot state that makes this effect re-run at all.
@@ -632,11 +646,8 @@ fun App(
     }
     // The shells behind the terminal tabs at the head of the tool strip. A separate list from the
     // launcher runs above — those belong to the Run tab and come and go with the scripts that
-    // started them, while these are the project's own terminals. The first one is opened here so
-    // the tab is there from the start; it costs nothing until it is looked at, because a session
-    // spawns no PTY until the panel asks it for a widget.
-    val terminals = remember(projectPath) { RunSessions().apply { openShell(rootPath.toFile()) } }
-    DisposableEffect(terminals) { onDispose { terminals.disposeAll() } }
+    // started them, while these are the project's own terminals.
+    val terminals = projectTerminals.shells
     // The vendor agent sessions behind the Agent tab. The one collection on this screen that is not
     // owned here: it comes from a store that lives as long as nop does, because a composition is the
     // wrong lifetime for a model half-way through a refactor — looking at another project, or moving
@@ -755,7 +766,10 @@ fun App(
                     Log.warn("could not read usage for ${account.name}: $failure")
                 }
             }
-            delay(USAGE_POLL_INTERVAL_MS)
+            // Sooner while a reading is stale, so a rate-limited account recovers within a minute
+            // or two rather than five. Usage's own gate decides whether a poll actually asks.
+            val stale = agentAccounts.any { agentUsage[it.name]?.note != null }
+            delay(if (stale) USAGE_RETRY_INTERVAL_MS else USAGE_POLL_INTERVAL_MS)
         }
     }
     // The other half of believing a quota wall: the provider's own number for what is left. Read

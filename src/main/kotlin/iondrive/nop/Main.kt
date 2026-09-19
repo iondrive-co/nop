@@ -43,6 +43,8 @@ import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
 import iondrive.nop.ui.NopTextContextMenu
 import iondrive.nop.ui.ProjectBar
+import iondrive.nop.ui.TerminalStore
+import iondrive.nop.ui.projectAgentNews
 import iondrive.nop.ui.WindowPickerPanel
 import iondrive.nop.ui.nopMenuStyle
 import iondrive.nop.ui.projectTint
@@ -361,8 +363,13 @@ fun main(args: Array<String>) {
         // The agent sessions are the one thing that outlives the window showing it (see
         // AgentSessionStore), so they are also the one thing nop has to put down on the way out: a
         // vendor CLI is a real process under a PTY, and quitting with one per tab still running would
-        // leave them going with nothing able to reach them.
-        DisposableEffect(Unit) { onDispose { AgentSessionStore.disposeAll() } }
+        // leave them going with nothing able to reach them. The terminals likewise (see TerminalStore).
+        DisposableEffect(Unit) {
+            onDispose {
+                AgentSessionStore.disposeAll()
+                TerminalStore.disposeAll()
+            }
+        }
         // And the sessions of a project no window has a tab on any more. Parking a window is not
         // that: [Workspaces.allProjects] counts a parked window's tabs, so an agent carries on
         // working while the window it was started in is put away, and is still there when it comes
@@ -370,7 +377,10 @@ fun main(args: Array<String>) {
         LaunchedEffect(Unit) {
             snapshotFlow { Workspaces.allProjects(workspaces) }
                 .distinctUntilChanged()
-                .collect { projects -> AgentSessionStore.retain(projects) }
+                .collect { projects ->
+                    AgentSessionStore.retain(projects)
+                    TerminalStore.retain(projects)
+                }
         }
         // collectLatest restarts the loop when tabs open or close and when a window changes what it
         // is showing — the poller needs to know which projects to leave alone — dropping stale flags
@@ -657,6 +667,11 @@ private fun ApplicationScope.WorkspaceWindow(
                     tabs = workspace.tabs,
                     activeTab = workspace.active,
                     dirtyProjects = dirtyProjects,
+                    // Read here, in composition, so each session's state is observed and a question
+                    // asked behind another project re-marks the bar the moment it is asked.
+                    agentNews = workspace.tabs.mapNotNull { tab ->
+                        projectAgentNews(AgentSessionStore.sessionsFor(tab.path))?.let { tab.path to it }
+                    }.toMap(),
                     windows = windows,
                     windowId = workspace.id,
                     onSelect = onSelectTab,
