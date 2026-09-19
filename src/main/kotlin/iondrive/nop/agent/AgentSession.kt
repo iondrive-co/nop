@@ -15,6 +15,7 @@ import iondrive.nop.agent.transcript.TranscriptFollower
 import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalTab
 import java.io.File
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -150,6 +151,12 @@ class AgentSession(
      * on a screen the agent itself is writing to, and that is not evidence about an account.
      */
     private val hasRunOut: (Account) -> Boolean? = { _ -> null },
+    /**
+     * When [account] can be served again, going by the poller's last reading, or null when it does
+     * not say. See [UsageReading.spentUntil], and [onQuotaWall] for what a reset close at hand
+     * changes.
+     */
+    private val spentUntil: (Account) -> Instant? = { _ -> null },
 ) : TerminalTab {
 
     /**
@@ -183,7 +190,17 @@ class AgentSession(
         // handover, and a handover disposes the very terminal whose output is calling us and starts
         // another in its place — which is the UI thread's work, and exactly what the Hand over
         // button already does there.
-        SwingUtilities.invokeLater { onQuotaWall(hit) }
+        //
+        // And not at once. The screen can be ahead of the transcript — a reply is drawn as it
+        // streams and filed when it ends — and the transcript is what tells the agent's words from
+        // the vendor's (see [QuotaEcho]). A real wall has already ended the turn, so a moment's
+        // wait costs it nothing.
+        SwingUtilities.invokeLater {
+            val firedOn = run
+            javax.swing.Timer(QUOTA_SETTLE_MS) { if (run === firedOn) onQuotaWall(hit) }
+                .apply { isRepeats = false }
+                .start()
+        }
     }
 
     /**
@@ -243,9 +260,15 @@ class AgentSession(
         titleIsUsers = true
     }
 
-    /** A title the CLI gave the session. Yields to a name the user chose. */
-    fun titleFromTranscript(name: String) {
+    /**
+     * A title the CLI gave the session. Yields to a name the user chose, and to the name the work
+     * already had when a handover started the run naming it ([fromHandoff]): the CLI that takes over
+     * names its conversation after the handoff it was given ("Handoff from Claude Code"), which says
+     * nothing about the work.
+     */
+    fun titleFromTranscript(name: String, fromHandoff: Boolean = false) {
         if (titleIsUsers) return
+        if (fromHandoff && title != DEFAULT_TITLE) return
         val trimmed = name.trim()
         if (trimmed.isNotEmpty()) title = trimmed
     }
@@ -525,17 +548,30 @@ class AgentSession(
         // being shown rather than said. See [QuotaEcho] for why a miss here is the right way round to
         // be wrong.
         //
-        // Not asked when the reading says the account is spent. The screen and the provider's own
-        // number then agree, and the transcript's "the agent could be showing this" is weaker than
-        // either: every session nop hands over reads a handoff quoting the wall that ended the last
-        // one, so it would veto the very next wall in exactly the sessions that need it.
-        val why = if (runOut == true) {
-            "its usage reading is spent"
-        } else {
-            when (QuotaEcho.judge(current.transcriptPath, hit.matched, since = current.startedAt)) {
-                QuotaEcho.Verdict.Refused -> "the CLI filed the refusal"
-                QuotaEcho.Verdict.Unrecorded -> "nothing in the transcript disputes it"
-                QuotaEcho.Verdict.Shown -> {
+        // Mostly not heard when the reading says the account is spent. The screen and the provider's
+        // own number then agree, and the transcript's "the agent could be showing this" is weaker
+        // than either: every session nop hands over reads a handoff quoting the wall that ended the
+        // last one, so it would veto the very next wall in exactly the sessions that need it.
+        //
+        // The exception is the agent's own reply from moments ago. A refused request writes no
+        // reply, so a fresh one carrying the phrase is the agent talking — the hermes session handed
+        // over at 18:59 had just finished answering a question about an exchange's 429 "too many
+        // requests", on an account at 99% of a window that reset 30 seconds later.
+        val verdict = QuotaEcho.judge(current.transcriptPath, hit.matched, since = current.startedAt)
+        val why = when (verdict) {
+            QuotaEcho.Verdict.Refused -> "the CLI filed the refusal"
+            QuotaEcho.Verdict.Said -> {
+                Log.warn(
+                    "ignoring a usage-limit phrase on ${current.account.name}: \"${hit.matched}\" is " +
+                        "in the agent's own reply from moments ago, and the CLI has filed no refusal",
+                )
+                quotaWatcher.reset()
+                return
+            }
+            QuotaEcho.Verdict.Shown, QuotaEcho.Verdict.Unrecorded -> when {
+                runOut == true -> "its usage reading is spent"
+                verdict == QuotaEcho.Verdict.Unrecorded -> "nothing in the transcript disputes it"
+                else -> {
                     Log.warn(
                         "ignoring a usage-limit phrase on ${current.account.name}: \"${hit.matched}\" " +
                             "is in this session's own transcript and the CLI has filed no refusal this " +
@@ -545,6 +581,23 @@ class AgentSession(
                     return
                 }
             }
+        }
+
+        // A wall that is about to lift is waited out, not acted on. Handing over costs the work its
+        // conversation — the next account starts from a summary — and ending the run costs the user a
+        // restart, both to save a few minutes; Claude Code carries on by itself once the window
+        // rolls over. The watcher stays quiet until then, so the wall on screen is not re-judged at
+        // every redraw, and is armed again afterwards for the walls still to come.
+        val untilReset = spentUntil(current.account)?.let { Duration.between(Instant.now(), it) }
+        if (untilReset != null && untilReset <= WAIT_FOR_RESET) {
+            Log.info(
+                "agent quota wall on ${current.account.name} ($why), but it resets in " +
+                    "${untilReset.seconds}s; waiting for that rather than handing over: ${hit.line}",
+            )
+            javax.swing.Timer(untilReset.toMillis().toInt() + REARM_SLACK_MS) {
+                if (run === current && current.endReason == null) quotaWatcher.reset()
+            }.apply { isRepeats = false }.start()
+            return
         }
 
         Log.info("agent quota wall on ${current.account.name} ($why): ${hit.line}")
@@ -726,7 +779,7 @@ class AgentSession(
                 log.append(event)
                 // The CLI names its own session a turn or two in. That name says far more about
                 // which of three open tabs this is than the account does.
-                if (event is AgentEvent.SessionTitled) titleFromTranscript(event.title)
+                if (event is AgentEvent.SessionTitled) titleFromTranscript(event.title, seededFromHandoff)
                 // A question is an open tool call, and a new prompt is a new turn — see
                 // [ActivityTracker]. Nothing else in the transcript changes what the tab is doing.
                 if (event is AgentEvent.ToolStarted || event is AgentEvent.ToolFinished ||
@@ -790,5 +843,17 @@ class AgentSession(
 
         /** Past the moment a title settles, so the re-read lands after it rather than just before. */
         private const val SETTLE_SLACK_MS = 50L
+
+        /** How long a limit phrase waits for the transcript to catch up. See [quotaWatcher]. */
+        private const val QUOTA_SETTLE_MS = 3_000
+
+        /**
+         * How close a reset has to be for a wall to be waited out rather than handed over. A few
+         * minutes idle is cheaper than a conversation traded for a summary of it.
+         */
+        internal val WAIT_FOR_RESET: Duration = Duration.ofMinutes(10)
+
+        /** Past the reset before the watcher listens again, so the poller has had a chance to see it. */
+        private const val REARM_SLACK_MS = 5_000
     }
 }

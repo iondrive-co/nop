@@ -97,6 +97,72 @@ class QuotaEchoTest {
         assertEquals(Verdict.Refused, judge(file, "Usage limit reached"))
     }
 
+    /** The agent's own reply, at [at]. */
+    private fun reply(at: Instant, text: String) =
+        """{"type":"assistant","timestamp":"$at","message":{"content":[{"type":"text","text":"$text"}]}}"""
+
+    /**
+     * The 18:59 handover in hermes. The agent had just answered a question about an exchange
+     * refusing its requests, and finished its turn; the screen showed its answer, and nop took the
+     * answer for the vendor. A refused request writes no reply, so a fresh one is the agent talking.
+     */
+    @Test
+    fun `a phrase in the agent's own reply from moments ago is said by the agent`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"user","timestamp":"${now.minusSeconds(44)}","message":{"content":"any rate limits?"}}""",
+            reply(now.minusSeconds(12), """02:10Z: Hyperliquid refused a request (a 429 \"too many requests\" reply)."""),
+        )
+
+        assertEquals(Verdict.Said, judge(file, "too many requests"))
+    }
+
+    @Test
+    fun `so is one in a Codex agent message`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"timestamp":"${now.minusSeconds(5)}","type":"event_msg","payload":""" +
+                """{"type":"agent_message","message":"The API answered 429 Too Many Requests twice."}}""",
+        )
+
+        assertEquals(Verdict.Said, judge(file, "Too Many Requests"))
+    }
+
+    /** A vendor refusal filed now still outranks whatever the agent said a moment before it. */
+    @Test
+    fun `a fresh refusal outranks the agent having just said the same words`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            reply(now.minusSeconds(30), "Next I'll check whether you've hit your session limit."),
+            apiError(now.minusMillis(72)),
+        )
+
+        assertEquals(Verdict.Refused, judge(file, "You've hit your session limit"))
+    }
+
+    /**
+     * What the agent said long ago, or in a run before this one, is conversation like any other: a
+     * redraw can put it on screen at the moment of a real wall.
+     */
+    @Test
+    fun `an old reply is being shown, not said`(@TempDir tmp: Path) {
+        val stale = transcript(tmp, reply(now.minus(QuotaEcho.FRESH).minusSeconds(1), "429 too many requests"))
+        assertEquals(Verdict.Shown, judge(stale, "too many requests"))
+
+        val earlierRun = transcript(tmp, reply(since.minusSeconds(1), "429 too many requests"))
+        assertEquals(Verdict.Shown, QuotaEcho.judge(earlierRun, "too many requests", since = since, now = since))
+    }
+
+    /** The refusal wears the assistant's role, but it is not the agent's reply. */
+    @Test
+    fun `a refusal from before this run is not the agent's reply either`(@TempDir tmp: Path) {
+        val file = transcript(tmp, apiError(now.minusSeconds(5)).replace(""""isApiErrorMessage":true,""", ""))
+        assertEquals(Verdict.Said, judge(file, "You've hit your session limit"), "control: unflagged it is a reply")
+
+        val flagged = transcript(tmp, apiError(since.minusSeconds(60)))
+        assertEquals(Verdict.Shown, judge(flagged, "You've hit your session limit"))
+    }
+
     /**
      * A resume redraws the conversation, the wall that ended the last run among it. That record was
      * the vendor speaking then; now it is text on a screen, and the account may well have reset.

@@ -389,4 +389,63 @@ class UsageTest {
     fun `a reading with no windows in it declines to answer`() {
         assertNull(UsageReading(null, null, Instant.now()).looksSpent())
     }
+
+    /**
+     * The poller reads every few minutes, and the window can roll over in between. A reading from
+     * before the reset describes a window that is not there any more.
+     */
+    @Test
+    fun `a spent window whose reset has passed is not spent`() {
+        val reading = UsageReading(
+            session = UsageWindow(100.0, Instant.now().minusSeconds(20)),
+            weekly = UsageWindow(40.0, Instant.now().plus(Duration.ofDays(3))),
+            asOf = Instant.now().minus(Duration.ofMinutes(4)),
+        )
+
+        assertEquals(false, reading.looksSpent())
+        assertNull(reading.spentUntil())
+    }
+
+    @Test
+    fun `a spent account says when it can be served again`() {
+        val reset = Instant.now().plusSeconds(30)
+        val reading = UsageReading(
+            session = UsageWindow(99.0, reset),
+            weekly = UsageWindow(40.0, Instant.now().plus(Duration.ofDays(3))),
+            asOf = Instant.now(),
+        )
+
+        assertEquals(reset, reading.spentUntil())
+    }
+
+    /** A session window resetting in a minute is no use under a weekly one spent for days. */
+    @Test
+    fun `with both windows spent it is the later reset that counts`() {
+        val weekly = Instant.now().plus(Duration.ofDays(2))
+        val reading = UsageReading(
+            session = UsageWindow(100.0, Instant.now().plusSeconds(60)),
+            weekly = UsageWindow(100.0, weekly),
+            asOf = Instant.now(),
+        )
+
+        assertEquals(weekly, reading.spentUntil())
+    }
+
+    @Test
+    fun `a spent window with no reset time says nothing about when`() {
+        val reading = UsageReading(
+            session = UsageWindow(100.0, Instant.now().plusSeconds(60)),
+            weekly = UsageWindow(100.0, null),
+            asOf = Instant.now(),
+        )
+
+        assertNull(reading.spentUntil())
+    }
+
+    @Test
+    fun `an account with room has no reset to wait for`() {
+        val reading = UsageReading(UsageWindow(40.0, Instant.now().plusSeconds(60)), null, Instant.now())
+
+        assertNull(reading.spentUntil())
+    }
 }

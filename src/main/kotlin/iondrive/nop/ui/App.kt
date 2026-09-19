@@ -681,9 +681,15 @@ fun App(
     // nop's row wins a tie, which is every session it ran: it is the same conversation either way,
     // and only that side knows which configured account is behind it.
     //
-    // Re-read whenever the open sessions change — which is when a session that just ended becomes
-    // one of these — and whenever the accounts do, since they are what says which stores to read.
-    LaunchedEffect(projectPath, agentSessions.sessions.size, agentAccounts) {
+    // Re-read whenever the conversations running in the strip change, and whenever the accounts do,
+    // since they are what says which stores to read. The conversations, not the count of tabs: a
+    // handover, a reopen or a `/clear` keeps the tab and moves it to another conversation, and the
+    // one it left is exactly what the picker is for. Keyed on the count alone, the list went on
+    // hiding the conversation a handover had just left, as though it were still running in its tab.
+    // And re-read each time the picker comes up, which also finds what a shell has filed since.
+    val runningConversations = agentSessions.sessions.map { it.sessionId to it.run.nativeSessionId }
+    val pickerShowing = agentSessions.selected == null
+    LaunchedEffect(projectPath, runningConversations, pickerShowing, agentAccounts) {
         pastAgentSessions = withContext(Dispatchers.IO) {
             val own = EventLog.sessions(rootPath)
             // Only a row that can actually be reopened is allowed to stand in for the vendor's own
@@ -777,6 +783,7 @@ fun App(
     // rather than whatever had arrived when the tab was opened. See [UsageReading.looksSpent].
     SideEffect {
         agentSessions.hasRunOut = { account -> agentUsage[account.name]?.looksSpent() }
+        agentSessions.spentUntil = { account -> agentUsage[account.name]?.spentUntil() }
     }
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
     // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in
@@ -1919,10 +1926,33 @@ fun App(
                     // terminal is a heavyweight AWT component that Compose composites *above* every
                     // popup — one drawn inside this dialog would simply not be on screen. The output
                     // staying in the tab afterwards is also the only thing that explains a login
-                    // that didn't take.
+                    // that didn't take. On success, dismiss the tab, refresh usage and return to settings.
                     showAccounts = false
-                    terminals.open(Login.session(account))
+                    val session = Login.session(account)
+                    val run = terminals.open(session)
+                    session.onExit = { code ->
+                        scope.launch {
+                            val hasCreds = Login.hasCredentials(account)
+                            if (code == 0 && hasCreds) {
+                                Usage.clearAuthCache()
+                                val reading = withContext(Dispatchers.IO) { runCatching { Usage.read(account) }.getOrNull() }
+                                if (reading != null) agentUsage[account.name] = reading
+                                val models = withContext(Dispatchers.IO) { runCatching { Usage.discoverModels(account) }.getOrDefault(emptyList()) }
+                                if (models.isNotEmpty()) agentModels[account.name] = models
+                                delay(800)
+                                terminals.close(run.id)
+                                showAccounts = true
+                            } else {
+                                val reading = withContext(Dispatchers.IO) { runCatching { Usage.read(account) }.getOrNull() }
+                                if (reading != null) agentUsage[account.name] = reading
+                            }
+                        }
+                    }
                     showSession(ToolTab.Terminal)
+                },
+                onLogOut = { account ->
+                    Login.logOut(account)
+                    agentUsage[account.name] = UsageReading.unavailable("not signed in")
                 },
                 onClose = { showAccounts = false },
             )

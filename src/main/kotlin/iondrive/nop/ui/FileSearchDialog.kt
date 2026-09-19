@@ -1,20 +1,17 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -24,7 +21,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -34,23 +30,21 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
 
 /**
- * Centered "find file by name" popup. Up/Down navigates results, Enter opens the highlighted
- * file via [onPick], Esc dismisses. The text field grabs focus on first composition so the user
- * can start typing immediately after the double-shift trigger.
+ * "Find file by name". Up/Down navigates results, Enter opens the highlighted file via [onPick], Esc
+ * dismisses. The text field grabs focus on first composition so the user can start typing
+ * immediately after the double-shift trigger.
+ *
+ * A window of its own rather than a popup over nop's, because the middle of nop's window is often
+ * the tool region, and a terminal there is drawn over any popup. See [DialogFrame]. A fixed size, so
+ * the window doesn't jump about as the result list grows and shrinks under the typing.
  */
 @Composable
 fun FileSearchDialog(
@@ -92,23 +86,13 @@ fun FileSearchDialog(
 
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
-    Popup(
-        popupPositionProvider = TopCenterPositionProvider,
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
-    ) {
-        val border =if (JewelTheme.isDark) Color(0xFF43454A) else Color(0xFFD3D5DB)
+    DialogFrame(title = "Find file", onClose = onDismiss, size = DpSize(560.dp, 480.dp)) {
         Column(
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(JewelTheme.globalColors.panelBackground)
-                .border(1.dp, border, RoundedCornerShape(8.dp))
-                .width(560.dp)
-                .padding(12.dp)
+                .fillMaxSize()
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (event.key) {
-                        Key.Escape -> { onDismiss(); true }
                         Key.DirectionDown -> {
                             if (results.isNotEmpty()) {
                                 selectedIndex = (selectedIndex + 1).coerceAtMost(results.size - 1)
@@ -141,7 +125,7 @@ fun FileSearchDialog(
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.heightIn(max = 380.dp).fillMaxWidth(),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
                     itemsIndexed(results) { idx, path ->
                         Column {
@@ -196,16 +180,4 @@ private fun ResultRow(path: String, selected: Boolean, onClick: () -> Unit) {
             }
         }
     }
-}
-
-private val TopCenterPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset = IntOffset(
-        x = (windowSize.width - popupContentSize.width) / 2,
-        y = (windowSize.height / 6).coerceAtLeast(40),
-    )
 }

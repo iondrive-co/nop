@@ -82,6 +82,7 @@ fun AccountsDialog(
     modelsFor: (Account) -> List<String>,
     onSave: (AgentConfig) -> Unit,
     onLogIn: (Account) -> Unit,
+    onLogOut: (Account) -> Unit = { Login.logOut(it) },
     onClose: () -> Unit,
 ) {
     DialogFrame(title = "Agent accounts", onClose = onClose, size = DpSize(640.dp, 660.dp)) {
@@ -115,7 +116,7 @@ fun AccountsDialog(
                         },
                         onLogIn = { onLogIn(account) },
                         onLogOut = {
-                            Login.logOut(account)
+                            onLogOut(account)
                             // Bounce the draft so the row's "signed in" line re-reads the file.
                             update(draft.copy())
                         },
@@ -187,9 +188,10 @@ private fun AccountEditor(
     // that admits it. The poller already answered this off the composition thread; the file check
     // is only the stand-in until its first reading lands, because this is drawn on the UI thread
     // and the real answer costs a network round trip.
-    val signedIn = when (reading?.unavailable) {
-        null -> reading != null || Login.hasCredentials(account)
-        else -> false
+    val signedIn = when {
+        !Login.hasCredentials(account) -> false
+        reading?.unavailable in setOf("not signed in", "usage API refused the sign-in") -> false
+        else -> true
     }
 
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {

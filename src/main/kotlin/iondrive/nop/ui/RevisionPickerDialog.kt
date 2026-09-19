@@ -1,20 +1,17 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -24,7 +21,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -33,15 +29,10 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.GitRepo
 import kotlinx.coroutines.Dispatchers
@@ -57,8 +48,10 @@ import java.time.Instant
  * user types. Enter (or a click) picks one, which the caller opens as a [Tab.RevisionDiff] — that
  * revision of the file against what's on disk now.
  *
- * Same shape as [FileSearchDialog] — centered popup, Up/Down to move, Esc to dismiss — because it
- * answers the same kind of question: pick one thing out of a list nop already knows.
+ * Same shape as [FileSearchDialog] — a window of its own, Up/Down to move, Esc to dismiss — because
+ * it answers the same kind of question: pick one thing out of a list nop already knows. A window and
+ * not a popup over nop's for the same reason too: a terminal in the tool region is drawn over any
+ * popup. See [DialogFrame].
  */
 @Composable
 fun RevisionPickerDialog(
@@ -103,24 +96,15 @@ fun RevisionPickerDialog(
 
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
-    Popup(
-        popupPositionProvider = RevisionPickerPosition,
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
-    ) {
-        val border = if (JewelTheme.isDark) Color(0xFF43454A) else Color(0xFFD3D5DB)
+    val title = "Compare ${file.name} with revision"
+    DialogFrame(title = title, onClose = onDismiss, size = DpSize(620.dp, 500.dp)) {
         val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
         Column(
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(JewelTheme.globalColors.panelBackground)
-                .border(1.dp, border, RoundedCornerShape(8.dp))
-                .width(620.dp)
-                .padding(12.dp)
+                .fillMaxSize()
                 .onPreviewKeyEvent { event ->
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                     when (event.key) {
-                        Key.Escape -> { onDismiss(); true }
                         Key.DirectionDown -> {
                             if (results.isNotEmpty()) {
                                 selectedIndex = (selectedIndex + 1).coerceAtMost(results.size - 1)
@@ -140,7 +124,7 @@ fun RevisionPickerDialog(
                 },
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Compare ${file.name} with revision")
+            Text(title, fontWeight = FontWeight.SemiBold)
             TextField(
                 state = state,
                 modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
@@ -152,7 +136,7 @@ fun RevisionPickerDialog(
                 results.isEmpty() -> Text("No matches", color = muted)
                 else -> LazyColumn(
                     state = listState,
-                    modifier = Modifier.heightIn(max = 380.dp).fillMaxWidth(),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
                     itemsIndexed(results, key = { _, c -> c.sha }) { idx, c ->
                         RevisionRow(
@@ -201,17 +185,4 @@ object RevisionSearch {
             terms.all { haystack.contains(it, ignoreCase = true) }
         }
     }
-}
-
-/** Same placement as the file-search popup: centered, a sixth of the way down the window. */
-private val RevisionPickerPosition: PopupPositionProvider = object : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset = IntOffset(
-        x = (windowSize.width - popupContentSize.width) / 2,
-        y = (windowSize.height / 6).coerceAtLeast(40),
-    )
 }

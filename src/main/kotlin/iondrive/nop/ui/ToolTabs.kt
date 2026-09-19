@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,6 +43,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.Key
@@ -51,9 +53,11 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -254,18 +258,23 @@ fun ToolTabs(
         }
     }
     val toolPane: @Composable () -> Unit = {
-        Box(modifier = Modifier.fillMaxSize()) {
-            when (selected) {
-                ToolTab.Commit -> commit()
-                ToolTab.Diff -> diff()
-                ToolTab.Search -> search()
-                ToolTab.Usages -> usages()
-                ToolTab.Stash -> stash()
-                ToolTab.Preview -> preview()
-                ToolTab.History -> history()
-                // A session tab can never be the tool selection; drawing nothing beats drawing a
-                // second copy of the pane beside it.
-                ToolTab.Terminal, ToolTab.Agent, ToolTab.Run -> Unit
+        // Where this pane is, for the dropdowns inside it to stay within: the terminal beside it is
+        // drawn over any popup that strays across. See PanelDropdown.
+        var bounds by remember { mutableStateOf<Rect?>(null) }
+        Box(modifier = Modifier.fillMaxSize().onGloballyPositioned { bounds = it.boundsInWindow() }) {
+            CompositionLocalProvider(LocalPanelBounds provides bounds) {
+                when (selected) {
+                    ToolTab.Commit -> commit()
+                    ToolTab.Diff -> diff()
+                    ToolTab.Search -> search()
+                    ToolTab.Usages -> usages()
+                    ToolTab.Stash -> stash()
+                    ToolTab.Preview -> preview()
+                    ToolTab.History -> history()
+                    // A session tab can never be the tool selection; drawing nothing beats drawing
+                    // a second copy of the pane beside it.
+                    ToolTab.Terminal, ToolTab.Agent, ToolTab.Run -> Unit
+                }
             }
         }
     }

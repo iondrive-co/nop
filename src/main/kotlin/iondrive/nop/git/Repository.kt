@@ -353,13 +353,30 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         val seen = HashSet<String>()
         runCatching {
             TreeWalk(repository).use { walk ->
-                walk.addTree(FileTreeIterator(repository))
+                // Three things make the iterator answer for THIS repo in THIS direction, and every
+                // one of them fails silently — with a plausible answer — when left out:
+                //   - CHECKIN_OP, because a TreeWalk is a checkout walk by default and conversion
+                //     is not symmetric: `text eol=lf` converts on the way in, not on the way out;
+                //   - setDirCacheIterator, because an iterator with no walk to ask has nothing to
+                //     read attributes with. getCleanFilterCommand() then returns null for EVERY
+                //     path and getEolStreamType() answers from core.autocrlf alone. That made the
+                //     clean-filter test below dead code and sent every binary file down the fast
+                //     path: hermes stored 15 commits of corpus as raw bytes instead of Git LFS
+                //     pointers, 39.55 GiB of it, before the cause was found on 2026-09-18;
+                //   - the DirCache, because `text=auto` leaves a file alone when the index already
+                //     holds CRLF, and only the index can answer that.
+                // This is the setup AddCommand uses, and agreeing with AddCommand is the contract.
+                walk.setOperationType(TreeWalk.OperationType.CHECKIN_OP)
+                val cacheIdx = walk.addTree(DirCacheIterator(repository.readDirCache()))
+                val wt = FileTreeIterator(repository)
+                val treeIdx = walk.addTree(wt)
+                wt.setDirCacheIterator(walk, cacheIdx)
                 walk.isRecursive = true
                 walk.filter = PathFilterGroup.createFromStrings(wanted.keys)
                 while (walk.next()) {
                     val change = wanted[walk.pathString] ?: continue
                     seen.add(change.path)
-                    val f = walk.getTree(0, WorkingTreeIterator::class.java)
+                    val f = walk.getTree(treeIdx, WorkingTreeIterator::class.java)
                     val mode = f?.entryFileMode
                     val plain = mode == FileMode.REGULAR_FILE || mode == FileMode.EXECUTABLE_FILE
                     if (f == null || !plain || f.cleanFilterCommand != null || !passesThrough(f, change)) {

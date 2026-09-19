@@ -471,6 +471,97 @@ class AgentSessionsTest {
     }
 
     /**
+     * The 18:59 handover in hermes, as it happened: an account reading 99%, a session that had just
+     * finished answering a question about an exchange's 429 "too many requests", and a nominated
+     * account ready to take over. The reading makes a wall believable; the agent's own reply, twelve
+     * seconds old, says this was not one.
+     */
+    @Test
+    fun `a session that has just talked about a rate limit is not handed over, spent or not`(
+        @TempDir tmp: Path,
+    ) {
+        val aloancloud = Account(
+            "claude-aloancloud",
+            Provider.Anthropic,
+            "/homes/claude-aloancloud",
+            handoverTo = "claude-iondrive",
+        )
+        val iondrive = Account("claude-iondrive", Provider.Anthropic, "/homes/claude-iondrive")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        state.hasRunOut = { true }
+        val session = state.open(tmp.toFile(), aloancloud)
+        // Written during this run, as the reply was: that run had been going for eighteen minutes.
+        val said = java.time.Instant.now()
+        session.run.transcriptPath = tmp.resolve("session.jsonl").also {
+            Files.writeString(
+                it,
+                """{"type":"assistant","timestamp":"$said","message":{"content":[{"type":"text",""" +
+                    """"text":"02:10Z: Hyperliquid refused a request (a 429 \"too many requests\" reply)."}]}}""",
+            )
+        }
+
+        session.onQuotaWall(
+            QuotaHit("rate limit", "429 \"too many requests\" reply", matched = "too many requests"),
+        )
+
+        assertEquals("claude-aloancloud", session.account.name)
+        assertFalse(session.ended)
+        assertNull(session.autoHandover)
+    }
+
+    /**
+     * The same afternoon's other half: the window reset thirty seconds after the handover. A wall
+     * that is about to lift is waited out — neither handed over nor ended.
+     */
+    @Test
+    fun `a wall that lifts in a few minutes is waited out rather than handed over`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        state.hasRunOut = { true }
+        state.spentUntil = { java.time.Instant.now().plusSeconds(30) }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
+
+        assertEquals("claude-main", session.account.name)
+        assertFalse(session.ended, "a wall that lifts by itself is not a reason to end the run either")
+        assertNull(session.autoHandover)
+    }
+
+    @Test
+    fun `a wall hours from lifting is still handed over`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        state.hasRunOut = { true }
+        state.spentUntil = { java.time.Instant.now().plus(AgentSession.WAIT_FOR_RESET).plusSeconds(60) }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
+
+        assertEquals("codex", session.account.name)
+    }
+
+    /**
+     * The CLI that takes over names its conversation after the handoff it was given. The tab was
+     * already named after the work, and "Handoff from Claude Code" is what hid it from the user.
+     */
+    @Test
+    fun `a handover keeps the tab's name when the new CLI names the handoff`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        session.titleFromTranscript("LIQFADE rule health")
+
+        session.handOver(account("claude-iondrive"))
+        session.titleFromTranscript("Handoff from Claude Code", fromHandoff = true)
+
+        assertEquals("LIQFADE rule health", session.title)
+    }
+
+    /**
      * The picker's tab closes the way a terminal's does: it goes out of the strip. There is no
      * process behind it to kill — closing the last terminal leaves the strip with only its "+", and
      * this is the same gesture with the same result.

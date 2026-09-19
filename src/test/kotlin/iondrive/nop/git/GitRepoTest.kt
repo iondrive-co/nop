@@ -242,6 +242,46 @@ class GitRepoTest {
     }
 
     @Test
+    fun `parallel staging declines paths a clean filter applies to`(@TempDir tmp: Path) {
+        // The guard the whole fast path rests on, and the one case nothing above reaches: the eol
+        // tests pass on this box because core.autocrlf=input is set globally, which is also the
+        // answer an iterator with no walk gives — so they hold whether or not .gitattributes was
+        // ever read. A clean filter has no such fallback, and it is the one that costs real bytes:
+        // hermes stored 39.55 GiB of corpus as raw blobs instead of Git LFS pointers before this
+        // was found. `tr` stands in for git-lfs because it is binary-safe and needs no install.
+        val mine = (tmp / "mine").also { it.createDirectories() }
+        val reference = (tmp / "reference").also { it.createDirectories() }
+        for (dir in listOf(mine, reference)) {
+            runShell(dir, "git init -q && git config user.email t@x && git config user.name T && " +
+                "git config filter.zap.clean 'tr A B' && git config filter.zap.required true")
+            (dir / ".gitattributes").writeText("*.bin filter=zap -text\n")
+            (dir / "data").createDirectories()
+            // A NUL in the first bytes is git's own binary test, so these are precisely the files
+            // the fast path reads straight off disk once it believes no filter applies.
+            repeat(70) { i ->
+                val body = ("\u0000" + "A".repeat(600 + i)).toByteArray(Charsets.ISO_8859_1)
+                (dir / "data" / "b$i.bin").toFile().writeBytes(body)
+            }
+        }
+
+        val repo = GitRepo.discover(mine, ceiling = tmp)!!
+        repo.stageAndCommit("filtered", repo.loadStatus().changes)
+        val committed = repo.readHeadContent("data/b0.bin")
+        repo.close()
+        runShell(reference, "git add -A && git commit -q -m filtered")
+
+        assertEquals(
+            gitOutput(reference, "git rev-parse HEAD^{tree}"),
+            gitOutput(mine, "git rev-parse HEAD^{tree}"),
+            "a clean filter must be applied by AddCommand, not bypassed by reading the file raw",
+        )
+        assertFalse(
+            committed.orEmpty().contains("A"),
+            "the clean filter never ran — the fast path committed the bytes on disk",
+        )
+    }
+
+    @Test
     fun `parallel staging preserves the executable bit`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         seedBulkTree(tmp)

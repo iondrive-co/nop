@@ -34,10 +34,7 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.diff.DiffComputer
 import iondrive.nop.diff.DiffResult
 import iondrive.nop.git.ChangeKind
@@ -198,43 +195,42 @@ private fun DiffPanelHeader(count: Int, base: DiffBase, onBaseChange: (DiffBase)
 @Composable
 private fun BaseSelector(base: DiffBase, onBaseChange: (DiffBase) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Box {
-        Tooltip(tooltip = { Text("What the working tree is compared against") }) {
-            Text(
-                "base: ${base.label} ▾",
-                color = AgentMuted,
-                modifier = Modifier.clickable { expanded = !expanded }.padding(horizontal = 4.dp),
-            )
-        }
-        if (expanded) {
-            Popup(
-                onDismissRequest = { expanded = false },
-                offset = IntOffset(0, 24),
-                properties = PopupProperties(focusable = true),
-            ) {
-                val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
-                Column(
+    // Kept inside the diff panel rather than slid over the agent pane beside it: see PanelDropdown.
+    PanelDropdown(
+        expanded = expanded,
+        onDismiss = { expanded = false },
+        maxWidth = 180.dp,
+        anchor = {
+            Tooltip(tooltip = { Text("What the working tree is compared against") }) {
+                Text(
+                    "base: ${base.label} ▾",
+                    color = AgentMuted,
+                    modifier = Modifier.clickable { expanded = !expanded }.padding(horizontal = 4.dp),
+                )
+            }
+        },
+    ) { width ->
+        val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
+        Column(
+            modifier = Modifier
+                .width(width)
+                .clip(RoundedCornerShape(6.dp))
+                .background(JewelTheme.globalColors.panelBackground)
+                .border(1.dp, border, RoundedCornerShape(6.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            DiffBase.entries.forEach { option ->
+                Text(
+                    option.label,
+                    color = if (option == base) ChangeColors.MODIFIED else Color.Unspecified,
                     modifier = Modifier
-                        .width(180.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(JewelTheme.globalColors.panelBackground)
-                        .border(1.dp, border, RoundedCornerShape(6.dp))
-                        .padding(vertical = 4.dp),
-                ) {
-                    DiffBase.entries.forEach { option ->
-                        Text(
-                            option.label,
-                            color = if (option == base) ChangeColors.MODIFIED else Color.Unspecified,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    expanded = false
-                                    onBaseChange(option)
-                                }
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
-                }
+                        .fillMaxWidth()
+                        .clickable {
+                            expanded = false
+                            onBaseChange(option)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
             }
         }
     }

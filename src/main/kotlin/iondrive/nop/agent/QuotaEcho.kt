@@ -2,6 +2,7 @@ package iondrive.nop.agent
 
 import iondrive.nop.Log
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -50,6 +51,10 @@ import java.time.Instant
  * on every resume until the session cannot be re-entered at all. There is no undo for that; there
  * is for this.
  *
+ * One kind of echo outranks even the account's own usage reading: the agent's own reply, written
+ * moments ago — see [Verdict.Said]. A reading at 99% says a wall is believable, not that the text on
+ * screen is one, and a session that has just finished explaining a rate limit is not out of quota.
+ *
  * A provider with no transcript nop can read is [Verdict.Unrecorded] here and is decided exactly as
  * it was before — see [AgentSession.onQuotaWall], which has the account's own usage reading as well.
  */
@@ -62,6 +67,14 @@ object QuotaEcho {
          * whatever the conversation also happens to quote.
          */
         Refused,
+
+        /**
+         * No fresh refusal, and the agent itself wrote the phrase moments ago, in a reply of this
+         * run. A refused request produces no reply at all, so the words on screen are the agent's —
+         * the 18:59 handover in hermes was of a session that had just answered a question about a
+         * 429 "too many requests" from an exchange, and had finished its turn doing so.
+         */
+        Said,
 
         /**
          * No fresh refusal, and the phrase is in the transcript anyway: in the conversation, or in
@@ -109,14 +122,53 @@ object QuotaEcho {
         // transcript and veto every wall — but it cannot hide a refusal, so the scan still runs.
         val needle = flatten(phrase).takeIf { it.isNotBlank() }
         val freshFrom = maxOf(since, now.minus(FRESH))
+        var said = false
         var shown = false
         for (line in text.lineSequence()) {
             val refusedAt = refusal(line)
             if (refusedAt != null && !refusedAt.isBefore(freshFrom)) return Verdict.Refused
-            if (!shown && needle != null && flatten(line).contains(needle)) shown = true
+            if (needle == null || said || !flatten(line).contains(needle)) continue
+            shown = true
+            val reply = reply(line) ?: continue
+            if (!reply.first.isBefore(freshFrom) && flatten(reply.second).contains(needle)) said = true
         }
-        return if (shown) Verdict.Shown else Verdict.Unrecorded
+        return when {
+            said -> Verdict.Said
+            shown -> Verdict.Shown
+            else -> Verdict.Unrecorded
+        }
     }
+
+    /**
+     * When the agent wrote [line] as a reply of its own, and the text of it; null for anything else.
+     *
+     * Claude's `assistant` records, less the ones flagged `isApiErrorMessage` (the vendor wearing the
+     * assistant's role — see [refusal]), and Codex's `agent_message` events and `assistant` messages.
+     * Only the text: a tool call's input is the agent handling something, which is [Verdict.Shown]'s
+     * territory. Antigravity files no replies nop can read, so it never gets this far.
+     */
+    private fun reply(line: String): Pair<Instant, String>? {
+        val record = runCatching { json.parseToJsonElement(line.trim()) }.getOrNull().obj() ?: return null
+        val at = record["timestamp"].str()?.let { runCatching { Instant.parse(it) }.getOrNull() } ?: return null
+        val payload = record["payload"].obj()
+        val text = when (record["type"].str()) {
+            "assistant" ->
+                if (record["isApiErrorMessage"].bool()) null else texts(record["message"].obj()?.get("content"))
+            "event_msg" -> if (payload?.get("type").str() == "agent_message") payload?.get("message").str() else null
+            "response_item" ->
+                if (payload?.get("type").str() == "message" && payload?.get("role").str() == "assistant") {
+                    texts(payload?.get("content"))
+                } else {
+                    null
+                }
+            else -> null
+        }
+        return text?.let { at to it }
+    }
+
+    /** The `text` of each block in a message's content list, joined. */
+    private fun texts(content: JsonElement?): String? =
+        content.arr()?.mapNotNull { it.obj()?.get("text").str() }?.joinToString("\n")
 
     /**
      * When the CLI filed [line] as its own account of a refusal, or null when it is anything else.

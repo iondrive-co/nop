@@ -46,10 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitStatus
@@ -330,38 +327,38 @@ private fun RecentMessagesDropdown(
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    Box(modifier = modifier) {
-        OutlinedButton(onClick = { expanded = !expanded }) {
-            Text("Recent messages ▾")
-        }
-        if (expanded) {
-            Popup(
-                onDismissRequest = { expanded = false },
-                offset = IntOffset(0, 32),
-                properties = PopupProperties(focusable = true),
-            ) {
-                val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
-                val bg = JewelTheme.globalColors.panelBackground
-                Column(
-                    modifier = Modifier
-                        .width(460.dp)
-                        .heightIn(max = 280.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(bg)
-                        .border(1.dp, border, RoundedCornerShape(6.dp))
-                        .padding(vertical = 4.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    for (msg in messages) {
-                        MessageRow(
-                            message = msg,
-                            onClick = {
-                                expanded = false
-                                onPick(msg)
-                            },
-                        )
-                    }
-                }
+    // Kept inside the commit panel rather than slid over the agent pane beside it: see PanelDropdown.
+    PanelDropdown(
+        expanded = expanded,
+        onDismiss = { expanded = false },
+        maxWidth = 460.dp,
+        modifier = modifier,
+        anchor = {
+            OutlinedButton(onClick = { expanded = !expanded }) {
+                Text("Recent messages ▾")
+            }
+        },
+    ) { width ->
+        val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
+        val bg = JewelTheme.globalColors.panelBackground
+        Column(
+            modifier = Modifier
+                .width(width)
+                .heightIn(max = 280.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(bg)
+                .border(1.dp, border, RoundedCornerShape(6.dp))
+                .padding(vertical = 4.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            for (msg in messages) {
+                MessageRow(
+                    message = msg,
+                    onClick = {
+                        expanded = false
+                        onPick(msg)
+                    },
+                )
             }
         }
     }
@@ -371,15 +368,14 @@ private fun RecentMessagesDropdown(
 @Composable
 private fun MessageRow(message: String, onClick: () -> Unit) {
     val firstLine = message.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: message
-    // Truncate so a long subject line can't blow out the popup width or wrap onto two lines.
-    val label = if (firstLine.length > 80) firstLine.take(79) + "…" else firstLine
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
-        Text(label)
+        // One line, ellipsised at whatever width the dropdown got, so each row stays one message.
+        Text(firstLine, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

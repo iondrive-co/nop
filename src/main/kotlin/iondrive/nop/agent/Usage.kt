@@ -109,13 +109,38 @@ data class UsageReading(
      * at — null leaves the decision exactly where it was before this existed.
      */
     fun looksSpent(now: Instant = Instant.now()): Boolean? {
+        val windows = current(now)?.takeIf { it.isNotEmpty() } ?: return null
+        // A window whose reset has passed has rolled over since the reading was taken: whatever it
+        // said then, it is empty now, and the next poll will say so.
+        val worst = windows.filterNot { it.rolledOver(now) }.maxOfOrNull { it.percent } ?: return false
+        return worst >= SPENT_PERCENT
+    }
+
+    /**
+     * When this account can be served again, if the reading says it is spent and says when every
+     * spent window resets; null otherwise.
+     *
+     * The latest of the spent windows' resets, since the account is out until the last of them rolls
+     * over: a session window resetting in a minute is no use under a weekly one spent for three days.
+     * A spent window with no reset time is null. So is a stale reading, for the same reason as in
+     * [looksSpent].
+     */
+    fun spentUntil(now: Instant = Instant.now()): Instant? {
+        val spent = current(now)?.filter { it.percent >= SPENT_PERCENT && !it.rolledOver(now) }
+        if (spent.isNullOrEmpty()) return null
+        return spent.map { it.resetsAt ?: return null }.max()
+    }
+
+    /** The windows, when the reading is about the present; null when it is not worth acting on. */
+    private fun current(now: Instant): List<UsageWindow>? {
         if (unavailable != null) return null
         // A reading has to be about the present to contradict something happening in the present.
         val taken = asOf ?: return null
         if (Duration.between(taken, now) > FRESH_ENOUGH) return null
-        val worst = listOfNotNull(session?.percent, weekly?.percent).maxOrNull() ?: return null
-        return worst >= SPENT_PERCENT
+        return listOfNotNull(session, weekly)
     }
+
+    private fun UsageWindow.rolledOver(now: Instant): Boolean = resetsAt?.isAfter(now) == false
 
     companion object {
         fun unavailable(why: String) = UsageReading(null, null, null, why)

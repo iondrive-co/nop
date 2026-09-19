@@ -55,6 +55,9 @@ class AgentSessions {
      */
     var hasRunOut: (Account) -> Boolean? = { _ -> null }
 
+    /** When an account can be served again, by the same readings. See [AgentSession.spentUntil]. */
+    var spentUntil: (Account) -> java.time.Instant? = { _ -> null }
+
     /**
      * Launches [account] at [dir] as a new session and shows it, in the tab the picker was in.
      *
@@ -79,6 +82,7 @@ class AgentSessions {
             baselineSha = baselineSha,
             handoverTarget = { from -> handoverTarget(from) },
             hasRunOut = { of -> hasRunOut(of) },
+            spentUntil = { of -> spentUntil(of) },
         )
         _sessions.add(session)
         selectedId = session.sessionId
@@ -143,6 +147,7 @@ class AgentSessions {
                     // has to follow the settings as they stand whenever the wall is actually hit.
                     handoverTarget = { from -> handoverTarget(from) },
                     hasRunOut = { of -> hasRunOut(of) },
+                    spentUntil = { of -> spentUntil(of) },
                 ),
             )
         }

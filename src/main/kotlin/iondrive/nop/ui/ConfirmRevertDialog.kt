@@ -1,28 +1,17 @@
 package iondrive.nop.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.FileChange
-import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
@@ -105,9 +94,14 @@ internal fun plural(count: Int, noun: String) = if (count == 1) "1 $noun" else "
 private const val MaxListedChanges = 12
 
 /**
- * The shared frame the destructive-git confirmations sit in — centred popup, body, Cancel/confirm
- * row. Used by both revert dialogs here and by the history log's restore ([ConfirmRestoreDialog]),
- * so a warning about losing uncommitted work looks the same wherever it is raised from.
+ * The shared frame the destructive-git confirmations sit in — title, body, Cancel/confirm row. Used
+ * by both revert dialogs here and by the history log's revert ([ConfirmRevertCommitDialog]), so a
+ * warning about losing uncommitted work looks the same wherever it is raised from.
+ *
+ * A window of its own, not a popup centred in nop's: revert is asked for from the commit panel,
+ * right beside the agent pane, and a terminal there is drawn over any popup — the confirmation came
+ * up with its buttons hidden behind it. See [DialogFrame]. Enter is deliberately not a shortcut for
+ * confirming: nothing here can be undone.
  */
 @Composable
 internal fun ConfirmGitActionDialog(
@@ -117,40 +111,15 @@ internal fun ConfirmGitActionDialog(
     confirmLabel: String = "Revert",
     body: @Composable () -> Unit,
 ) {
-    Popup(
-        popupPositionProvider = ConfirmCenteredPositionProvider,
-        onDismissRequest = onCancel,
-        properties = PopupProperties(focusable = true, dismissOnBackPress = true, dismissOnClickOutside = true),
-    ) {
-        Column(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(JewelTheme.globalColors.panelBackground)
-                .width(420.dp)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+    DialogFrame(title = title, onClose = onCancel, size = DpSize(420.dp, Dp.Unspecified)) {
+        Text(title, fontWeight = FontWeight.SemiBold)
+        body()
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
         ) {
-            Text(title)
-            body()
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-            ) {
-                OutlinedButton(onClick = onCancel) { Text("Cancel") }
-                DefaultButton(onClick = onConfirm) { Text(confirmLabel) }
-            }
+            OutlinedButton(onClick = onCancel) { Text("Cancel") }
+            DefaultButton(onClick = onConfirm) { Text(confirmLabel) }
         }
     }
-}
-
-internal val ConfirmCenteredPositionProvider: PopupPositionProvider = object : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset = IntOffset(
-        x = (windowSize.width - popupContentSize.width) / 2,
-        y = (windowSize.height - popupContentSize.height) / 3,
-    )
 }
