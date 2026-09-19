@@ -58,7 +58,7 @@ object NativeSessions {
     )
 
     /**
-     * Every Claude session filed under [project] across [stores], newest first.
+     * Every Claude session filed under [project] across [stores], most recently active first.
      *
      * Failures are per store and per file: a directory that cannot be listed, or a transcript whose
      * first lines are unreadable, costs its own row rather than the whole list. The picker is a way
@@ -75,7 +75,7 @@ object NativeSessions {
                 }
             }.getOrElse { emptyList() }
             files.mapNotNull { file -> summarise(file, store, projectPath) }
-        }.sortedByDescending { it.startedAt }
+        }.sortedByDescending { it.lastActiveAt }
     }
 
     /**
@@ -167,8 +167,11 @@ object NativeSessions {
         }
 
         val id = file.fileName.toString().removeSuffix(".jsonl")
+        // The CLI appends to the transcript for as long as the conversation goes on, so its time is
+        // when the conversation last did anything.
+        val touched = modified(file)
         // A transcript with nothing in it yet is a session that has not started, not one to offer.
-        val at = startedAt ?: modified(file) ?: return null
+        val at = startedAt ?: touched ?: return null
         if (titled == null && firstPrompt == null) return null
 
         return PastSession(
@@ -180,6 +183,7 @@ object NativeSessions {
             lastAccount = store.label,
             lastNativeSessionId = id,
             home = store.dir.toString(),
+            lastActiveAt = touched ?: at,
         )
     }
 

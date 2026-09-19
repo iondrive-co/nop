@@ -172,7 +172,7 @@ private fun PastSessionRow(past: PastSession, account: Account?, onReopen: () ->
             overflow = TextOverflow.Ellipsis,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(Ago.of(past.startedAt), color = AgentMuted)
+            Text(Ago.of(past.lastActiveAt), color = AgentMuted)
             past.lastAccount?.let { Text(it, color = AgentMuted) }
             if (!resumable) Text("nothing to resume", color = AgentMuted)
         }

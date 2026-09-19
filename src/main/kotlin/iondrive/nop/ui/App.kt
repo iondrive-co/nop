@@ -703,7 +703,7 @@ fun App(
                 .toSet()
             val native = NativeSessions.claude(rootPath, NativeSessions.stores(agentAccounts))
                 .filterNot { it.sessionId in seen }
-            (own + native).sortedByDescending { it.startedAt }
+            (own + native).sortedByDescending { it.lastActiveAt }
         }
     }
     // The agent tabs this project had when nop last exited, put back and then kept up to date.

@@ -205,6 +205,23 @@ class EventLogTest {
         assertTrue(EventLog.sessions(tmp).none { it.title == "Not ours" })
     }
 
+    /**
+     * A conversation begun this morning and worked in until a minute ago is the one the user was
+     * just in. Dated by its start, it sat below everything begun since.
+     */
+    @Test
+    fun `a session is listed by when it was last active, not when it began`(@TempDir tmp: Path) {
+        val allDay = session("ours-all-day", tmp.toString(), "Begun this morning", null)
+        session("ours-brief", tmp.toString(), "Begun at lunch", null)
+        val justNow = System.currentTimeMillis() + 60_000
+        Files.setLastModifiedTime(allDay.file, java.nio.file.attribute.FileTime.fromMillis(justNow))
+
+        val listed = EventLog.sessions(tmp).filter { it.sessionId.startsWith("ours") }
+
+        assertEquals(listOf("Begun this morning", "Begun at lunch"), listed.map { it.title })
+        assertEquals(justNow, listed.first().lastActiveAt, "the picker says how long ago that was")
+    }
+
     @Test
     fun `a session with no title of its own is labelled by the first thing the user typed`(@TempDir tmp: Path) {
         session("by-prompt", tmp.toString(), null, "Make the provisioning script work for AWS\nand test it")

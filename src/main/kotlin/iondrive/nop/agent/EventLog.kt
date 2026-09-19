@@ -165,6 +165,12 @@ data class PastSession(
      * against that directory rather than picking a configured account to spend.
      */
     val home: String? = null,
+    /**
+     * When the session last did anything, as far as its files say: what the picker sorts by and
+     * shows. Not [startedAt] — a conversation opened at breakfast and worked in all day is the one
+     * the user was just in, and dating it by its first message sank it below everything begun since.
+     */
+    val lastActiveAt: Long = startedAt,
 ) {
     /**
      * The account reopening this session would run, or null when nop has no way back into it.
@@ -280,7 +286,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
         }.getOrDefault(emptyList())
 
         /**
-         * The sessions this project has had, newest first.
+         * The sessions this project has had, most recently active first.
          *
          * Each log is read once, streaming, keeping only what a row needs: the label comes from the
          * head — a title, or failing that the first thing the user typed, both written early — and
@@ -297,7 +303,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             val wanted = projectPath.toAbsolutePath().normalize().toString()
 
             return files.mapNotNull { file -> summarise(file, wanted) }
-                .sortedByDescending { it.startedAt }
+                .sortedByDescending { it.lastActiveAt }
         }
 
         /**
@@ -361,6 +367,11 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 lastAccount = lastRun?.account,
                 lastNativeSessionId = resumeId(lastRun, lastSpawn?.at ?: session.at),
                 home = lastRun?.home ?: storeOf(lastRun),
+                // The log's own time rather than the transcript's: the tailer appends to it for
+                // everything the conversation does, whichever provider, and one Antigravity keeps
+                // its prompts in a single file for every conversation, whose time says nothing.
+                lastActiveAt = runCatching { Files.getLastModifiedTime(file).toMillis() }.getOrNull()
+                    ?: session.at,
             )
         }
 

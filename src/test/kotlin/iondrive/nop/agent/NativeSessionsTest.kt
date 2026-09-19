@@ -95,11 +95,11 @@ class NativeSessionsTest {
         Files.writeString(
             slugDir(work, project).resolve("eeee-5555.jsonl"),
             prompt("older", "2026-09-16T01:00:00.000Z") + "\n",
-        )
+        ).also { touch(it, "2026-09-16T01:30:00Z") }
         Files.writeString(
             slugDir(personal, project).resolve("ffff-6666.jsonl"),
             prompt("newer", "2026-09-16T04:00:00.000Z") + "\n",
-        )
+        ).also { touch(it, "2026-09-16T04:30:00Z") }
 
         val rows = NativeSessions.claude(
             project,
@@ -108,6 +108,34 @@ class NativeSessionsTest {
 
         assertEquals(listOf("newer", "older"), rows.map { it.title })
         assertEquals(listOf("claude-home", "claude-work"), rows.map { it.lastAccount })
+    }
+
+    /**
+     * The hermes session of 2026-09-19: begun at 14:20, worked in until 18:59, and listed as "5h ago"
+     * beneath sessions begun after it, however long ago they were last touched. The transcript's own
+     * time is when it last did anything, and that is what the picker sorts by and shows.
+     */
+    @Test
+    fun `a session is listed by when it was last active, not when it began`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val store = tmp.resolve("store")
+        val dir = slugDir(store, project)
+        Files.writeString(dir.resolve("aaaa-1420.jsonl"), prompt("LIQFADE", "2026-09-19T04:20:52.000Z") + "\n")
+            .also { touch(it, "2026-09-19T08:59:40Z") }
+        Files.writeString(dir.resolve("bbbb-1901.jsonl"), prompt("Plan 36", "2026-09-19T09:01:07.000Z") + "\n")
+            .also { touch(it, "2026-09-19T09:02:00Z") }
+        Files.writeString(dir.resolve("cccc-1700.jsonl"), prompt("brief", "2026-09-19T07:00:00.000Z") + "\n")
+            .also { touch(it, "2026-09-19T07:05:00Z") }
+
+        val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("s", store)))
+
+        assertEquals(listOf("Plan 36", "LIQFADE", "brief"), rows.map { it.title })
+        assertEquals(java.time.Instant.parse("2026-09-19T08:59:40Z").toEpochMilli(), rows[1].lastActiveAt)
+        assertEquals(java.time.Instant.parse("2026-09-19T04:20:52Z").toEpochMilli(), rows[1].startedAt)
+    }
+
+    private fun touch(file: Path, at: String) {
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.from(java.time.Instant.parse(at)))
     }
 
     /**
