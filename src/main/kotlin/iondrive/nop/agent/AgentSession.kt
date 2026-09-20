@@ -157,6 +157,18 @@ class AgentSession(
      * changes.
      */
     private val spentUntil: (Account) -> Instant? = { _ -> null },
+    /**
+     * What to do when the CLI in this tab quits of its own accord and cleanly — `/exit`, `quit`,
+     * Ctrl-D at its prompt. Wired by [AgentSessions] to closing the tab.
+     *
+     * Quitting the CLI is how the user says the work in that tab is over, and a dead TUI left in
+     * the strip made them say it twice: once to the agent and once to nop. Every other way a run
+     * can end keeps its tab, because each of those leaves something on screen worth reading — a
+     * wall and a crash both do, and the post-exit choices are the answer to them (see
+     * [iondrive.nop.ui.AgentExitPanel]). A non-zero exit is a crash as far as this can tell, so it
+     * is not this.
+     */
+    private val onExited: (AgentSession) -> Unit = { },
 ) : TerminalTab {
 
     /**
@@ -827,7 +839,16 @@ class AgentSession(
         // happens to look at the session next: the last records are written on the way out. Guarded
         // on still being the current run, so a dying TUI a switch has already replaced cannot end
         // the one that took its place.
-        terminal.onExit = { if (run === newRun) endRun(EndReason.Exited) }
+        terminal.onExit = { code ->
+            if (run === newRun && newRun.endReason == null) {
+                endRun(EndReason.Exited)
+                // A clean exit is the user leaving; anything else is the CLI falling over, and the
+                // tab is where the evidence of that is. Off this thread before the tab goes, for
+                // the same reason the quota watcher hops threads: closing disposes the very
+                // terminal whose watcher is calling us, which is the UI thread's work.
+                if (code == 0) SwingUtilities.invokeLater { onExited(this) }
+            }
+        }
         return newRun
     }
 

@@ -127,7 +127,7 @@ class AgentSessionsTest {
     }
 
     @Test
-    fun `closing a session drops it and falls back to the picker`(@TempDir tmp: Path) {
+    fun `closing a session drops it and lands on the tab beside it`(@TempDir tmp: Path) {
         val state = sessions()
         val first = state.open(tmp.toFile(), account("claude-main"))
         val second = state.open(tmp.toFile(), account("codex", Provider.OpenAI))
@@ -135,9 +135,10 @@ class AgentSessionsTest {
         state.close(second.sessionId)
 
         assertEquals(listOf(first.sessionId), state.sessions.map { it.sessionId })
-        assertNull(
+        assertEquals(
+            first.sessionId,
             state.selectedId,
-            "after closing a session the useful next thing is starting another, which is the picker",
+            "closing a tab is not a request for an empty one — the strip keeps what is left",
         )
     }
 
@@ -608,19 +609,84 @@ class AgentSessionsTest {
     }
 
     /**
-     * The pane falls back to the picker when the session on screen is closed, so the strip has to
-     * have a tab for it — a strip with nothing selected beside a panel showing the picker is a
-     * strip that disagrees with the panel.
+     * The "+" is the only thing that makes the empty tab. Closing a session used to make one too,
+     * which meant tidying the strip up handed back another tab to close.
      */
     @Test
-    fun `closing the session on screen brings the picker's tab back with it`(@TempDir tmp: Path) {
+    fun `closing the last session makes no tab to replace it`(@TempDir tmp: Path) {
         val state = sessions()
         val session = state.open(tmp.toFile(), account("claude-main"))
         assertFalse(state.pickerTabVisible)
 
         state.close(session.sessionId)
 
-        assertTrue(state.pickerTabVisible)
+        assertFalse(state.pickerTabVisible, "only the + makes the picker's tab")
+        assertNull(state.selectedId, "with nothing left to show, the pane holds the picker")
+    }
+
+    /** With something left, closing the tab on screen lands on its neighbour, as a terminal's does. */
+    @Test
+    fun `closing the session on screen falls to a neighbour`(@TempDir tmp: Path) {
+        val state = sessions()
+        val first = state.open(tmp.toFile(), account("claude-main"))
+        val second = state.open(tmp.toFile(), account("codex", Provider.OpenAI))
+        state.select(second.sessionId)
+
+        state.close(second.sessionId)
+
+        assertEquals(first.sessionId, state.selectedId)
+        assertFalse(state.pickerTabVisible)
+    }
+
+    /**
+     * Typing `/exit` is the user saying the work in that tab is over. Leaving the dead TUI in the
+     * strip made them say it a second time, to nop.
+     */
+    @Test
+    fun `quitting the CLI closes the tab`(@TempDir tmp: Path) {
+        val state = sessions()
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.run.session.onExit?.invoke(0)
+        javax.swing.SwingUtilities.invokeAndWait { }
+
+        assertTrue(state.sessions.isEmpty(), "the CLI exited cleanly, so the tab has done its job")
+        assertFalse(state.pickerTabVisible, "and closing a tab is still not a reason to make one")
+    }
+
+    /**
+     * A CLI that fell over is the one case where the dead frame is worth keeping: it is where the
+     * reason is, and the post-exit choices are how the run is picked back up.
+     */
+    @Test
+    fun `a CLI that exits badly keeps its tab`(@TempDir tmp: Path) {
+        val state = sessions()
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.run.session.onExit?.invoke(1)
+        javax.swing.SwingUtilities.invokeAndWait { }
+
+        assertEquals(listOf(session), state.sessions)
+        assertTrue(session.ended, "the run is over either way")
+    }
+
+    /**
+     * And a wall nobody was nominated for ends the run by killing the CLI, which exits like any
+     * other dying process. The choice of where the work goes next is the whole point of the tab
+     * staying, so that exit must not take it away.
+     */
+    @Test
+    fun `a session ended at a quota wall keeps its tab`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { true }
+        val session = state.open(tmp.toFile(), account("claude-main"))
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
+        session.run.session.onExit?.invoke(0)
+        javax.swing.SwingUtilities.invokeAndWait { }
+
+        assertEquals(listOf(session), state.sessions)
+        assertEquals(EndReason.Quota, session.run.endReason)
     }
 
     /** Closing a tab the user is not looking at moves nothing: the strip is theirs to arrange. */

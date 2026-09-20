@@ -1528,7 +1528,7 @@ fun App(
                                     agentSessions.select(id)
                                     showSession(ToolTab.Agent)
                                 },
-                                onCloseAgent = { agentSessions.close(it) },
+                                onCloseAgent = { id -> agentSessions.close(id) },
                                 onRenameAgent = { id, name -> agentSessions.rename(id, name) },
                                 runs = runSessions,
                                 onSelectRun = { id ->
@@ -1575,12 +1575,24 @@ fun App(
                                         state = agentSessions,
                                         accounts = agentAccounts,
                                         readings = agentUsage,
-                                        // Minus the ones the strip already holds — since agent tabs
-                                        // come back at the next start, a restored session is both a
-                                        // tab and a past session, and clicking it here would resume
-                                        // the same conversation a second time beside the first.
+                                        // Minus the ones the strip is still running — since agent
+                                        // tabs come back at the next start, a restored session is
+                                        // both a tab and a past session, and clicking it here would
+                                        // resume the same conversation a second time beside the
+                                        // first.
+                                        //
+                                        // Only while it is running, though. A tab whose run has
+                                        // ended holds nothing but the post-exit choices, and it is
+                                        // the one case where hiding the row hid the work: a session
+                                        // that handed over and then stopped is listed by nop
+                                        // under the conversation it ended in, so hiding that row
+                                        // left the picker showing only the conversation the
+                                        // handover walked away from — on the account that had
+                                        // just run out.
                                         sessions = pastAgentSessions.filterNot { past ->
-                                            agentSessions.sessions.any { it.sessionId == past.sessionId }
+                                            agentSessions.sessions.any {
+                                                it.sessionId == past.sessionId && !it.ended
+                                            }
                                         },
                                         // The same path every launch below is given, so the picker
                                         // cannot name one directory and start the CLI in another.

@@ -83,6 +83,7 @@ class AgentSessions {
             handoverTarget = { from -> handoverTarget(from) },
             hasRunOut = { of -> hasRunOut(of) },
             spentUntil = { of -> spentUntil(of) },
+            onExited = { ended -> close(ended.sessionId) },
         )
         _sessions.add(session)
         selectedId = session.sessionId
@@ -148,6 +149,7 @@ class AgentSessions {
                     handoverTarget = { from -> handoverTarget(from) },
                     hasRunOut = { of -> hasRunOut(of) },
                     spentUntil = { of -> spentUntil(of) },
+                    onExited = { ended -> close(ended.sessionId) },
                 ),
             )
         }
@@ -187,18 +189,22 @@ class AgentSessions {
         pickerTabVisible = false
     }
 
-    /** Kills the session behind [id] and drops it from the strip. */
+    /**
+     * Kills the session behind [id] and drops it from the strip.
+     *
+     * Falls to a neighbour, the way closing a terminal does, and makes no empty tab on the way out.
+     * Closing used to bring the picker's tab back with it, on the grounds that starting another
+     * session is the usual next thing — but it is only usual, and when it was not, tidying the
+     * strip handed back a second tab to close. The "+" is the one thing that makes that tab now;
+     * with nothing left to fall to, the pane shows the picker anyway, which is exactly where
+     * closing the picker's own tab leaves it.
+     */
     fun close(id: String) {
         val idx = _sessions.indexOfFirst { it.sessionId == id }
         if (idx < 0) return
         _sessions.removeAt(idx).dispose()
-        // Fall back to the picker rather than to a neighbour: after closing a session the useful
-        // next thing is almost always starting another, and the picker is where that lives. Its tab
-        // comes with it — the pane is holding the picker, and a strip with nothing selected in it
-        // while the picker is on screen is a strip that disagrees with the panel beside it.
         if (selectedId == id) {
-            selectedId = null
-            pickerTabVisible = true
+            selectedId = (_sessions.getOrNull(idx) ?: _sessions.getOrNull(idx - 1))?.sessionId
         }
     }
 

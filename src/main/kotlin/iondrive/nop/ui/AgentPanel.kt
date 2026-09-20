@@ -62,8 +62,9 @@ fun AgentPanel(
         return
     }
 
-    // Dismissed per ending, not per session: closing the panel after one run must not suppress it
-    // for the next, which after a switch is a different provider entirely.
+    // Dismissed per ending, not per session: dismissing the exit choices on a reopen, a fresh
+    // start or a switch must not suppress them for the next run, which after a switch is a
+    // different provider entirely.
     var dismissedAt by remember(selected.sessionId) { mutableStateOf(0L) }
     val showExit = selected.ended && selected.endedAt > dismissedAt
 
@@ -98,7 +99,7 @@ fun AgentPanel(
                     dismissedAt = selected.endedAt
                     selected.handOver(account)
                 },
-                onClose = { dismissedAt = selected.endedAt },
+                onClose = { state.close(selected.sessionId) },
             )
         }
         Box(modifier = Modifier.weight(1f)) {
