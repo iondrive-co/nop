@@ -48,4 +48,19 @@ class TerminalFileDropTest {
     fun `a newline in the name is quoted`() {
         assertEquals("'/tmp/a\nb.png'", quoteForPrompt("/tmp/a\nb.png"))
     }
+
+    @Test
+    fun `saveImageToTemp writes a PNG image to temp and returns its path`() {
+        val img = java.awt.image.BufferedImage(64, 48, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val path = saveImageToTemp(img)
+        org.junit.jupiter.api.Assertions.assertNotNull(path)
+        org.junit.jupiter.api.Assertions.assertTrue(java.nio.file.Files.exists(path!!))
+        org.junit.jupiter.api.Assertions.assertTrue(path.fileName.toString().endsWith(".png"))
+
+        val readBack = javax.imageio.ImageIO.read(path.toFile())
+        assertEquals(64, readBack.width)
+        assertEquals(48, readBack.height)
+
+        java.nio.file.Files.deleteIfExists(path)
+    }
 }

@@ -736,14 +736,22 @@ class AgentSession(
     /**
      * This session as a row for the state file, or null for one that should not come back.
      *
-     * Two kinds decline. A session whose run has [ended] is one the user quit: the tab is still in
-     * the strip so its last frame can be read, but starting nop again is not a reason to start that
-     * CLI again — the picker lists it among the past sessions, which is where a deliberate return to
-     * it belongs. And a session with no [AgentRun.nativeSessionId] is one nop has no way back into;
-     * restoring it would be a tab in the right place with the wrong conversation behind it.
+     * Two kinds decline. A session whose run the *user* ended is one they are finished with: the
+     * tab is still in the strip so its last frame can be read, but starting nop again is not a
+     * reason to start that CLI again — the picker lists it among the past sessions, which is where
+     * a deliberate return to it belongs. And a session with no [AgentRun.nativeSessionId] is one
+     * nop has no way back into; restoring it would be a tab in the right place with the wrong
+     * conversation behind it.
+     *
+     * [EndReason.Killed] is explicitly not the first of those. It is nop's own doing — [dispose],
+     * which is what quitting nop calls on every session it has — so reading it as "the user quit
+     * this one" makes the rows disappear at exactly the moment they are needed: shutdown ends every
+     * session, and whether the strip survives the restart then comes down to whether the save that
+     * watches this ran before the process died. A tab the user really did close is dropped from the
+     * strip in the same breath, so it never reaches this at all.
      */
     fun asOpenAgent(): Settings.OpenAgent? {
-        if (ended) return null
+        if (ended && run.endReason != EndReason.Killed) return null
         val native = run.nativeSessionId ?: return null
         return Settings.OpenAgent(
             sessionId = sessionId,
@@ -864,6 +872,12 @@ class AgentSession(
             // Everything nop is following *except* this run. It is what stops the tailer adopting
             // the transcript of another agent tab on the same project — see [LiveTranscripts].
             foreign = { id -> id != newRun.nativeSessionId && LiveTranscripts.isLive(id) },
+            // A conversation this session has already written down: the tab came back from the
+            // state file, or was reopened from the picker. Its transcript is not news, and reading
+            // it as though it were is what used to rename the tab back to whatever the CLI last
+            // called it. A resume into a log with nothing in it — a vendor session nop has never
+            // followed — still replays, because there the history is the whole point.
+            resumingLoggedWork = resumeId != null && log.hadHistory,
         )
         val tailer = tailerFor(account)
         newRun.follower = TranscriptFollower(

@@ -133,6 +133,11 @@ class TerminalSession private constructor(
             override fun keyPressed(e: java.awt.event.KeyEvent) {
                 if (e.keyCode == java.awt.event.KeyEvent.VK_ENTER) {
                     onUserInput?.invoke()
+                } else if (e.keyCode == java.awt.event.KeyEvent.VK_S &&
+                    e.isControlDown && e.isShiftDown && !e.isAltDown
+                ) {
+                    e.consume()
+                    snipArea()
                 }
             }
         })
@@ -234,6 +239,22 @@ class TerminalSession private constructor(
         }
         SwingUtilities.invokeLater {
             (widget as? NopTerminalWidget)?.scrollToBottom()
+        }
+    }
+
+    /** Requests focus for this session's terminal widget. */
+    fun requestFocus() {
+        widget?.requestFocusInWindow()
+    }
+
+    /**
+     * Starts the interactive screen region selector tool and types the selected image's path into
+     * this terminal's prompt ready to send.
+     */
+    fun snipArea() {
+        ScreenSnip.start { path ->
+            sendText(quoteForPrompt(path.toAbsolutePath().toString()) + " ")
+            requestFocus()
         }
     }
 

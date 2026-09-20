@@ -369,6 +369,100 @@ class ClaudeTailerTest {
         }
     }
 
+    /**
+     * The bug that made a restart look like lost work.
+     *
+     * A tab put back from the state file resumes a conversation whose transcript is already hours
+     * long, and every line of it is already in the session's own event log. Reading it again filed
+     * a second copy of the lot — and Claude re-states its title on most records, so the last one
+     * through renamed the tab to whatever the CLI had last called it. A session saved as "Plan 40
+     * completion check" came back up called "Handoff from Claude Code", which is not a name its
+     * owner was looking for.
+     */
+    @Test
+    fun `a resumed run joins its transcript at the end instead of replaying it`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val file = dir.resolve("resumed.jsonl")
+        Files.writeString(
+            file,
+            """{"type":"user","timestamp":"2026-09-15T00:00:00.000Z","message":{"role":"user","content":"an hour of history"}}""" + "\n" +
+                """{"type":"ai-title","aiTitle":"Handoff from Claude Code"}""" + "\n",
+        )
+
+        withLog("resumed") { log ->
+            // The offset is chosen when the transcript is found, so the line standing in for what
+            // the user types after the restart is only written once it has been.
+            val located = java.util.concurrent.CountDownLatch(1)
+            val follower = TranscriptFollower(
+                ClaudeTailer(config),
+                RunContext(
+                    project, config, "resumed", System.currentTimeMillis(),
+                    resumingLoggedWork = true,
+                ),
+                log,
+                onLocated = { _, _ -> located.countDown() },
+            )
+            follower.start()
+            assertTrue(located.await(5, java.util.concurrent.TimeUnit.SECONDS), "transcript never found")
+            Files.writeString(
+                file,
+                """{"type":"user","timestamp":"2026-09-15T01:00:00.000Z","message":{"role":"user","content":"what I typed after the restart"}}""" + "\n",
+                StandardOpenOption.APPEND,
+            )
+
+            assertTimeoutPreemptively(Duration.ofSeconds(5)) {
+                while (log.events().filterIsInstance<AgentEvent.UserMessage>().isEmpty()) Thread.sleep(50)
+            }
+            follower.stop()
+
+            assertEquals(
+                listOf("what I typed after the restart"),
+                log.events().filterIsInstance<AgentEvent.UserMessage>().map { it.text },
+                "the history was already logged once; reading it again files it twice",
+            )
+            assertTrue(
+                log.events().filterIsInstance<AgentEvent.SessionTitled>().isEmpty(),
+                "a title out of the history would rename the restored tab out from under the user",
+            )
+        }
+    }
+
+    /**
+     * The other half of the same switch. A session nop has never followed — a vendor conversation
+     * reopened from the picker — has an empty log, and there the history is the whole point.
+     */
+    @Test
+    fun `a run nop has not logged before still reads the transcript it is given`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        Files.writeString(
+            dir.resolve("fresh.jsonl"),
+            """{"type":"user","timestamp":"2026-09-15T00:00:00.000Z","message":{"role":"user","content":"history worth having"}}""" + "\n",
+        )
+
+        withLog("fresh") { log ->
+            val follower = TranscriptFollower(
+                ClaudeTailer(config),
+                RunContext(project, config, "fresh", System.currentTimeMillis()),
+                log,
+            )
+            follower.start()
+
+            assertTimeoutPreemptively(Duration.ofSeconds(5)) {
+                while (log.events().filterIsInstance<AgentEvent.UserMessage>().isEmpty()) Thread.sleep(50)
+            }
+            follower.stop()
+
+            assertEquals(
+                listOf("history worth having"),
+                log.events().filterIsInstance<AgentEvent.UserMessage>().map { it.text },
+            )
+        }
+    }
+
     /** Opens a log, runs [body], and takes the file away again. */
     private fun withLog(id: String, body: (EventLog) -> Unit) {
         val log = EventLog.open("test-$id-${System.nanoTime()}")

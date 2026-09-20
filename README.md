@@ -52,7 +52,8 @@ When a file or directory is selected:
 In a terminal, a launcher run or an agent session:
 	- `Shift Enter` — insert a newline
 	- `Ctrl C` — copy selection or interupt run if nothing selected
-	- `Ctrl Shift V` or `Shift Insert` — paste
+	- `Ctrl Shift V` or `Shift Insert` — paste (text, copied files, or clipboard images as paths)
+	- `Ctrl Shift S` — select an area of the screen to show the agent directly
 
 ## Troubleshooting
 

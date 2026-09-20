@@ -81,7 +81,7 @@ internal class TerminalFileDrop(private val onPaths: (List<String>) -> Unit) : D
         }
         if (transferable.isDataFlavorSupported(DataFlavor.imageFlavor)) {
             val image = transferable.getTransferData(DataFlavor.imageFlavor) as? Image
-            imageFile(image)?.let { return listOf(it.toAbsolutePath().toString()) }
+            saveImageToTemp(image)?.let { return listOf(it.toAbsolutePath().toString()) }
         }
         return emptyList()
     }
@@ -95,42 +95,6 @@ internal class TerminalFileDrop(private val onPaths: (List<String>) -> Unit) : D
         .mapNotNull { runCatching { Path.of(it).toAbsolutePath().toString() }.getOrNull() }
         .toList()
 
-    /**
-     * Writes a dropped image out so there is a path to name, and returns it.
-     *
-     * Under the system temp directory rather than in the project: a picture dragged in to be looked
-     * at is not part of the repository, and a file nop drops into the working tree is one the user
-     * has to notice and delete — possibly after committing it.
-     */
-    private fun imageFile(image: Image?): Path? {
-        val rendered = image as? RenderedImage ?: image?.let(::rasterize) ?: return null
-        return runCatching {
-            val dir = Files.createDirectories(
-                Path.of(System.getProperty("java.io.tmpdir"), "nop-drops"),
-            )
-            Files.createTempFile(dir, "image-", ".png").also { file ->
-                Files.newOutputStream(file).use { out ->
-                    check(ImageIO.write(rendered, "png", out)) { "no PNG writer" }
-                }
-            }
-        }.onFailure { Log.warn("could not save the dropped image: $it") }.getOrNull()
-    }
-
-    /** Copies a non-[RenderedImage] (a `ToolkitImage`, say) into one ImageIO can write. */
-    private fun rasterize(image: Image): RenderedImage? {
-        val width = image.getWidth(null)
-        val height = image.getHeight(null)
-        if (width <= 0 || height <= 0) return null
-        return BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB).also { copy ->
-            val g = copy.createGraphics()
-            try {
-                g.drawImage(image, 0, 0, null)
-            } finally {
-                g.dispose()
-            }
-        }
-    }
-
     private companion object {
         /**
          * The `text/uri-list` a good deal of Linux software offers. Asked for as a String rather
@@ -141,6 +105,43 @@ internal class TerminalFileDrop(private val onPaths: (List<String>) -> Unit) : D
 
         val USABLE: List<DataFlavor> =
             listOf(DataFlavor.javaFileListFlavor, URI_LIST, DataFlavor.imageFlavor)
+    }
+}
+
+/**
+ * Writes an image out to the temp directory so there is a file path to name, and returns it.
+ *
+ * Under the system temp directory rather than in the project: a picture dragged in, pasted,
+ * or snipped to be looked at is not part of the repository, and a file nop drops into the
+ * working tree is one the user has to notice and delete — possibly after committing it.
+ */
+internal fun saveImageToTemp(image: Image?): Path? {
+    if (image == null) return null
+    val rendered = image as? RenderedImage ?: rasterizeImage(image) ?: return null
+    return runCatching {
+        val dir = Files.createDirectories(
+            Path.of(System.getProperty("java.io.tmpdir"), "nop-drops"),
+        )
+        Files.createTempFile(dir, "image-", ".png").also { file ->
+            Files.newOutputStream(file).use { out ->
+                check(ImageIO.write(rendered, "png", out)) { "no PNG writer" }
+            }
+        }
+    }.onFailure { Log.warn("could not save image: $it") }.getOrNull()
+}
+
+/** Copies a non-[RenderedImage] (a `ToolkitImage`, say) into one ImageIO can write. */
+internal fun rasterizeImage(image: Image): RenderedImage? {
+    val width = image.getWidth(null)
+    val height = image.getHeight(null)
+    if (width <= 0 || height <= 0) return null
+    return BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB).also { copy ->
+        val g = copy.createGraphics()
+        try {
+            g.drawImage(image, 0, 0, null)
+        } finally {
+            g.dispose()
+        }
     }
 }
 

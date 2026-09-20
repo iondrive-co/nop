@@ -1,5 +1,7 @@
 package iondrive.nop.terminal
 
+import com.jediterm.terminal.DefaultTerminalCopyPasteHandler
+import com.jediterm.terminal.TerminalCopyPasteHandler
 import com.jediterm.terminal.model.StyleState
 import com.jediterm.terminal.model.TerminalTextBuffer
 import com.jediterm.terminal.ui.JediTermWidget
@@ -19,6 +21,9 @@ import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.awt.Shape
 import java.awt.Stroke
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.io.File
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import java.awt.event.MouseAdapter
@@ -171,6 +176,9 @@ private class NopTerminalPanel(
     styleState: StyleState,
 ) : TerminalPanel(settings, textBuffer, styleState) {
 
+    override fun createCopyPasteHandler(): TerminalCopyPasteHandler =
+        NopTerminalCopyPasteHandler()
+
     override fun paintComponent(g: Graphics) {
         val g2d = g as? Graphics2D ?: run {
             super.paintComponent(g)
@@ -187,6 +195,53 @@ private class NopTerminalPanel(
                 verticalScrollModel.value = 0
             }
         }
+    }
+}
+
+/**
+ * Terminal copy/paste handler that intercepts paste when the clipboard holds an image or files.
+ *
+ * When an image is pasted into the terminal (e.g. via Ctrl+Shift+V or Shift+Insert), saves it as a
+ * temporary PNG file and types the quoted file path with a trailing space into the prompt, matching
+ * what [TerminalFileDrop] does when an image is dragged onto the terminal.
+ *
+ * Also handles dropped/copied file lists from the clipboard. If neither an image nor files are
+ * present, delegates to [DefaultTerminalCopyPasteHandler] for standard text paste.
+ */
+internal class NopTerminalCopyPasteHandler : DefaultTerminalCopyPasteHandler() {
+
+    override fun getContents(useSystemSelectionClipboard: Boolean): String? {
+        val clipboard = if (useSystemSelectionClipboard) {
+            runCatching { Toolkit.getDefaultToolkit().systemSelection }.getOrNull()
+                ?: Toolkit.getDefaultToolkit().systemClipboard
+        } else {
+            Toolkit.getDefaultToolkit().systemClipboard
+        } ?: return null
+
+        // 1. Image on the clipboard
+        if (runCatching { clipboard.isDataFlavorAvailable(DataFlavor.imageFlavor) }.getOrDefault(false)) {
+            val image = runCatching { clipboard.getData(DataFlavor.imageFlavor) as? Image }.getOrNull()
+            if (image != null) {
+                val saved = saveImageToTemp(image)
+                if (saved != null) {
+                    return quoteForPrompt(saved.toAbsolutePath().toString()) + " "
+                }
+            }
+        }
+
+        // 2. File list on the clipboard
+        if (runCatching { clipboard.isDataFlavorAvailable(DataFlavor.javaFileListFlavor) }.getOrDefault(false)) {
+            val files = runCatching {
+                @Suppress("UNCHECKED_CAST")
+                clipboard.getData(DataFlavor.javaFileListFlavor) as? List<File>
+            }.getOrNull()
+            if (!files.isNullOrEmpty()) {
+                return files.joinToString(" ") { quoteForPrompt(it.absolutePath) } + " "
+            }
+        }
+
+        // 3. Fall back to standard text
+        return super.getContents(useSystemSelectionClipboard)
     }
 }
 

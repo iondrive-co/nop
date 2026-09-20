@@ -3,6 +3,8 @@ package iondrive.nop.agent
 import iondrive.nop.Log
 import iondrive.nop.agent.transcript.ClaudeTailer
 import kotlinx.serialization.json.Json
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -118,6 +120,11 @@ object NativeSessions {
     /** What the picker calls a session that was not run under any configured account. */
     const val DEFAULT_STORE_LABEL: String = "outside nop"
 
+    /** How much of a transcript's tail [lastRecordAt] reads looking for the newest record time. */
+    private const val TAIL_BYTES: Long = 64 * 1024
+
+    private val TIMESTAMP = Regex("\"timestamp\"\\s*:\\s*\"([^\"]+)\"")
+
     private fun summarise(file: Path, store: Store, projectPath: String): PastSession? {
         var startedAt: Long? = null
         var titled: String? = null
@@ -167,9 +174,17 @@ object NativeSessions {
         }
 
         val id = file.fileName.toString().removeSuffix(".jsonl")
-        // The CLI appends to the transcript for as long as the conversation goes on, so its time is
-        // when the conversation last did anything.
-        val touched = modified(file)
+        // When the conversation last did anything, taken from the last record that carries a time
+        // rather than from the file's own.
+        //
+        // The mtime looks like the same answer and is not. A CLI left sitting at its prompt keeps
+        // its transcript open and goes on touching it — housekeeping records, file-history
+        // snapshots — so a `claude` somebody started in a terminal two days ago and never closed
+        // reports itself as active every few minutes, for ever. It then sorts above the session
+        // they were actually in an hour ago, wearing a timestamp that says it is the newest thing
+        // here. The last timestamped record is what the conversation itself last did, which is the
+        // question the picker is asking.
+        val touched = lastRecordAt(file) ?: modified(file)
         // A transcript with nothing in it yet is a session that has not started, not one to offer.
         val at = startedAt ?: touched ?: return null
         if (titled == null && firstPrompt == null) return null
@@ -189,6 +204,31 @@ object NativeSessions {
 
     private fun modified(file: Path): Long? =
         runCatching { Files.getLastModifiedTime(file).toMillis() }.getOrNull()
+
+    /**
+     * The newest `timestamp` in the last [TAIL_BYTES] of a transcript, or null when it carries none.
+     *
+     * A window rather than the whole file because the picker summarises every transcript in the
+     * project each time it is drawn, and these run to megabytes. The newest in the window rather
+     * than the last one in it because the records are not strictly ordered — a snapshot written on
+     * the way out can carry an earlier time than the turn above it.
+     *
+     * A partial first line is expected, and costs nothing: the regex only ever matches a whole
+     * quoted field, so a line the window cut in half either yields its timestamp or does not.
+     */
+    private fun lastRecordAt(file: Path): Long? = runCatching {
+        Files.newByteChannel(file).use { channel ->
+            val size = channel.size()
+            val from = (size - TAIL_BYTES).coerceAtLeast(0)
+            val buffer = ByteBuffer.allocate((size - from).toInt().coerceAtLeast(0))
+            channel.position(from)
+            while (buffer.hasRemaining() && channel.read(buffer) > 0) Unit
+            val text = String(buffer.array(), 0, buffer.position(), StandardCharsets.UTF_8)
+            TIMESTAMP.findAll(text)
+                .mapNotNull { epochMillis(it.groupValues[1]) }
+                .maxOrNull()
+        }
+    }.getOrNull()
 
     private fun epochMillis(value: String): Long? =
         runCatching { java.time.Instant.parse(value).toEpochMilli() }.getOrNull()

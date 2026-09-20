@@ -27,6 +27,66 @@ class NativeSessionsTest {
     private fun title(text: String, at: String) =
         """{"type":"ai-title","timestamp":"$at","aiTitle":"$text"}"""
 
+    /**
+     * A CLI left open at its prompt goes on touching its transcript — housekeeping records, file
+     * history — long after the conversation stopped. Dating the row by the file's mtime put a
+     * `claude` somebody started in a terminal two days ago and never closed at the top of the
+     * picker, over the session they were in an hour ago, which is the one they were looking for.
+     */
+    @Test
+    fun `a stale conversation an idle CLI keeps touching does not float to the top`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val store = tmp.resolve("home").resolve(".claude")
+        val dir = slugDir(store, project)
+
+        val idle = dir.resolve("aaaa-idle.jsonl")
+        Files.writeString(
+            idle,
+            prompt("remove the pre-commit hooks", "2026-09-14T01:00:00.000Z") + "\n" +
+                title("Remove pre-commit hooks", "2026-09-14T01:00:05.000Z") + "\n",
+        )
+        val recent = dir.resolve("bbbb-recent.jsonl")
+        Files.writeString(
+            recent,
+            prompt("close plan 40", "2026-09-20T09:00:00.000Z") + "\n" +
+                title("Plan 40 completion check", "2026-09-20T09:00:05.000Z") + "\n",
+        )
+        // The week-old one is the file the operating system calls newest, because its CLI is still
+        // sitting there with it open.
+        Files.setLastModifiedTime(idle, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis()))
+        Files.setLastModifiedTime(recent, java.nio.file.attribute.FileTime.fromMillis(1_000))
+
+        val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("outside nop", store)))
+
+        assertEquals(
+            listOf("Plan 40 completion check", "Remove pre-commit hooks"),
+            rows.map { it.title },
+            "the picker orders by what each conversation last did, not by what touched its file",
+        )
+        assertTrue(
+            rows.first().lastActiveAt > rows.last().lastActiveAt,
+            "the row's own time has to agree with the order it is listed in",
+        )
+    }
+
+    /** With no timestamped record to go on, the file's own time is still better than nothing. */
+    @Test
+    fun `a transcript carrying no times falls back to the file's own`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val store = tmp.resolve("home").resolve(".claude")
+        val dir = slugDir(store, project)
+        val file = dir.resolve("cccc-2222.jsonl")
+        Files.writeString(
+            file,
+            """{"type":"user","message":{"role":"user","content":"no clock on this one"}}""" + "\n",
+        )
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(5_000))
+
+        val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("outside nop", store)))
+
+        assertEquals(5_000, rows.single().lastActiveAt)
+    }
+
     @Test
     fun `a session run outside nop is listed, and says which store it came from`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").also { Files.createDirectories(it) }
@@ -112,20 +172,34 @@ class NativeSessionsTest {
 
     /**
      * The hermes session of 2026-09-19: begun at 14:20, worked in until 18:59, and listed as "5h ago"
-     * beneath sessions begun after it, however long ago they were last touched. The transcript's own
-     * time is when it last did anything, and that is what the picker sorts by and shows.
+     * beneath sessions begun after it, however long ago they were last touched. When a conversation
+     * last did anything is what the picker sorts by and shows.
+     *
+     * Each transcript here carries a record at the time it was last worked in, because that is what
+     * a transcript worked in until 18:59 looks like. The fixture used to say the same thing with
+     * the files' mtimes alone, which was the one part of it that was not true of a real store: see
+     * the idle-CLI case above, where the mtime goes on moving long after the conversation stopped.
      */
     @Test
     fun `a session is listed by when it was last active, not when it began`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").also { Files.createDirectories(it) }
         val store = tmp.resolve("store")
         val dir = slugDir(store, project)
-        Files.writeString(dir.resolve("aaaa-1420.jsonl"), prompt("LIQFADE", "2026-09-19T04:20:52.000Z") + "\n")
-            .also { touch(it, "2026-09-19T08:59:40Z") }
-        Files.writeString(dir.resolve("bbbb-1901.jsonl"), prompt("Plan 36", "2026-09-19T09:01:07.000Z") + "\n")
-            .also { touch(it, "2026-09-19T09:02:00Z") }
-        Files.writeString(dir.resolve("cccc-1700.jsonl"), prompt("brief", "2026-09-19T07:00:00.000Z") + "\n")
-            .also { touch(it, "2026-09-19T07:05:00Z") }
+        Files.writeString(
+            dir.resolve("aaaa-1420.jsonl"),
+            prompt("LIQFADE", "2026-09-19T04:20:52.000Z") + "\n" +
+                prompt("and again", "2026-09-19T08:59:40.000Z") + "\n",
+        ).also { touch(it, "2026-09-19T08:59:40Z") }
+        Files.writeString(
+            dir.resolve("bbbb-1901.jsonl"),
+            prompt("Plan 36", "2026-09-19T09:01:07.000Z") + "\n" +
+                prompt("and again", "2026-09-19T09:02:00.000Z") + "\n",
+        ).also { touch(it, "2026-09-19T09:02:00Z") }
+        Files.writeString(
+            dir.resolve("cccc-1700.jsonl"),
+            prompt("brief", "2026-09-19T07:00:00.000Z") + "\n" +
+                prompt("and again", "2026-09-19T07:05:00.000Z") + "\n",
+        ).also { touch(it, "2026-09-19T07:05:00Z") }
 
         val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("s", store)))
 

@@ -150,6 +150,7 @@ fun App(
     jumpToSourceTrigger: Int = 0,
     refreshTrigger: Int = 0,
     saveTrigger: Int = 0,
+    snipTrigger: Int = 0,
     findUsagesTrigger: Int = 0,
     renameSymbolTrigger: Int = 0,
 ) {
@@ -655,6 +656,15 @@ fun App(
     // with it. See AgentSessionStore for what ends a session now (its tab, its project, or nop).
     val agentSessions = remember(projectPath, rootPath) {
         AgentSessionStore.of(root = rootPath, project = projectPath)
+    }
+    val snipBaseline = remember(projectPath) { snipTrigger }
+    LaunchedEffect(snipTrigger) {
+        if (snipTrigger > snipBaseline) {
+            val session = agentSessions.selected?.session
+                ?: terminals.selected?.session
+                ?: agentSessions.sessions.firstOrNull()?.session
+            session?.snipArea()
+        }
     }
     // This project's earlier agent sessions, for the picker.
     var pastAgentSessions by remember(projectPath) { mutableStateOf(emptyList<PastSession>()) }

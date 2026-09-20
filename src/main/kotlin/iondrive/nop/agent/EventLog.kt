@@ -213,6 +213,18 @@ data class PastSession(
  */
 class EventLog private constructor(val file: Path) : AutoCloseable {
 
+    /**
+     * Whether this log already held events before the session opened it — a tab put back from the
+     * state file, or one reopened from the picker, as against a session that has never run.
+     *
+     * Read before the writer below creates the file, because afterwards there is no telling the two
+     * apart. What it decides is whether the run about to start replays its vendor transcript from
+     * the beginning: everything in that file is already in *this* one, so replaying it would file a
+     * second copy of every message and, because the last title in the history wins, rename the tab
+     * out from under the user. See [iondrive.nop.agent.transcript.RunContext.resumingLoggedWork].
+     */
+    val hadHistory: Boolean = runCatching { Files.size(file) > 0 }.getOrDefault(false)
+
     private var writer: BufferedWriter? = runCatching {
         // Created owner-only before the writer opens it: what goes in here is everything the user
         // typed and everything the model said back, and the default umask would make that readable

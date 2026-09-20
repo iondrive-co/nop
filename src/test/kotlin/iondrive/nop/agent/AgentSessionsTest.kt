@@ -4,6 +4,7 @@ import iondrive.nop.Settings
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -120,6 +121,28 @@ class AgentSessionsTest {
         session.titleFromTranscript("AWS support")
 
         assertEquals("parser rewrite", session.title)
+    }
+
+    /**
+     * Quitting nop kills every session it is running — that is what [AgentSessions.disposeAll] is
+     * for, because a vendor CLI is a real process and leaving one per tab behind is worse. But the
+     * state file is written from the same sessions, and a row that reads its own killing as "the
+     * user is finished with this" takes the whole strip out with it on the way down. Which is the
+     * difference between a restart that comes back where you left off and one that comes back
+     * empty.
+     */
+    @Test
+    fun `a session nop killed on its own way out still comes back`(@TempDir tmp: Path) {
+        val state = sessions()
+        val session = state.open(tmp.toFile(), account("claude-main"))
+        state.rename(session.sessionId, "plan 40")
+
+        session.dispose()
+
+        val row = session.asOpenAgent()
+        assertNotNull(row, "nop ending the session is not the user ending it")
+        assertEquals("plan 40", row?.title)
+        assertEquals(session.sessionId, row?.sessionId, "the tab keeps the log it already has")
     }
 
     @Test

@@ -30,6 +30,7 @@ import java.awt.datatransfer.StringSelection
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.Tooltip
 
 /**
  * The one row of nop's own chrome above a running agent TUI.
@@ -49,7 +50,10 @@ import org.jetbrains.jewel.ui.component.Text
  * [AgentSession.autoHandover]. A tab whose provider changed under it while the user was in another
  * window is otherwise indistinguishable from a tab they have misremembered.
  */
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 @Composable
 fun AgentSessionBar(
     session: AgentSession,
@@ -126,6 +130,13 @@ fun AgentSessionBar(
                             .setContents(StringSelection(command), null)
                         copied = true
                     },
+                )
+            }
+            Tooltip(tooltip = { Text("Select an area of the screen to show the agent (Ctrl+Shift+S)") }) {
+                Text(
+                    "Snip area",
+                    color = AgentMuted,
+                    modifier = Modifier.clickable { session.session.snipArea() },
                 )
             }
             if (others.isNotEmpty()) {

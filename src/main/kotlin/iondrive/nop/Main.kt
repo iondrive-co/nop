@@ -549,6 +549,8 @@ private fun ApplicationScope.WorkspaceWindow(
     var refreshTrigger by remember { mutableStateOf(0) }
     // Ctrl+S writes the active editor's buffer now, rather than waiting out the autosave debounce.
     var saveTrigger by remember { mutableStateOf(0) }
+    // Ctrl+Shift+S triggers screen area snip to send to the active agent session.
+    var snipTrigger by remember { mutableStateOf(0) }
     // Alt+F7 lists where the Java name under the caret is used; Shift+F6 renames it everywhere.
     // Both are IntelliJ's bindings, which is the muscle memory anyone arriving at this feature has.
     var findUsagesTrigger by remember { mutableStateOf(0) }
@@ -602,6 +604,14 @@ private fun ApplicationScope.WorkspaceWindow(
                 event.key == Key.S
             ) {
                 saveTrigger += 1
+                return@Window true
+            }
+            // Ctrl+Shift+S selects an area of the screen and feeds it directly to the running agent.
+            if (event.type == KeyEventType.KeyDown &&
+                event.isCtrlPressed && event.isShiftPressed && !event.isAltPressed &&
+                event.key == Key.S
+            ) {
+                snipTrigger += 1
                 return@Window true
             }
             // Alt+F7 — find usages of the name under the caret. Consumed so the editor beneath
@@ -712,6 +722,7 @@ private fun ApplicationScope.WorkspaceWindow(
                                 jumpToSourceTrigger = jumpToSourceTrigger,
                                 refreshTrigger = refreshTrigger,
                                 saveTrigger = saveTrigger,
+                                snipTrigger = snipTrigger,
                                 findUsagesTrigger = findUsagesTrigger,
                                 renameSymbolTrigger = renameSymbolTrigger,
                             )
