@@ -11,6 +11,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 
 /**
  * The collection behind the agent tabs, and the naming that makes a strip of them readable.
@@ -545,6 +546,162 @@ class AgentSessionsTest {
         session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
 
         assertEquals("codex", session.account.name)
+    }
+
+    /**
+     * The `agy` wall in hermes on 2026-09-20, which nop watched happen twice and did nothing about.
+     *
+     * "Individual quota reached ... Resets in 7m31s" is a limit `agy`'s own `/usage` never mentions:
+     * both of the windows it does report had hours left, so the account's reading said there was
+     * quota and was telling the truth about something else. A vendor that has just said when it
+     * will serve again outranks a number that is not about the allowance it refused against.
+     */
+    @Test
+    fun `a wall the vendor timed itself is acted on though the reading has room`(@TempDir tmp: Path) {
+        val google = Account(
+            "google-aloancloud",
+            Provider.Antigravity,
+            "/homes/google-aloancloud",
+            handoverTo = "codex-iondrive",
+        )
+        val codex = Account("codex-iondrive", Provider.OpenAI, "/homes/codex-iondrive")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(google, codex).handoverTarget(from) }
+        state.hasRunOut = { false }
+        val session = state.open(tmp.toFile(), google)
+
+        session.onQuotaWall(
+            QuotaHit(
+                "usage limit",
+                "⚠ Individual quota reached. Please upgrade your subscription to increase your " +
+                    "limits. Resets in 7m31s.",
+                matched = "quota reached",
+                resetsIn = Duration.ofMinutes(7).plusSeconds(31),
+            ),
+        )
+
+        assertEquals("codex-iondrive", session.account.name)
+        assertEquals("google-aloancloud", session.autoHandover?.from)
+    }
+
+    /**
+     * The other half of that: the reading only stands aside for a wall that timed itself. A phrase
+     * with no countdown on it, on an account with quota, is the false positive this all exists to
+     * stop — see the test above about a session editing nop's own quota code.
+     */
+    @Test
+    fun `a phrase with no countdown is still nothing on an account with quota`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.hasRunOut = { false }
+        val session = state.open(tmp.toFile(), account("google-aloancloud", Provider.Antigravity))
+
+        session.onQuotaWall(QuotaHit("usage limit", """the log said "quota reached" at 17:03"""))
+
+        assertFalse(session.ended)
+        assertNull(session.run.quota)
+    }
+
+    /**
+     * `agy` does not sit out a window and carry on the way Claude Code does: at the 2026-09-20 wall
+     * it retried for three minutes, filed an executor error and sat idle at its prompt with four
+     * minutes left to run. Waiting on that is not patience, it is a tab nobody comes back to.
+     */
+    @Test
+    fun `a CLI that gives up at a wall is handed over rather than waited for`(@TempDir tmp: Path) {
+        val google = Account(
+            "google-aloancloud",
+            Provider.Antigravity,
+            "/homes/google-aloancloud",
+            handoverTo = "codex-iondrive",
+        )
+        val codex = Account("codex-iondrive", Provider.OpenAI, "/homes/codex-iondrive")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(google, codex).handoverTarget(from) }
+        state.hasRunOut = { true }
+        state.spentUntil = { java.time.Instant.now().plusSeconds(30) }
+        val session = state.open(tmp.toFile(), google)
+
+        session.onQuotaWall(QuotaHit("usage limit", "Individual quota reached", matched = "quota reached"))
+
+        assertEquals("codex-iondrive", session.account.name, "nothing was going to resume that session")
+    }
+
+    /**
+     * The 16:49 wall in hermes. claude-aloancloud ran out at 13:09 and handed the work to
+     * claude-iondrive; three and a half hours later iondrive ran out in turn, and the account that
+     * had taken its place was by then rested and reading 0% used — and was skipped anyway, because
+     * running out once had struck it off for the rest of the session. The run ended at the post-exit
+     * panel with the right answer sitting in it as a button to press.
+     */
+    @Test
+    fun `an account that has rested since its own wall is handed the work again`(@TempDir tmp: Path) {
+        val aloancloud = Account(
+            "claude-aloancloud",
+            Provider.Anthropic,
+            "/homes/claude-aloancloud",
+            handoverTo = "claude-iondrive",
+        )
+        val iondrive = Account(
+            "claude-iondrive",
+            Provider.Anthropic,
+            "/homes/claude-iondrive",
+            handoverTo = "claude-aloancloud",
+        )
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        var rested = false
+        state.hasRunOut = { who -> if (who.name == "claude-aloancloud") !rested else true }
+        val session = state.open(tmp.toFile(), aloancloud)
+
+        val firstWall = java.time.Instant.now().minus(Duration.ofHours(3)).minusSeconds(40 * 60)
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"), now = firstWall)
+        assertEquals("claude-iondrive", session.account.name)
+        rested = true
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
+
+        assertEquals("claude-aloancloud", session.account.name, "its window rolled over hours ago")
+        assertFalse(session.ended)
+    }
+
+    /**
+     * And not straight back. The provider's number is not always about the allowance that refused —
+     * an `agy` account walls on one `/usage` never mentions and reads as having room the whole time
+     * — so a reading alone would let a pair trade the session as fast as two CLIs can start.
+     */
+    @Test
+    fun `an account is not handed the work back moments after its own wall`(@TempDir tmp: Path) {
+        val aloancloud = Account(
+            "claude-aloancloud",
+            Provider.Anthropic,
+            "/homes/claude-aloancloud",
+            handoverTo = "claude-iondrive",
+        )
+        val iondrive = Account(
+            "claude-iondrive",
+            Provider.Anthropic,
+            "/homes/claude-iondrive",
+            handoverTo = "claude-aloancloud",
+        )
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        // Both read as having room throughout, which is what makes this the dangerous shape.
+        state.hasRunOut = { false }
+        val session = state.open(tmp.toFile(), aloancloud)
+        val timed = QuotaHit(
+            "usage limit",
+            "Individual quota reached. Resets in 5m7s.",
+            matched = "quota reached",
+            resetsIn = Duration.ofMinutes(5).plusSeconds(7),
+        )
+
+        session.onQuotaWall(timed)
+        assertEquals("claude-iondrive", session.account.name)
+
+        session.onQuotaWall(timed)
+
+        assertEquals("claude-iondrive", session.account.name, "aloancloud walled seconds ago")
+        assertTrue(session.ended, "with nowhere rested to go, the user is asked")
     }
 
     /**

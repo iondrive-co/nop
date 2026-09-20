@@ -216,15 +216,21 @@ class AgentSession(
     }
 
     /**
-     * The accounts that have already hit a wall in this session.
+     * The accounts that have already hit a wall in this session, and when each of them did.
      *
      * A handover chain has to be able to stop. Two accounts nominating each other is the obvious
      * arrangement for someone with one of each provider, and without this, the pair would trade a
      * dead session back and forth for as long as nop was open — each switch spawning a CLI that
-     * reads the summary, asks for a turn, is refused, and hands on again. An account that has been
-     * refused once in this session is not offered the same work twice.
+     * reads the summary, asks for a turn, is refused, and hands on again.
+     *
+     * The times are what keeps that from outliving its reason. A wall lasts hours and a session
+     * can last longer: claude-aloancloud ran out in hermes at 13:09 on 2026-09-20 and handed its
+     * work to claude-iondrive, and when iondrive ran out in turn at 16:49 the first account had
+     * long since rolled over and read 0% used — but it had been struck off for good, so the run
+     * ended at the post-exit panel with a rested account sitting in it as a button to press. See
+     * [canTakeOver] for what gets an account back into the rotation.
      */
-    private val spent: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val spent: MutableMap<String, Instant> = ConcurrentHashMap()
 
     /**
      * Bumped for each run so the terminal card panel — which files widgets under [id] — sees a
@@ -511,14 +517,16 @@ class AgentSession(
      * What happens when the vendor says it will not continue.
      *
      * Either the work moves to the account this one nominated, or — with nobody nominated, or with
-     * everyone nominated already refused in this session — the run ends and the post-exit panel puts
-     * the choice in front of the user, which is what always used to happen.
+     * that account refused in this session and nothing to say it has rested since — the run ends and
+     * the post-exit panel puts the choice in front of the user, which is what always used to happen.
      *
-     * Internal rather than private so its own test can drive it. Reaching it for real means a PTY
-     * printing a limit message, which is not something a test can arrange; the parsing that leads
-     * here has [QuotaWatcher]'s tests, and what is decided here has its own.
+     * Internal rather than private so its own test can drive it, and [now] is passed for the same
+     * reason: every clock this decision reads is that one, so a test can put an earlier wall hours
+     * behind the one it is making. Reaching it for real means a PTY printing a limit message, which
+     * is not something a test can arrange; the parsing that leads here has [QuotaWatcher]'s tests,
+     * and what is decided here has its own.
      */
-    internal fun onQuotaWall(hit: QuotaHit) {
+    internal fun onQuotaWall(hit: QuotaHit, now: Instant = Instant.now()) {
         val current = run
         // Anything may have happened between the watcher firing and this reaching the UI thread —
         // the user quitting the TUI, or handing the work on themselves. A run that is already over
@@ -537,8 +545,17 @@ class AgentSession(
         //
         // Only a reading that actively contradicts the screen stops this. Not knowing (null) is left
         // to the transcript below — see [UsageReading.looksSpent].
+        //
+        // And it can only contradict the screen about a limit it reports. A refusal that times
+        // itself — "Individual quota reached ... Resets in 7m31s" — names an allowance of minutes,
+        // and the windows nop reads are five hours and a week: `agy` refused a hermes session on
+        // 2026-09-20 with both of its own windows nearly untouched, so "the account still has
+        // quota" was true and said nothing about the wall in front of it. A reading with room in
+        // every window it knows about is either about some other allowance or twenty minutes stale;
+        // either way it is not evidence against a vendor that has just said when it will serve
+        // again. The transcript below still gets its say.
         val runOut = hasRunOut(current.account)
-        if (runOut == false) {
+        if (runOut == false && hit.resetsIn == null) {
             Log.warn(
                 "ignoring a usage-limit phrase on ${current.account.name}: the account still has " +
                     "quota, so this is output the agent was showing rather than the vendor " +
@@ -582,8 +599,10 @@ class AgentSession(
             }
             QuotaEcho.Verdict.Shown, QuotaEcho.Verdict.Unrecorded -> when {
                 runOut == true -> "its usage reading is spent"
-                verdict == QuotaEcho.Verdict.Unrecorded -> "nothing in the transcript disputes it"
-                else -> {
+                // Ahead of the exception above, and not behind it: a transcript that says the
+                // phrase was being shown and a reading that says there is room are two answers to
+                // the same question, and two of them are not weaker than one.
+                verdict == QuotaEcho.Verdict.Shown -> {
                     Log.warn(
                         "ignoring a usage-limit phrase on ${current.account.name}: \"${hit.matched}\" " +
                             "is in this session's own transcript and the CLI has filed no refusal this " +
@@ -592,6 +611,8 @@ class AgentSession(
                     quotaWatcher.reset()
                     return
                 }
+                runOut == false -> "it timed its own reset, which is no window the reading covers"
+                else -> "nothing in the transcript disputes it"
             }
         }
 
@@ -600,7 +621,13 @@ class AgentSession(
         // restart, both to save a few minutes; Claude Code carries on by itself once the window
         // rolls over. The watcher stays quiet until then, so the wall on screen is not re-judged at
         // every redraw, and is armed again afterwards for the walls still to come.
-        val untilReset = spentUntil(current.account)?.let { Duration.between(Instant.now(), it) }
+        //
+        // Only for a CLI that does carry on, though. Waiting on one that has already given up is
+        // not patience, it is a tab left sitting at a dead prompt with nobody coming back to it —
+        // see [Provider.waitsOutItsOwnWall], which is what `agy` taught this.
+        val untilReset = spentUntil(current.account)
+            ?.takeIf { current.account.provider.waitsOutItsOwnWall }
+            ?.let { Duration.between(now, it) }
         if (untilReset != null && untilReset <= WAIT_FOR_RESET) {
             Log.info(
                 "agent quota wall on ${current.account.name} ($why), but it resets in " +
@@ -614,10 +641,18 @@ class AgentSession(
 
         Log.info("agent quota wall on ${current.account.name} ($why): ${hit.line}")
         current.quota = hit
-        spent += current.account.name
+        spent[current.account.name] = now
 
-        val target = handoverTarget(current.account)?.takeIf { it.name !in spent }
+        val nominated = handoverTarget(current.account)
+        val target = nominated?.takeIf { canTakeOver(it, now) }
         if (target == null) {
+            // Said out loud, because the silence was the hard part of reading the 16:49 wall back:
+            // a handover that does not happen looks exactly like a wall that was never seen.
+            Log.info(
+                "${current.account.name} ran out and nothing took the work on: " +
+                    (nominated?.let { "${it.name} ran out in this session too" }
+                        ?: "it nominates nobody"),
+            )
             endRun(EndReason.Quota)
             // Killed rather than left sitting at its own error — the session is over either way.
             // Killed and not disposed, so the dead TUI keeps its last frame under the panel, which
@@ -635,6 +670,25 @@ class AgentSession(
             to = target.name,
             kind = hit.kind,
         )
+    }
+
+    /**
+     * Whether [target] can be handed the work: true unless it ran out earlier in this session and
+     * nothing since says it has room again.
+     *
+     * Only the provider's own number gets an account back into the rotation, and only once the
+     * wall it hit is [WAIT_FOR_RESET] behind it. Both halves are load-bearing. Without the reading,
+     * a rested account stays struck off for the rest of the session — the 16:49 wall in [spent].
+     * Without the delay, a pair could trade the session as fast as two CLIs start, because a
+     * reading is not always about the allowance that refused: an `agy` account walls on one its
+     * `/usage` never mentions and reads as having room throughout. nop declines to wait out a
+     * reset closer than that anyway, so an account that handed its work on cannot have been inside
+     * that window when it did.
+     */
+    private fun canTakeOver(target: Account, now: Instant): Boolean {
+        val walledAt = spent[target.name] ?: return true
+        if (hasRunOut(target) != false) return false
+        return Duration.between(walledAt, now) >= WAIT_FOR_RESET
     }
 
     /** Starts the same account again in this tab, resuming the vendor's own session where it left off. */

@@ -56,6 +56,28 @@ enum class Provider(
         }
 
     /**
+     * Whether this CLI sits out a quota window and carries on by itself once it rolls over.
+     *
+     * It is what makes waiting for a close reset better than handing the work on: a few minutes
+     * idle costs nothing, where a handover trades the conversation for a summary of it. Claude
+     * Code does wait — it says so on screen, under the wall ("continuing automatically at 6:20pm ·
+     * esc or type to cancel") — and so the session it is running is left alone. See
+     * [AgentSession.onQuotaWall].
+     *
+     * `agy` does not, and waiting on it would strand the work rather than resume it: at the wall
+     * on 2026-09-20 it retried eight times over three minutes, filed `agent executor error:
+     * generating and executing: RESOURCE_EXHAUSTED (code 429)`, and sat idle at its prompt with
+     * four minutes still to run on the window. Codex has not been seen at a wall close enough to
+     * its reset for this to decide anything, and keeps the behaviour it has always had.
+     */
+    val waitsOutItsOwnWall: Boolean
+        get() = when (this) {
+            Anthropic -> true
+            OpenAI -> true
+            Antigravity -> false
+        }
+
+    /**
      * Models to offer when the live list can't be fetched. Claude's real list comes from the
      * Anthropic Models API using the account's own token, and Antigravity's from `agy models` run
      * as the account (see `Usage.discoverModels`), so neither is hardcoded here to go stale; Codex

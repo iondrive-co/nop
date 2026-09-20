@@ -1,14 +1,25 @@
 package iondrive.nop.agent
 
+import java.time.Duration
+
 /**
- * A quota wall the vendor's own output announced, the line that announced it, and the phrase that
- * actually matched.
+ * A quota wall the vendor's own output announced, the line that announced it, the phrase that
+ * actually matched, and the countdown the vendor put on it.
  *
  * [matched] is the phrase alone, where [line] is everything around it — the gutters, the box drawing,
  * whatever else the TUI had on that row. The phrase is what can be looked for somewhere else, which
  * is how nop decides whether the vendor said it or the agent was showing it: see [QuotaEcho].
+ *
+ * [resetsIn] is set only for a refusal that timed itself — `agy` ends its with "Resets in 7m31s" —
+ * and is null for the CLIs that give a clock time or nothing at all. It is what tells a wall apart
+ * from the windows an account's usage reading covers: see [AgentSession.onQuotaWall].
  */
-data class QuotaHit(val kind: String, val line: String, val matched: String = "")
+data class QuotaHit(
+    val kind: String,
+    val line: String,
+    val matched: String = "",
+    val resetsIn: Duration? = null,
+)
 
 /**
  * Watches a vendor CLI's terminal output for the moment it runs out of quota.
@@ -51,11 +62,13 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         }
         val match = QUOTA.find(window) ?: return
         fired = true
+        val line = lineAround(window, match.range.first)
         onHit(
             QuotaHit(
                 kind = kindOf(match.value),
-                line = lineAround(window, match.range.first),
+                line = line,
                 matched = match.value,
+                resetsIn = resetsInFrom(line),
             ),
         )
     }
@@ -158,6 +171,13 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 // Anthropic API.
                 """\bcredit_balance\b.*\binsufficient\b""",
                 """rate\s+limit\s+exceeded""",
+                // Antigravity's, which names no window at all: "Individual quota reached. Please
+                // upgrade your subscription to increase your limits. Resets in 7m31s." The `agy`
+                // account nop watched run out on 2026-09-20 had hours left in both windows its
+                // `/usage` reports — the allowance this refuses against is a third one, minutes
+                // long, that no reading here has ever seen. The countdown on the end is the only
+                // thing that says so, and it is read separately: see [resetsInFrom].
+                """\bquota\s+reached\b""",
                 // Generic, and common to both.
                 """\bquota\s+exceeded\b""",
                 """\bquota\s+has\s+been\s+exceeded\b""",
@@ -173,6 +193,36 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 """\bresource\s+exhausted\b""",
                 """429\s+too\s+many\s+requests""",
             ).joinToString("|") { "($it)" },
+            RegexOption.IGNORE_CASE,
+        )
+
+        /**
+         * How long the vendor said the wall lasts, taken from the refusal itself, or null when it
+         * did not time it.
+         *
+         * Only the compact form `7m31s`, and only on the line the phrase was found on. This is
+         * read as the vendor naming the allowance it refused against — [AgentSession.onQuotaWall]
+         * lets it outrank a usage reading that knows nothing about that allowance — so the looser
+         * a shape it were allowed to take, the more of the agent's own output could wear it.
+         * Claude Code's "resets 8:10pm" is deliberately not matched: it is a clock time rather
+         * than a countdown, and for that provider the account's own reading says when the window
+         * turns over anyway.
+         */
+        internal fun resetsInFrom(text: String): Duration? =
+            RESETS_IN.findAll(text).firstNotNullOfOrNull { match ->
+                val (hours, minutes, seconds) = match.destructured
+                if (hours.isEmpty() && minutes.isEmpty() && seconds.isEmpty()) {
+                    null
+                } else {
+                    Duration.ofHours(hours.toLongOrNull() ?: 0)
+                        .plusMinutes(minutes.toLongOrNull() ?: 0)
+                        .plusSeconds(seconds.toLongOrNull() ?: 0)
+                }
+            }
+
+        /** The countdown's shape. Every part is optional; [resetsInFrom] rejects a match with none. */
+        private val RESETS_IN = Regex(
+            """\bresets?\s+in\s+(?:(\d{1,3})h)?(?:(\d{1,3})m)?(?:(\d{1,3})s)?""",
             RegexOption.IGNORE_CASE,
         )
 

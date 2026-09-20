@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.time.Duration
 
 /**
  * The quota watcher: what it fires on, and — more importantly — what it does not.
@@ -170,5 +171,48 @@ class QuotaTest {
         assertNotNull(hit)
         assertEquals("You've hit your usage limit", hit!!.matched)
         assertTrue("173" in hit.line, "the line keeps its context, got: ${hit.line}")
+    }
+
+    /**
+     * The wall that went straight past nop on 2026-09-20: an `agy` session in hermes refused twice
+     * inside five minutes, and the watcher had no pattern for either. None of the wording this list
+     * was built from appears in it — no limit "hit" or "reached", no quota "exceeded".
+     */
+    @Test
+    fun `Antigravity's own refusal is caught`() {
+        val hit = fire(
+            "⚠ Individual quota reached. Please upgrade your subscription to increase your " +
+                "limits. Resets in 7m31s.\nError ID: cf01273f-a58f-4d5d-a86f-ec071611e771-700\n",
+        )
+
+        assertNotNull(hit)
+        assertEquals("usage limit", hit!!.kind)
+        assertEquals(Duration.ofMinutes(7).plusSeconds(31), hit.resetsIn)
+    }
+
+    /**
+     * The countdown is how [AgentSession.onQuotaWall] tells a wall on an allowance no usage reading
+     * covers from one on a window it does, so what it is taken off matters as much as what it is.
+     */
+    @Test
+    fun `only a countdown the vendor wrote is read as one`() {
+        assertEquals(Duration.ofMinutes(4).plusSeconds(44), fire("Quota reached. Resets in 4m44s.")!!.resetsIn)
+        assertEquals(Duration.ofSeconds(45), fire("Quota reached. Resets in 45s.")!!.resetsIn)
+        assertEquals(
+            Duration.ofHours(1).plusMinutes(2).plusSeconds(3),
+            fire("Quota reached. Resets in 1h2m3s.")!!.resetsIn,
+        )
+        // Claude Code gives a clock time instead, and its accounts have a usage reading that says
+        // the same thing. A wall with no countdown on it leaves that reading in charge.
+        assertNull(fire("You've hit your session limit · resets 8:10pm (Australia/Melbourne)")!!.resetsIn)
+        assertNull(fire("You've hit your usage limit")!!.resetsIn)
+        // Words rather than the compact form the CLI writes: not a countdown this reads.
+        assertNull(fire("Quota reached. Resets in about ten minutes.")!!.resetsIn)
+    }
+
+    /** `agy`'s separate allowance for pictures, in the wording this test's neighbour above missed. */
+    @Test
+    fun `an image quota reached is still not the account running out`() {
+        assertNull(fire("Your image generation quota reached. Please try again later.\n"))
     }
 }
