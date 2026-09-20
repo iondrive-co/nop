@@ -110,7 +110,9 @@ class SpawnTest {
 
         assertEquals("abc-123", command.argv.after("--resume"))
         assertEquals("abc-123", command.nativeSessionId)
+        assertTrue(command.isResume, "command must be marked as resume")
         assertFalse("--session-id" in command.argv, "a resume must not also ask for a fresh id")
+        assertFalse(Spawn.command(claude(), projectDir).isResume, "fresh run must not be marked as resume")
     }
 
     @Test

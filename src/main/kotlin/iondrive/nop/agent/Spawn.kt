@@ -16,6 +16,8 @@ data class AgentCommand(
      * first rollout line — [iondrive.nop.agent.transcript.CodexTailer] finds it there.
      */
     val nativeSessionId: String?,
+    /** True when this command resumes an existing session rather than starting a fresh one. */
+    val isResume: Boolean = false,
 )
 
 /**
@@ -65,7 +67,7 @@ object Spawn {
 
         val env = mutableMapOf("CLAUDE_CONFIG_DIR" to account.home)
         CLAUDE_THINKING_BUDGETS[account.reasoning]?.let { env["MAX_THINKING_TOKENS"] = it.toString() }
-        return AgentCommand(argv, env, sessionId)
+        return AgentCommand(argv, env, sessionId, isResume = resumeId != null)
     }
 
     /**
@@ -124,6 +126,7 @@ object Spawn {
                 "AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS" to "1",
             ),
             resumeId,
+            isResume = resumeId != null,
         )
     }
 
@@ -145,7 +148,7 @@ object Spawn {
         if (resumeId != null) argv += listOf("resume", resumeId)
         seed?.takeIf { it.isNotBlank() }?.let { argv += it }
 
-        return AgentCommand(argv, mapOf("HOME" to account.home), resumeId)
+        return AgentCommand(argv, mapOf("HOME" to account.home), resumeId, isResume = resumeId != null)
     }
 
     /**

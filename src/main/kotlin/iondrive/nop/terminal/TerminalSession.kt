@@ -85,6 +85,13 @@ class TerminalSession private constructor(
     @Volatile
     var onExit: ((Int) -> Unit)? = null
 
+    /**
+     * Called when the user types input (e.g. Enter) or sends text to the session. Used by agent sessions
+     * to detect when a prompt is submitted in a resumed session.
+     */
+    @Volatile
+    var onUserInput: (() -> Unit)? = null
+
     private var widget: JediTermWidget? = null
     private var settings: NopTerminalSettings? = null
     private var process: PtyProcess? = null
@@ -122,6 +129,13 @@ class TerminalSession private constructor(
         // handler in the panel's listener list: the panel adds that one when the session connects,
         // and only a listener that runs first can take the event off it.
         w.terminalPanel.addCustomKeyListener(ShiftEnterNewline { sendText(it) })
+        w.terminalPanel.addCustomKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                if (e.keyCode == java.awt.event.KeyEvent.VK_ENTER) {
+                    onUserInput?.invoke()
+                }
+            }
+        })
         settings = s
         widget = w
         attach(w, startProcess())
@@ -211,6 +225,7 @@ class TerminalSession private constructor(
      * Nothing happens if no process is running — there is nothing to type at.
      */
     fun sendText(text: String) {
+        onUserInput?.invoke()
         val proc = process ?: return
         runCatching {
             val out = proc.outputStream
@@ -302,7 +317,15 @@ class TerminalSession private constructor(
     }
 
     private fun attach(w: JediTermWidget, proc: PtyProcess) {
-        w.ttyConnector = PtyTtyConnector(proc, outputTap)
+        w.ttyConnector = PtyTtyConnector(
+            process = proc,
+            tap = outputTap,
+            inputTap = { bytes ->
+                if (bytes.any { it == '\r'.code.toByte() || it == '\n'.code.toByte() }) {
+                    onUserInput?.invoke()
+                }
+            },
+        )
         w.start()
     }
 

@@ -52,30 +52,80 @@ internal class NopTerminalWidget(
     settings: NopTerminalSettings,
 ) : JediTermWidget(columns, rows, settings) {
 
+    internal var userScrolledUp: Boolean = false
+    @Volatile
+    private var scrollScheduled: Boolean = false
+    private var scrollBarRef: JScrollBar? = null
+
     init {
-        // Keep scroll at bottom on buffer updates if user is already at or near the bottom
+        // Keep scroll at bottom on buffer updates unless the user has explicitly scrolled up
         terminalTextBuffer.addModelListener {
-            val model = terminalPanel.verticalScrollModel
-            if (model.value >= -1 && model.value != 0) {
+            if (!userScrolledUp && !scrollScheduled) {
+                scrollScheduled = true
                 SwingUtilities.invokeLater {
-                    if (model.value >= -1 && model.value != 0) {
-                        model.value = 0
+                    scrollScheduled = false
+                    if (!userScrolledUp) {
+                        scrollToBottom()
                     }
                 }
             }
         }
 
+        // Track when the viewport reaches bottom to reset userScrolledUp
+        terminalPanel.verticalScrollModel.addChangeListener {
+            if (terminalPanel.verticalScrollModel.value == 0) {
+                userScrolledUp = false
+            }
+        }
+
+        // Mouse wheel: scrolling up sets userScrolledUp; scrolling down checks if bottom reached
+        terminalPanel.addMouseWheelListener { e ->
+            if (e.wheelRotation < 0) {
+                userScrolledUp = true
+            } else if (e.wheelRotation > 0) {
+                SwingUtilities.invokeLater {
+                    if (terminalPanel.verticalScrollModel.value == 0) {
+                        userScrolledUp = false
+                    }
+                }
+            }
+        }
+
+        // Scrollbar thumb dragging: user dragging up into history sets userScrolledUp
+        scrollBarRef?.addAdjustmentListener { e ->
+            if (e.valueIsAdjusting && terminalPanel.verticalScrollModel.value < 0) {
+                userScrolledUp = true
+            } else if (terminalPanel.verticalScrollModel.value == 0) {
+                userScrolledUp = false
+            }
+        }
+
+        // Typing or submitting a command brings the viewport back to bottom
+        terminalPanel.addCustomKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                if (e.keyCode == java.awt.event.KeyEvent.VK_PAGE_UP || e.keyCode == java.awt.event.KeyEvent.VK_UP) {
+                    return
+                }
+                if (userScrolledUp && (e.keyCode == java.awt.event.KeyEvent.VK_ENTER ||
+                        e.keyChar in ' '..'~' || e.keyCode == java.awt.event.KeyEvent.VK_BACK_SPACE)
+                ) {
+                    userScrolledUp = false
+                    scrollToBottom()
+                }
+            }
+        })
+
         // Snap to bottom when focused or clicked, unless scrolled up into history
         terminalPanel.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
-                if (terminalPanel.verticalScrollModel.value >= -1) {
+                if (!userScrolledUp) {
                     scrollToBottom()
                 }
             }
         })
         terminalPanel.addFocusListener(object : FocusAdapter() {
             override fun focusGained(e: FocusEvent) {
-                if (terminalPanel.verticalScrollModel.value >= -1) {
+                if (!userScrolledUp) {
                     scrollToBottom()
                 }
             }
@@ -84,6 +134,7 @@ internal class NopTerminalWidget(
 
     /** Scrolls the viewport down to the active prompt / live screen output. */
     fun scrollToBottom() {
+        userScrolledUp = false
         val model = terminalPanel.verticalScrollModel
         if (model.value != 0) {
             model.value = 0
@@ -96,8 +147,11 @@ internal class NopTerminalWidget(
      * so `private val settings` would still be null here. `mySettingsProvider` is set before that
      * call, and is the very object handed in above.
      */
-    override fun createScrollBar(): JScrollBar =
-        TerminalScrollBar(mySettingsProvider as NopTerminalSettings)
+    override fun createScrollBar(): JScrollBar {
+        val bar = TerminalScrollBar(mySettingsProvider as NopTerminalSettings)
+        scrollBarRef = bar
+        return bar
+    }
 
     override fun createTerminalPanel(
         settingsProvider: SettingsProvider,

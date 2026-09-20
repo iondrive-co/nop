@@ -2,6 +2,7 @@ package iondrive.nop.terminal
 
 import com.jediterm.terminal.HyperlinkStyle
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -133,5 +134,38 @@ class NopTerminalSettingsTest {
         javax.swing.SwingUtilities.invokeAndWait { }
 
         assertEquals(0, model.value, "leaving alternate screen should restore scroll to bottom")
+    }
+
+    @Test
+    fun `incoming buffer lines autoscroll to bottom when user has not scrolled up`() {
+        val s = settings()
+        val widget = NopTerminalWidget(80, 24, s)
+        val model = widget.terminalPanel.verticalScrollModel
+        model.setRangeProperties(-50, 24, -100, 24, false)
+        assertEquals(-50, model.value)
+        assertFalse(widget.userScrolledUp)
+
+        widget.terminalTextBuffer.addLine(com.jediterm.terminal.model.TerminalLine.createEmpty())
+        javax.swing.SwingUtilities.invokeAndWait { }
+
+        assertEquals(0, model.value, "incoming buffer lines must autoscroll to bottom even from deep in history")
+    }
+
+    @Test
+    fun `buffer updates do not autoscroll when user has scrolled up`() {
+        val s = settings()
+        val widget = NopTerminalWidget(80, 24, s)
+        val model = widget.terminalPanel.verticalScrollModel
+        model.setRangeProperties(-50, 24, -100, 24, false)
+        widget.userScrolledUp = true
+
+        widget.terminalTextBuffer.addLine(com.jediterm.terminal.model.TerminalLine.createEmpty())
+        javax.swing.SwingUtilities.invokeAndWait { }
+
+        assertEquals(-50, model.value, "user scroll position must be preserved while userScrolledUp holds")
+
+        widget.scrollToBottom()
+        assertFalse(widget.userScrolledUp, "scrollToBottom must reset userScrolledUp")
+        assertEquals(0, model.value)
     }
 }

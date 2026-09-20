@@ -51,6 +51,16 @@ class AgentRun(
      */
     internal val tracker: ActivityTracker = ActivityTracker(),
 ) {
+    /** True when this command resumes an existing session rather than starting a fresh one. */
+    val isResume: Boolean get() = command.isResume
+
+    /**
+     * Whether a user prompt has been entered in this run. A resumed run starts false so opening
+     * a past session to inspect it never triggers an auto-handover on old replayed quota walls.
+     */
+    @Volatile
+    var userPromptSubmitted: Boolean = !isResume
+
     /**
      * When nop started this run. What the CLI filed before it — the wall that ended the last run,
      * replayed by a resume — is history rather than something the vendor is saying now; see
@@ -533,6 +543,19 @@ class AgentSession(
         // is not one to end again.
         if (current.endReason != null) return
 
+        // A session resumed simply to inspect or view must not trigger an auto-handover until
+        // the user actually enters a question in this run. Otherwise, replaying the previous
+        // screen output (which includes the quota message that ended the previous run) on a spent
+        // account kills the session and overwrites the tab immediately.
+        if (current.isResume && !current.userPromptSubmitted) {
+            Log.info(
+                "ignoring quota wall on ${current.account.name}: session was resumed to view and no " +
+                    "question has been submitted yet — ${hit.line}",
+            )
+            quotaWatcher.reset()
+            return
+        }
+
         // The screen said the account has run out; the provider's own numbers get to disagree.
         //
         // This is the difference between a session that ends because the vendor stopped serving it
@@ -806,6 +829,12 @@ class AgentSession(
             },
         )
         newRun = AgentRun(account, command, terminal, seededFromHandoff, tracker)
+        if (!seed.isNullOrBlank()) {
+            newRun.userPromptSubmitted = true
+        }
+        terminal.onUserInput = {
+            newRun.userPromptSubmitted = true
+        }
         // Claimed here rather than when the transcript turns up, because the gap between the two is
         // exactly when a tab opened beside this one would mistake this session's file for a `/clear`
         // of its own. Claude's id is known before the spawn; Codex's is claimed in [onLocated]
@@ -846,6 +875,9 @@ class AgentSession(
                 // The CLI names its own session a turn or two in. That name says far more about
                 // which of three open tabs this is than the account does.
                 if (event is AgentEvent.SessionTitled) titleFromTranscript(event.title, seededFromHandoff)
+                if (event is AgentEvent.UserMessage && event.at >= startedAt - 5000) {
+                    newRun.userPromptSubmitted = true
+                }
                 // A question is an open tool call, and a new prompt is a new turn — see
                 // [ActivityTracker]. Nothing else in the transcript changes what the tab is doing.
                 if (event is AgentEvent.ToolStarted || event is AgentEvent.ToolFinished ||

@@ -388,6 +388,32 @@ class AgentSessionsTest {
         assertFalse(session.ended)
     }
 
+    @Test
+    fun `resuming a session on a spent account does not hand over until a prompt is submitted`(@TempDir tmp: Path) {
+        val aloancloud = Account("claude-aloancloud", Provider.Anthropic, "/homes/claude-aloancloud", handoverTo = "claude-iondrive")
+        val iondrive = Account("claude-iondrive", Provider.Anthropic, "/homes/claude-iondrive")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        state.hasRunOut = { it == aloancloud }
+
+        val session = state.open(tmp.toFile(), aloancloud, resumeId = "native-1")
+        assertTrue(session.run.isResume)
+        assertFalse(session.run.userPromptSubmitted)
+
+        val replayed = QuotaHit("usage limit", "You've hit your usage limit")
+        session.onQuotaWall(replayed)
+
+        assertFalse(session.ended, "merely viewing a resumed session must not end it")
+        assertNull(session.autoHandover, "merely viewing a resumed session must not trigger auto-handover")
+        assertEquals(aloancloud.name, session.account.name, "session must remain on original account while inspecting")
+
+        // Now user enters a question
+        session.run.userPromptSubmitted = true
+        session.onQuotaWall(replayed)
+
+        assertEquals(iondrive.name, session.account.name, "work must have handed over to iondrive after prompt")
+    }
+
     /**
      * The 19:48 wall. A session nop has handed over reads a handoff quoting the wall that ended the
      * last run, so the phrase is in its conversation from its first turn — and its own wall, when it

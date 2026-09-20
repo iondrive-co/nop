@@ -18,6 +18,10 @@ import java.nio.charset.StandardCharsets
 class PtyTtyConnector(
     private val process: PtyProcess,
     /**
+     * Sees raw bytes typed or pasted into the PTY.
+     */
+    private val inputTap: ((ByteArray) -> Unit)? = null,
+    /**
      * Sees every character on its way to the terminal, and changes none of them.
      *
      * The agent launcher uses it for two things the CLI never tells nop directly: noticing the
@@ -41,6 +45,22 @@ class PtyTtyConnector(
             runCatching { listener(String(buf, offset, read)) }
         }
         return read
+    }
+
+    override fun write(buf: ByteArray) {
+        val listener = inputTap
+        if (listener != null) {
+            runCatching { listener(buf) }
+        }
+        super.write(buf)
+    }
+
+    override fun write(string: String) {
+        val listener = inputTap
+        if (listener != null) {
+            runCatching { listener(string.toByteArray(StandardCharsets.UTF_8)) }
+        }
+        super.write(string)
     }
 
     override fun isConnected(): Boolean = process.isAlive
