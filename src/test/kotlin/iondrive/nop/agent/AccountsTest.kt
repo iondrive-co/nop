@@ -101,6 +101,40 @@ class AccountsTest {
     }
 
     @Test
+    fun `a nomination cleared in the active accounts list resolves to nobody even if the running account had one`() {
+        val running = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "codex")
+        val currentClaude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = null)
+        val codex = Account("codex", Provider.OpenAI, "/h2")
+
+        assertNull(listOf(currentClaude, codex).handoverTarget(running))
+    }
+
+    @Test
+    fun `a nomination set in the active accounts list resolves even if the running account had none`() {
+        val running = Account("claude-main", Provider.Anthropic, "/h", handoverTo = null)
+        val currentClaude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/h2")
+
+        assertEquals(codex, listOf(currentClaude, codex).handoverTarget(running))
+    }
+
+    @Test
+    fun `change listeners are notified on save`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        var notified: AgentConfig? = null
+        val unsubscribe = Accounts.addChangeListener { notified = it }
+
+        val config = AgentConfig(listOf(Account("a", Provider.Anthropic, "/h")))
+        Accounts.save(config)
+
+        assertEquals(config, notified)
+        unsubscribe()
+
+        Accounts.save(AgentConfig())
+        assertEquals(config, notified, "unsubscribed listener should not be notified")
+    }
+
+    @Test
     fun `providers are stored under the names chad used`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         Accounts.save(AgentConfig(listOf(Account("a", Provider.Anthropic, "/h"))))

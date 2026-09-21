@@ -53,6 +53,63 @@ internal object Antigravity {
     /** Workspace path to the conversation last opened there, written by the CLI as it opens one. */
     fun lastConversationsFile(home: Path): Path = cliDir(home).resolve("cache").resolve("last_conversations.json")
 
+    /** Metadata annotation file written by the CLI for a conversation, containing its model-generated title. */
+    fun annotationsFile(home: Path, conversationId: String): Path =
+        cliDir(home).resolve("annotations").resolve("$conversationId.pbtxt")
+
+    /**
+     * The model-given title for [conversationId] in [home], or null when it has none yet.
+     *
+     * Checked first in `annotations/<id>.pbtxt` (fast file read), then in `conversation_summaries.db`
+     * (sqlite3 CLI query).
+     */
+    fun conversationTitle(home: Path, conversationId: String): String? {
+        if (conversationId.isBlank()) return null
+        val pbtxt = annotationsFile(home, conversationId)
+        if (Files.isRegularFile(pbtxt)) {
+            val title = parseAnnotationTitle(pbtxt)
+            if (!title.isNullOrBlank()) return title
+        }
+        val db = cliDir(home).resolve("conversation_summaries.db")
+        if (Files.isRegularFile(db) && Regex("^[a-zA-Z0-9_-]+$").matches(conversationId)) {
+            val title = querySqliteTitle(db, conversationId)
+            if (!title.isNullOrBlank()) return title
+        }
+        return null
+    }
+
+    private fun parseAnnotationTitle(file: Path): String? = runCatching {
+        Files.readAllLines(file).firstNotNullOfOrNull { line ->
+            ANNOTATION_TITLE.find(line)?.groupValues?.get(1)
+                ?.replace("\\\"", "\"")
+                ?.replace("\\\\", "\\")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+        }
+    }.getOrNull()
+
+    private val ANNOTATION_TITLE = Regex("""^title\s*:\s*"(.*)"\s*$""")
+
+    private fun querySqliteTitle(db: Path, conversationId: String): String? = runCatching {
+        val process = ProcessBuilder(
+            listOf("sqlite3", db.toString(), "SELECT title FROM conversation_summaries WHERE conversation_id = '$conversationId';")
+        )
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
+            .start()
+        process.outputStream.close()
+        val output = AtomicReference<String>()
+        val drain = thread(isDaemon = true, name = "agy-title-read") {
+            runCatching { process.inputStream.bufferedReader().use { output.set(it.readText()) } }
+        }
+        if (!process.waitFor(1000, TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly()
+            return null
+        }
+        drain.join(500)
+        if (process.exitValue() != 0) return null
+        output.get()?.trim()?.takeIf { it.isNotEmpty() }
+    }.getOrNull()
+
     /**
      * Readies [account]'s home for an interactive run or a login. Safe to call every time, and
      * best-effort throughout: none of it is worth refusing to launch over.

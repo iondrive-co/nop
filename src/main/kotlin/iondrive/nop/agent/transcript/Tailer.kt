@@ -83,6 +83,12 @@ interface Tailer {
 
     /** The native session id, once the transcript has revealed one. Null when [locate] already knew. */
     fun nativeSessionId(): String? = null
+
+    /**
+     * Events discovered outside transcript lines (e.g. titles written to metadata files
+     * or databases by the CLI). Polled on every pass of the follower.
+     */
+    fun poll(): List<AgentEvent> = emptyList()
 }
 
 /**
@@ -154,6 +160,8 @@ class TranscriptFollower(
      */
     @Synchronized
     private fun pass() {
+        tailer.poll().forEach(onEvent)
+
         val current = file ?: tailer.locate(run)?.also { found ->
             file = found
             // Everything already in a resumed conversation's transcript is already in the

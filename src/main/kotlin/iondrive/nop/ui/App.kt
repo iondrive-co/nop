@@ -674,6 +674,10 @@ fun App(
     LaunchedEffect(Unit) {
         if (agentConfig == null) agentConfig = withContext(Dispatchers.IO) { Accounts.load() }
     }
+    DisposableEffect(Unit) {
+        val unsubscribe = Accounts.addChangeListener { next -> agentConfig = next }
+        onDispose { unsubscribe() }
+    }
     val agentAccounts: List<Account> = agentConfig?.accounts.orEmpty()
     // Who a session hands its work to when the account running it runs out. Pushed into the
     // collection rather than passed to each session, because the sessions outlive this composition

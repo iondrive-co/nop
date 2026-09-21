@@ -153,6 +153,9 @@ class AgentSessions {
                 ),
             )
         }
+        if (_sessions.isNotEmpty()) {
+            pickerTabVisible = false
+        }
     }
 
     /**
@@ -165,15 +168,10 @@ class AgentSessions {
     }
 
     /**
-     * Whether the strip carries an agent tab with no session in it yet — the picker.
+     * Whether the selector tab for the sessions ("Agent") is showing in the strip.
      *
-     * One at a time, because it is an *empty* tab rather than a panel: pressing "+" twice without
-     * choosing anything has nothing to make a second of. [open] spends it and [showPicker] makes
-     * another, which is what the "+" and the post-close fallback both do.
-     *
-     * It is drawn beside the sessions rather than only in place of them, because the picker is the
-     * one place an *earlier* session can be resumed from, and a session already running is not a
-     * reason to be unable to reach that list.
+     * Only shows if there are no sessions running. While sessions are running, session selection /
+     * creation is accessible only from the "+" button, so the selector tab does not appear.
      */
     var pickerTabVisible: Boolean by mutableStateOf(true)
         private set
@@ -181,7 +179,9 @@ class AgentSessions {
     /** Shows the picker without disturbing any running session. */
     fun showPicker() {
         selectedId = null
-        pickerTabVisible = true
+        if (_sessions.isEmpty()) {
+            pickerTabVisible = true
+        }
     }
 
     /** Takes the picker's tab out of the strip. The "+" is how it comes back. */
@@ -193,11 +193,7 @@ class AgentSessions {
      * Kills the session behind [id] and drops it from the strip.
      *
      * Falls to a neighbour, the way closing a terminal does, and makes no empty tab on the way out.
-     * Closing used to bring the picker's tab back with it, on the grounds that starting another
-     * session is the usual next thing — but it is only usual, and when it was not, tidying the
-     * strip handed back a second tab to close. The "+" is the one thing that makes that tab now;
-     * with nothing left to fall to, the pane shows the picker anyway, which is exactly where
-     * closing the picker's own tab leaves it.
+     * When the last session closes, the selector tab returns to the strip.
      */
     fun close(id: String) {
         val idx = _sessions.indexOfFirst { it.sessionId == id }
@@ -205,6 +201,9 @@ class AgentSessions {
         _sessions.removeAt(idx).dispose()
         if (selectedId == id) {
             selectedId = (_sessions.getOrNull(idx) ?: _sessions.getOrNull(idx - 1))?.sessionId
+        }
+        if (_sessions.isEmpty()) {
+            pickerTabVisible = true
         }
     }
 
@@ -219,5 +218,6 @@ class AgentSessions {
         _sessions.forEach { it.dispose() }
         _sessions.clear()
         selectedId = null
+        pickerTabVisible = true
     }
 }

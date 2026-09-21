@@ -243,4 +243,48 @@ class AntigravityTailerTest {
         assertEquals(Antigravity.historyFile(tmp), tailer.locate(context))
         assertEquals("conv-new", tailer.nativeSessionId())
     }
+
+    // ── session titling via poll ──
+
+    @Test
+    fun `poll returns SessionTitled once title is written to annotations`(@TempDir tmp: Path) {
+        val tailer = AntigravityTailer(tmp)
+        history(tmp, prompt("hello", conversation = "conv-1"))
+        tailer.locate(run(tmp))
+
+        // Before annotation file exists, poll has nothing
+        assertTrue(tailer.poll().isEmpty())
+
+        // Write annotation file
+        val annotationFile = Antigravity.annotationsFile(tmp, "conv-1")
+        Files.createDirectories(annotationFile.parent)
+        Files.writeString(annotationFile, "title:\"Work on feature X\"\n")
+
+        val events = tailer.poll()
+        assertEquals(1, events.size)
+        val titled = events.first() as AgentEvent.SessionTitled
+        assertEquals("Work on feature X", titled.title)
+
+        // Subsequent poll returns nothing (already titled)
+        assertTrue(tailer.poll().isEmpty())
+    }
+
+    @Test
+    fun `poll titles new conversation when conversationId changes`(@TempDir tmp: Path) {
+        val tailer = AntigravityTailer(tmp)
+        history(tmp, prompt("first", conversation = "conv-1"))
+        tailer.locate(run(tmp))
+
+        val file1 = Antigravity.annotationsFile(tmp, "conv-1")
+        Files.createDirectories(file1.parent)
+        Files.writeString(file1, "title:\"Initial task\"\n")
+        assertEquals(listOf("Initial task"), tailer.poll().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+
+        // Clear or new prompt moves to conv-2
+        tailer.parse(prompt("after clear", at = startedAt + 5_000, conversation = "conv-2"))
+
+        val file2 = Antigravity.annotationsFile(tmp, "conv-2")
+        Files.writeString(file2, "title:\"Second task\"\n")
+        assertEquals(listOf("Second task"), tailer.poll().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+    }
 }

@@ -370,11 +370,18 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             val session = started ?: return null
             if (session.projectPath != projectPath) return null
 
+            val resolvedTitle = titled
+                ?: (if (lastRun?.provider == Provider.Antigravity.id && lastRun.nativeSessionId != null && (lastRun.home ?: storeOf(lastRun)) != null) {
+                    Antigravity.conversationTitle(Path.of(lastRun.home ?: storeOf(lastRun)), lastRun.nativeSessionId)
+                } else null)
+                ?: firstPrompt?.firstLine()
+                ?: "Untitled session"
+
             return PastSession(
                 sessionId = file.fileName.toString().removeSuffix(".jsonl"),
                 projectPath = session.projectPath,
                 startedAt = session.at,
-                title = titled ?: firstPrompt?.firstLine() ?: "Untitled session",
+                title = resolvedTitle,
                 lastProvider = lastRun?.provider,
                 lastAccount = lastRun?.account,
                 lastNativeSessionId = resumeId(lastRun, lastSpawn?.at ?: session.at),

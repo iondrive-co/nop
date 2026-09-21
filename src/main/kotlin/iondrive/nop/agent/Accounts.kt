@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * One configured vendor account: a name, the provider it belongs to, and the directory holding its
@@ -63,6 +64,10 @@ data class Account(
  * Who [from] hands its work to when it hits its wall, or null when nobody has been nominated and
  * the choice belongs to the user.
  *
+ * The nomination is read from the account as it stands in [this] list (the active configuration)
+ * rather than from [from] directly, so a change made in the settings dialog mid-session applies to
+ * sessions that were already running when the change was made.
+ *
  * Two answers are deliberately null rather than an error. A nomination naming an account that has
  * since been removed resolves to nothing, because a handover that cannot happen should end up in
  * front of the user rather than in a log; and an account nominating *itself* resolves to nothing
@@ -71,7 +76,8 @@ data class Account(
  * edited by hand, or written by a version that allowed it, must not be able to wedge a session.
  */
 fun List<Account>.handoverTarget(from: Account): Account? {
-    val nominated = from.handoverTo?.takeIf { it != from.name } ?: return null
+    val currentFrom = firstOrNull { it.name == from.name } ?: from
+    val nominated = currentFrom.handoverTo?.takeIf { it != currentFrom.name } ?: return null
     return firstOrNull { it.name == nominated }
 }
 
@@ -111,6 +117,17 @@ object Accounts {
 
     val configFile: Path
         get() = Settings.configRoot.resolve("nop").resolve("agent.json")
+
+    private val listeners = CopyOnWriteArrayList<(AgentConfig) -> Unit>()
+
+    /**
+     * Registers a callback notified whenever [save] successfully writes a new configuration.
+     * Returns an unsubscribe lambda.
+     */
+    fun addChangeListener(listener: (AgentConfig) -> Unit): () -> Unit {
+        listeners.add(listener)
+        return { listeners.remove(listener) }
+    }
 
     /** Where a brand-new account's credential directory is made. */
     fun defaultHome(name: String): Path = dataRoot().resolve("homes").resolve(name)
@@ -159,6 +176,8 @@ object Accounts {
             Files.writeString(tmp, json.encodeToString(config))
             Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             OwnerOnly.tighten(f)
+        }.onSuccess {
+            listeners.forEach { it(config) }
         }.onFailure { Log.warn("could not save agent.json: $it") }
     }
 

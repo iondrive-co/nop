@@ -441,7 +441,8 @@ private fun SessionStrip(
     // pressing it when no account can be guessed makes a tab like any other, and a tab the user
     // cannot see is one they will press the button for a second time.
     val agentPlus = remember { BringIntoViewRequester() }
-    val agentTabs = agents.sessions.size + if (agents.pickerTabVisible) 1 else 0
+    val showPickerTab = agents.sessions.isEmpty() && agents.pickerTabVisible
+    val agentTabs = agents.sessions.size + if (showPickerTab) 1 else 0
     var openAgents by remember { mutableStateOf(agentTabs) }
     LaunchedEffect(agentTabs) {
         if (agentTabs > openAgents) agentPlus.bringIntoView()
@@ -530,15 +531,9 @@ private fun SessionStrip(
                 }
             }
         }
-        // The empty agent tab, holding the picker, which the "+" beside it makes and starting a
-        // session spends — see [AgentSessions.pickerTabVisible]. It draws *after* the sessions and
-        // not before them because it is the newest tab in the strip rather than a fixture of it:
-        // the one the "+" just made, in the place a new tab appears.
-        //
-        // Reachable while a session is running, and that is the point of it having a tab at all.
-        // The picker is the one place a *past* session can be resumed from, so an agent panel that
-        // only ever showed it in place of a running session left the user no way back to the list.
-        if (agents.pickerTabVisible) {
+        // The selector tab for the sessions, which is also called Agent, only shows if there are no
+        // sessions running; otherwise that functionality is only accessible from the + button.
+        if (showPickerTab) {
             ToolStripTab(
                 label = "$AGENT_GLYPH ${AgentSession.DEFAULT_TITLE}",
                 // Only when the pane is actually holding the picker. Without the second clause this

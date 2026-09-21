@@ -46,6 +46,9 @@ class AntigravityTailer(private val home: Path) : Tailer {
     @Volatile
     private var conversationId: String? = null
 
+    @Volatile
+    private var titledConversationId: String? = null
+
     /** The run being followed, kept so [parse] can tell this session's prompts from the file's. */
     @Volatile
     private var context: RunContext? = null
@@ -54,6 +57,15 @@ class AntigravityTailer(private val home: Path) : Tailer {
     private var scannedAt: Long = -1
 
     override fun nativeSessionId(): String? = conversationId
+
+    override fun poll(): List<AgentEvent> {
+        val id = conversationId ?: return emptyList()
+        if (id == titledConversationId) return emptyList()
+
+        val title = Antigravity.conversationTitle(home, id) ?: return emptyList()
+        titledConversationId = id
+        return listOf(AgentEvent.SessionTitled(title, System.currentTimeMillis()))
+    }
 
     /**
      * The history file, once this run has a conversation to put in it.

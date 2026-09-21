@@ -597,6 +597,24 @@ class AgentSessionsTest {
         assertEquals("codex", session.account.name)
     }
 
+    @Test
+    fun `changing handover nomination mid-session to ask me prevents auto-handover`(@TempDir tmp: Path) {
+        val claudeStarted = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        // Nomination cleared mid-session in the active accounts list:
+        val claudeUpdated = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = null)
+        state.handoverTarget = { from -> listOf(claudeUpdated, codex).handoverTarget(from) }
+        state.hasRunOut = { true }
+        state.spentUntil = { java.time.Instant.now().plus(AgentSession.WAIT_FOR_RESET).plusSeconds(60) }
+        val session = state.open(tmp.toFile(), claudeStarted)
+
+        session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
+
+        assertNull(session.autoHandover, "clearing nomination mid-session should prevent auto-handover")
+        assertEquals("claude-main", session.account.name)
+    }
+
     /**
      * The `agy` wall in hermes on 2026-09-20, which nop watched happen twice and did nothing about.
      *
@@ -824,32 +842,32 @@ class AgentSessionsTest {
         assertEquals(session.sessionId, state.selectedId)
     }
 
-    /** Twice over: one press of the "+" is one new tab, however many sessions are already running. */
+    /** While sessions are running, the selector tab is not added to the strip; the picker is accessed via + */
     @Test
-    fun `the + makes one empty tab at a time`(@TempDir tmp: Path) {
+    fun `the + opens the picker without adding a selector tab when sessions are running`(@TempDir tmp: Path) {
         val state = sessions()
         state.open(tmp.toFile(), account("claude-main"))
 
         state.showPicker()
         state.showPicker()
 
-        assertTrue(state.pickerTabVisible)
-        assertNull(state.selectedId, "the empty tab is what is on screen after the +")
+        assertFalse(state.pickerTabVisible, "the selector tab only shows if there are no sessions running")
+        assertNull(state.selectedId, "the picker is what is on screen after the +")
     }
 
     /**
-     * The "+" is the only thing that makes the empty tab. Closing a session used to make one too,
-     * which meant tidying the strip up handed back another tab to close.
+     * The selector tab for the sessions only shows if there are no sessions running.
+     * When the last session is closed, the selector tab returns to the strip.
      */
     @Test
-    fun `closing the last session makes no tab to replace it`(@TempDir tmp: Path) {
+    fun `closing the last session restores the selector tab`(@TempDir tmp: Path) {
         val state = sessions()
         val session = state.open(tmp.toFile(), account("claude-main"))
         assertFalse(state.pickerTabVisible)
 
         state.close(session.sessionId)
 
-        assertFalse(state.pickerTabVisible, "only the + makes the picker's tab")
+        assertTrue(state.pickerTabVisible, "the selector tab shows when no sessions are running")
         assertNull(state.selectedId, "with nothing left to show, the pane holds the picker")
     }
 
@@ -880,7 +898,20 @@ class AgentSessionsTest {
         javax.swing.SwingUtilities.invokeAndWait { }
 
         assertTrue(state.sessions.isEmpty(), "the CLI exited cleanly, so the tab has done its job")
-        assertFalse(state.pickerTabVisible, "and closing a tab is still not a reason to make one")
+        assertTrue(state.pickerTabVisible, "with no sessions running, the selector tab shows")
+    }
+
+    @Test
+    fun `restoring sessions hides the selector tab`(@TempDir tmp: Path) {
+        val state = sessions()
+        assertTrue(state.pickerTabVisible)
+
+        val row = Settings.OpenAgent("s-1", Provider.Anthropic.id, "claude-main", "conv-1", "Title", titleIsUsers = false)
+        val accounts = listOf(Account("claude-main", Provider.Anthropic, tmp.toString()))
+        state.restore(listOf(row), tmp.toFile(), accounts)
+
+        assertEquals(1, state.sessions.size)
+        assertFalse(state.pickerTabVisible, "selector tab should hide when sessions are restored")
     }
 
     /**

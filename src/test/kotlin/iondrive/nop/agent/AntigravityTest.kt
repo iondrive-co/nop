@@ -260,4 +260,35 @@ class AntigravityTest {
 
         assertEquals("not signed in", reading.unavailable)
     }
+
+    // ── conversation titles ──
+
+    @Test
+    fun `conversation title is read from the annotation file`(@TempDir tmp: Path) {
+        val annotationFile = Antigravity.annotationsFile(tmp, "conv-123")
+        Files.createDirectories(annotationFile.parent)
+        Files.writeString(annotationFile, "title:\"Fix Calculator Addition Bug\"\n")
+
+        assertEquals("Fix Calculator Addition Bug", Antigravity.conversationTitle(tmp, "conv-123"))
+    }
+
+    @Test
+    fun `conversation title unescapes quotes in annotation file`(@TempDir tmp: Path) {
+        val annotationFile = Antigravity.annotationsFile(tmp, "conv-123")
+        Files.createDirectories(annotationFile.parent)
+        Files.writeString(annotationFile, "title:\"Fix \\\"quoted\\\" bug\"\n")
+
+        assertEquals("Fix \"quoted\" bug", Antigravity.conversationTitle(tmp, "conv-123"))
+    }
+
+    @Test
+    fun `missing or empty annotation file returns null`(@TempDir tmp: Path) {
+        assertNull(Antigravity.conversationTitle(tmp, "non-existent"))
+
+        val annotationFile = Antigravity.annotationsFile(tmp, "conv-empty")
+        Files.createDirectories(annotationFile.parent)
+        Files.writeString(annotationFile, "title:\"\"\n")
+
+        assertNull(Antigravity.conversationTitle(tmp, "conv-empty"))
+    }
 }
