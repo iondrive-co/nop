@@ -201,6 +201,9 @@ class ActivityTracker {
     /** Tool calls made in the current turn and not yet answered, by call id, with the tool's name. */
     private val open = LinkedHashMap<String, String>()
 
+    private var hasQueuedQuestion = false
+    private val recentOutput = StringBuilder()
+
     fun onTitle(text: String, at: Long) {
         // The same title again is not news, and must not restart the wait for stillness — Claude
         // Code rewrites a stopped title now and then without anything having changed.
@@ -211,11 +214,38 @@ class ActivityTracker {
         said = TitleSignal.read(text)
     }
 
+    fun onOutput(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val clean = QuotaWatcher.stripAnsi(text)
+        recentOutput.append(clean)
+        if (recentOutput.length > RECENT_OUTPUT_WINDOW) {
+            recentOutput.delete(0, recentOutput.length - RECENT_OUTPUT_WINDOW)
+        }
+        if (!hasQueuedQuestion && QUEUED_QUESTION.containsMatchIn(recentOutput)) {
+            hasQueuedQuestion = true
+            return true
+        }
+        return false
+    }
+
+    fun onUserInput(): Boolean {
+        if (hasQueuedQuestion) {
+            hasQueuedQuestion = false
+            recentOutput.setLength(0)
+            return true
+        }
+        return false
+    }
+
     fun onEvent(event: AgentEvent) {
         when (event) {
             // A new prompt starts a new turn. Anything still open from the last one was interrupted
             // or lost to the tailer, and is not a question anybody is being asked now.
-            is AgentEvent.UserMessage -> open.clear()
+            is AgentEvent.UserMessage -> {
+                open.clear()
+                hasQueuedQuestion = false
+                recentOutput.setLength(0)
+            }
             is AgentEvent.ToolStarted -> open[event.callId] = event.tool
             is AgentEvent.ToolFinished -> open.remove(event.callId)
             else -> Unit
@@ -224,7 +254,7 @@ class ActivityTracker {
 
     /** What the tab is doing at [now], for a run that is alive. */
     fun activity(now: Long): Activity {
-        if (open.values.any { it in QUESTION_TOOLS }) return Activity.Asking
+        if (hasQueuedQuestion || open.values.any { it in QUESTION_TOOLS }) return Activity.Asking
         return when (said) {
             TitleSignal.Says.Working -> Activity.Working
             TitleSignal.Says.Blocked -> Activity.Asking
@@ -248,5 +278,16 @@ class ActivityTracker {
          * and Codex's request for input.
          */
         val QUESTION_TOOLS: Set<String> = setOf("AskUserQuestion", "ExitPlanMode", "request_user_input")
+
+        /**
+         * A background task multiplexed with a queued question / survey (e.g. in Codex:
+         * "• Queued follow-up inputs \n ? 1 question \n alt + ↑ to answer").
+         */
+        val QUEUED_QUESTION: Regex = Regex(
+            """(?:queued\s+follow-up\s+inputs?|alt\s*\+\s*(?:↑|\^|up)\s*to\s*answer)""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        private const val RECENT_OUTPUT_WINDOW = 4096
     }
 }

@@ -74,6 +74,23 @@ class QuotaEchoTest {
         assertEquals(Verdict.Refused, judge(file, "Usage limit reached"))
     }
 
+    private fun codexTaskComplete(
+        at: Instant,
+        message: String = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), " +
+            "visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 4:14 PM.",
+    ) = """{"timestamp":"$at","type":"event_msg","payload":{"type":"task_complete","error":{"message":"$message","codex_error_info":"usage_limit_exceeded"}}}"""
+
+    @Test
+    fun `a Codex task_complete error filed moments ago is a vendor refusal`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"event_msg","timestamp":"${since.plusSeconds(5)}","payload":{"type":"agent_message","message":"working on task"}}""",
+            codexTaskComplete(now.minusMillis(50)),
+        )
+
+        assertEquals(Verdict.Refused, judge(file, "You've hit your usage limit"))
+    }
+
     /**
      * The 19:48 wall, and the reason the second version of this guard still never handed a thing
      * over. The session was itself a handover: its first act was to read a handoff whose last line

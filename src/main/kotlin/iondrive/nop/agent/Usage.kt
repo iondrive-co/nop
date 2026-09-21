@@ -211,6 +211,7 @@ object Usage {
     /** Forgets remembered refusals — after a fresh login, and in tests. */
     fun clearAuthCache() {
         refusedAt.clear()
+        liveCodex.clear()
     }
 
     /**
@@ -461,6 +462,26 @@ object Usage {
 
     // ── Codex ──
 
+    private val liveCodex = ConcurrentHashMap<Path, Pair<JsonObject, Instant>>()
+
+    /**
+     * Records a live `rate_limits` snapshot arrived during a running session tail.
+     */
+    fun recordCodexLimits(home: Path, limits: JsonObject) {
+        if (limits["primary"] is JsonObject || limits["secondary"] is JsonObject) {
+            liveCodex[home.toAbsolutePath().normalize()] = limits to Instant.now()
+        }
+    }
+
+    /**
+     * The freshest live reading recorded from a running Codex session, if available.
+     */
+    fun liveCodexReading(home: Path): UsageReading? {
+        val (limits, at) = liveCodex[home.toAbsolutePath().normalize()] ?: return null
+        val (session, weekly) = codexWindows(limits)
+        return UsageReading(session, weekly, at)
+    }
+
     /**
      * The freshest populated `rate_limits` snapshot in this account's session transcripts.
      *
@@ -474,6 +495,12 @@ object Usage {
         // cannot run at all — which is the one reading worse than none, because it says the week is
         // untouched when the truth is that nop has nothing to ask.
         if (codexAuth(account) == null) return UsageReading.unavailable("not signed in")
+
+        liveCodexReading(account.homePath)?.let { live ->
+            if (live.asOf != null && Duration.between(live.asOf, Instant.now()) < UsageReading.FRESH_ENOUGH) {
+                return live
+            }
+        }
 
         val sessions = account.homePath.resolve(".codex").resolve("sessions")
         if (!Files.isDirectory(sessions)) return UsageReading.unavailable("no sessions yet")

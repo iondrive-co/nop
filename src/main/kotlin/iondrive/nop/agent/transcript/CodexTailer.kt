@@ -3,6 +3,7 @@ package iondrive.nop.agent.transcript
 import iondrive.nop.agent.AgentEvent
 import iondrive.nop.agent.Block
 import iondrive.nop.agent.TokenUsage
+import iondrive.nop.agent.Usage
 import iondrive.nop.agent.arr
 import iondrive.nop.agent.bool
 import iondrive.nop.agent.int
@@ -206,6 +207,7 @@ class CodexTailer(private val home: Path) : Tailer {
 
             "token_count" -> {
                 pendingUsage = tokenUsage(payload)
+                payload["rate_limits"].obj()?.let { Usage.recordCodexLimits(home, it) }
                 emptyList()
             }
 

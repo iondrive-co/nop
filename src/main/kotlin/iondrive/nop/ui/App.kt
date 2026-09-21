@@ -792,8 +792,12 @@ fun App(
     // out of the poller's map at the moment a session asks, so it is the freshest reading there is
     // rather than whatever had arrived when the tab was opened. See [UsageReading.looksSpent].
     SideEffect {
-        agentSessions.hasRunOut = { account -> agentUsage[account.name]?.looksSpent() }
-        agentSessions.spentUntil = { account -> agentUsage[account.name]?.spentUntil() }
+        agentSessions.hasRunOut = { account ->
+            (Usage.liveCodexReading(account.homePath) ?: agentUsage[account.name])?.looksSpent()
+        }
+        agentSessions.spentUntil = { account ->
+            (Usage.liveCodexReading(account.homePath) ?: agentUsage[account.name])?.spentUntil()
+        }
     }
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
     // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in

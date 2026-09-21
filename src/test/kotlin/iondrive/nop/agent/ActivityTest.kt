@@ -171,6 +171,54 @@ class ActivityTest {
         assertEquals(Activity.Asking, tracker.activity(now = 0))
     }
 
+    @Test
+    fun `a queued question makes a working tab asking`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("[ ⠹ ] Working | ops", at = 0)
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+
+        val changed = tracker.onOutput(
+            "Working (31m 54s • esc to interrupt) · 1 background terminal running\n" +
+                "• Queued follow-up inputs\n" +
+                "  ? 1 question\n" +
+                "    alt + ↑ to answer\n",
+        )
+        assertTrue(changed)
+        assertEquals(Activity.Asking, tracker.activity(now = 10))
+    }
+
+    @Test
+    fun `user input clears the queued question state`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("[ ⠹ ] Working | ops", at = 0)
+        tracker.onOutput("• Queued follow-up inputs\n  alt + ↑ to answer")
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+
+        val changed = tracker.onUserInput()
+        assertTrue(changed)
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+    }
+
+    @Test
+    fun `a new user message clears the queued question state`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("[ ⠹ ] Working | ops", at = 0)
+        tracker.onOutput("• Queued follow-up inputs\n  alt + ↑ to answer")
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+
+        tracker.onEvent(AgentEvent.UserMessage("my answer", at = 0))
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+    }
+
+    @Test
+    fun `queued question with ansi escapes is detected`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("[ ⠹ ] Working | ops", at = 0)
+        val esc = "\u001b"
+        tracker.onOutput("${esc}[32m• Queued follow-up inputs${esc}[0m\n  alt + ↑ to answer")
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+    }
+
     /**
      * Codex's stopped title carries no glyph, so it means nothing until it has stood still — and
      * until then the tab is still what it was, not "running", which would be a change from working

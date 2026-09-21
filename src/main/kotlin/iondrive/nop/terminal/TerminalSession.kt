@@ -129,6 +129,7 @@ class TerminalSession private constructor(
         // handler in the panel's listener list: the panel adds that one when the session connects,
         // and only a listener that runs first can take the event off it.
         w.terminalPanel.addCustomKeyListener(ShiftEnterNewline { sendText(it) })
+        w.terminalPanel.addCustomKeyListener(AltArrowKeys { sendText(it) })
         w.terminalPanel.addCustomKeyListener(object : java.awt.event.KeyAdapter() {
             override fun keyPressed(e: java.awt.event.KeyEvent) {
                 if (e.keyCode == java.awt.event.KeyEvent.VK_ENTER) {
@@ -295,6 +296,16 @@ class TerminalSession private constructor(
         val childEnv = HashMap(System.getenv())
         // Advertise a colour terminal so tools enable ANSI output and full-screen rendering.
         childEnv["TERM"] = "xterm-256color"
+        // And a *24-bit* one, which TERM alone cannot say: there is no termcap entry for truecolor,
+        // so every CLI that can emit it (claude, codex, bat, delta, and anything else built on
+        // chalk / supports-color / crossterm) decides by looking for COLORTERM and settles for the
+        // 256-colour cube when it is absent. That downgrade is visible rather than academic —
+        // Claude Code's inline-code lavender #b1b9f9 arrives here as #afd7ff, xterm index 153, and
+        // every other colour in its theme is likewise snapped to the nearest of 240 entries, which
+        // is what flattened output in nop against the same CLI in a plain terminal. JediTerm has
+        // parsed `38;2;r;g;b` since long before 3.72 (`JediEmulator.getColor256`), so nothing on
+        // this side needs to change to receive the real colours.
+        childEnv["COLORTERM"] = "truecolor"
         // Which way round the terminal is, stated up front rather than left to be asked for.
         //
         // JediTerm does answer the OSC 11 "what colour is your background?" query, with the themed

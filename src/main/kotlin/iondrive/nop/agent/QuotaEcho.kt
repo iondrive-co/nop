@@ -173,15 +173,17 @@ object QuotaEcho {
     /**
      * When the CLI filed [line] as its own account of a refusal, or null when it is anything else.
      *
-     * Two shapes, both Claude Code's, both written by the CLI about itself:
+     * Three shapes, written by the CLI about itself:
      *
-     * - `isApiErrorMessage` — the request that was refused, kept in the transcript wearing the
-     *   assistant's role so the TUI can redraw it. The model did not say it; the 429 did.
-     * - `type: "system"` — the CLI's own notices, the "continuing automatically at 8:10pm" banner
-     *   and a `/compact` that failed for want of quota among them. Nothing here is a turn by either
-     *   party.
+     * - `isApiErrorMessage` — Claude Code's request that was refused, kept in the transcript
+     *   wearing the assistant's role so the TUI can redraw it. The model did not say it; the 429 did.
+     * - `type: "system"` — Claude Code's own notices, the "continuing automatically at 8:10pm"
+     *   banner and a `/compact` that failed for want of quota among them. Nothing here is a turn by
+     *   either party.
+     * - `task_complete` with `error` — Codex's event filed when a task completes with an error,
+     *   such as `usage_limit_exceeded`.
      *
-     * Either one only counts when it carries a limit phrase, since both shapes carry plenty that is
+     * Any shape only counts when it carries a limit phrase, since these shapes carry plenty that is
      * not a wall — an overloaded API, a turn's duration — and only with a timestamp that parses,
      * since a refusal that cannot be placed in time cannot be told from one a resume is redrawing.
      * Anything else is treated as conversation, which is what keeps the guard conservative. So is a
@@ -191,10 +193,15 @@ object QuotaEcho {
     private fun refusal(line: String): Instant? {
         // A substring test first. This runs over every line of up to [MAX_READ] on the thread that
         // noticed the wall, and all but a handful of those lines are conversation.
-        if ("\"isApiErrorMessage\"" !in line && "\"system\"" !in line) return null
+        if ("\"isApiErrorMessage\"" !in line && "\"system\"" !in line && "\"task_complete\"" !in line) return null
         val record: JsonObject = runCatching { json.parseToJsonElement(line.trim()) }.getOrNull().obj()
             ?: return null
-        if (!record["isApiErrorMessage"].bool() && record["type"].str() != "system") return null
+        val isClaudeRefusal = record["isApiErrorMessage"].bool() || record["type"].str() == "system"
+        val payload = record["payload"].obj()
+        val isCodexRefusal = record["type"].str() == "event_msg" &&
+            payload?.get("type").str() == "task_complete" &&
+            payload?.get("error") != null
+        if (!isClaudeRefusal && !isCodexRefusal) return null
         if (QuotaWatcher.limitPhraseIn(line) == null) return null
         return record["timestamp"].str()?.let { runCatching { Instant.parse(it) }.getOrNull() }
     }

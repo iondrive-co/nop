@@ -650,6 +650,29 @@ class AgentSessionsTest {
         assertNull(session.run.quota)
     }
 
+    @Test
+    fun `a fresh refusal hands over even when poller says the account still has quota`(@TempDir tmp: Path) {
+        val codex = Account("codex-iondrive", Provider.OpenAI, "/homes/codex-iondrive", handoverTo = "claude-main")
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(codex, claude).handoverTarget(from) }
+        state.hasRunOut = { false } // Poller reading claims account still has quota
+        val session = state.open(tmp.toFile(), codex)
+
+        val wall = "You've hit your usage limit"
+        val now = java.time.Instant.now()
+        session.run.transcriptPath = tmp.resolve("session.jsonl").also {
+            Files.writeString(
+                it,
+                """{"timestamp":"$now","type":"event_msg","payload":{"type":"task_complete","error":{"message":"$wall. Upgrade to Pro... or try again at 4:14 PM.","codex_error_info":"usage_limit_exceeded"}}}""",
+            )
+        }
+
+        session.onQuotaWall(QuotaHit("usage limit", "$wall. Upgrade to Pro... or try again at 4:14 PM.", matched = wall))
+
+        assertEquals("claude-main", session.account.name, "CLI refusal must override stale poller reading and trigger handover")
+    }
+
     /**
      * `agy` does not sit out a window and carry on the way Claude Code does: at the 2026-09-20 wall
      * it retried for three minutes, filed an executor error and sat idle at its prompt with four

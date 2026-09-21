@@ -67,6 +67,100 @@ class NopTerminalSettingsTest {
         assertEquals(Color.DARK_GRAY.rgb, style.background!!.toColor().rgb, "background did not follow the theme")
     }
 
+    /**
+     * Bold has to come from JetBrains Mono's *bold* outlines, not from AWT smearing the regular
+     * ones. JediTerm paints a bold cell with `getTerminalFont().deriveFont(Font.BOLD)`, and a font
+     * built by `Font.createFont` belongs to no family AWT can search — so deriving from one leaves
+     * the regular face in place under a BOLD style flag and the renderer fakes the weight. Every
+     * heading a TUI emits (Claude Code's section titles, a compiler's error prefix) goes through
+     * this call, so the check is on the derived font's own name.
+     */
+    @Test
+    fun `bold cells resolve the real bold face`() {
+        val font = settings().terminalFont
+        assertEquals("JetBrains Mono", font.family, "terminal is not on JetBrains Mono at all")
+        assertEquals(
+            "JetBrains Mono Bold",
+            font.deriveFont(java.awt.Font.BOLD).fontName,
+            "bold is being synthesised from the regular face",
+        )
+        assertEquals(
+            "JetBrains Mono Italic",
+            font.deriveFont(java.awt.Font.ITALIC).fontName,
+            "italic is being synthesised from the regular face",
+        )
+    }
+
+    /**
+     * The cell a character lands in. A terminal beside nop puts a monospace glyph on a 9px advance;
+     * nop was on 8, because JetBrains Mono's advance rounds down below 15f (14f still gives 8), and
+     * then stretched the row to 20px with a 1.1 line spacing the font's own metrics had already
+     * paid for. Both halves are easy to undo by tidying a constant, hence the test.
+     */
+    @Test
+    fun `a character occupies the same cell as a plain terminal`() {
+        val s = settings()
+        val metrics = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            .createGraphics().getFontMetrics(s.terminalFont)
+        assertEquals(9, metrics.charWidth('W'), "glyph advance no longer matches a plain terminal's cell")
+        assertEquals(1.0f, s.lineSpacing, "rows are being padded past the height the font already asks for")
+    }
+
+    /**
+     * The characters JetBrains Mono has no glyph for must not come out as AWT's empty box. The
+     * case that found this is codex, whose composer animates `·✦✧` behind the prompt: the font has
+     * the middle dot and neither star, so the animation was boxes crawling across the input.
+     */
+    @Test
+    fun `a glyph the terminal font lacks falls back to a face that has it`() {
+        val font = settings().terminalFont
+        // The premise: these really are missing, so the test is not passing vacuously.
+        assertFalse(font.canDisplay(0x2726), "JetBrains Mono gained ✦; this test needs a new example")
+        assertFalse(font.canDisplay(0x2727), "JetBrains Mono gained ✧; this test needs a new example")
+
+        for (cp in intArrayOf(0x2726, 0x2727, 0x28FF)) {
+            val text = Character.toChars(cp)
+            val chosen = TerminalGlyphFallback.fontFor(font, text, 0, text.size)
+            assertTrue(
+                chosen.canDisplay(cp),
+                "U+%04X would render as a missing-glyph box in %s".format(cp, chosen.fontName),
+            )
+        }
+    }
+
+    /** ASCII — every cluster that matters — must keep the terminal's own face. */
+    @Test
+    fun `text the terminal font can draw is not substituted`() {
+        val font = settings().terminalFont
+        for (s in listOf("class Discount(", "─│╭╮ ● ○ █░▒▓", "·")) {
+            val text = s.toCharArray()
+            assertEquals(
+                font,
+                TerminalGlyphFallback.fontFor(font, text, 0, text.size),
+                "\"$s\" was pushed onto the fallback face unnecessarily",
+            )
+        }
+    }
+
+    /**
+     * [NopTerminalWidget] turns fractional metrics on, to stop OpenJDK's FreeType scaler hinting
+     * the glyphs — that snapping is what made the terminal look unlike the Compose-drawn code tabs
+     * beside it. The glyph then occupies its true sub-pixel advance rather than a rounded one, so
+     * that advance has to agree with the whole-pixel cell the grid was measured into: JetBrains
+     * Mono's 0.6em is 9.0000354px at 15f against a 9px cell, where 14f (8.4) or 13f (7.8) would
+     * leave every glyph sitting visibly inside or over its cell.
+     */
+    @Test
+    fun `the drawn advance agrees with the whole-pixel cell`() {
+        val font = settings().terminalFont
+        val cell = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            .createGraphics().getFontMetrics(font).charWidth('W')
+        val columns = 400
+        val frc = java.awt.font.FontRenderContext(null, true, true)
+        val drift = Math.abs(font.getStringBounds("0".repeat(columns), frc).width - cell.toDouble() * columns)
+        assertTrue(drift < 0.5, "over $columns cells the drawn advance is ${drift}px away from the ${cell}px cell")
+    }
+
     @Test
     fun `links are always underlined`() {
         assertEquals(HyperlinkStyle.HighlightMode.ALWAYS, settings().hyperlinkHighlightingMode)

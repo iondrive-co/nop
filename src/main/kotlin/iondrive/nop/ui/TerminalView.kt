@@ -41,10 +41,18 @@ import kotlin.math.roundToInt
 fun TerminalView(tab: TerminalTab, cards: JPanel) {
     val isDark = JewelTheme.isDark
     val bg = JewelTheme.globalColors.panelBackground
-    val fg = if (isDark) Color(0xFFA9B7C6) else Color(0xFF000000)
+    // The terminal is a *content* surface, like the editor — not chrome. It used to be painted in
+    // the panel background with Darcula's #A9B7C6 on top, which is 6.8:1: less contrast than the
+    // 5.9:1 a TUI uses for the text it means to play *down*. Claude Code's dim/normal/bold ladder
+    // was arriving with its rungs almost touching, and TerminalContrast's 4.5:1 floor pushed the
+    // dim end back up to meet the normal one. #DFE1E5 on #1E1F22 — nop's own dark near-white and
+    // the tone ToolTabs already paints its strip — is 12.6:1, and leaves an ANSI mid-grey sitting
+    // untouched at ~4.7:1 below it, which is the separation the plain terminal has.
+    val surface = if (isDark) Color(0xFF1E1F22) else Color(0xFFFFFFFF)
+    val fg = if (isDark) Color(0xFFDFE1E5) else Color(0xFF000000)
     // Same link blues the markdown preview uses, so a URL looks the same wherever nop shows one.
     val link = if (isDark) Color(0xFF6897BB) else Color(0xFF1750EB)
-    val awtBg = bg.toAwt()
+    val awtBg = surface.toAwt()
     val awtFg = fg.toAwt()
     val awtLink = link.toAwt()
 
@@ -93,7 +101,7 @@ fun TerminalView(tab: TerminalTab, cards: JPanel) {
             return@Column
         }
         SwingPanel(
-            background = bg,
+            background = surface,
             factory = {
                 ensureCard(cards, tab, awtBg, awtFg, awtLink)
                 cards

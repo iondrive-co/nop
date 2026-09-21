@@ -2,6 +2,7 @@ package iondrive.nop.terminal
 
 import com.jediterm.terminal.DefaultTerminalCopyPasteHandler
 import com.jediterm.terminal.TerminalCopyPasteHandler
+import com.jediterm.terminal.TextStyle
 import com.jediterm.terminal.model.StyleState
 import com.jediterm.terminal.model.TerminalTextBuffer
 import com.jediterm.terminal.ui.JediTermWidget
@@ -37,6 +38,7 @@ import java.awt.image.ImageObserver
 import java.awt.image.RenderedImage
 import java.awt.image.renderable.RenderableImage
 import java.text.AttributedCharacterIterator
+import java.util.concurrent.ConcurrentHashMap
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JScrollBar
@@ -179,6 +181,38 @@ private class NopTerminalPanel(
     override fun createCopyPasteHandler(): TerminalCopyPasteHandler =
         NopTerminalCopyPasteHandler()
 
+    /**
+     * Substitutes a face that has the glyph whenever JetBrains Mono does not — see
+     * [TerminalGlyphFallback]. JediTerm asks this once per grapheme cluster, on the way to drawing
+     * it.
+     */
+    override fun getFontToDisplay(text: CharArray, start: Int, end: Int, style: TextStyle): Font =
+        TerminalGlyphFallback.fontFor(super.getFontToDisplay(text, start, end, style), text, start, end)
+
+    /**
+     * JediTerm's own antialiasing, plus fractional metrics.
+     *
+     * Not about metrics so much as about *hinting*: OpenJDK's FreeType scaler loads glyphs
+     * unhinted once fractional metrics are on, and hinting — stems snapped onto whole pixel
+     * columns — is the whole of why the terminal read as a different, more "Linux" program than
+     * the Compose-drawn code tabs beside it, which go through Skia and are not hinted. It does not
+     * make the two rasterisers identical, but it takes the hard edge off the difference.
+     *
+     * A row cannot drift out of its cells from this: JediTerm splits a line into grapheme
+     * clusters and draws each one at its own `column * cellWidth`, so no advance is ever summed
+     * across a row. What the advance still has to do is fill the cell it was measured for —
+     * JetBrains Mono's 0.6em is 9.0000354px at [NopTerminalSettings.FONT_SIZE] = 15, against the
+     * 9px `charWidth` the grid is built from, so a glyph sits where its cell is. `NopTerminal
+     * SettingsTest` fails if a change to that constant opens the two apart.
+     */
+    override fun setupAntialiasing(g: Graphics) {
+        super.setupAntialiasing(g)
+        (g as? Graphics2D)?.setRenderingHint(
+            RenderingHints.KEY_FRACTIONALMETRICS,
+            RenderingHints.VALUE_FRACTIONALMETRICS_ON,
+        )
+    }
+
     override fun paintComponent(g: Graphics) {
         val g2d = g as? Graphics2D ?: run {
             super.paintComponent(g)
@@ -194,6 +228,48 @@ private class NopTerminalPanel(
             SwingUtilities.invokeLater {
                 verticalScrollModel.value = 0
             }
+        }
+    }
+}
+
+/**
+ * A face for the characters the terminal font has no glyph for, instead of the empty box AWT draws
+ * when a physical font is asked for one it doesn't have.
+ *
+ * Codex animates its composer background with `·✦✧` (`chat_composer/sparkle.rs`). JetBrains Mono
+ * has the middle dot and neither star, so two frames in three came out a hollow rectangle and the
+ * animation read as boxes crawling behind the prompt rather than as anything twinkling. The same
+ * gap swallows the braille spinners other CLIs use (U+2800..U+28FF) and most of Dingbats.
+ *
+ * The stand-in is AWT's *logical* monospace. A font from `Font.createFont` — which is what the
+ * terminal runs on, see [NopTerminalSettings.getTerminalFont] — is a single physical face with no
+ * fallback behind it; a logical family is a composite over the platform's whole fallback chain, so
+ * it covers whatever turns up instead of a list of symbols guessed in advance.
+ *
+ * Substituting per cluster is safe because JediTerm positions each cluster at `column * cellWidth`
+ * and centres one narrower than its cell, so a face with different metrics cannot walk the row off
+ * the grid.
+ */
+internal object TerminalGlyphFallback {
+    private val cache = ConcurrentHashMap<Long, Font>()
+
+    /**
+     * [font] if it can draw `text[start until end]`, otherwise a logical monospace of the same
+     * size and style.
+     */
+    fun fontFor(font: Font, text: CharArray, start: Int, end: Int): Font {
+        // Nearly every cluster on screen is one ASCII character, and the terminal font has all of
+        // those — so answer those without touching the font's character map at all.
+        var nonAscii = false
+        for (i in start until end) {
+            if (text[i].code >= 0x80) {
+                nonAscii = true
+                break
+            }
+        }
+        if (!nonAscii || font.canDisplayUpTo(text, start, end) < 0) return font
+        return cache.computeIfAbsent((font.style.toLong() shl 32) or font.size.toLong()) {
+            Font(Font.MONOSPACED, font.style, font.size)
         }
     }
 }

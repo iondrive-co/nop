@@ -577,8 +577,12 @@ class AgentSession(
         // every window it knows about is either about some other allowance or twenty minutes stale;
         // either way it is not evidence against a vendor that has just said when it will serve
         // again. The transcript below still gets its say.
+        // And the transcript gets its say, whoever the provider is. A refusal the CLI filed just
+        // now (Verdict.Refused) is ground truth that the vendor spoke, outranking any poller reading
+        // that may be stale or measuring a different pool.
         val runOut = hasRunOut(current.account)
-        if (runOut == false && hit.resetsIn == null) {
+        val verdict = QuotaEcho.judge(current.transcriptPath, hit.matched, since = current.startedAt)
+        if (verdict != QuotaEcho.Verdict.Refused && runOut == false && hit.resetsIn == null) {
             Log.warn(
                 "ignoring a usage-limit phrase on ${current.account.name}: the account still has " +
                     "quota, so this is output the agent was showing rather than the vendor " +
@@ -589,27 +593,6 @@ class AgentSession(
             quotaWatcher.reset()
             return
         }
-
-        // And the transcript gets its say when the reading has none, whoever the provider is.
-        //
-        // The usage reading above is the strongest answer there is, but only one provider offers one
-        // worth having: Codex's is scavenged from its last session and is usually too old to mean
-        // anything, and a provider added later may have none at all. This test needs nothing from the
-        // vendor beyond the transcript nop already follows to build a handoff — a refusal the CLI
-        // filed just now settles it, and failing that, a phrase that is in the conversation was
-        // being shown rather than said. See [QuotaEcho] for why a miss here is the right way round to
-        // be wrong.
-        //
-        // Mostly not heard when the reading says the account is spent. The screen and the provider's
-        // own number then agree, and the transcript's "the agent could be showing this" is weaker
-        // than either: every session nop hands over reads a handoff quoting the wall that ended the
-        // last one, so it would veto the very next wall in exactly the sessions that need it.
-        //
-        // The exception is the agent's own reply from moments ago. A refused request writes no
-        // reply, so a fresh one carrying the phrase is the agent talking — the hermes session handed
-        // over at 18:59 had just finished answering a question about an exchange's 429 "too many
-        // requests", on an account at 99% of a window that reset 30 seconds later.
-        val verdict = QuotaEcho.judge(current.transcriptPath, hit.matched, since = current.startedAt)
         val why = when (verdict) {
             QuotaEcho.Verdict.Refused -> "the CLI filed the refusal"
             QuotaEcho.Verdict.Said -> {
@@ -830,8 +813,13 @@ class AgentSession(
             outputTap = { text ->
                 quotaWatcher.feed(text)
                 log.appendScreenTail(QuotaWatcher.stripAnsi(text))
+                var titleChanged = false
                 titles.feed(text)?.let { title ->
                     synchronized(tracker) { tracker.onTitle(title, System.currentTimeMillis()) }
+                    titleChanged = true
+                }
+                val questionChanged = synchronized(tracker) { tracker.onOutput(text) }
+                if (titleChanged || questionChanged) {
                     SwingUtilities.invokeLater { refreshActivity(tracker) }
                 }
             },
@@ -842,6 +830,10 @@ class AgentSession(
         }
         terminal.onUserInput = {
             newRun.userPromptSubmitted = true
+            val questionChanged = synchronized(tracker) { tracker.onUserInput() }
+            if (questionChanged) {
+                SwingUtilities.invokeLater { refreshActivity(tracker) }
+            }
         }
         // Claimed here rather than when the transcript turns up, because the gap between the two is
         // exactly when a tab opened beside this one would mistake this session's file for a `/clear`

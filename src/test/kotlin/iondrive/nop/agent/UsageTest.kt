@@ -81,6 +81,25 @@ class UsageTest {
     }
 
     @Test
+    fun `live codex rate limits update liveCodexReading and readCodex`(@TempDir tmp: Path) {
+        val account = codexAccount(tmp)
+        val future = Instant.now().plusSeconds(3600).epochSecond
+        val limitsJson = Json.parseToJsonElement(
+            """{"primary":{"used_percent":99.0,"window_minutes":300,"resets_at":$future},"secondary":null}""",
+        ).jsonObject
+
+        Usage.recordCodexLimits(tmp, limitsJson)
+
+        val live = Usage.liveCodexReading(tmp)
+        assertNotNull(live)
+        assertEquals(99.0, live?.session?.percent)
+        assertEquals(true, live?.looksSpent())
+
+        val reading = Usage.read(account)
+        assertEquals(99.0, reading.session?.percent)
+    }
+
+    @Test
     fun `window_minutes decides which window is the session one, not the slot it arrived in`(@TempDir tmp: Path) {
         val future = Instant.now().plusSeconds(600_000).epochSecond
         // A team plan reports its seven-day window in `primary` with `secondary` empty. Reading

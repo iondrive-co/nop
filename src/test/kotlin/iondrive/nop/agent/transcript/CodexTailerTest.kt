@@ -143,6 +143,21 @@ class CodexTailerTest {
     }
 
     @Test
+    fun `token_count rate_limits update Usage live reading`(@TempDir tmp: Path) {
+        val tailer = CodexTailer(tmp)
+        val future = java.time.Instant.now().plusSeconds(3600).epochSecond
+        val line = """{"type":"event_msg","timestamp":"2026-09-15T00:00:00.000Z","payload":{"type":"token_count",""" +
+            """"info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}},""" +
+            """"rate_limits":{"primary":{"used_percent":88.5,"window_minutes":300,"resets_at":$future},"secondary":null}}}"""
+
+        tailer.parse(line)
+
+        val live = iondrive.nop.agent.Usage.liveCodexReading(tmp)
+        assertNotNull(live)
+        assertEquals(88.5, live?.session?.percent)
+    }
+
+    @Test
     fun `a count is spent once, not repeated onto every later turn`() {
         val tailer = CodexTailer(Path.of("/nowhere"))
         parseAll(tailer)
