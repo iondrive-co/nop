@@ -55,11 +55,12 @@ fun CommitDiffView(
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
+    var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
 
     // reloadKey re-reads both revisions. A commit's content is fixed, so this only matters after
     // the history was rewritten underneath the tab (amend, rebase) — but it also makes "open it
     // again / F5" mean the same thing on every diff surface.
-    LaunchedEffect(tab.id, reloadKey) {
+    LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
         try {
             val (oldText, newText) = withContext(Dispatchers.IO) {
                 val parentRev = "${tab.sha}^"
@@ -73,7 +74,7 @@ fun CommitDiffView(
                 }
                 old to new
             }
-            result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText) }
+            result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText, ignoreWhitespace) }
             error = null
             loading = false
         } catch (t: Throwable) {
@@ -96,6 +97,8 @@ fun CommitDiffView(
                 findTrigger = findTrigger,
                 oldHeader = "${tab.sha.take(8)}^: ${tab.file.path}",
                 newHeader = "${tab.sha.take(8)}: ${tab.file.path}",
+                ignoreWhitespace = ignoreWhitespace,
+                onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )
         }
     }
@@ -122,10 +125,11 @@ fun RevisionDiffView(
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
+    var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
 
     // reloadKey re-reads both sides. The left one is fixed by its sha, but the right is the live
     // file, so re-opening this tab (or F5) re-diffs the revision against work done since.
-    LaunchedEffect(tab.id, reloadKey) {
+    LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
         try {
             val rel = repoRelativePath(repo, tab.file)
             if (rel == null) {
@@ -139,7 +143,7 @@ fun RevisionDiffView(
                 val old = repo.readContentAt(tab.sha, rel) ?: ""
                 old to runCatching { tab.file.readText() }.getOrDefault("")
             }
-            result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText) }
+            result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText, ignoreWhitespace) }
             error = null
             loading = false
         } catch (t: Throwable) {
@@ -164,6 +168,8 @@ fun RevisionDiffView(
                 findTrigger = findTrigger,
                 oldHeader = "${tab.sha.take(8)}: ${tab.file.name}",
                 newHeader = "Working copy: ${tab.file.name}",
+                ignoreWhitespace = ignoreWhitespace,
+                onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )
         }
     }
@@ -185,6 +191,8 @@ internal fun ReadOnlyDiffList(
     findTrigger: Int,
     oldHeader: String? = null,
     newHeader: String? = null,
+    ignoreWhitespace: Boolean = false,
+    onToggleWhitespace: (() -> Unit)? = null,
 ) {
     val listState = rememberLazyListState()
 
@@ -206,6 +214,8 @@ internal fun ReadOnlyDiffList(
         findTrigger = findTrigger,
         oldHeader = oldHeader,
         newHeader = newHeader,
+        ignoreWhitespace = ignoreWhitespace,
+        onToggleWhitespace = onToggleWhitespace,
     ) { listModifier ->
         // One SelectionContainer over the whole list so a drag spans rows — the user can select a
         // multi-line deleted block on the old (left) side and copy it. Gutters and the right column

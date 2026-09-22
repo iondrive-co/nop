@@ -8,7 +8,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import iondrive.nop.Log
 
-enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR, TYPE }
+enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR, TYPE, FUNCTION }
 
 data class Token(val start: Int, val endExclusive: Int, val kind: TokenKind)
 
@@ -24,6 +24,7 @@ data class HighlightPalette(
     val emphasis: SpanStyle,
     val error: SpanStyle,
     val type: SpanStyle = SpanStyle(color = Color.Unspecified),
+    val function: SpanStyle = SpanStyle(color = Color.Unspecified),
 ) {
     fun styleFor(kind: TokenKind): SpanStyle = when (kind) {
         TokenKind.KEYWORD -> keyword
@@ -36,6 +37,7 @@ data class HighlightPalette(
         TokenKind.EMPHASIS -> emphasis
         TokenKind.ERROR -> error
         TokenKind.TYPE -> type
+        TokenKind.FUNCTION -> function
     }
 
     companion object {
@@ -54,6 +56,7 @@ data class HighlightPalette(
             // of this (see ErrorSquiggles) for the IntelliJ-style "this is wrong" squiggle.
             error = SpanStyle(color = Color(0xFFFF6B68)),
             type = SpanStyle(color = Color(0xFF4EC9B0)),     // Clean mint/teal for types/classes
+            function = SpanStyle(color = Color(0xFF56A8F5)), // Soft sky blue for functions/methods
         )
 
         // IntelliJ-default light palette — darker hues so they read on a near-white background.
@@ -68,6 +71,7 @@ data class HighlightPalette(
             emphasis = SpanStyle(color = Color(0xFF875700)), // Warm amber/gold for annotations
             error = SpanStyle(color = Color(0xFFFF0000)),    // Red errors
             type = SpanStyle(color = Color(0xFF1F6B75)),     // Slate cyan for types/classes
+            function = SpanStyle(color = Color(0xFF00627A)), // Deep cyan/teal for functions/methods
         )
 
         // Diff variants. A diff row paints a colour tint behind its text (see DiffRendering's
@@ -219,6 +223,8 @@ private val KOTLIN_BLOCK_COMMENT = Regex("""/\*[\s\S]*?\*/""")
 private val KOTLIN_TRIPLE_STRING = Regex("\"\"\"[\\s\\S]*?\"\"\"")
 private val KOTLIN_CHAR = Regex("""'(?:\\.|[^'\\\n])'""")
 private val IDENT = Regex("""[A-Za-z_][A-Za-z0-9_]*""")
+private val CALL_LPAREN = Regex("""\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()""")
+private val KOTLIN_ANNOTATION = Regex("""@[A-Za-z_][A-Za-z0-9_.]*""")
 private val NUMBER_RE = Regex("""\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?[fFLuU]?\b""")
 
 fun tokenizeKotlin(text: String): List<Token> {
@@ -239,7 +245,16 @@ fun tokenizeKotlin(text: String): List<Token> {
     KOTLIN_TRIPLE_STRING.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.STRING) }
     doubleQuoted(text).forEach { if (!overlap(it.first, it.last + 1)) add(it.first, it.last + 1, TokenKind.STRING) }
     KOTLIN_CHAR.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.STRING) }
+    KOTLIN_ANNOTATION.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.EMPHASIS) }
     NUMBER_RE.findAll(text).forEach { if (!overlap(it.range.first, it.range.last + 1)) add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
+    CALL_LPAREN.findAll(text).forEach { m ->
+        val name = m.groupValues[1]
+        val range = m.groups[1]!!.range
+        if (name !in KOTLIN_KEYWORDS && !overlap(range.first, range.last + 1)) {
+            val kind = if (name[0].isUpperCase()) TokenKind.TYPE else TokenKind.FUNCTION
+            add(range.first, range.last + 1, kind)
+        }
+    }
     IDENT.findAll(text).forEach {
         val word = it.value
         if (word in KOTLIN_KEYWORDS && !overlap(it.range.first, it.range.last + 1)) {
@@ -300,12 +315,22 @@ fun tokenizeJava(text: String): List<Token> {
     JAVA_ANNOTATION.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.EMPHASIS) }
     JAVA_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     JAVA_LITERAL.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
+    CALL_LPAREN.findAll(text).forEach { m ->
+        val name = m.groupValues[1]
+        val range = m.groups[1]!!.range
+        if (name !in JAVA_KEYWORDS && !overlap(range.first, range.last + 1)) {
+            val kind = if (name[0].isUpperCase()) TokenKind.TYPE else TokenKind.FUNCTION
+            add(range.first, range.last + 1, kind)
+        }
+    }
     IDENT.findAll(text).forEach {
         val word = it.value
-        if (word in JAVA_KEYWORDS) {
-            add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
-        } else if (word[0].isUpperCase()) {
-            add(it.range.first, it.range.last + 1, TokenKind.TYPE)
+        if (!overlap(it.range.first, it.range.last + 1)) {
+            if (word in JAVA_KEYWORDS) {
+                add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+            } else if (word[0].isUpperCase()) {
+                add(it.range.first, it.range.last + 1, TokenKind.TYPE)
+            }
         }
     }
     return out.sortedBy { it.start }

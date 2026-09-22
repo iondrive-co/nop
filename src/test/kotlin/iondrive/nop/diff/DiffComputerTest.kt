@@ -127,4 +127,17 @@ class DiffComputerTest {
             }
         }
     }
+
+    @Test
+    fun `ignoreWhitespace treats whitespace-only differences as EQUAL`() {
+        val old = "val x = 1\nval y = 2\n"
+        val new = "val  x  = 1\nval y = 2  \n"
+
+        val defaultDiff = DiffComputer.compute(old, new, ignoreWhitespace = false)
+        assertTrue(defaultDiff.hasChanges)
+
+        val ignoredDiff = DiffComputer.compute(old, new, ignoreWhitespace = true)
+        assertFalse(ignoredDiff.hasChanges)
+        assertTrue(ignoredDiff.rows.all { it.kind == RowKind.EQUAL })
+    }
 }

@@ -132,10 +132,11 @@ fun LocalDiffView(
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
+    var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
 
     // reloadKey re-reads both sides: the right-hand one is the live file, so re-opening this tab (or
     // F5) is how the user re-diffs the revision against work done since.
-    LaunchedEffect(tab.id, reloadKey) {
+    LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
         val (old, new) = withContext(Dispatchers.IO) {
             val revision = history.revisionAt(tab.file, tab.timestampMillis)
             val snapshot = revision?.let { history.read(it) }
@@ -148,7 +149,7 @@ fun LocalDiffView(
             loading = false
             return@LaunchedEffect
         }
-        result = withContext(Dispatchers.Default) { DiffComputer.compute(old, new) }
+        result = withContext(Dispatchers.Default) { DiffComputer.compute(old, new, ignoreWhitespace) }
         error = null
         loading = false
     }
@@ -167,6 +168,8 @@ fun LocalDiffView(
                 findTrigger = findTrigger,
                 oldHeader = "Local history: ${tab.file.name}",
                 newHeader = "Working copy: ${tab.file.name}",
+                ignoreWhitespace = ignoreWhitespace,
+                onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )
         }
     }

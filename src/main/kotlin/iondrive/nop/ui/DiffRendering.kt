@@ -1,14 +1,18 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -21,10 +25,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -47,6 +53,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isCtrlPressed
@@ -54,6 +66,9 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.Tooltip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -694,11 +709,18 @@ internal fun ReadOnlyDiffHalf(
  * items so the indices drift apart, and the working-tree diff packs many rows into one item, so
  * "scroll to the item" is not the same as "scroll to the row".
  */
+@OptIn(ExperimentalJewelApi::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun DiffHeaderBar(
     oldTitle: String,
     newTitle: String,
     oldWidth: Dp,
+    hunkCount: Int = 0,
+    currentHunk: Int = -1,
+    onPrevHunk: (() -> Unit)? = null,
+    onNextHunk: (() -> Unit)? = null,
+    ignoreWhitespace: Boolean = false,
+    onToggleWhitespace: (() -> Unit)? = null,
 ) {
     val isDark = JewelTheme.isDark
     val bg = if (isDark) Color(0xFF26282D) else Color(0xFFF2F3F5)
@@ -708,7 +730,7 @@ internal fun DiffHeaderBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(26.dp)
+            .height(28.dp)
             .background(bg)
             .drawBehind {
                 drawLine(
@@ -736,9 +758,10 @@ internal fun DiffHeaderBar(
             )
         }
         Box(Modifier.width(DIVIDER_W).fillMaxHeight().background(border))
-        Box(
+        Row(
             modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-            contentAlignment = Alignment.CenterStart,
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             BasicText(
                 text = newTitle,
@@ -749,6 +772,85 @@ internal fun DiffHeaderBar(
                     color = fg,
                 ),
                 maxLines = 1,
+            )
+            if ((hunkCount > 0 && onPrevHunk != null && onNextHunk != null) || onToggleWhitespace != null) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (onToggleWhitespace != null) {
+                        DiffNavButton(
+                            label = "␣",
+                            tooltip = if (ignoreWhitespace) "Ignoring whitespace changes (click to compare all)" else "Do not ignore whitespace (click to ignore)",
+                            active = ignoreWhitespace,
+                            onClick = onToggleWhitespace,
+                        )
+                    }
+                    val countText = when {
+                        hunkCount == 0 -> "No differences"
+                        currentHunk >= 0 -> "Hunk ${currentHunk + 1} of $hunkCount"
+                        else -> "$hunkCount difference${if (hunkCount != 1) "s" else ""}"
+                    }
+                    BasicText(
+                        text = countText,
+                        style = TextStyle(
+                            fontFamily = NopFonts.Mono,
+                            fontSize = 11.sp,
+                            color = fg,
+                        ),
+                    )
+                    if (hunkCount > 0 && onPrevHunk != null && onNextHunk != null) {
+                        DiffNavButton(label = "↑", tooltip = "Previous Difference (Shift+F7)", onClick = onPrevHunk)
+                        DiffNavButton(label = "↓", tooltip = "Next Difference (F7)", onClick = onNextHunk)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalJewelApi::class, ExperimentalFoundationApi::class)
+@Composable
+private fun DiffNavButton(
+    label: String,
+    tooltip: String,
+    active: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val isDark = JewelTheme.isDark
+    val btnBg = if (active) {
+        if (isDark) Color(0xFF35538C) else Color(0xFFD4E2FF)
+    } else {
+        if (isDark) Color(0xFF2F3237) else Color(0xFFE8E9EC)
+    }
+    val btnBorder = if (active) {
+        if (isDark) Color(0xFF5482D0) else Color(0xFF90B4F0)
+    } else {
+        if (isDark) Color(0xFF45484E) else Color(0xFFD3D5D8)
+    }
+    val fg = if (active) {
+        if (isDark) Color(0xFFFFFFFF) else Color(0xFF0C42A6)
+    } else {
+        if (isDark) Color(0xFFC0C4CC) else Color(0xFF404349)
+    }
+
+    Tooltip(tooltip = { Text(tooltip) }) {
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .background(btnBg, RoundedCornerShape(3.dp))
+                .border(0.5.dp, btnBorder, RoundedCornerShape(3.dp))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            BasicText(
+                text = label,
+                style = TextStyle(
+                    fontFamily = NopFonts.Mono,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = fg,
+                ),
             )
         }
     }
@@ -767,6 +869,8 @@ internal fun DiffListScaffold(
     rowLocation: (Int) -> RowLocation = { RowLocation(it, 0) },
     oldHeader: String? = null,
     newHeader: String? = null,
+    ignoreWhitespace: Boolean = false,
+    onToggleWhitespace: (() -> Unit)? = null,
     list: @Composable (Modifier) -> Unit,
 ) {
     val oldScroll = rememberDiffSideScroll(rows, DiffSide.OLD)
@@ -871,7 +975,41 @@ internal fun DiffListScaffold(
         val clamped = ratio.coerceIn(minRatio, maxRatio)
         val oldWidth = with(density) { (available * clamped).toDp() }
 
-        Column(modifier = Modifier.fillMaxSize()) {
+        val hunks = remember(rows) { hunkRanges(rows) }
+        var currentHunkIndex by remember(hunks) { mutableStateOf(-1) }
+        val onNextHunk: () -> Unit = {
+            if (hunks.isNotEmpty()) {
+                val next = if (currentHunkIndex + 1 < hunks.size) currentHunkIndex + 1 else 0
+                currentHunkIndex = next
+                searchScope.launch {
+                    val loc = rowLocation(hunks[next].first)
+                    val context = (CONTEXT_ROWS * lineHeightPx).toInt()
+                    listState.animateScrollToItem(loc.item, (loc.offsetPx - context).coerceAtLeast(0))
+                }
+            }
+        }
+        val onPrevHunk: () -> Unit = {
+            if (hunks.isNotEmpty()) {
+                val prev = if (currentHunkIndex - 1 >= 0) currentHunkIndex - 1 else hunks.lastIndex
+                currentHunkIndex = prev
+                searchScope.launch {
+                    val loc = rowLocation(hunks[prev].first)
+                    val context = (CONTEXT_ROWS * lineHeightPx).toInt()
+                    listState.animateScrollToItem(loc.item, (loc.offsetPx - context).coerceAtLeast(0))
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.F7) {
+                        if (event.isShiftPressed) onPrevHunk() else onNextHunk()
+                        true
+                    } else false
+                }
+        ) {
             if (searchOpen) {
                 FindBar(
                     state = searchState,
@@ -885,7 +1023,17 @@ internal fun DiffListScaffold(
                 )
             }
             if (oldHeader != null && newHeader != null) {
-                DiffHeaderBar(oldTitle = oldHeader, newTitle = newHeader, oldWidth = oldWidth)
+                DiffHeaderBar(
+                    oldTitle = oldHeader,
+                    newTitle = newHeader,
+                    oldWidth = oldWidth,
+                    hunkCount = hunks.size,
+                    currentHunk = currentHunkIndex,
+                    onPrevHunk = onPrevHunk,
+                    onNextHunk = onNextHunk,
+                    ignoreWhitespace = ignoreWhitespace,
+                    onToggleWhitespace = onToggleWhitespace,
+                )
             }
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 CompositionLocalProvider(

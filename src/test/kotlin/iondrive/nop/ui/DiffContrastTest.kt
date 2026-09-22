@@ -1,6 +1,8 @@
 package iondrive.nop.ui
 
 import androidx.compose.ui.graphics.Color
+import iondrive.nop.diff.DiffRow
+import iondrive.nop.diff.RowKind
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import kotlin.math.max
@@ -117,5 +119,34 @@ class DiffContrastTest {
             // Italics are what still marks a comment as prose once the brightness gap narrows.
             assertTrue(diff.comment.fontStyle == editor.comment.fontStyle, "comments lost their italics")
         }
+    }
+
+    @Test
+    fun `function and emphasis tokens have strong contrast on diff backgrounds`() {
+        val insertDark = over(INSERT_BG, darkBase)
+        val changeDark = over(CHANGE_BG, darkBase)
+        assertReadable("dark function on insert row", HighlightPalette.DarkDiff.function.color, insertDark, 4.0)
+        assertReadable("dark function on change row", HighlightPalette.DarkDiff.function.color, changeDark, 4.0)
+
+        val insertLight = over(INSERT_BG, lightBase)
+        val changeLight = over(CHANGE_BG, lightBase)
+        assertReadable("light function on insert row", HighlightPalette.LightDiff.function.color, insertLight, 4.0)
+        assertReadable("light function on change row", HighlightPalette.LightDiff.function.color, changeLight, 4.0)
+    }
+
+    @Test
+    fun `hunkRanges accurately groups consecutive changed rows`() {
+        val rows = listOf(
+            DiffRow(RowKind.EQUAL, "a", "a", emptyList(), emptyList(), 1, 1),
+            DiffRow(RowKind.CHANGE, "b", "c", emptyList(), emptyList(), 2, 2),
+            DiffRow(RowKind.CHANGE, "d", "e", emptyList(), emptyList(), 3, 3),
+            DiffRow(RowKind.EQUAL, "f", "f", emptyList(), emptyList(), 4, 4),
+            DiffRow(RowKind.INSERT, null, "g", emptyList(), emptyList(), null, 5),
+            DiffRow(RowKind.EQUAL, "h", "h", emptyList(), emptyList(), 5, 6),
+        )
+        val hunks = hunkRanges(rows)
+        org.junit.jupiter.api.Assertions.assertEquals(2, hunks.size)
+        org.junit.jupiter.api.Assertions.assertEquals(1..2, hunks[0])
+        org.junit.jupiter.api.Assertions.assertEquals(4..4, hunks[1])
     }
 }

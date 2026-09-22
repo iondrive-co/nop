@@ -148,6 +148,7 @@ fun DiffView(
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var content by remember(tab.id) { mutableStateOf<DiffContent?>(null) }
     var headText by remember(tab.id) { mutableStateOf("") }
+    var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
     // Bumped whenever the working buffer is rewritten by something *other* than the diff's own
     // editable blocks: a (re)load, a hunk revert, a line merged across a block boundary, an external
     // change adopted off disk. The blocks re-read their lines from the buffer when this moves, and
@@ -162,7 +163,7 @@ fun DiffView(
     // switch or pull would leave the left side frozen on whatever it said when the tab opened.
     // `loading` is deliberately keyed on tab.id alone: a reload updates in place rather than
     // flashing the placeholder and dropping the user's scroll position.
-    LaunchedEffect(tab.id, reloadKey) {
+    LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
         try {
             val head = withContext(Dispatchers.IO) {
                 when (tab.change.kind) {
@@ -183,7 +184,7 @@ fun DiffView(
                 ChangeKind.REMOVED, ChangeKind.MISSING -> ""
                 else -> edit?.state?.text?.toString() ?: ""
             }
-            content = withContext(Dispatchers.Default) { computeContent(head, workingNow) }
+            content = withContext(Dispatchers.Default) { computeContent(head, workingNow, ignoreWhitespace) }
             bufferReset++
             error = null
             loading = false
@@ -197,13 +198,13 @@ fun DiffView(
     // kind tints, inline highlights and — for conflicts — the remaining regions track the buffer.
     // Skip the initial value (drop(1)) so opening a diff doesn't immediately rebuild on the seed.
     if (edit != null) {
-        LaunchedEffect(edit, headText) {
+        LaunchedEffect(edit, headText, ignoreWhitespace) {
             snapshotFlow { edit.state.text.toString() }
                 .drop(1)
                 .debounce(DIFF_DEBOUNCE_MS)
                 .distinctUntilChanged()
                 .collect { text ->
-                    content = withContext(Dispatchers.Default) { computeContent(headText, text) }
+                    content = withContext(Dispatchers.Default) { computeContent(headText, text, ignoreWhitespace) }
                 }
         }
 
@@ -283,6 +284,8 @@ fun DiffView(
             onSplitRatioChange = onSplitRatioChange,
             searchKey = tab.id,
             findTrigger = findTrigger,
+            ignoreWhitespace = ignoreWhitespace,
+            onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
         )
         content is DiffContent.Ordinary -> {
             val result = (content as DiffContent.Ordinary).result
@@ -295,7 +298,7 @@ fun DiffView(
                     if (next != current) {
                         it.markUserEdit()
                         it.state.edit { replace(0, length, next) }
-                        content = computeContent(headText, next)
+                        content = computeContent(headText, next, ignoreWhitespace)
                         bufferReset++
                     }
                 }
@@ -312,7 +315,7 @@ fun DiffView(
                     if (res != null && res.first != current) {
                         it.markUserEdit()
                         it.state.edit { replace(0, length, res.first) }
-                        content = computeContent(headText, res.first)
+                        content = computeContent(headText, res.first, ignoreWhitespace)
                         bufferReset++
                         res.second
                     } else null
@@ -323,7 +326,7 @@ fun DiffView(
             // debounce. Ordinary typing leaves the line count alone and still takes the debounced
             // path; only Enter, a multi-line paste and the like pay for a synchronous re-diff.
             val onLineCountChanged: (() -> Unit)? = edit?.let {
-                { content = computeContent(headText, it.state.text.toString()) }
+                { content = computeContent(headText, it.state.text.toString(), ignoreWhitespace) }
             }
             DiffRowsList(
                 result = result,
@@ -340,6 +343,8 @@ fun DiffView(
                 onSplitRatioChange = onSplitRatioChange,
                 searchKey = tab.id,
                 findTrigger = findTrigger,
+                ignoreWhitespace = ignoreWhitespace,
+                onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )
         }
     }
@@ -352,11 +357,11 @@ fun DiffView(
  * Builds the render model for a diff. When the working buffer carries conflict markers we surface
  * the two sides for resolution; otherwise it's the ordinary HEAD-vs-working line diff.
  */
-private fun computeContent(head: String, working: String): DiffContent {
+private fun computeContent(head: String, working: String, ignoreWhitespace: Boolean = false): DiffContent {
     if (ConflictParser.hasConflicts(working)) {
-        return DiffContent.Merge(buildMergeRows(working))
+        return DiffContent.Merge(buildMergeRows(working, ignoreWhitespace))
     }
-    return DiffContent.Ordinary(DiffComputer.compute(head, working))
+    return DiffContent.Ordinary(DiffComputer.compute(head, working, ignoreWhitespace))
 }
 
 /**
@@ -365,7 +370,7 @@ private fun computeContent(head: String, working: String): DiffContent {
  * block (reusing [DiffComputer] for the inline word highlights). Line numbers run continuously
  * down each side as if ours/theirs were whole files.
  */
-private fun buildMergeRows(working: String): List<MergeRow> {
+private fun buildMergeRows(working: String, ignoreWhitespace: Boolean = false): List<MergeRow> {
     val segments = ConflictParser.parse(working)
     val rows = ArrayList<MergeRow>()
     var oursNo = 1
@@ -387,7 +392,7 @@ private fun buildMergeRows(working: String): List<MergeRow> {
             }
             is ConflictParser.MergeSegment.Conflict -> {
                 rows.add(MergeRow.Control(regionId))
-                val block = DiffComputer.compute(seg.ours, seg.theirs)
+                val block = DiffComputer.compute(seg.ours, seg.theirs, ignoreWhitespace)
                 for (r in block.rows) {
                     rows.add(
                         MergeRow.Line(
@@ -432,6 +437,8 @@ private fun DiffRowsList(
     onSplitRatioChange: (Float) -> Unit,
     searchKey: Any,
     findTrigger: Int,
+    ignoreWhitespace: Boolean = false,
+    onToggleWhitespace: (() -> Unit)? = null,
 ) {
     val listState = rememberLazyListState()
     val lineHeightPx = rememberDiffLineHeightPx()
@@ -528,6 +535,8 @@ private fun DiffRowsList(
         findTrigger = findTrigger,
         oldHeader = "HEAD: ${currentFile.name}",
         newHeader = "Current version",
+        ignoreWhitespace = ignoreWhitespace,
+        onToggleWhitespace = onToggleWhitespace,
         // Where a row sits: which item holds it, and how far down. A wrapped line is more than one
         // step tall, so inside a wrapped block this is a floor rather than the exact offset — find
         // then scrolls to somewhere above the hit instead of onto it, which is the right way to be
@@ -613,6 +622,8 @@ private fun MergeRowsList(
     onSplitRatioChange: (Float) -> Unit,
     searchKey: Any,
     findTrigger: Int,
+    ignoreWhitespace: Boolean = false,
+    onToggleWhitespace: (() -> Unit)? = null,
 ) {
     val listState = rememberLazyListState()
     val kinds = rows.map { if (it is MergeRow.Control) RowKind.CHANGE else (it as MergeRow.Line).row.kind }
@@ -642,6 +653,8 @@ private fun MergeRowsList(
         findTrigger = findTrigger,
         oldHeader = "OURS (current branch)",
         newHeader = "THEIRS (incoming branch)",
+        ignoreWhitespace = ignoreWhitespace,
+        onToggleWhitespace = onToggleWhitespace,
         rowLocation = { RowLocation(itemOfDiffIndex.getOrElse(it) { 0 }, 0) },
     ) { listModifier ->
         SelectionContainer {

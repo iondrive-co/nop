@@ -8,9 +8,10 @@ private const val NEW_OPEN = ""
 private const val NEW_CLOSE = ""
 
 object DiffComputer {
-    private val generator: DiffRowGenerator = DiffRowGenerator.create()
+    private fun createGenerator(ignoreWhitespace: Boolean): DiffRowGenerator = DiffRowGenerator.create()
         .showInlineDiffs(true)
         .inlineDiffByWord(true)
+        .ignoreWhiteSpaces(ignoreWhitespace)
         .oldTag { isOpen -> if (isOpen) OLD_OPEN else OLD_CLOSE }
         .newTag { isOpen -> if (isOpen) NEW_OPEN else NEW_CLOSE }
         // The default normalizer prepares rows for HTML display, so `<` `>` `&` come back as
@@ -18,7 +19,11 @@ object DiffComputer {
         .lineNormalizer { line -> line.replace("\t", "    ") }
         .build()
 
-    fun compute(oldText: String, newText: String): DiffResult {
+    private val defaultGenerator = createGenerator(ignoreWhitespace = false)
+    private val ignoreWhitespaceGenerator = createGenerator(ignoreWhitespace = true)
+
+    fun compute(oldText: String, newText: String, ignoreWhitespace: Boolean = false): DiffResult {
+        val generator = if (ignoreWhitespace) ignoreWhitespaceGenerator else defaultGenerator
         val oldLines = oldText.splitLines()
         val newLines = newText.splitLines()
 

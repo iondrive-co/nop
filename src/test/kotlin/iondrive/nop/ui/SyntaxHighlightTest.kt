@@ -38,6 +38,25 @@ class SyntaxHighlightTest {
         assertTrue(tokens.containsExact(src, "val", TokenKind.KEYWORD))
         assertTrue(tokens.containsExact(src, "42", TokenKind.NUMBER))
         assertTrue(tokens.containsExact(src, "\"hello\"", TokenKind.STRING))
+        assertTrue(tokens.containsExact(src, "foo", TokenKind.FUNCTION))
+        assertTrue(tokens.containsExact(src, "Int", TokenKind.TYPE))
+    }
+
+    @Test
+    fun `kotlin and java lexers highlight function calls and types`() {
+        val ktSrc = "fun computeValue(): ShadowMode { return processItem(42) }"
+        val ktTokens = tokenizeKotlin(ktSrc)
+        assertTrue(ktTokens.containsExact(ktSrc, "computeValue", TokenKind.FUNCTION))
+        assertTrue(ktTokens.containsExact(ktSrc, "ShadowMode", TokenKind.TYPE))
+        assertTrue(ktTokens.containsExact(ktSrc, "processItem", TokenKind.FUNCTION))
+
+        val javaSrc = "@VisibleForTesting public static ShadowMode readMode(ConsulClient consul) { return consul.get(); }"
+        val javaTokens = tokenizeJava(javaSrc)
+        assertTrue(javaTokens.containsExact(javaSrc, "@VisibleForTesting", TokenKind.EMPHASIS))
+        assertTrue(javaTokens.containsExact(javaSrc, "ShadowMode", TokenKind.TYPE))
+        assertTrue(javaTokens.containsExact(javaSrc, "readMode", TokenKind.FUNCTION))
+        assertTrue(javaTokens.containsExact(javaSrc, "ConsulClient", TokenKind.TYPE))
+        assertTrue(javaTokens.containsExact(javaSrc, "get", TokenKind.FUNCTION))
     }
 
     @Test
