@@ -149,7 +149,7 @@ internal fun computeDirectoryEntries(
     openFilePaths: Set<String>,
     expandedEllipsisKeys: Set<String>,
     openDirectoryIds: Set<String> = emptySet(),
-    minItemsForEllipsis: Int = 6,
+    minItemsForEllipsis: Int = Int.MAX_VALUE,
     minRunForEllipsis: Int = 3,
 ): List<TreeEntry> {
     val (dirs, leafFiles) = files.partition { it.isDirectory }

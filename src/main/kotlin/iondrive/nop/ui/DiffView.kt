@@ -1,7 +1,9 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.ContextMenuDataProvider
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -59,6 +62,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -77,7 +81,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
 import java.io.File
+import org.jetbrains.jewel.foundation.ExperimentalJewelApi
+import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.Tooltip
 
 // Diff colours, the read-only half, gutter, change-marker lane and text selection rules live in
 // DiffRendering.kt and are shared with the history diff (CommitDiffView). Only the bits unique to
@@ -519,6 +526,8 @@ private fun DiffRowsList(
         onRatioChange = onSplitRatioChange,
         searchKey = searchKey,
         findTrigger = findTrigger,
+        oldHeader = "HEAD: ${currentFile.name}",
+        newHeader = "Current version",
         // Where a row sits: which item holds it, and how far down. A wrapped line is more than one
         // step tall, so inside a wrapped block this is a floor rather than the exact offset — find
         // then scrolls to somewhere above the hit instead of onto it, which is the right way to be
@@ -631,6 +640,8 @@ private fun MergeRowsList(
         overrideColor = { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null },
         searchKey = searchKey,
         findTrigger = findTrigger,
+        oldHeader = "OURS (current branch)",
+        newHeader = "THEIRS (incoming branch)",
         rowLocation = { RowLocation(itemOfDiffIndex.getOrElse(it) { 0 }, 0) },
     ) { listModifier ->
         SelectionContainer {
@@ -717,6 +728,39 @@ private fun ActionChip(
     }
 }
 
+@OptIn(ExperimentalJewelApi::class, ExperimentalFoundationApi::class)
+@Composable
+private fun HunkRevertButton(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val isDark = JewelTheme.isDark
+    val bg = if (isDark) Color(0xFF2B2D30) else Color(0xFFFFFFFF)
+    val borderCol = if (isDark) Color(0xFF4E5157) else Color(0xFFD1D2D4)
+    val iconCol = if (isDark) Color(0xFF8C9098) else Color(0xFF6C707E)
+
+    Tooltip(tooltip = { Text("Revert hunk (apply from HEAD)") }) {
+        Box(
+            modifier = modifier
+                .size(16.dp)
+                .background(bg, RoundedCornerShape(3.dp))
+                .border(0.5.dp, borderCol, RoundedCornerShape(3.dp))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            BasicText(
+                text = "»",
+                style = TextStyle(
+                    fontFamily = NopFonts.Mono,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = iconCol,
+                ),
+            )
+        }
+    }
+}
+
 @Composable
 private fun MergeLineRow(
     row: DiffRow,
@@ -725,7 +769,8 @@ private fun MergeLineRow(
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
 ) {
-    val (oldBg, newBg) = backgroundsFor(row)
+    val diffColors = currentDiffColors()
+    val (oldBg, newBg) = backgroundsFor(row, diffColors)
     // Fixed to one line step, or — while wrapping — as tall as the taller half, with the tints and
     // the centre hairline painted behind the pair. Same shape as the commit diff's rows.
     val wrap = LocalWrapLines.current
@@ -741,7 +786,7 @@ private fun MergeLineRow(
             spans = row.oldSpans,
             lineNumber = row.oldLineNumber,
             background = oldBg,
-            inlineHighlight = INLINE_WORD_BG_OLD,
+            inlineHighlight = diffColors.inlineWordBgOld,
             rowIndex = rowIndex,
             currentFile = currentFile,
             onResolveAt = onResolveAt,
@@ -755,7 +800,7 @@ private fun MergeLineRow(
             spans = row.newSpans,
             lineNumber = row.newLineNumber,
             background = newBg,
-            inlineHighlight = INLINE_WORD_BG,
+            inlineHighlight = diffColors.inlineWordBg,
             rowIndex = rowIndex,
             currentFile = currentFile,
             onResolveAt = onResolveAt,
@@ -799,9 +844,10 @@ private fun DiffBlockView(
 ) {
     val wrap = LocalWrapLines.current
     val height = with(density) { (lineHeightPx * rows.size).toDp() }
+    val diffColors = currentDiffColors()
     // Only meaningful while wrapping, where a block is exactly one row; otherwise the tints are
     // drawn per line by [BlockHalfFrame].
-    val (oldBg, newBg) = backgroundsFor(rows.first())
+    val (oldBg, newBg) = backgroundsFor(rows.first(), diffColors)
     // Fixed-height outer box so the (overlaid) revert chip can never grow a hunk-start block and
     // throw the left/right line alignment off. A wrapped block has no height to fix — it is one row
     // tall in *lines*, whatever that comes to in pixels — so there the box only carries the tints.
@@ -854,14 +900,13 @@ private fun DiffBlockView(
         // Hunk action over the centre divider: copy HEAD's (left) lines over the working side. It
         // rides the divider rather than the block's midpoint, so it stays put as the split moves.
         val dividerX = LocalDiffLayout.current?.oldWidth
+        val rowHeightDp = with(density) { lineHeightPx.toDp() }
+        val buttonOffset = (rowHeightDp - 16.dp).coerceAtLeast(0.dp) / 2
         rows.indices.forEach { i ->
             val revert = revertAt(firstRowIndex + i) ?: return@forEach
             key(i) {
-                val y = with(density) { (i * lineHeightPx).toDp() }
-                ActionChip(
-                    label = "‹ revert",
-                    background = CHIP_BG,
-                    enabled = true,
+                val y = with(density) { (i * lineHeightPx).toDp() } + buttonOffset
+                HunkRevertButton(
                     modifier = if (dividerX != null) {
                         Modifier.align(Alignment.TopStart).offset(y = y).centredAtX(dividerX)
                     } else {
@@ -889,14 +934,15 @@ private fun ReadOnlyBlockHalf(
 ) {
     val tokenize = LocalDiffTokenizer.current
     val palette = diffPalette()
+    val diffColors = currentDiffColors()
     val find = rememberFindHits(firstRowIndex, rows.size, side)
     val typos = rememberTypos(rows.map { it.lineOn(side) ?: "" }, tokenize)
     val typoColor = typoSquiggleColor()
-    val text = remember(rows, side, tokenize, palette, find) {
+    val text = remember(rows, side, tokenize, palette, find, diffColors) {
         annotateBlock(
             rows.map { it.lineOn(side) },
             rows.map { if (side == DiffSide.OLD) it.oldSpans else it.newSpans },
-            if (side == DiffSide.OLD) INLINE_WORD_BG_OLD else INLINE_WORD_BG,
+            if (side == DiffSide.OLD) diffColors.inlineWordBgOld else diffColors.inlineWordBg,
             tokenize,
             palette,
             find,
@@ -1045,7 +1091,8 @@ private fun EditableBlockHalf(
     // (last, so the highlight reads over the syntax colour and the inline word tint).
     val find = rememberFindHits(firstRowIndex, rows.size, DiffSide.NEW)
     val spans = remember(rows) { rows.map { it.newSpans } }
-    val transformation = remember(spans, lineTokens, palette, find) {
+    val diffColors = currentDiffColors()
+    val transformation = remember(spans, lineTokens, palette, find, diffColors) {
         OutputTransformation {
             forEachLine(asCharSequence().toString()) { index, start, end ->
                 for (t in lineTokens.getOrElse(index) { emptyList() }) {
@@ -1057,7 +1104,7 @@ private fun EditableBlockHalf(
                     if (!span.changed) continue
                     val s = (start + span.startChar).coerceIn(start, end)
                     val e = (start + span.endCharExclusive).coerceIn(s, end)
-                    if (e > s) addStyle(SpanStyle(background = INLINE_WORD_BG), s, e)
+                    if (e > s) addStyle(SpanStyle(background = diffColors.inlineWordBg), s, e)
                 }
                 val hits = find.getOrElse(index) { null } ?: return@forEachLine
                 for (r in hits.ranges) {
@@ -1199,8 +1246,9 @@ private fun BlockHalfFrame(
     lineHeights: List<Float>? = null,
     body: @Composable BoxScope.() -> Unit,
 ) {
-    val backgrounds = remember(rows, side) {
-        rows.map { backgroundsFor(it).let { (old, new) -> if (side == DiffSide.OLD) old else new } }
+    val diffColors = currentDiffColors()
+    val backgrounds = remember(rows, side, diffColors) {
+        rows.map { backgroundsFor(it, diffColors).let { (old, new) -> if (side == DiffSide.OLD) old else new } }
     }
     val numbers = remember(rows, side) {
         rows.map { if (side == DiffSide.OLD) it.oldLineNumber else it.newLineNumber }

@@ -158,7 +158,16 @@ fun LocalDiffView(
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text(error!!) }
-            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, onTopLine, tab.id, findTrigger)
+            result != null -> ReadOnlyDiffList(
+                result = result!!,
+                splitRatio = splitRatio,
+                onSplitRatioChange = onSplitRatioChange,
+                onTopLine = onTopLine,
+                searchKey = tab.id,
+                findTrigger = findTrigger,
+                oldHeader = "Local history: ${tab.file.name}",
+                newHeader = "Working copy: ${tab.file.name}",
+            )
         }
     }
 }

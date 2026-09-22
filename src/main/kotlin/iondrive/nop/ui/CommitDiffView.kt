@@ -87,7 +87,16 @@ fun CommitDiffView(
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
-            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, onTopLine, tab.id, findTrigger)
+            result != null -> ReadOnlyDiffList(
+                result = result!!,
+                splitRatio = splitRatio,
+                onSplitRatioChange = onSplitRatioChange,
+                onTopLine = onTopLine,
+                searchKey = tab.id,
+                findTrigger = findTrigger,
+                oldHeader = "${tab.sha.take(8)}^: ${tab.file.path}",
+                newHeader = "${tab.sha.take(8)}: ${tab.file.path}",
+            )
         }
     }
 }
@@ -146,7 +155,16 @@ fun RevisionDiffView(
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
                 Text("Could not load diff: $error")
             }
-            result != null -> ReadOnlyDiffList(result!!, splitRatio, onSplitRatioChange, onTopLine, tab.id, findTrigger)
+            result != null -> ReadOnlyDiffList(
+                result = result!!,
+                splitRatio = splitRatio,
+                onSplitRatioChange = onSplitRatioChange,
+                onTopLine = onTopLine,
+                searchKey = tab.id,
+                findTrigger = findTrigger,
+                oldHeader = "${tab.sha.take(8)}: ${tab.file.name}",
+                newHeader = "Working copy: ${tab.file.name}",
+            )
         }
     }
 }
@@ -165,6 +183,8 @@ internal fun ReadOnlyDiffList(
     onTopLine: (Int) -> Unit,
     searchKey: Any,
     findTrigger: Int,
+    oldHeader: String? = null,
+    newHeader: String? = null,
 ) {
     val listState = rememberLazyListState()
 
@@ -184,6 +204,8 @@ internal fun ReadOnlyDiffList(
         onRatioChange = onSplitRatioChange,
         searchKey = searchKey,
         findTrigger = findTrigger,
+        oldHeader = oldHeader,
+        newHeader = newHeader,
     ) { listModifier ->
         // One SelectionContainer over the whole list so a drag spans rows — the user can select a
         // multi-line deleted block on the old (left) side and copy it. Gutters and the right column
@@ -206,7 +228,8 @@ internal fun ReadOnlyDiffList(
 
 @Composable
 private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
-    val (oldBg, newBg) = backgroundsFor(row)
+    val diffColors = currentDiffColors()
+    val (oldBg, newBg) = backgroundsFor(row, diffColors)
     // One line is one row's height — unless wrapping is on, in which case the row is as tall as
     // whichever half needed the most lines, and the tints behind both are painted by the row.
     val wrap = LocalWrapLines.current
@@ -222,7 +245,7 @@ private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
             spans = row.oldSpans,
             lineNumber = row.oldLineNumber,
             background = oldBg,
-            inlineHighlight = INLINE_WORD_BG_OLD,
+            inlineHighlight = diffColors.inlineWordBgOld,
             rowIndex = rowIndex,
             modifier = diffHalf(DiffSide.OLD),
         )
@@ -233,7 +256,7 @@ private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
             spans = row.newSpans,
             lineNumber = row.newLineNumber,
             background = newBg,
-            inlineHighlight = INLINE_WORD_BG,
+            inlineHighlight = diffColors.inlineWordBg,
             rowIndex = rowIndex,
             modifier = diffHalf(DiffSide.NEW),
             selectable = false,

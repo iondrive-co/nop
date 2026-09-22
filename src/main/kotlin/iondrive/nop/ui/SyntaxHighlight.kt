@@ -5,9 +5,10 @@ import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import iondrive.nop.Log
 
-enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR }
+enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR, TYPE }
 
 data class Token(val start: Int, val endExclusive: Int, val kind: TokenKind)
 
@@ -22,6 +23,7 @@ data class HighlightPalette(
     val heading: SpanStyle,
     val emphasis: SpanStyle,
     val error: SpanStyle,
+    val type: SpanStyle = SpanStyle(color = Color.Unspecified),
 ) {
     fun styleFor(kind: TokenKind): SpanStyle = when (kind) {
         TokenKind.KEYWORD -> keyword
@@ -33,36 +35,39 @@ data class HighlightPalette(
         TokenKind.HEADING -> heading
         TokenKind.EMPHASIS -> emphasis
         TokenKind.ERROR -> error
+        TokenKind.TYPE -> type
     }
 
     companion object {
         // Dark palette — hues picked to sit against the editor foreground at #BCBEC4.
         val Dark = HighlightPalette(
-            keyword = SpanStyle(color = Color(0xFFCF8E6D)),  // Orange keywords
+            keyword = SpanStyle(color = Color(0xFFCF8E6D), fontWeight = FontWeight.Bold),  // Orange bold keywords
             string = SpanStyle(color = Color(0xFF6AAB73)),   // Green strings
             // IntelliJ renders comments in italics; mirror that so they read as prose, not code.
             comment = SpanStyle(color = Color(0xFF7A7E85), fontStyle = FontStyle.Italic),
             number = SpanStyle(color = Color(0xFF2AACB8)),   // Cyan numbers
-            literal = SpanStyle(color = Color(0xFFCF8E6D)),  // Orange literals like keywords
+            literal = SpanStyle(color = Color(0xFFCF8E6D), fontWeight = FontWeight.Bold),  // Orange literals like keywords
             punct = SpanStyle(color = Color(0xFFBCBEC4)),    // Light grey punctuation
             heading = SpanStyle(color = Color(0xFFC77DBB)),  // Pink/magenta for markdown headings
-            emphasis = SpanStyle(color = Color(0xFFB389C5)), // Purple for annotations/emphasis
+            emphasis = SpanStyle(color = Color(0xFFBBB529)), // Gold for annotations/emphasis
             // Errors are tinted red; the editor draws a red wavy underline under the range on top
             // of this (see ErrorSquiggles) for the IntelliJ-style "this is wrong" squiggle.
             error = SpanStyle(color = Color(0xFFFF6B68)),
+            type = SpanStyle(color = Color(0xFF4EC9B0)),     // Clean mint/teal for types/classes
         )
 
         // IntelliJ-default light palette — darker hues so they read on a near-white background.
         val Light = HighlightPalette(
-            keyword = SpanStyle(color = Color(0xFF0033B3)),  // Dark blue keywords
+            keyword = SpanStyle(color = Color(0xFF0033B3), fontWeight = FontWeight.Bold),  // Dark blue bold keywords
             string = SpanStyle(color = Color(0xFF067D17)),   // Green strings
             comment = SpanStyle(color = Color(0xFF8C8C8C), fontStyle = FontStyle.Italic),
             number = SpanStyle(color = Color(0xFF1750EB)),   // Blue numbers
-            literal = SpanStyle(color = Color(0xFF0033B3)),  // Dark blue literals
+            literal = SpanStyle(color = Color(0xFF0033B3), fontWeight = FontWeight.Bold),  // Dark blue literals
             punct = SpanStyle(color = Color(0xFF000000)),    // Black punctuation
             heading = SpanStyle(color = Color(0xFF871094)),  // Purple headings
-            emphasis = SpanStyle(color = Color(0xFF9E4585)), // Magenta emphasis
+            emphasis = SpanStyle(color = Color(0xFF875700)), // Warm amber/gold for annotations
             error = SpanStyle(color = Color(0xFFFF0000)),    // Red errors
+            type = SpanStyle(color = Color(0xFF1F6B75)),     // Slate cyan for types/classes
         )
 
         // Diff variants. A diff row paints a colour tint behind its text (see DiffRendering's
@@ -239,6 +244,8 @@ fun tokenizeKotlin(text: String): List<Token> {
         val word = it.value
         if (word in KOTLIN_KEYWORDS && !overlap(it.range.first, it.range.last + 1)) {
             add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+        } else if (word[0].isUpperCase() && !overlap(it.range.first, it.range.last + 1)) {
+            add(it.range.first, it.range.last + 1, TokenKind.TYPE)
         }
     }
     return out.sortedBy { it.start }
@@ -294,7 +301,12 @@ fun tokenizeJava(text: String): List<Token> {
     JAVA_NUMBER.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.NUMBER) }
     JAVA_LITERAL.findAll(text).forEach { add(it.range.first, it.range.last + 1, TokenKind.LITERAL) }
     IDENT.findAll(text).forEach {
-        if (it.value in JAVA_KEYWORDS) add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+        val word = it.value
+        if (word in JAVA_KEYWORDS) {
+            add(it.range.first, it.range.last + 1, TokenKind.KEYWORD)
+        } else if (word[0].isUpperCase()) {
+            add(it.range.first, it.range.last + 1, TokenKind.TYPE)
+        }
     }
     return out.sortedBy { it.start }
 }

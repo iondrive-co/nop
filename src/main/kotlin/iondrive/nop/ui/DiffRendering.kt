@@ -61,6 +61,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.Dp
@@ -79,14 +80,53 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 // and change-marker lane in one place means a change like "darker font" or "selectable text"
 // applies to both views at once instead of having to be copied between near-identical files.
 
-// Background tints — muted dark-theme palette.
-internal val INSERT_BG = Color(0x30456E4E)  // Green tint for insertions
-internal val DELETE_BG = Color(0x305E3D40)  // Red tint for deletions
-internal val CHANGE_BG = Color(0x30374F6B)  // Blue tint for changes
-internal val EMPTY_BG = Color(0x0AFFFFFF)   // Very subtle gray for filler
-internal val INLINE_WORD_BG = Color(0x60456E4E)       // Stronger green for inline word changes
-internal val INLINE_WORD_BG_OLD = Color(0x605E3D40)   // Stronger red for deleted words
-internal val GUTTER_FG = Color(0xFF6F737A)
+internal data class DiffColors(
+    val insertBg: Color,
+    val deleteBg: Color,
+    val changeBg: Color,
+    val emptyBg: Color,
+    val inlineWordBg: Color,
+    val inlineWordBgOld: Color,
+    val gutterFg: Color,
+    val gutterDivider: Color,
+) {
+    companion object {
+        val Dark = DiffColors(
+            insertBg = Color(0x30456E4E),
+            deleteBg = Color(0x305E3D40),
+            changeBg = Color(0x30374F6B),
+            emptyBg = Color(0x0AFFFFFF),
+            inlineWordBg = Color(0x60456E4E),
+            inlineWordBgOld = Color(0x605E3D40),
+            gutterFg = Color(0xFF6F737A),
+            gutterDivider = Color(0x1FFFFFFF),
+        )
+
+        // Clean, crisp pastel tones matching modern IntelliJ IDEA light theme diffs
+        val Light = DiffColors(
+            insertBg = Color(0xFFE6F5E6),
+            deleteBg = Color(0xFFFCE8E6),
+            changeBg = Color(0xFFE6EEF7),
+            emptyBg = Color(0xFFF9FAFB),
+            inlineWordBg = Color(0xFFBCE8BC),
+            inlineWordBgOld = Color(0xFFF7BDB9),
+            gutterFg = Color(0xFFA1A3A8),
+            gutterDivider = Color(0x1F000000),
+        )
+    }
+}
+
+@Composable
+internal fun currentDiffColors(): DiffColors = if (JewelTheme.isDark) DiffColors.Dark else DiffColors.Light
+
+// Backwards-compatible constants for callers and tests
+internal val INSERT_BG = DiffColors.Dark.insertBg
+internal val DELETE_BG = DiffColors.Dark.deleteBg
+internal val CHANGE_BG = DiffColors.Dark.changeBg
+internal val EMPTY_BG = DiffColors.Dark.emptyBg
+internal val INLINE_WORD_BG = DiffColors.Dark.inlineWordBg
+internal val INLINE_WORD_BG_OLD = DiffColors.Dark.inlineWordBgOld
+internal val GUTTER_FG = DiffColors.Dark.gutterFg
 
 // Saturated marker colours for the scrollbar lane — must read at a glance on the dark panel.
 internal val INSERT_MARK = Color(0xFF5FAD65)
@@ -322,11 +362,11 @@ internal fun textColor(): Color =
 internal fun diffPalette(): HighlightPalette =
     if (JewelTheme.isDark) HighlightPalette.DarkDiff else HighlightPalette.LightDiff
 
-internal fun backgroundsFor(row: DiffRow): Pair<Color, Color> = when (row.kind) {
+internal fun backgroundsFor(row: DiffRow, colors: DiffColors = DiffColors.Dark): Pair<Color, Color> = when (row.kind) {
     RowKind.EQUAL -> Color.Transparent to Color.Transparent
-    RowKind.CHANGE -> CHANGE_BG to CHANGE_BG
-    RowKind.INSERT -> EMPTY_BG to INSERT_BG
-    RowKind.DELETE -> DELETE_BG to EMPTY_BG
+    RowKind.CHANGE -> colors.changeBg to colors.changeBg
+    RowKind.INSERT -> colors.emptyBg to colors.insertBg
+    RowKind.DELETE -> colors.deleteBg to colors.emptyBg
 }
 
 internal fun annotateLine(
@@ -467,18 +507,29 @@ internal fun DrawScope.drawLineBackgrounds(backgrounds: List<Color>, lineHeightP
 internal fun BlockGutter(numbers: List<Int?>, lineHeights: List<Float>? = null) {
     // Line numbers sit inside the list-wide SelectionContainer; keep them out of selections so a
     // copied deletion is source text only, no gutter digits.
+    val colors = currentDiffColors()
     DisableSelection {
-        val style = DIFF_TEXT_STYLE.copy(color = GUTTER_FG)
+        val style = DIFF_TEXT_STYLE.copy(color = colors.gutterFg)
+        val gutterMod = Modifier
+            .drawBehind {
+                drawLine(
+                    color = colors.gutterDivider,
+                    start = Offset(size.width, 0f),
+                    end = Offset(size.width, size.height),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            }
+            .padding(start = 10.dp, end = 8.dp)
         if (lineHeights == null) {
             BasicText(
                 text = numbers.joinToString("\n") { it?.toString()?.padStart(5) ?: "     " },
                 style = style,
                 softWrap = false,
-                modifier = Modifier.padding(horizontal = 6.dp),
+                modifier = gutterMod,
             )
         } else {
             val density = LocalDensity.current
-            Column(modifier = Modifier.padding(horizontal = 6.dp)) {
+            Column(modifier = gutterMod) {
                 numbers.forEachIndexed { i, number ->
                     val height = lineHeights.getOrNull(i) ?: return@forEachIndexed
                     // The number rides the top of its line's band, so a line that folded into three
@@ -525,12 +576,22 @@ internal fun logicalLineHeights(layout: TextLayoutResult?, text: String, count: 
 internal fun GutterCell(lineNumber: Int?) {
     // Line numbers sit inside the list-wide SelectionContainer; keep them out of selections so a
     // copied deletion is source text only, no gutter digits.
+    val colors = currentDiffColors()
     DisableSelection {
         BasicText(
             text = lineNumber?.toString()?.padStart(5) ?: "     ",
-            style = DIFF_TEXT_STYLE.copy(color = GUTTER_FG),
+            style = DIFF_TEXT_STYLE.copy(color = colors.gutterFg),
             softWrap = false,
-            modifier = Modifier.padding(horizontal = 6.dp),
+            modifier = Modifier
+                .drawBehind {
+                    drawLine(
+                        color = colors.gutterDivider,
+                        start = Offset(size.width, 0f),
+                        end = Offset(size.width, size.height),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                }
+                .padding(start = 10.dp, end = 8.dp),
         )
     }
 }
@@ -634,6 +695,66 @@ internal fun ReadOnlyDiffHalf(
  * "scroll to the item" is not the same as "scroll to the row".
  */
 @Composable
+internal fun DiffHeaderBar(
+    oldTitle: String,
+    newTitle: String,
+    oldWidth: Dp,
+) {
+    val isDark = JewelTheme.isDark
+    val bg = if (isDark) Color(0xFF26282D) else Color(0xFFF2F3F5)
+    val border = if (isDark) Color(0xFF36383D) else Color(0xFFE2E3E5)
+    val fg = if (isDark) Color(0xFF9DA3AB) else Color(0xFF5A5D65)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(26.dp)
+            .background(bg)
+            .drawBehind {
+                drawLine(
+                    color = border,
+                    start = Offset(0f, size.height),
+                    end = Offset(size.width, size.height),
+                    strokeWidth = 1.dp.toPx(),
+                )
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.width(oldWidth).padding(horizontal = 10.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            BasicText(
+                text = oldTitle,
+                style = TextStyle(
+                    fontFamily = NopFonts.Mono,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = fg,
+                ),
+                maxLines = 1,
+            )
+        }
+        Box(Modifier.width(DIVIDER_W).fillMaxHeight().background(border))
+        Box(
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            BasicText(
+                text = newTitle,
+                style = TextStyle(
+                    fontFamily = NopFonts.Mono,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = fg,
+                ),
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
 internal fun DiffListScaffold(
     rows: List<DiffRow>,
     kinds: List<RowKind>,
@@ -644,6 +765,8 @@ internal fun DiffListScaffold(
     searchKey: Any = Unit,
     findTrigger: Int = 0,
     rowLocation: (Int) -> RowLocation = { RowLocation(it, 0) },
+    oldHeader: String? = null,
+    newHeader: String? = null,
     list: @Composable (Modifier) -> Unit,
 ) {
     val oldScroll = rememberDiffSideScroll(rows, DiffSide.OLD)
@@ -760,6 +883,9 @@ internal fun DiffListScaffold(
                     onPrev = { step(-1) },
                     onClose = { searchOpen = false },
                 )
+            }
+            if (oldHeader != null && newHeader != null) {
+                DiffHeaderBar(oldTitle = oldHeader, newTitle = newHeader, oldWidth = oldWidth)
             }
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 CompositionLocalProvider(
