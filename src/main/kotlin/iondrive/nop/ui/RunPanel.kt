@@ -134,6 +134,14 @@ class RunSessions {
         _sessions.firstOrNull { it.id == id }?.title = trimmed
     }
 
+    /**
+     * Reorders a session from [from] to [to]. Out-of-bounds indices are ignored.
+     */
+    fun move(from: Int, to: Int) {
+        if (from !in _sessions.indices || to !in _sessions.indices || from == to) return
+        _sessions.add(to, _sessions.removeAt(from))
+    }
+
     /** Stops the run behind [id], tears its widget down and drops it from the strip. */
     fun close(id: String) {
         val idx = _sessions.indexOfFirst { it.id == id }

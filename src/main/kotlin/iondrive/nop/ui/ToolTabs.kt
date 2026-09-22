@@ -3,6 +3,7 @@ package iondrive.nop.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -32,9 +33,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +49,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -58,10 +62,13 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import iondrive.nop.StripDrag
 import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSession
 import iondrive.nop.agent.AgentSessions
@@ -222,11 +229,13 @@ fun ToolTabs(
     onNewTerminal: () -> Unit,
     onSelectTerminal: (String) -> Unit,
     onCloseTerminal: (String) -> Unit,
+    onReorderTerminal: (from: Int, to: Int) -> Unit = { from, to -> terminals.move(from, to) },
     agents: AgentSessions,
     onShowPicker: () -> Unit,
     onSelectAgent: (String) -> Unit,
     onCloseAgent: (String) -> Unit,
     onRenameAgent: (String, String) -> Unit,
+    onReorderAgent: (from: Int, to: Int) -> Unit = { from, to -> agents.move(from, to) },
     runs: RunSessions,
     onSelectRun: (String) -> Unit,
     onCloseRun: (String) -> Unit,
@@ -295,11 +304,13 @@ fun ToolTabs(
             onNewTerminal = onNewTerminal,
             onSelectTerminal = onSelectTerminal,
             onCloseTerminal = onCloseTerminal,
+            onReorderTerminal = onReorderTerminal,
             agents = agents,
             onShowPicker = onShowPicker,
             onSelectAgent = onSelectAgent,
             onCloseAgent = onCloseAgent,
             onRenameAgent = onRenameAgent,
+            onReorderAgent = onReorderAgent,
             runs = runs,
             onSelectRun = onSelectRun,
             onCloseRun = onCloseRun,
@@ -411,11 +422,13 @@ private fun SessionStrip(
     onNewTerminal: () -> Unit,
     onSelectTerminal: (String) -> Unit,
     onCloseTerminal: (String) -> Unit,
+    onReorderTerminal: (Int, Int) -> Unit,
     agents: AgentSessions,
     onShowPicker: () -> Unit,
     onSelectAgent: (String) -> Unit,
     onCloseAgent: (String) -> Unit,
     onRenameAgent: (String, String) -> Unit,
+    onReorderAgent: (Int, Int) -> Unit,
     runs: RunSessions,
     onSelectRun: (String) -> Unit,
     onCloseRun: (String) -> Unit,
@@ -425,6 +438,8 @@ private fun SessionStrip(
     val palette = remember(isDark) { StripPalette(isDark) }
     // The tab currently being renamed in place, if any.
     var renamingId by remember { mutableStateOf<String?>(null) }
+    val terminalReorder = remember { StripTabReorder() }
+    val agentReorder = remember { StripTabReorder() }
 
     // Opening a terminal scrolls the "+" back into view, not the tab it just made. The tab sits
     // immediately left of the "+" so it comes along anyway, and stopping at the tab would leave the
@@ -454,26 +469,36 @@ private fun SessionStrip(
             // Keyed by run id so a tab's hover state follows the terminal it belongs to when one
             // further left is closed.
             key(run.id) {
-                if (run.id == renamingId) {
-                    TabRenameField(
-                        initial = run.title,
-                        style = style,
-                        onCommit = { name ->
-                            terminals.rename(run.id, name)
-                            renamingId = null
-                        },
-                        onCancel = { renamingId = null },
-                    )
-                } else {
-                    ToolStripTab(
-                        label = "$TERMINAL_GLYPH ${run.title}",
-                        selected = sessionTab == ToolTab.Terminal && run.id == terminals.selectedId,
-                        isDark = isDark,
-                        style = style,
-                        onClick = { onSelectTerminal(run.id) },
-                        onClose = { onCloseTerminal(run.id) },
-                        onRename = { renamingId = run.id },
-                    )
+                ReorderableStripTab(
+                    key = run.id,
+                    items = terminals.sessions,
+                    keyOf = { it.id },
+                    reorder = terminalReorder,
+                    onMove = onReorderTerminal,
+                    enabled = run.id != renamingId,
+                ) { dragging ->
+                    if (run.id == renamingId) {
+                        TabRenameField(
+                            initial = run.title,
+                            style = style,
+                            onCommit = { name ->
+                                terminals.rename(run.id, name)
+                                renamingId = null
+                            },
+                            onCancel = { renamingId = null },
+                        )
+                    } else {
+                        ToolStripTab(
+                            label = "$TERMINAL_GLYPH ${run.title}",
+                            selected = sessionTab == ToolTab.Terminal && run.id == terminals.selectedId,
+                            isDark = isDark,
+                            style = style,
+                            onClick = { onSelectTerminal(run.id) },
+                            onClose = { onCloseTerminal(run.id) },
+                            onRename = { renamingId = run.id },
+                            dragging = dragging,
+                        )
+                    }
                 }
             }
         }
@@ -484,50 +509,60 @@ private fun SessionStrip(
         )
         agents.sessions.forEach { agentSession ->
             key(agentSession.sessionId) {
-                if (agentSession.sessionId == renamingId) {
-                    TabRenameField(
-                        initial = agentSession.title,
-                        style = style,
-                        onCommit = { name ->
-                            onRenameAgent(agentSession.sessionId, name)
-                            renamingId = null
-                        },
-                        onCancel = { renamingId = null },
-                    )
-                } else {
-                    val selected = sessionTab == ToolTab.Agent &&
-                        agentSession.sessionId == agents.selectedId
-                    // The tab on screen is the one being watched: nothing it does is news to anyone.
-                    // See [AgentSession.unseen].
-                    DisposableEffect(agentSession, selected) {
-                        if (selected) agentSession.watch()
-                        onDispose { if (selected) agentSession.unwatch() }
+                ReorderableStripTab(
+                    key = agentSession.sessionId,
+                    items = agents.sessions,
+                    keyOf = { it.sessionId },
+                    reorder = agentReorder,
+                    onMove = onReorderAgent,
+                    enabled = agentSession.sessionId != renamingId,
+                ) { dragging ->
+                    if (agentSession.sessionId == renamingId) {
+                        TabRenameField(
+                            initial = agentSession.title,
+                            style = style,
+                            onCommit = { name ->
+                                onRenameAgent(agentSession.sessionId, name)
+                                renamingId = null
+                            },
+                            onCancel = { renamingId = null },
+                        )
+                    } else {
+                        val selected = sessionTab == ToolTab.Agent &&
+                            agentSession.sessionId == agents.selectedId
+                        // The tab on screen is the one being watched: nothing it does is news to anyone.
+                        // See [AgentSession.unseen].
+                        DisposableEffect(agentSession, selected) {
+                            if (selected) agentSession.watch()
+                            onDispose { if (selected) agentSession.unwatch() }
+                        }
+                        val activity = agentSession.activity
+                        val unseen = agentSession.unseen && !selected
+                        val colors = remember(isDark) { AgentStatusColors(isDark) }
+                        val emphasis = if (unseen) colors.label(activity, isDark) ?: palette.selectedText else null
+                        ToolStripTab(
+                            label = agentSession.title,
+                            selected = selected,
+                            isDark = isDark,
+                            style = style,
+                            onClick = { onSelectAgent(agentSession.sessionId) },
+                            onClose = { onCloseAgent(agentSession.sessionId) },
+                            onRename = { renamingId = agentSession.sessionId },
+                            leading = {
+                                AgentStatusMark(
+                                    activity = activity,
+                                    unseen = unseen,
+                                    since = agentSession.activitySince,
+                                    isDark = isDark,
+                                )
+                            },
+                            emphasis = emphasis,
+                            // A question nobody has seen tints the whole tab, not only its name: it is the
+                            // one state where the agent can do nothing at all until somebody comes.
+                            wash = if (unseen && activity == Activity.Asking) colors.asking.copy(alpha = 0.16f) else null,
+                            dragging = dragging,
+                        )
                     }
-                    val activity = agentSession.activity
-                    val unseen = agentSession.unseen && !selected
-                    val colors = remember(isDark) { AgentStatusColors(isDark) }
-                    val emphasis = if (unseen) colors.label(activity, isDark) ?: palette.selectedText else null
-                    ToolStripTab(
-                        label = agentSession.title,
-                        selected = selected,
-                        isDark = isDark,
-                        style = style,
-                        onClick = { onSelectAgent(agentSession.sessionId) },
-                        onClose = { onCloseAgent(agentSession.sessionId) },
-                        onRename = { renamingId = agentSession.sessionId },
-                        leading = {
-                            AgentStatusMark(
-                                activity = activity,
-                                unseen = unseen,
-                                since = agentSession.activitySince,
-                                isDark = isDark,
-                            )
-                        },
-                        emphasis = emphasis,
-                        // A question nobody has seen tints the whole tab, not only its name: it is the
-                        // one state where the agent can do nothing at all until somebody comes.
-                        wash = if (unseen && activity == Activity.Asking) colors.asking.copy(alpha = 0.16f) else null,
-                    )
                 }
             }
         }
@@ -595,6 +630,71 @@ private fun SessionStrip(
                 }
             }
         }
+    }
+}
+
+/** Shared drag-reorder state for a flat run of tabs in the strip. */
+private class StripTabReorder {
+    var draggingKey by mutableStateOf<String?>(null)
+    var delta by mutableStateOf(0f)
+    val widths = mutableStateMapOf<String, Int>()
+
+    fun settle() {
+        draggingKey = null
+        delta = 0f
+    }
+}
+
+/**
+ * Wraps one tab in the session strip with drag-to-reorder. While dragging, the tab follows the
+ * pointer (translation + raised above its neighbours); each time it travels past half a
+ * neighbour's width we swap it with that neighbour so the strip reflows live — see [StripDrag.step].
+ */
+@Composable
+private fun <T> ReorderableStripTab(
+    key: String,
+    items: List<T>,
+    keyOf: (T) -> String,
+    reorder: StripTabReorder,
+    onMove: (from: Int, to: Int) -> Unit,
+    enabled: Boolean = true,
+    content: @Composable (dragging: Boolean) -> Unit,
+) {
+    val itemsUpdated by rememberUpdatedState(items)
+    val onMoveUpdated by rememberUpdatedState(onMove)
+    val dragging = reorder.draggingKey == key
+
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .onSizeChanged { reorder.widths[key] = it.width }
+            .zIndex(if (dragging) 1f else 0f)
+            .graphicsLayer { translationX = if (dragging) reorder.delta else 0f }
+            .pointerInput(key, enabled) {
+                if (!enabled) return@pointerInput
+                detectDragGestures(
+                    onDragStart = {
+                        reorder.draggingKey = key
+                        reorder.delta = 0f
+                    },
+                    onDragEnd = { reorder.settle() },
+                    onDragCancel = { reorder.settle() },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        reorder.delta += amount.x
+                        val cur = itemsUpdated
+                        val from = cur.indexOfFirst { keyOf(it) == key }
+                        val sizes = cur.map { reorder.widths[keyOf(it)] ?: 0 }
+                        val step = StripDrag.step(sizes, from, reorder.delta)
+                        if (step != null) {
+                            onMoveUpdated(from, step.to)
+                            reorder.delta -= step.travelled
+                        }
+                    },
+                )
+            },
+    ) {
+        content(dragging)
     }
 }
 
@@ -722,6 +822,7 @@ private fun ToolStripTab(
     leading: (@Composable () -> Unit)? = null,
     emphasis: Color? = null,
     wash: Color? = null,
+    dragging: Boolean = false,
 ) {
     val palette = remember(isDark) { StripPalette(isDark) }
     val interaction = remember { MutableInteractionSource() }
@@ -729,7 +830,7 @@ private fun ToolStripTab(
     val background = when {
         selected -> palette.selected
         wash != null -> wash
-        hovered -> palette.hovered
+        dragging || hovered -> palette.hovered
         else -> Color.Transparent
     }
     val content = emphasis ?: if (selected) palette.selectedText else palette.text
@@ -739,7 +840,7 @@ private fun ToolStripTab(
             .fillMaxHeight()
             .background(background)
             .tabUnderline(selected, palette.accent, SELECTED_RULE)
-            .let { m -> if (selected) m else m.tabDivider(palette.divider) }
+            .let { m -> if (selected || dragging) m else m.tabDivider(palette.divider) }
             .hoverable(interaction)
             // Right-click, caught on the Initial pass so it is seen before `clickable` below claims
             // the press — and consumed there, so the tab doesn't also select itself.

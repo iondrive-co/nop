@@ -114,6 +114,33 @@ class RunSessionsTest {
         assertEquals(only.id, runs.selected?.id)
     }
 
+    @Test
+    fun `moving a session reorders the sessions list and preserves selection`(@TempDir tmp: Path) {
+        val runs = RunSessions()
+        val a = runs.open(shell(tmp))
+        val b = runs.open(shell(tmp))
+        val c = runs.open(shell(tmp))
+        runs.select(b.id)
+
+        runs.move(2, 0)
+        assertEquals(listOf(c, a, b), runs.sessions)
+        assertEquals(b.id, runs.selectedId)
+
+        runs.move(0, 2)
+        assertEquals(listOf(a, b, c), runs.sessions)
+        assertEquals(b.id, runs.selectedId)
+
+        // Stale or out-of-bounds indices are no-ops
+        runs.move(-1, 0)
+        assertEquals(listOf(a, b, c), runs.sessions)
+
+        runs.move(1, 10)
+        assertEquals(listOf(a, b, c), runs.sessions)
+
+        runs.move(2, 2)
+        assertEquals(listOf(a, b, c), runs.sessions)
+    }
+
     /**
      * What a project-tab switch does. Everything has to go: a run left behind would keep its PTY —
      * and whatever ports its children hold — with nothing on screen able to reach it.

@@ -100,6 +100,33 @@ class AgentSessionsTest {
     }
 
     @Test
+    fun `moving a session reorders the sessions list and preserves selection`(@TempDir tmp: Path) {
+        val state = sessions()
+        val a = state.open(tmp.toFile(), account("claude-1"))
+        val b = state.open(tmp.toFile(), account("claude-2"))
+        val c = state.open(tmp.toFile(), account("claude-3"))
+        state.select(b.sessionId)
+
+        state.move(0, 2)
+        assertEquals(listOf(b, c, a), state.sessions)
+        assertEquals(b.sessionId, state.selectedId)
+
+        state.move(2, 0)
+        assertEquals(listOf(a, b, c), state.sessions)
+        assertEquals(b.sessionId, state.selectedId)
+
+        // Stale or out-of-bounds indices are no-ops
+        state.move(-1, 1)
+        assertEquals(listOf(a, b, c), state.sessions)
+
+        state.move(0, 10)
+        assertEquals(listOf(a, b, c), state.sessions)
+
+        state.move(1, 1)
+        assertEquals(listOf(a, b, c), state.sessions)
+    }
+
+    @Test
     fun `the title the CLI gives the session replaces the default`(@TempDir tmp: Path) {
         val session = sessions().open(tmp.toFile(), account("claude-main"))
 
@@ -804,9 +831,34 @@ class AgentSessionsTest {
         session.titleFromTranscript("LIQFADE rule health")
 
         session.handOver(account("claude-iondrive"))
-        session.titleFromTranscript("Handoff from Claude Code", fromHandoff = true)
+        session.titleFromTranscript("Handoff from Claude Code")
 
         assertEquals("LIQFADE rule health", session.title)
+        assertEquals(listOf("LIQFADE rule health"), session.log.events().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+    }
+
+    @Test
+    fun `a handover keeps the default tab name when the new CLI names the handoff`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+        assertEquals("Agent", session.title)
+
+        session.handOver(account("claude-iondrive"))
+        session.titleFromTranscript("Handoff from Codex continuation")
+
+        assertEquals("Agent", session.title)
+        assertTrue(session.log.events().filterIsInstance<AgentEvent.SessionTitled>().isEmpty())
+    }
+
+    @Test
+    fun `a handover keeps a user-chosen tab name when the new CLI names the handoff`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        session.rename("Custom investigation")
+
+        session.handOver(account("claude-iondrive"))
+        session.titleFromTranscript("Handoff from Claude Code")
+
+        assertEquals("Custom investigation", session.title)
+        assertEquals(listOf("Custom investigation"), session.log.events().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
     }
 
     /**

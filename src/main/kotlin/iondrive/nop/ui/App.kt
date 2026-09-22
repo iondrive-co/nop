@@ -1532,6 +1532,7 @@ fun App(
                                     showSession(ToolTab.Terminal)
                                 },
                                 onCloseTerminal = { terminals.close(it) },
+                                onReorderTerminal = { from, to -> terminals.move(from, to) },
                                 agents = agentSessions,
                                 // Both the "+" and the picker's own tab. The "+" opens an empty
                                 // agent tab rather than a session on the account used last: which
@@ -1548,6 +1549,7 @@ fun App(
                                 },
                                 onCloseAgent = { id -> agentSessions.close(id) },
                                 onRenameAgent = { id, name -> agentSessions.rename(id, name) },
+                                onReorderAgent = { from, to -> agentSessions.move(from, to) },
                                 runs = runSessions,
                                 onSelectRun = { id ->
                                     runSessions.select(id)

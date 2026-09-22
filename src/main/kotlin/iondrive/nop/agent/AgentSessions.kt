@@ -168,6 +168,14 @@ class AgentSessions {
     }
 
     /**
+     * Reorders a session from [from] to [to]. Out-of-bounds indices are ignored.
+     */
+    fun move(from: Int, to: Int) {
+        if (from !in _sessions.indices || to !in _sessions.indices || from == to) return
+        _sessions.add(to, _sessions.removeAt(from))
+    }
+
+    /**
      * Whether the selector tab for the sessions ("Agent") is showing in the strip.
      *
      * Only shows if there are no sessions running. While sessions are running, session selection /

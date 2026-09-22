@@ -286,6 +286,7 @@ class AgentSession(
         if (trimmed.isEmpty()) return
         title = trimmed
         titleIsUsers = true
+        log.append(AgentEvent.SessionTitled(trimmed, System.currentTimeMillis()))
     }
 
     /**
@@ -294,11 +295,18 @@ class AgentSession(
      * names its conversation after the handoff it was given ("Handoff from Claude Code"), which says
      * nothing about the work.
      */
-    fun titleFromTranscript(name: String, fromHandoff: Boolean = false) {
+    fun titleFromTranscript(
+        name: String,
+        fromHandoff: Boolean = run.seededFromHandoff,
+        at: Long = System.currentTimeMillis(),
+    ) {
         if (titleIsUsers) return
-        if (fromHandoff && title != DEFAULT_TITLE) return
+        if (fromHandoff) return
         val trimmed = name.trim()
-        if (trimmed.isNotEmpty()) title = trimmed
+        if (trimmed.isNotEmpty()) {
+            title = trimmed
+            log.append(AgentEvent.SessionTitled(trimmed, at))
+        }
     }
 
     /** True once the current run has ended and the post-exit choices belong on screen. */
@@ -877,10 +885,14 @@ class AgentSession(
             run = context,
             log = log,
             onEvent = { event ->
-                log.append(event)
+                if (event !is AgentEvent.SessionTitled) {
+                    log.append(event)
+                }
                 // The CLI names its own session a turn or two in. That name says far more about
                 // which of three open tabs this is than the account does.
-                if (event is AgentEvent.SessionTitled) titleFromTranscript(event.title, seededFromHandoff)
+                if (event is AgentEvent.SessionTitled) {
+                    titleFromTranscript(event.title, seededFromHandoff, event.at)
+                }
                 if (event is AgentEvent.UserMessage && event.at >= startedAt - 5000) {
                     newRun.userPromptSubmitted = true
                 }
