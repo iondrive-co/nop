@@ -207,6 +207,125 @@ class UsageTest {
         assertEquals(Duration.ofMinutes(300), Usage.read(codexAccount(tmp)).session?.length)
     }
 
+    // ── Codex: HTTP backend API ──
+
+    @Test
+    fun `codex usage queries backend API when endpoint is configured`(@TempDir tmp: Path) {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress(0), 0)
+        server.createContext("/wham/usage") { exchange ->
+            val json = """
+                {
+                    "plan_type": "plus",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 15.0,
+                            "limit_window_seconds": 18000,
+                            "reset_at": 1790757173
+                        },
+                        "secondary_window": {
+                            "used_percent": 60.0,
+                            "limit_window_seconds": 604800,
+                            "reset_at": 1791200000
+                        }
+                    }
+                }
+            """.trimIndent()
+            val bytes = json.toByteArray()
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+
+        try {
+            Usage.codexUsageUrl = "http://localhost:${server.address.port}/wham/usage"
+            val account = codexAccount(tmp)
+            val reading = Usage.read(account)
+
+            assertEquals(15.0, reading.session?.percent)
+            assertEquals(60.0, reading.weekly?.percent)
+            assertEquals(Duration.ofSeconds(18000), reading.session?.length)
+            assertEquals(Duration.ofSeconds(604800), reading.weekly?.length)
+        } finally {
+            server.stop(0)
+            Usage.clearAuthCache()
+        }
+    }
+
+    @Test
+    fun `codex usage correctly parses single weekly window for Team plans`(@TempDir tmp: Path) {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress(0), 0)
+        server.createContext("/wham/usage") { exchange ->
+            val json = """
+                {
+                    "plan_type": "team",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 0.0,
+                            "limit_window_seconds": 604800,
+                            "reset_at": 1790757173
+                        },
+                        "secondary_window": null
+                    }
+                }
+            """.trimIndent()
+            val bytes = json.toByteArray()
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+
+        try {
+            Usage.codexUsageUrl = "http://localhost:${server.address.port}/wham/usage"
+            val account = codexAccount(tmp)
+            val reading = Usage.read(account)
+
+            assertNull(reading.session, "single 7-day window must be classified as weekly, not session")
+            assertEquals(0.0, reading.weekly?.percent)
+            assertEquals(Duration.ofSeconds(604800), reading.weekly?.length)
+        } finally {
+            server.stop(0)
+            Usage.clearAuthCache()
+        }
+    }
+
+    @Test
+    fun `codex usage handles 429 rate limiting with Retry-After`(@TempDir tmp: Path) {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress(0), 0)
+        server.createContext("/wham/usage") { exchange ->
+            exchange.responseHeaders.set("Retry-After", "45")
+            val bytes = "Too Many Requests".toByteArray()
+            exchange.sendResponseHeaders(429, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+
+        try {
+            Usage.codexUsageUrl = "http://localhost:${server.address.port}/wham/usage"
+            val account = codexAccount(tmp)
+            val reading = Usage.read(account)
+
+            assertEquals("usage API rate-limited", reading.note)
+        } finally {
+            server.stop(0)
+            Usage.clearAuthCache()
+        }
+    }
+
+    @Test
+    fun `invalidate clears liveCodex for account`(@TempDir tmp: Path) {
+        val account = codexAccount(tmp)
+        val future = Instant.now().plusSeconds(3600).epochSecond
+        val limitsJson = Json.parseToJsonElement(
+            """{"primary":{"used_percent":99.0,"window_minutes":300,"resets_at":$future},"secondary":null}""",
+        ).jsonObject
+
+        Usage.recordCodexLimits(tmp, limitsJson)
+        assertNotNull(Usage.liveCodexReading(tmp))
+
+        Usage.invalidate(account)
+        assertNull(Usage.liveCodexReading(tmp))
+    }
+
     // ── Claude: percentages ──
 
     @Test

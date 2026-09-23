@@ -198,6 +198,9 @@ object Usage {
     private const val MODELS_URL = "https://api.anthropic.com/v1/models?limit=100"
     private const val OAUTH_BETA = "oauth-2025-04-20"
     private const val USER_AGENT = "claude-code/2.1.270"
+    private const val USER_AGENT_CODEX = "codex/0.154.0"
+    private const val CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+    internal var codexUsageUrl: String = CODEX_USAGE_URL
 
     /**
      * A refused refresh means the account is signed out until the user signs in again, so retrying
@@ -212,6 +215,14 @@ object Usage {
     fun clearAuthCache() {
         refusedAt.clear()
         liveCodex.clear()
+        gate.clear()
+        codexUsageUrl = CODEX_USAGE_URL
+    }
+
+    /** Invalidates any cached usage reading for [account]. */
+    fun invalidate(account: Account) {
+        gate.invalidate(gateKey(account))
+        liveCodex.remove(account.homePath.toAbsolutePath().normalize())
     }
 
     /**
@@ -483,18 +494,29 @@ object Usage {
     }
 
     /**
-     * The freshest populated `rate_limits` snapshot in this account's session transcripts.
+     * Reads Codex usage from the ChatGPT backend API, or scavenges transcripts if unavailable.
      *
-     * Not an API call: Codex publishes no usage endpoint, so the only record of what the account
-     * has spent is what the CLI itself wrote down mid-session. The upside is that a *running*
-     * session updates it live, since the tailer is already reading that very file.
+     * An OpenAI reading queries ChatGPT's `/wham/usage` endpoint when signed in with ChatGPT OAuth
+     * credentials, giving live five-hour and weekly quota numbers and reflecting resets immediately.
+     * If the endpoint cannot be reached or the account uses legacy credentials, it falls back to
+     * scavenging the newest `rate_limits` snapshot from session transcripts.
      */
     private fun readCodex(account: Account): UsageReading {
-        // Sign-in first, and before looking at a single transcript. A home that was abandoned still
-        // has its old rollouts in it, and reading those reported a tidy 0% for an account that
-        // cannot run at all — which is the one reading worse than none, because it says the week is
-        // untouched when the truth is that nop has nothing to ask.
-        if (codexAuth(account) == null) return UsageReading.unavailable("not signed in")
+        val auth = codexAuth(account) ?: return UsageReading.unavailable("not signed in")
+
+        val key = gateKey(account)
+        gate.held(key)?.let { return it }
+
+        val tokens = auth["tokens"].obj()
+        val accessToken = tokens?.get("access_token").str()?.takeIf { it.isNotBlank() }
+        val accountId = tokens?.get("account_id").str()?.takeIf { it.isNotBlank() }
+
+        // Only call the network if the URL is test-configured or the token looks like a real JWT.
+        val canCallApi = accessToken != null && (codexUsageUrl != CODEX_USAGE_URL || accessToken.startsWith("ey"))
+        if (canCallApi) {
+            val apiReading = queryCodexApi(key, account, accessToken!!, accountId)
+            if (apiReading != null) return apiReading
+        }
 
         liveCodexReading(account.homePath)?.let { live ->
             if (live.asOf != null && Duration.between(live.asOf, Instant.now()) < UsageReading.FRESH_ENOUGH) {
@@ -502,13 +524,86 @@ object Usage {
             }
         }
 
-        val sessions = account.homePath.resolve(".codex").resolve("sessions")
-        if (!Files.isDirectory(sessions)) return UsageReading.unavailable("no sessions yet")
+        return scavengeCodex(account)
+    }
+
+    private fun queryCodexApi(
+        key: String,
+        account: Account,
+        accessToken: String,
+        accountId: String?,
+    ): UsageReading? {
+        val headers = mutableMapOf("User-Agent" to USER_AGENT_CODEX)
+        if (accountId != null) headers["chatgpt-account-id"] = accountId
+
+        val answer = get(codexUsageUrl, accessToken, headers) ?: return null
+        when (answer.status) {
+            200 -> {}
+            429 -> {
+                Log.info("usage for ${account.name}: usage API rate-limited" + (answer.retryAfter?.let { " (Retry-After ${it.seconds}s)" } ?: ""))
+                return gate.unanswered(key, "usage API rate-limited", answer.retryAfter)
+            }
+            401, 403 -> return null
+            else -> return null
+        }
+
+        val data = runCatching { json.parseToJsonElement(answer.body).jsonObject }.getOrNull() ?: return null
+        val rateLimit = data["rate_limit"].obj() ?: return null
+        val (session, weekly) = codexApiWindows(rateLimit)
+        if (session == null && weekly == null) return null
+
+        val reading = UsageReading(
+            session = session,
+            weekly = weekly,
+            asOf = Instant.now(),
+        )
+        liveCodex.remove(account.homePath.toAbsolutePath().normalize())
+        return gate.answered(key, reading)
+    }
+
+    internal fun codexApiWindows(rateLimit: JsonObject): Pair<UsageWindow?, UsageWindow?> {
+        val windows = listOfNotNull(
+            apiWindow(rateLimit["primary_window"].obj()),
+            apiWindow(rateLimit["secondary_window"].obj()),
+        )
+        val short = windows.filter { it.first <= CODEX_SESSION_MAX_MINUTES }.minByOrNull { it.first }?.second
+        val long = windows.filter { it.first > CODEX_SESSION_MAX_MINUTES }.maxByOrNull { it.first }?.second
+        return short to long
+    }
+
+    private fun apiWindow(w: JsonObject?): Pair<Long, UsageWindow>? {
+        if (w == null) return null
+        val used = w["used_percent"].double() ?: return null
+        val seconds = w["limit_window_seconds"].long()
+            ?: w["window_minutes"].long()?.let { it * 60 }
+            ?: return null
+        val resets = (w["reset_at"].long() ?: w["resets_at"].long())?.let(Instant::ofEpochSecond)
+        val rolled = resets != null && !Instant.now().isBefore(resets)
+        val window = UsageWindow(
+            percent = if (rolled) 0.0 else normalizePercent(used),
+            resetsAt = resets,
+            length = Duration.ofSeconds(seconds),
+        )
+        return (seconds / 60) to window
+    }
+
+    private fun scavengeCodex(account: Account): UsageReading {
+        val searchDirs = buildList {
+            add(account.homePath.resolve(".codex").resolve("sessions"))
+            val userSessions = Path.of(System.getProperty("user.home"), ".codex", "sessions")
+            if (userSessions != account.homePath.resolve(".codex").resolve("sessions") && sharesAccountId(account)) {
+                add(userSessions)
+            }
+        }.filter { Files.isDirectory(it) }
+
+        if (searchDirs.isEmpty()) return UsageReading.unavailable("no sessions yet")
 
         val files = runCatching {
-            Files.walk(sessions).use { stream ->
-                stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".jsonl") }
-                    .toList()
+            searchDirs.flatMap { dir ->
+                Files.walk(dir).use { stream ->
+                    stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".jsonl") }
+                        .toList()
+                }
             }
         }.getOrDefault(emptyList())
             .sortedByDescending { runCatching { Files.getLastModifiedTime(it).toMillis() }.getOrDefault(0L) }
@@ -520,6 +615,16 @@ object Usage {
             return UsageReading(session, weekly, asOf)
         }
         return UsageReading.unavailable("no usage recorded yet")
+    }
+
+    private fun sharesAccountId(account: Account): Boolean {
+        val accountAuth = codexAuth(account) ?: return false
+        val accountId = accountAuth["tokens"].obj()?.get("account_id").str() ?: return false
+        val userAuthFile = Path.of(System.getProperty("user.home"), ".codex", "auth.json")
+        if (!Files.isRegularFile(userAuthFile)) return false
+        val userAuth = runCatching { json.parseToJsonElement(Files.readString(userAuthFile)).jsonObject }.getOrNull()
+        val userAccountId = userAuth?.get("tokens").obj()?.get("account_id").str()
+        return accountId == userAccountId
     }
 
     /**
@@ -598,11 +703,11 @@ object Usage {
 
     private fun get(url: String, token: String, headers: Map<String, String>): Answer? {
         val builder = HttpRequest.newBuilder(URI.create(url))
-            .header("Authorization", "Bearer $token")
-            .header("User-Agent", USER_AGENT)
+            .setHeader("Authorization", "Bearer $token")
+            .setHeader("User-Agent", headers["User-Agent"] ?: USER_AGENT)
             .timeout(Duration.ofSeconds(10))
             .GET()
-        headers.forEach { (k, v) -> builder.header(k, v) }
+        headers.filterKeys { it != "User-Agent" }.forEach { (k, v) -> builder.setHeader(k, v) }
         return runCatching {
             val response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString())
             val retryAfter = response.headers().firstValue("Retry-After").orElse(null)

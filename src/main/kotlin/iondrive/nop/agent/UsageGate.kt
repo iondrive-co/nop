@@ -34,17 +34,39 @@ internal class UsageGate(private val clock: () -> Instant = Instant::now) {
 
     private val held = ConcurrentHashMap<String, Held>()
 
+    /** Invalidates any held reading for [key]. */
+    fun invalidate(key: String) {
+        held.remove(key)
+    }
+
+    /** Clears all held readings. */
+    fun clear() {
+        held.clear()
+    }
+
     /** The reading to give without asking the provider, or null when it is time to ask again. */
     fun held(key: String): UsageReading? {
         val entry = held[key] ?: return null
         return entry.shown.takeIf { clock().isBefore(entry.until) }
     }
 
-    /** The provider answered with [reading]. Held for [HOLD], and returned. */
+    /** The provider answered with [reading]. Held for [HOLD] (or [BACKOFF] if spent), and returned. */
     fun answered(key: String, reading: UsageReading): UsageReading {
         // A signed-out answer drops the old numbers: they are not to come back as "stale" later.
         val good = reading.takeIf { it.unavailable == null }
-        held[key] = Held(reading, good, clock().plus(HOLD), strikes = 0)
+        val holdDuration = when {
+            reading.looksSpent(clock()) == true -> {
+                val until = reading.spentUntil(clock())
+                if (until != null) {
+                    val remaining = Duration.between(clock(), until).coerceAtLeast(Duration.ofSeconds(15))
+                    remaining.coerceAtMost(BACKOFF)
+                } else {
+                    BACKOFF
+                }
+            }
+            else -> HOLD
+        }
+        held[key] = Held(reading, good, clock().plus(holdDuration), strikes = 0)
         return reading
     }
 
@@ -64,6 +86,7 @@ internal class UsageGate(private val clock: () -> Instant = Instant::now) {
     }
 
     private fun Duration.coerceAtMost(max: Duration): Duration = if (this > max) max else this
+    private fun Duration.coerceAtLeast(min: Duration): Duration = if (this < min) min else this
 
     companion object {
         /**

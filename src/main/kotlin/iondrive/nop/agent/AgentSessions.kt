@@ -197,6 +197,9 @@ class AgentSessions {
         pickerTabVisible = false
     }
 
+    /** Called when an open session closes, so the window can refresh that account's usage. */
+    var onSessionClosed: ((Account) -> Unit)? = null
+
     /**
      * Kills the session behind [id] and drops it from the strip.
      *
@@ -206,7 +209,10 @@ class AgentSessions {
     fun close(id: String) {
         val idx = _sessions.indexOfFirst { it.sessionId == id }
         if (idx < 0) return
-        _sessions.removeAt(idx).dispose()
+        val session = _sessions.removeAt(idx)
+        session.dispose()
+        Usage.invalidate(session.account)
+        onSessionClosed?.invoke(session.account)
         if (selectedId == id) {
             selectedId = (_sessions.getOrNull(idx) ?: _sessions.getOrNull(idx - 1))?.sessionId
         }

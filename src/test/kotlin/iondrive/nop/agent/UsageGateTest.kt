@@ -143,4 +143,33 @@ class UsageGateTest {
 
         assertNull(shown.looksSpent(now))
     }
+
+    @Test
+    fun `invalidate drops held reading immediately`() {
+        gate.answered(key, reading(12.0))
+        assertNotNull(gate.held(key))
+
+        gate.invalidate(key)
+        assertNull(gate.held(key))
+    }
+
+    @Test
+    fun `clear drops all held readings`() {
+        gate.answered(key, reading(12.0))
+        gate.answered("Anthropic:/home/other", reading(20.0))
+
+        gate.clear()
+        assertNull(gate.held(key))
+        assertNull(gate.held("Anthropic:/home/other"))
+    }
+
+    @Test
+    fun `a spent reading is held for a shorter duration than a fresh reading`() {
+        gate.answered(key, reading(100.0))
+        advance(UsageGate.BACKOFF.minusSeconds(1))
+        assertNotNull(gate.held(key))
+
+        advance(Duration.ofSeconds(1))
+        assertNull(gate.held(key), "spent reading should expire after BACKOFF so resets are noticed quickly")
+    }
 }

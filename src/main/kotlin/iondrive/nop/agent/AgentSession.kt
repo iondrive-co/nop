@@ -508,6 +508,7 @@ class AgentSession(
         endedAt = System.currentTimeMillis()
         activitySince = endedAt
         noteChange(live, Activity.Ended)
+        Usage.invalidate(run.account)
     }
 
     /**

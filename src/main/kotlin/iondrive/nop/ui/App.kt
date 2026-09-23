@@ -800,10 +800,20 @@ fun App(
                     Log.warn("could not read usage for ${account.name}: $failure")
                 }
             }
-            // Sooner while a reading is stale, so a rate-limited account recovers within a minute
-            // or two rather than five. Usage's own gate decides whether a poll actually asks.
-            val stale = agentAccounts.any { agentUsage[it.name]?.note != null }
+            // Sooner while a reading is stale or spent, so a rate-limited or reset account recovers
+            // within a minute rather than five. Usage's own gate decides whether a poll actually asks.
+            val stale = agentAccounts.any {
+                agentUsage[it.name]?.note != null || agentUsage[it.name]?.looksSpent() == true
+            }
             delay(if (stale) USAGE_RETRY_INTERVAL_MS else USAGE_POLL_INTERVAL_MS)
+        }
+    }
+    LaunchedEffect(showAccounts) {
+        if (!showAccounts) return@LaunchedEffect
+        for (account in agentAccounts) {
+            Usage.invalidate(account)
+            val reading = withContext(Dispatchers.IO) { runCatching { Usage.read(account) }.getOrNull() }
+            if (reading != null) agentUsage[account.name] = reading
         }
     }
     // The other half of believing a quota wall: the provider's own number for what is left. Read
@@ -811,10 +821,23 @@ fun App(
     // rather than whatever had arrived when the tab was opened. See [UsageReading.looksSpent].
     SideEffect {
         agentSessions.hasRunOut = { account ->
-            (Usage.liveCodexReading(account.homePath) ?: agentUsage[account.name])?.looksSpent()
+            val reading = listOfNotNull(agentUsage[account.name], Usage.liveCodexReading(account.homePath))
+                .maxByOrNull { it.asOf ?: java.time.Instant.EPOCH }
+            reading?.looksSpent()
         }
         agentSessions.spentUntil = { account ->
-            (Usage.liveCodexReading(account.homePath) ?: agentUsage[account.name])?.spentUntil()
+            val reading = listOfNotNull(agentUsage[account.name], Usage.liveCodexReading(account.homePath))
+                .maxByOrNull { it.asOf ?: java.time.Instant.EPOCH }
+            reading?.spentUntil()
+        }
+        agentSessions.onSessionClosed = { account ->
+            scope.launch {
+                val reading = withContext(Dispatchers.IO) {
+                    Usage.invalidate(account)
+                    runCatching { Usage.read(account) }.getOrNull()
+                }
+                if (reading != null) agentUsage[account.name] = reading
+            }
         }
     }
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
