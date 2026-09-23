@@ -199,14 +199,17 @@ class GitRepoTest {
         repo.close()
         runShell(reference, "git add -A && git commit -q -m bulk")
 
-        val refTree = gitOutput(reference, "git rev-parse HEAD^{tree}")
-        val mineTree = gitOutput(mine, "git rev-parse HEAD^{tree}")
-        if (refTree != mineTree) {
-            println("DIFF-TREE:\n" + runShell(reference, "git diff --no-prefix $refTree $mineTree"))
+        val refLs = gitOutput(reference, "git ls-tree -r HEAD")
+        val mineLs = gitOutput(mine, "git ls-tree -r HEAD")
+        if (refLs != mineLs) {
+            val refLines = refLs.lines().toSet()
+            val mineLines = mineLs.lines().toSet()
+            println("REF ONLY: " + (refLines - mineLines))
+            println("MINE ONLY: " + (mineLines - refLines))
         }
         assertEquals(
-            refTree,
-            mineTree,
+            gitOutput(reference, "git rev-parse HEAD^{tree}"),
+            gitOutput(mine, "git rev-parse HEAD^{tree}"),
             "staging in parallel must produce byte-for-byte what git would have staged",
         )
         assertTrue(gitOutput(mine, "git status --porcelain").isEmpty(), "everything should be committed")

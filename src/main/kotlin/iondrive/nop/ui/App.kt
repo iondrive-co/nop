@@ -1681,6 +1681,18 @@ fun App(
                                         // cannot name one directory and start the CLI in another.
                                         projectDir = rootPath,
                                         cards = terminalCards,
+                                        modelsFor = { account ->
+                                            agentModels[account.name] ?: account.provider.fallbackModels
+                                        },
+                                        onUpdateAccount = { changed ->
+                                            agentConfig?.let { current ->
+                                                val next = current.copy(
+                                                    accounts = current.accounts.map { if (it.name == changed.name) changed else it },
+                                                )
+                                                agentConfig = next
+                                                scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
+                                            }
+                                        },
                                         onLaunch = { account ->
                                             // HEAD now is what the Diff tab's "session" base means
                                             // for this tab from here on — see AgentSession.

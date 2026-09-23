@@ -44,6 +44,8 @@ fun AgentPanel(
     /** The directory a session launched or resumed from here runs in. See [AgentPicker]. */
     projectDir: Path,
     cards: JPanel,
+    modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
+    onUpdateAccount: ((Account) -> Unit)? = null,
     onLaunch: (Account) -> Unit,
     onReopen: (PastSession) -> Unit,
     onSettings: () -> Unit,
@@ -77,6 +79,8 @@ fun AgentPanel(
             session = selected,
             accounts = accounts,
             readings = readings,
+            modelsFor = modelsFor,
+            onUpdateAccount = onUpdateAccount,
             onHandOver = { account -> selected.handOver(account) },
         )
         if (showExit) {
@@ -87,6 +91,8 @@ fun AgentPanel(
                 // Read from the log as it actually stands, so the warning describes this run rather
                 // than an assumption about the provider.
                 fromScreenOnly = Handoff.fromScreenOnly(selected.log.events()),
+                modelsFor = modelsFor,
+                onUpdateAccount = onUpdateAccount,
                 onReopen = {
                     dismissedAt = selected.endedAt
                     selected.reopen()

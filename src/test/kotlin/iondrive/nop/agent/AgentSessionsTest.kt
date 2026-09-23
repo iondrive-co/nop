@@ -861,6 +861,14 @@ class AgentSessionsTest {
         assertEquals(listOf("Custom investigation"), session.log.events().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
     }
 
+    @Test
+    fun `a handover starts the new run with the chosen model`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        session.handOver(account("claude-iondrive").copy(model = "claude-haiku-4-5"))
+
+        assertEquals("claude-haiku-4-5", session.run.account.model)
+    }
+
     /**
      * The picker's tab closes the way a terminal's does: it goes out of the strip. There is no
      * process behind it to kill — closing the last terminal leaves the strip with only its "+", and

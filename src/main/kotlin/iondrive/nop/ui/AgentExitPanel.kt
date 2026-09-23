@@ -41,6 +41,8 @@ fun AgentExitPanel(
     accounts: List<Account>,
     readings: Map<String, UsageReading>,
     fromScreenOnly: Boolean,
+    modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
+    onUpdateAccount: ((Account) -> Unit)? = null,
     onReopen: () -> Unit,
     onStartFresh: () -> Unit,
     onSwitch: (Account) -> Unit,
@@ -86,7 +88,7 @@ fun AgentExitPanel(
             )
         }
 
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             // Two ways back onto the same account, because they are different things and only one
             // of them used to be here. "Resume" lands in the conversation that just ended; "New
             // session" starts the CLI as a fresh shell would. A session that ended *because* it was
@@ -102,13 +104,23 @@ fun AgentExitPanel(
             } else {
                 DefaultButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
             }
-            others.forEach { account ->
-                key(account.name) {
-                    OutlinedButton(onClick = { onSwitch(account) }) {
-                        Text("Switch to ${account.name}${usageSuffix(readings[account.name])}")
-                    }
-                }
-            }
+        }
+
+        if (others.isNotEmpty()) {
+            Text(
+                "Or hand over to another provider:",
+                color = AgentMuted,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            HandoverProviderList(
+                accounts = others,
+                readings = readings,
+                modelsFor = modelsFor,
+                actionLabel = "Switch",
+                onHandOver = onSwitch,
+                onUpdateAccount = onUpdateAccount,
+            )
         }
     }
 }
@@ -122,10 +134,4 @@ private fun headline(session: AgentSession): String = when (session.run.endReaso
         val code = session.run.session.exitCode
         if (code == null || code == 0) "${session.account.name} exited" else "${session.account.name} exited ($code)"
     }
-}
-
-/** How much of the other account is left, so the choice can be made without leaving the panel. */
-private fun usageSuffix(reading: UsageReading?): String {
-    val window = reading?.session ?: reading?.weekly ?: return ""
-    return " · ${window.percent.toInt()}% used"
 }

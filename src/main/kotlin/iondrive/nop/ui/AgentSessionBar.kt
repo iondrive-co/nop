@@ -59,6 +59,8 @@ fun AgentSessionBar(
     session: AgentSession,
     accounts: List<Account>,
     readings: Map<String, UsageReading>,
+    modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
+    onUpdateAccount: ((Account) -> Unit)? = null,
     onHandOver: (Account) -> Unit,
 ) {
     val others = accounts.filter { it.name != session.account.name }
@@ -178,28 +180,20 @@ fun AgentSessionBar(
             Text(
                 "Ends this run, writes a summary of it, and opens the chosen account on that summary.",
                 color = AgentMuted,
-                modifier = Modifier.padding(top = 2.dp),
+                modifier = Modifier.padding(top = 4.dp, bottom = 6.dp),
             )
-            FlowRow(
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                others.forEach { account ->
-                    key(account.name) {
-                        OutlinedButton(onClick = { expanded = false; onHandOver(account) }) {
-                            Text(account.name + usageSuffix(readings[account.name]))
-                        }
-                    }
-                }
-            }
+            HandoverProviderList(
+                accounts = others,
+                readings = readings,
+                modelsFor = modelsFor,
+                actionLabel = "Hand over",
+                onHandOver = { target ->
+                    expanded = false
+                    onHandOver(target)
+                },
+                onUpdateAccount = onUpdateAccount,
+            )
             Box(modifier = Modifier.padding(bottom = 2.dp))
         }
     }
-}
-
-/** How much of the other account is left, so the choice needs nothing but this row. */
-private fun usageSuffix(reading: UsageReading?): String {
-    val window = reading?.session ?: reading?.weekly ?: return ""
-    return " · ${window.percent.toInt()}%"
 }
