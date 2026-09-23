@@ -153,6 +153,8 @@ fun App(
     snipTrigger: Int = 0,
     findUsagesTrigger: Int = 0,
     renameSymbolTrigger: Int = 0,
+    navigateBackTrigger: Int = 0,
+    navigateForwardTrigger: Int = 0,
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -251,6 +253,18 @@ fun App(
         if (jumpToSourceTrigger <= jumpToSourceBaseline) return@LaunchedEffect
         val file = jumpToSourceTarget(tabsState.selectedTab) ?: return@LaunchedEffect
         tabsState.openAt(Tab.FileView(file), diffTopLine)
+    }
+
+    // Ctrl+Alt+Left / Ctrl+Alt+Right navigation history between files
+    val navigateBackBaseline = remember(projectPath) { navigateBackTrigger }
+    LaunchedEffect(navigateBackTrigger) {
+        if (navigateBackTrigger <= navigateBackBaseline) return@LaunchedEffect
+        tabsState.navigateBack()
+    }
+    val navigateForwardBaseline = remember(projectPath) { navigateForwardTrigger }
+    LaunchedEffect(navigateForwardTrigger) {
+        if (navigateForwardTrigger <= navigateForwardBaseline) return@LaunchedEffect
+        tabsState.navigateForward()
     }
     // nop's own record of what this project's files have held, kept beside the other per-project
     // derived data. Every buffer the store hands out reports its saves into it — see [LocalHistory].

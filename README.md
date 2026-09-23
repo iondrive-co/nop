@@ -40,6 +40,7 @@ Multiple tabs for different views / agents on the same project, or different pro
 - F5 reload git status / re-read active tab from disk
 - `Alt F7` list usages
 - `Shift F6` rename
+- `Ctrl+Alt+Left` previous file
 
 When a file or directory is selected:
 	- `Delete` — remove it from disk

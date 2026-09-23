@@ -172,8 +172,8 @@ private val MIN_HALF_W = 80.dp
  */
 internal val DIFF_TEXT_STYLE = TextStyle(
     fontFamily = NopFonts.Mono,
-    fontSize = 12.sp,
-    lineHeight = 18.sp,
+    fontSize = 13.sp,
+    lineHeight = 20.sp,
     // Trim.None keeps the leading on the first and last lines too, so an N-line paragraph is
     // exactly N steps tall and a one-line cell is exactly one — otherwise the halves would drift
     // apart by the trimmed half-leading at every block boundary.
@@ -525,16 +525,7 @@ internal fun BlockGutter(numbers: List<Int?>, lineHeights: List<Float>? = null) 
     val colors = currentDiffColors()
     DisableSelection {
         val style = DIFF_TEXT_STYLE.copy(color = colors.gutterFg)
-        val gutterMod = Modifier
-            .drawBehind {
-                drawLine(
-                    color = colors.gutterDivider,
-                    start = Offset(size.width, 0f),
-                    end = Offset(size.width, size.height),
-                    strokeWidth = 1.dp.toPx(),
-                )
-            }
-            .padding(start = 10.dp, end = 8.dp)
+        val gutterMod = Modifier.padding(horizontal = 8.dp)
         if (lineHeights == null) {
             BasicText(
                 text = numbers.joinToString("\n") { it?.toString()?.padStart(5) ?: "     " },
@@ -597,16 +588,7 @@ internal fun GutterCell(lineNumber: Int?) {
             text = lineNumber?.toString()?.padStart(5) ?: "     ",
             style = DIFF_TEXT_STYLE.copy(color = colors.gutterFg),
             softWrap = false,
-            modifier = Modifier
-                .drawBehind {
-                    drawLine(
-                        color = colors.gutterDivider,
-                        start = Offset(size.width, 0f),
-                        end = Offset(size.width, size.height),
-                        strokeWidth = 1.dp.toPx(),
-                    )
-                }
-                .padding(start = 10.dp, end = 8.dp),
+            modifier = Modifier.padding(horizontal = 8.dp),
         )
     }
 }
@@ -654,7 +636,6 @@ internal fun ReadOnlyDiffHalf(
         modifier = modifier.fillMaxSize().then(if (wrap) Modifier else Modifier.background(background)),
         verticalAlignment = Alignment.Top,
     ) {
-        GutterCell(lineNumber)
         val jumpModifier = if (currentFile != null && onResolveAt != null && onJump != null) {
             Modifier.ctrlClickJump(
                 layoutProvider = { layout },
@@ -681,14 +662,24 @@ internal fun ReadOnlyDiffHalf(
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
-                    .padding(end = LINE_END_PAD)
+                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp, end = LINE_END_PAD)
                     // After the padding, so the squiggles are placed in the text's own coordinates.
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     .then(jumpModifier),
             )
         }
-        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
-            if (selectable) body() else DisableSelection { body() }
+        val gutter = @Composable { GutterCell(lineNumber) }
+        val code = @Composable {
+            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
+                if (selectable) body() else DisableSelection { body() }
+            }
+        }
+        if (side == DiffSide.OLD) {
+            code()
+            gutter()
+        } else {
+            gutter()
+            code()
         }
     }
 }

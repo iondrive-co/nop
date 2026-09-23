@@ -43,12 +43,12 @@ data class HighlightPalette(
     companion object {
         // Dark palette — hues picked to sit against the editor foreground at #BCBEC4.
         val Dark = HighlightPalette(
-            keyword = SpanStyle(color = Color(0xFFCF8E6D), fontWeight = FontWeight.Bold),  // Orange bold keywords
+            keyword = SpanStyle(color = Color(0xFFCF8E6D)),  // Orange keywords
             string = SpanStyle(color = Color(0xFF6AAB73)),   // Green strings
             // IntelliJ renders comments in italics; mirror that so they read as prose, not code.
             comment = SpanStyle(color = Color(0xFF7A7E85), fontStyle = FontStyle.Italic),
             number = SpanStyle(color = Color(0xFF2AACB8)),   // Cyan numbers
-            literal = SpanStyle(color = Color(0xFFCF8E6D), fontWeight = FontWeight.Bold),  // Orange literals like keywords
+            literal = SpanStyle(color = Color(0xFFCF8E6D)),  // Orange literals like keywords
             punct = SpanStyle(color = Color(0xFFBCBEC4)),    // Light grey punctuation
             heading = SpanStyle(color = Color(0xFFC77DBB)),  // Pink/magenta for markdown headings
             emphasis = SpanStyle(color = Color(0xFFBBB529)), // Gold for annotations/emphasis
@@ -61,11 +61,11 @@ data class HighlightPalette(
 
         // IntelliJ-default light palette — darker hues so they read on a near-white background.
         val Light = HighlightPalette(
-            keyword = SpanStyle(color = Color(0xFF0033B3), fontWeight = FontWeight.Bold),  // Dark blue bold keywords
+            keyword = SpanStyle(color = Color(0xFF0033B3)),  // Dark blue keywords
             string = SpanStyle(color = Color(0xFF067D17)),   // Green strings
             comment = SpanStyle(color = Color(0xFF8C8C8C), fontStyle = FontStyle.Italic),
             number = SpanStyle(color = Color(0xFF1750EB)),   // Blue numbers
-            literal = SpanStyle(color = Color(0xFF0033B3), fontWeight = FontWeight.Bold),  // Dark blue literals
+            literal = SpanStyle(color = Color(0xFF0033B3)),  // Dark blue literals
             punct = SpanStyle(color = Color(0xFF000000)),    // Black punctuation
             heading = SpanStyle(color = Color(0xFF871094)),  // Purple headings
             emphasis = SpanStyle(color = Color(0xFF875700)), // Warm amber/gold for annotations

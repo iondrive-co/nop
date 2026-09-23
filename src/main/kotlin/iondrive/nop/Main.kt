@@ -555,6 +555,10 @@ private fun ApplicationScope.WorkspaceWindow(
     // Both are IntelliJ's bindings, which is the muscle memory anyone arriving at this feature has.
     var findUsagesTrigger by remember { mutableStateOf(0) }
     var renameSymbolTrigger by remember { mutableStateOf(0) }
+    // Ctrl+Alt+Left (or Ctrl+Alt+Backspace) navigates back to the previous file in navigation history;
+    // Ctrl+Alt+Right navigates forward. Matches IntelliJ's Navigate -> Back / Forward bindings.
+    var navigateBackTrigger by remember { mutableStateOf(0) }
+    var navigateForwardTrigger by remember { mutableStateOf(0) }
 
     Window(
         state = windowState,
@@ -636,6 +640,22 @@ private fun ApplicationScope.WorkspaceWindow(
                 !event.isAltPressed && !event.isCtrlPressed && !event.isShiftPressed
             ) {
                 jumpToSourceTrigger += 1
+                return@Window true
+            }
+            // Ctrl+Alt+Left (or Ctrl+Alt+Backspace) — go back to the previous file in navigation history.
+            if (event.type == KeyEventType.KeyDown &&
+                event.isCtrlPressed && event.isAltPressed && !event.isShiftPressed &&
+                (event.key == Key.DirectionLeft || event.key == Key.Backspace)
+            ) {
+                navigateBackTrigger += 1
+                return@Window true
+            }
+            // Ctrl+Alt+Right — go forward to the next file in navigation history.
+            if (event.type == KeyEventType.KeyDown &&
+                event.isCtrlPressed && event.isAltPressed && !event.isShiftPressed &&
+                event.key == Key.DirectionRight
+            ) {
+                navigateForwardTrigger += 1
                 return@Window true
             }
             // F5 re-reads the world: git status and whatever the active tab is showing. Left
@@ -725,6 +745,8 @@ private fun ApplicationScope.WorkspaceWindow(
                                 snipTrigger = snipTrigger,
                                 findUsagesTrigger = findUsagesTrigger,
                                 renameSymbolTrigger = renameSymbolTrigger,
+                                navigateBackTrigger = navigateBackTrigger,
+                                navigateForwardTrigger = navigateForwardTrigger,
                             )
                         }
                     } else {

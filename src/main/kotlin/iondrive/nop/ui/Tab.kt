@@ -85,6 +85,96 @@ class TabsState {
     var selectedId: String? by mutableStateOf(null)
         private set
 
+    // Navigation history for navigating back/forward between files/tabs (Ctrl+Alt+Left / Ctrl+Alt+Right).
+    // Tracks tabs in the order the user visited them, allowing jumping back to previously viewed files.
+    private val navHistory = mutableListOf<Tab>()
+    private var navIndex = -1
+    private var isNavigatingHistory = false
+
+    val canNavigateBack: Boolean get() = navIndex > 0
+    val canNavigateForward: Boolean get() = navIndex >= 0 && navIndex < navHistory.size - 1
+
+    internal val navigationHistory: List<Tab> get() = navHistory.toList()
+    internal val navigationIndex: Int get() = navIndex
+
+    private fun recordNav(tab: Tab, previousTab: Tab? = null) {
+        if (isNavigatingHistory) return
+        if (navHistory.isEmpty()) {
+            if (previousTab != null && previousTab.id != tab.id) {
+                navHistory.add(previousTab)
+            }
+            navHistory.add(tab)
+            navIndex = navHistory.lastIndex
+            return
+        }
+        if (navIndex in navHistory.indices && navHistory[navIndex].id == tab.id) {
+            return
+        }
+        // Truncate any forward history after current index
+        if (navIndex >= 0 && navIndex < navHistory.size - 1) {
+            navHistory.subList(navIndex + 1, navHistory.size).clear()
+        }
+        navHistory.add(tab)
+        if (navHistory.size > MAX_NAV_HISTORY) {
+            navHistory.removeAt(0)
+        }
+        navIndex = navHistory.lastIndex
+    }
+
+    /**
+     * Navigates back to the previous file/tab in navigation history.
+     * Re-opens the tab if it was closed since (provided the underlying file/repo still exists).
+     * Returns true if a previous tab was selected or reopened; false if already at the start of history.
+     */
+    fun navigateBack(): Boolean {
+        val startIndex = navIndex
+        while (navIndex > 0) {
+            navIndex--
+            val target = navHistory[navIndex]
+            if (target.id != selectedId && navigateTo(target)) {
+                return true
+            }
+        }
+        navIndex = startIndex
+        return false
+    }
+
+    /**
+     * Navigates forward to the next file/tab in navigation history.
+     * Returns true if a forward tab was selected or reopened; false if already at the end of history.
+     */
+    fun navigateForward(): Boolean {
+        val startIndex = navIndex
+        while (navIndex < navHistory.size - 1) {
+            navIndex++
+            val target = navHistory[navIndex]
+            if (target.id != selectedId && navigateTo(target)) {
+                return true
+            }
+        }
+        navIndex = startIndex
+        return false
+    }
+
+    private fun navigateTo(target: Tab): Boolean {
+        isNavigatingHistory = true
+        try {
+            val existing = _tabs.firstOrNull { it.id == target.id }
+            if (existing != null) {
+                tabGroups[existing.id]?.let { setCollapsed(it, collapsed = false) }
+                selectedId = existing.id
+                return true
+            }
+            if (canRestoreTab(target)) {
+                open(target, record = false)
+                return true
+            }
+            return false
+        } finally {
+            isNavigatingHistory = false
+        }
+    }
+
     // 1-based line numbers to scroll to the next time a tab is composed. Cleared by the consumer
     // via [consumeJumpLine]. We keep this off [Tab.FileView] so the tab identity stays stable —
     // jumping to a different line in an already-open file shouldn't open a second tab.
@@ -121,6 +211,7 @@ class TabsState {
         // Breadcrumb: the last tab opened is the single most useful piece of context when nop dies
         // while rendering something, so it goes in the log before the render is attempted.
         Log.info("open tab ${tab.id}")
+        val previousTab = selectedTab
         val existing = _tabs.indexOfFirst { it.id == tab.id }
         if (existing < 0) {
             tabGroups[tab.id] = activeGroupId
@@ -131,6 +222,7 @@ class TabsState {
         }
         tabGroups[tab.id]?.let { setCollapsed(it, collapsed = false) }
         selectedId = tab.id
+        if (record && !isNavigatingHistory) recordNav(tab, previousTab)
         if (record && tab is Tab.FileView) onFileOpened?.invoke(tab.file)
     }
 
@@ -168,6 +260,11 @@ class TabsState {
         pendingJumpLines.remove(oldId)?.let { pendingJumpLines[tab.id] = it }
         pendingSearchQueries.remove(oldId)?.let { pendingSearchQueries[tab.id] = it }
         reloadCounts.remove(oldId)?.let { reloadCounts[tab.id] = it }
+        for (i in navHistory.indices) {
+            if (navHistory[i].id == oldId) {
+                navHistory[i] = tab
+            }
+        }
         if (selectedId == oldId) selectedId = tab.id
     }
 
@@ -231,9 +328,16 @@ class TabsState {
     fun close(id: String) {
         val idx = _tabs.indexOfFirst { it.id == id }
         if (idx < 0) return
+        val wasTab = _tabs[idx]
         _tabs.removeAt(idx)
         forget(id)
-        if (selectedId == id) selectedId = nearestShown(idx)
+        if (selectedId == id) {
+            val nextId = nearestShown(idx)
+            selectedId = nextId
+            nextId?.let { nid -> _tabs.firstOrNull { it.id == nid } }?.let {
+                if (!isNavigatingHistory) recordNav(it, wasTab)
+            }
+        }
     }
 
     /**
@@ -244,11 +348,13 @@ class TabsState {
      */
     fun closeOthers(keepId: String): List<Tab> {
         val keep = _tabs.firstOrNull { it.id == keepId } ?: return emptyList()
+        val previousTab = selectedTab
         val removed = _tabs.filter { it.id != keepId }
         _tabs.clear()
         _tabs.add(keep)
         removed.forEach { forget(it.id) }
         selectedId = keep.id
+        if (!isNavigatingHistory) recordNav(keep, previousTab)
         return removed
     }
 
@@ -277,7 +383,10 @@ class TabsState {
         _groups.firstOrNull { it.id == tabGroups[tabId] }?.collapsed != true
 
     fun select(id: String) {
-        if (_tabs.any { it.id == id }) selectedId = id
+        val tab = _tabs.firstOrNull { it.id == id } ?: return
+        val previousTab = selectedTab
+        selectedId = id
+        if (!isNavigatingHistory) recordNav(tab, previousTab)
     }
 
     val selectedTab: Tab? get() = _tabs.firstOrNull { it.id == selectedId }
@@ -337,7 +446,11 @@ class TabsState {
         val current = selectedId ?: return
         val idx = _tabs.indexOfFirst { it.id == current }
         if (idx < 0 || isShown(current)) return
+        val previousTab = selectedTab
         selectedId = nearestShown(idx)
+        selectedId?.let { sid -> _tabs.firstOrNull { it.id == sid } }?.let {
+            if (!isNavigatingHistory) recordNav(it, previousTab)
+        }
     }
 
     /**
@@ -356,7 +469,11 @@ class TabsState {
         if (_groups.isEmpty()) _groups.add(TabGroup(id = nextGroupId++, name = TabGroups.DEFAULT_NAME))
         activeGroupId = nextActive?.takeIf { next -> _groups.any { it.id == next } } ?: _groups.first().id
         if (_tabs.none { it.id == selectedId }) {
+            val previousTab = selectedTab
             selectedId = _tabs.firstOrNull { isShown(it.id) }?.id ?: _tabs.firstOrNull()?.id
+            selectedId?.let { sid -> _tabs.firstOrNull { it.id == sid } }?.let {
+                if (!isNavigatingHistory) recordNav(it, previousTab)
+            }
         }
         return removed
     }
@@ -432,3 +549,19 @@ internal fun jumpToSourceTarget(tab: Tab?): File? {
     }
     return file?.takeIf { it.isFile }
 }
+
+/**
+ * Whether [tab] can be reopened after being closed.
+ * A file view needs its file on disk; a diff or commit diff needs its repo directory.
+ */
+internal fun canRestoreTab(tab: Tab): Boolean = when (tab) {
+    is Tab.FileView -> tab.file.isFile
+    is Tab.Diff -> tab.repoRoot.isDirectory
+    is Tab.CommitDiff -> tab.repoRoot.isDirectory
+    is Tab.LocalHistory -> tab.file.exists()
+    is Tab.RevisionDiff -> tab.repoRoot.isDirectory && tab.file.isFile
+    is Tab.LocalDiff -> tab.file.isFile
+}
+
+private const val MAX_NAV_HISTORY = 100
+

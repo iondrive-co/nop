@@ -5,7 +5,9 @@ import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.FileChange
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -645,5 +647,199 @@ class TabsStateTest {
         // A directory is never a jump target either, even if a path collides with one.
         tmp.resolve("dir.ts").toFile().mkdirs()
         assertNull(jumpToSourceTarget(Tab.Diff(FileChange("dir.ts", ChangeKind.MODIFIED), repo)))
+    }
+
+    @Test
+    fun `navigateBack returns false when history is empty or at start`() {
+        val s = TabsState()
+        assertFalse(s.canNavigateBack)
+        assertFalse(s.canNavigateForward)
+        assertFalse(s.navigateBack())
+        assertFalse(s.navigateForward())
+
+        s.open(fileTab("/x/a.txt"))
+        assertFalse(s.canNavigateBack)
+        assertFalse(s.canNavigateForward)
+        assertFalse(s.navigateBack())
+    }
+
+    @Test
+    fun `navigateBack and navigateForward traverse visited files`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        val c = fileTab("/x/c.txt")
+
+        s.open(a)
+        s.open(b)
+        s.open(c)
+
+        assertEquals(c.id, s.selectedId)
+        assertTrue(s.canNavigateBack)
+        assertFalse(s.canNavigateForward)
+
+        // Back to b
+        assertTrue(s.navigateBack())
+        assertEquals(b.id, s.selectedId)
+        assertTrue(s.canNavigateBack)
+        assertTrue(s.canNavigateForward)
+
+        // Back to a
+        assertTrue(s.navigateBack())
+        assertEquals(a.id, s.selectedId)
+        assertFalse(s.canNavigateBack)
+        assertTrue(s.canNavigateForward)
+
+        // Cannot go back past the start
+        assertFalse(s.navigateBack())
+        assertEquals(a.id, s.selectedId)
+
+        // Forward to b
+        assertTrue(s.navigateForward())
+        assertEquals(b.id, s.selectedId)
+
+        // Forward to c
+        assertTrue(s.navigateForward())
+        assertEquals(c.id, s.selectedId)
+        assertFalse(s.canNavigateForward)
+
+        // Cannot go forward past the end
+        assertFalse(s.navigateForward())
+        assertEquals(c.id, s.selectedId)
+    }
+
+    @Test
+    fun `selecting same file again does not duplicate history`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+
+        s.open(a)
+        s.open(b)
+        s.open(b) // open again
+        s.select(b.id) // select again
+
+        assertEquals(listOf(a, b), s.navigationHistory)
+        assertEquals(1, s.navigationIndex)
+
+        assertTrue(s.navigateBack())
+        assertEquals(a.id, s.selectedId)
+        assertFalse(s.navigateBack())
+    }
+
+    @Test
+    fun `navigating back and opening a new file truncates forward history`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        val c = fileTab("/x/c.txt")
+        val d = fileTab("/x/d.txt")
+
+        s.open(a)
+        s.open(b)
+        s.open(c)
+
+        // Back to b
+        s.navigateBack()
+        assertEquals(b.id, s.selectedId)
+
+        // Open d from b: forward history (c) is truncated
+        s.open(d)
+        assertEquals(d.id, s.selectedId)
+        assertFalse(s.canNavigateForward)
+        assertFalse(s.navigateForward())
+
+        assertEquals(listOf(a, b, d), s.navigationHistory)
+
+        assertTrue(s.navigateBack())
+        assertEquals(b.id, s.selectedId)
+        assertTrue(s.navigateBack())
+        assertEquals(a.id, s.selectedId)
+    }
+
+    @Test
+    fun `navigateBack re-opens a closed file if it still exists on disk`(@TempDir tmp: Path) {
+        val s = TabsState()
+        val fileA = tmp.resolve("a.txt").toFile().apply { writeText("hello a") }
+        val fileB = tmp.resolve("b.txt").toFile().apply { writeText("hello b") }
+        val tabA = Tab.FileView(fileA)
+        val tabB = Tab.FileView(fileB)
+
+        s.open(tabA)
+        s.open(tabB)
+
+        // Close A while viewing B
+        s.close(tabA.id)
+        assertEquals(listOf(tabB), s.tabs)
+
+        // Navigate back should re-open tabA
+        assertTrue(s.navigateBack())
+        assertEquals(tabA.id, s.selectedId)
+        assertEquals(listOf(tabB, tabA), s.tabs)
+    }
+
+    @Test
+    fun `navigateBack skips a closed file if it was deleted on disk`(@TempDir tmp: Path) {
+        val s = TabsState()
+        val fileA = tmp.resolve("a.txt").toFile().apply { writeText("hello a") }
+        val fileB = tmp.resolve("b.txt").toFile().apply { writeText("hello b") }
+        val fileC = tmp.resolve("c.txt").toFile().apply { writeText("hello c") }
+        val tabA = Tab.FileView(fileA)
+        val tabB = Tab.FileView(fileB)
+        val tabC = Tab.FileView(fileC)
+
+        s.open(tabA)
+        s.open(tabB)
+        s.open(tabC)
+
+        // Delete b.txt and close it
+        fileB.delete()
+        s.close(tabB.id)
+
+        // Back from C should skip deleted B and land on A
+        assertTrue(s.navigateBack())
+        assertEquals(tabA.id, s.selectedId)
+    }
+
+    @Test
+    fun `closing active tab allows navigating back to the closed file`(@TempDir tmp: Path) {
+        val s = TabsState()
+        val fileA = tmp.resolve("a.txt").toFile().apply { writeText("hello a") }
+        val fileB = tmp.resolve("b.txt").toFile().apply { writeText("hello b") }
+        val tabA = Tab.FileView(fileA)
+        val tabB = Tab.FileView(fileB)
+
+        s.open(tabA)
+        s.open(tabB)
+
+        // Close active tab B; selection falls to A
+        s.close(tabB.id)
+        assertEquals(tabA.id, s.selectedId)
+
+        // Back should re-open B
+        assertTrue(s.navigateBack())
+        assertEquals(tabB.id, s.selectedId)
+        assertTrue(s.tabs.any { it.id == tabB.id })
+
+        // Back again should return to A
+        assertTrue(s.navigateBack())
+        assertEquals(tabA.id, s.selectedId)
+    }
+
+    @Test
+    fun `rekey updates navigation history when a file is renamed`() {
+        val s = TabsState()
+        val a = fileTab("/x/a.txt")
+        val b = fileTab("/x/b.txt")
+        val aRenamed = fileTab("/x/renamed.txt")
+
+        s.open(a)
+        s.open(b)
+
+        s.rekey(a.id, aRenamed)
+        assertEquals(listOf(aRenamed, b), s.navigationHistory)
+
+        assertTrue(s.navigateBack())
+        assertEquals(aRenamed.id, s.selectedId)
     }
 }

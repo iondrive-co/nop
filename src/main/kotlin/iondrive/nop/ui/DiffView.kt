@@ -977,7 +977,7 @@ private fun ReadOnlyBlockHalf(
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
-                    .padding(end = LINE_END_PAD)
+                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp, end = LINE_END_PAD)
                     // After the padding, so the squiggles are placed in the text's own coordinates.
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     // Ctrl-click resolves against the whole block's text — JumpResolver reads the
@@ -1275,8 +1275,17 @@ private fun BlockHalfFrame(
             .then(if (wrap) Modifier else Modifier.drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) }),
         verticalAlignment = Alignment.Top,
     ) {
-        BlockGutter(numbers, lineHeights)
-        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
+        val gutter = @Composable { BlockGutter(numbers, lineHeights) }
+        val content = @Composable {
+            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
+        }
+        if (side == DiffSide.OLD) {
+            content()
+            gutter()
+        } else {
+            gutter()
+            content()
+        }
     }
 }
 

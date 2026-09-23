@@ -132,4 +132,53 @@ class JumpResolverTest {
         val range = JumpResolver.wordRangeAt(text, 4)!!
         assertEquals("my_role-name", text.substring(range.first, range.last + 1))
     }
+
+    @Test
+    fun `call to function in current file jumps to local definition over external test or sibling`() {
+        val current = File(root, "adserver/src/main/java/ng/adserver/index/LineItemIndex.java")
+        val symbols = SymbolIndex(
+            listOf(
+                IndexEntry("getActiveCreativeIds", "adserver/src/test/java/ng/adserver/index/LineItemIndexUnitTest.java", 1084, SymbolKind.JAVA_METHOD),
+                IndexEntry("getActiveCreativeIds", "adserver/src/main/java/ng/adserver/index/LineItemIndex.java", 837, SymbolKind.JAVA_METHOD, "ng.adserver.index.LineItemIndex"),
+            ),
+        )
+        // Cursor is on line 271 calling getActiveCreativeIds(...)
+        val text = "line 1\n".repeat(270) + "    getActiveCreativeIds(lineItem);\n"
+        val offset = text.indexOf("getActiveCreativeIds") + 3
+        val target = JumpResolver.resolve(symbols, root, current, text, offset)
+        assertEquals(current, target?.file)
+        assertEquals(837, target?.line)
+    }
+
+    @Test
+    fun `receiver matching prefers candidate whose owner matches receiver object`() {
+        val current = File(root, "adserver/src/main/java/ng/adserver/index/LineItemIndex.java")
+        val symbols = SymbolIndex(
+            listOf(
+                IndexEntry("initialise", "util/src/main/java/ng/util/collection/ArrayUtil.java", 212, SymbolKind.JAVA_METHOD, "ng.util.collection.ArrayUtil"),
+                IndexEntry("initialise", "adserver/src/main/java/ng/adserver/search/EntrySearchMeta.java", 31, SymbolKind.JAVA_METHOD, "ng.adserver.search.EntrySearchMeta"),
+            ),
+        )
+        val text = "package ng.adserver.index;\n\nentrySearchMeta.initialise(creatives);\n"
+        val offset = text.indexOf("initialise") + 2
+        val target = JumpResolver.resolve(symbols, root, current, text, offset)
+        assertEquals(File(root, "adserver/src/main/java/ng/adserver/search/EntrySearchMeta.java"), target?.file)
+        assertEquals(31, target?.line)
+    }
+
+    @Test
+    fun `production file prefers main candidate over test candidate`() {
+        val current = File(root, "adserver/src/main/java/ng/adserver/index/LineItemIndex.java")
+        val symbols = SymbolIndex(
+            listOf(
+                IndexEntry("recordScore", "adserver/src/test/java/ng/adserver/index/LineItemTest.java", 45, SymbolKind.JAVA_METHOD),
+                IndexEntry("recordScore", "adserver/src/main/java/ng/adserver/events/ScoreService.java", 120, SymbolKind.JAVA_METHOD),
+            ),
+        )
+        val text = "package ng.adserver.index;\n\nrecordScore();\n"
+        val offset = text.indexOf("recordScore") + 2
+        val target = JumpResolver.resolve(symbols, root, current, text, offset)
+        assertEquals(File(root, "adserver/src/main/java/ng/adserver/events/ScoreService.java"), target?.file)
+        assertEquals(120, target?.line)
+    }
 }
