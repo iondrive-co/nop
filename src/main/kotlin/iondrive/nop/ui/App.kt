@@ -621,8 +621,34 @@ fun App(
     val searchQueryState = remember(rootPath) { TextFieldState() }
     // Held out here for the same reason, and a sharper one: the panel is composed only while its
     // tab is selected, so a message remembered inside it was lost the moment anything flipped the
-    // panel away — which now includes opening a markdown file or starting a script.
-    val commitMessageState = remember(rootPath) { TextFieldState() }
+    // panel away — which now includes opening a markdown file or starting a script. Persisted via
+    // Settings so an unsaved draft survives switching between tabs, switching projects, or app restarts.
+    val commitMessageState = remember(rootPath) {
+        TextFieldState(Settings.loadCommitMessageDraft(rootPath))
+    }
+    LaunchedEffect(rootPath, commitMessageState) {
+        snapshotFlow { commitMessageState.text.toString() }
+            .distinctUntilChanged()
+            .collect { draft ->
+                Settings.setCommitMessageDraftMemory(rootPath, draft)
+            }
+    }
+    LaunchedEffect(rootPath, commitMessageState) {
+        snapshotFlow { commitMessageState.text.toString() }
+            .drop(1)
+            .debounce(300)
+            .distinctUntilChanged()
+            .collectLatest { draft ->
+                withContext(Dispatchers.IO) {
+                    Settings.saveCommitMessageDraft(rootPath, draft)
+                }
+            }
+    }
+    DisposableEffect(rootPath, commitMessageState) {
+        onDispose {
+            Settings.saveCommitMessageDraft(rootPath, commitMessageState.text.toString())
+        }
+    }
     // Window-level counter; only bumps past the composition-time value count, else switching
     // back to a project after the session's first Ctrl+Shift+F would land on Search, not Commit.
     val findInFilesBaseline = remember(projectPath) { findInFilesTrigger }

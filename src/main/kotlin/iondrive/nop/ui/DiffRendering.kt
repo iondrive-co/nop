@@ -636,6 +636,7 @@ internal fun ReadOnlyDiffHalf(
         modifier = modifier.fillMaxSize().then(if (wrap) Modifier else Modifier.background(background)),
         verticalAlignment = Alignment.Top,
     ) {
+        GutterCell(lineNumber)
         val jumpModifier = if (currentFile != null && onResolveAt != null && onJump != null) {
             Modifier.ctrlClickJump(
                 layoutProvider = { layout },
@@ -662,24 +663,14 @@ internal fun ReadOnlyDiffHalf(
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
-                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp, end = LINE_END_PAD)
+                    .padding(end = LINE_END_PAD)
                     // After the padding, so the squiggles are placed in the text's own coordinates.
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     .then(jumpModifier),
             )
         }
-        val gutter = @Composable { GutterCell(lineNumber) }
-        val code = @Composable {
-            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
-                if (selectable) body() else DisableSelection { body() }
-            }
-        }
-        if (side == DiffSide.OLD) {
-            code()
-            gutter()
-        } else {
-            gutter()
-            code()
+        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
+            if (selectable) body() else DisableSelection { body() }
         }
     }
 }

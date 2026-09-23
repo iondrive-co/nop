@@ -2,6 +2,7 @@ package iondrive.nop
 
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -463,6 +464,36 @@ class SettingsTest {
 
         assertEquals(messagesA, Settings.loadRecentCommitMessages(a))
         assertEquals(listOf("Other project message"), Settings.loadRecentCommitMessages(b))
+    }
+
+    @Test
+    fun `commit message draft returns empty when nothing saved`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        assertEquals("", Settings.loadCommitMessageDraft(project))
+    }
+
+    @Test
+    fun `commit message draft round-trips per project and in-memory cache`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        Settings.saveCommitMessageDraft(a, "draft for a\nwith newline")
+        Settings.saveCommitMessageDraft(b, "draft for b")
+
+        assertEquals("draft for a\nwith newline", Settings.loadCommitMessageDraft(a))
+        assertEquals("draft for b", Settings.loadCommitMessageDraft(b))
+
+        // Survives in-memory cache clear (reads back from disk)
+        Settings.clearCommitDraftsForTest()
+        assertEquals("draft for a\nwith newline", Settings.loadCommitMessageDraft(a))
+        assertEquals("draft for b", Settings.loadCommitMessageDraft(b))
+
+        // Saving empty string clears draft and removes file
+        Settings.saveCommitMessageDraft(a, "")
+        assertEquals("", Settings.loadCommitMessageDraft(a))
+        val draftFileA = Settings.projectDataDir(a).resolve("commit-draft")
+        assertFalse(Files.exists(draftFileA))
     }
 
     @Test

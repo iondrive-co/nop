@@ -30,8 +30,14 @@ data class SplitRatios(
  * Both fall back into the open-projects list when no `open.N` entries are present.
  */
 object Settings {
+    private val commitDrafts = java.util.concurrent.ConcurrentHashMap<Path, String>()
+
     /** Overridable for tests; defaults to XDG_CONFIG_HOME (or ~/.config). */
     var configRoot: Path = defaultConfigRoot()
+        set(value) {
+            field = value
+            commitDrafts.clear()
+        }
 
     private fun defaultConfigRoot(): Path {
         val xdg = System.getenv("XDG_CONFIG_HOME")
@@ -433,6 +439,42 @@ object Settings {
             Files.createDirectories(f.parent)
             Files.writeString(f, messages.joinToString("\u0000"))
         }
+    }
+
+    /**
+     * Unsaved draft of the commit message for this project, preserved across tab and project switches.
+     */
+    fun loadCommitMessageDraft(projectPath: Path): String {
+        val norm = projectPath.toAbsolutePath().normalize()
+        commitDrafts[norm]?.let { return it }
+        val f = projectDataDir(norm).resolve("commit-draft")
+        if (!Files.isRegularFile(f)) return ""
+        val text = runCatching { Files.readString(f) }.getOrDefault("")
+        commitDrafts[norm] = text
+        return text
+    }
+
+    fun setCommitMessageDraftMemory(projectPath: Path, text: String) {
+        val norm = projectPath.toAbsolutePath().normalize()
+        commitDrafts[norm] = text
+    }
+
+    fun saveCommitMessageDraft(projectPath: Path, text: String) {
+        val norm = projectPath.toAbsolutePath().normalize()
+        commitDrafts[norm] = text
+        val f = projectDataDir(norm).resolve("commit-draft")
+        runCatching {
+            if (text.isEmpty()) {
+                Files.deleteIfExists(f)
+            } else {
+                Files.createDirectories(f.parent)
+                Files.writeString(f, text)
+            }
+        }
+    }
+
+    internal fun clearCommitDraftsForTest() {
+        commitDrafts.clear()
     }
 
     /**
