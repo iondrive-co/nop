@@ -23,6 +23,7 @@ object Normalize {
         "exec_command" to "Bash",
         "local_shell" to "Bash",
         "container.exec" to "Bash",
+        "exec" to "Bash",
         "apply_patch" to "Edit",
         "write_file" to "Write",
         "read_file" to "Read",

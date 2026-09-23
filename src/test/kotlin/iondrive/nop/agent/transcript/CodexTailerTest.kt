@@ -220,6 +220,149 @@ class CodexTailerTest {
         assertTrue(CodexTailer(Path.of("/nowhere")).parse("not json at all").isEmpty())
     }
 
+    @Test
+    fun `response_item assistant message reaches the event log`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+        tailer.parse(
+            """{"type":"turn_context","timestamp":"2026-09-15T00:00:00.000Z","payload":{"model":"gpt-5.5"}}""",
+        )
+
+        val events = tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:01.000Z","payload":{"type":"message",""" +
+                """"role":"assistant","content":[{"type":"output_text","text":"I will inspect the repository."}]}}""",
+        )
+
+        val message = events.filterIsInstance<AgentEvent.AssistantMessage>().single()
+        assertEquals("gpt-5.5", message.model)
+        val text = message.blocks.filterIsInstance<Block.Text>().single()
+        assertEquals("I will inspect the repository.", text.text)
+    }
+
+    @Test
+    fun `custom_tool_call with exec_command produces Bash tool call with command`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+
+        val events = tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:01.000Z","payload":{"type":"custom_tool_call",""" +
+                """"call_id":"c1","name":"exec","input":"text(await tools.exec_command({cmd:\"git status --short\"}));"}}""",
+        )
+
+        val started = events.filterIsInstance<AgentEvent.ToolStarted>().single()
+        assertEquals("c1", started.callId)
+        assertEquals("Bash", started.tool)
+        assertEquals("git status --short", started.args["command"])
+    }
+
+    @Test
+    fun `custom_tool_call with template literal backticks produces Bash tool call`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+
+        val events = tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:01.000Z","payload":{"type":"custom_tool_call",""" +
+                """"call_id":"c1","name":"exec","input":"const r=await tools.exec_command({cmd:`cat ${'$'}{p}`});"}}""",
+        )
+
+        val started = events.filterIsInstance<AgentEvent.ToolStarted>().single()
+        assertEquals("c1", started.callId)
+        assertEquals("Bash", started.tool)
+        assertEquals("cat ${'$'}{p}", started.args["command"])
+    }
+
+    @Test
+    fun `custom_tool_call with apply_patch produces Write and Edit tool calls`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+        val patch = "*** Begin Patch\\n*** Add File: docs/new.md\\n+new content\\n*** Update File: src/main.kt\\n-old\\n+new\\n*** Delete File: old.txt\\n"
+
+        val events = tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:01.000Z","payload":{"type":"custom_tool_call",""" +
+                """"call_id":"c2","name":"exec","input":"text(await tools.apply_patch(\"$patch\"));"}}""",
+        )
+
+        val started = events.filterIsInstance<AgentEvent.ToolStarted>()
+        assertEquals(3, started.size)
+        assertEquals("Write", started[0].tool)
+        assertEquals("docs/new.md", started[0].args["file_path"])
+        assertEquals("Edit", started[1].tool)
+        assertEquals("src/main.kt", started[1].args["file_path"])
+        assertEquals("Edit", started[2].tool)
+        assertEquals("old.txt", started[2].args["file_path"])
+    }
+
+    @Test
+    fun `custom_tool_call_output with JSON array and exit_code pairs back to call`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+        tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:01.000Z","payload":{"type":"custom_tool_call",""" +
+                """"call_id":"c1","name":"exec","input":"text(await tools.exec_command({cmd:\"make test\"}));"}}""",
+        )
+
+        val events = tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:03.000Z","payload":{"type":"custom_tool_call_output",""" +
+                """"call_id":"c1","output":[{"type":"input_text","text":"Script completed\nWall time 2.0s\nOutput:\n{\"chunk_id\":\"abc\",\"exit_code\":0,\"output\":\"ok\"}"}]}}""",
+        )
+
+        val finished = events.filterIsInstance<AgentEvent.ToolFinished>().single()
+        assertEquals("c1", finished.callId)
+        assertEquals(0, finished.exitCode)
+        assertFalse(finished.isError)
+        assertEquals(2000, finished.durationMs)
+    }
+
+    @Test
+    fun `custom_tool_call_output with non-zero exit_code is an error`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+        tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:01.000Z","payload":{"type":"custom_tool_call",""" +
+                """"call_id":"c1","name":"exec","input":"text(await tools.exec_command({cmd:\"make test\"}));"}}""",
+        )
+
+        val events = tailer.parse(
+            """{"type":"response_item","timestamp":"2026-09-15T00:00:04.000Z","payload":{"type":"custom_tool_call_output",""" +
+                """"call_id":"c1","output":[{"type":"input_text","text":"Script completed\nWall time 3.0s\nOutput:\n{\"chunk_id\":\"abc\",\"exit_code\":2,\"output\":\"FAIL\"}"}]}}""",
+        )
+
+        val finished = events.filterIsInstance<AgentEvent.ToolFinished>().single()
+        assertEquals("c1", finished.callId)
+        assertEquals(2, finished.exitCode)
+        assertTrue(finished.isError)
+    }
+
+    @Test
+    fun `task_complete with error produces an aborted assistant message`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+
+        val events = tailer.parse(
+            """{"type":"event_msg","timestamp":"2026-09-15T00:00:00.000Z","payload":{"type":"task_complete",""" +
+                """"turn_id":"t1","error":{"message":"usage limit reached"}}}""",
+        )
+
+        val message = events.filterIsInstance<AgentEvent.AssistantMessage>().single()
+        assertEquals("aborted:usage limit reached", message.stopReason)
+    }
+
+    @Test
+    fun `a handoff generated from codex 0-156-1 events contains conversation, files, commands, and remaining work`() {
+        val tailer = CodexTailer(Path.of("/nowhere"))
+        val lines = listOf(
+            """{"type":"turn_context","timestamp":"2026-09-23T10:17:28.000Z","payload":{"model":"gpt-5.5"}}""",
+            """{"type":"response_item","timestamp":"2026-09-23T10:17:28.100Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Review closed plans and check status"}]}}""",
+            """{"type":"response_item","timestamp":"2026-09-23T10:17:32.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will check the repo status and update the doc."}]}}""",
+            """{"type":"response_item","timestamp":"2026-09-23T10:17:35.000Z","payload":{"type":"custom_tool_call","call_id":"c1","name":"exec","input":"text(await tools.exec_command({cmd:\"./gradlew test\"}));\ntext(await tools.apply_patch(\"*** Begin Patch\\n*** Update File: docs/plans/TODO/test.md\\n-old\\n+new\\n\"));"}}""",
+            """{"type":"response_item","timestamp":"2026-09-23T10:17:39.000Z","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"Script completed\nWall time 1.0s\nOutput:\n{\"chunk_id\":\"abc\",\"exit_code\":0,\"output\":\"ok\"}"}]}}""",
+            """{"type":"response_item","timestamp":"2026-09-23T10:17:50.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Updated test.md and verified status. Ready for next steps."}]}}""",
+        )
+        val events = lines.flatMap { tailer.parse(it) }
+
+        val summary = iondrive.nop.agent.Handoff.summary(events, iondrive.nop.agent.Provider.Anthropic)
+
+        assertTrue("Review closed plans and check status" in summary)
+        assertTrue("Modified: `docs/plans/TODO/test.md`" in summary)
+        assertTrue("`./gradlew test`" in summary)
+        assertTrue("succeeded" in summary)
+        assertTrue("Updated test.md and verified status. Ready for next steps." in summary)
+        assertTrue("Pick the task up from here rather than starting discovery again." in summary)
+    }
+
     // ── Locating ──
 
     private fun rollout(home: Path, name: String, cwd: String, at: Long): Path {

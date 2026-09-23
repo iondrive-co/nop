@@ -104,14 +104,25 @@ class CodexTailer(private val home: Path) : Tailer {
 
     private fun responseItem(payload: JsonObject, at: Long): List<AgentEvent> =
         when (payload["type"].str()) {
-            // Only what the user actually typed. The `developer` role carries the CLI's own
-            // permission and environment preamble, and the `assistant` role is already covered by
-            // the agent_message event, which is the one that carries the final text.
-            "message" -> if (payload["role"].str() == "user") {
-                messageText(payload).takeIf { it.isNotBlank() }
+            "message" -> when (payload["role"].str()) {
+                "user" -> messageText(payload).takeIf { it.isNotBlank() }
                     ?.let { listOf(AgentEvent.UserMessage(it, at)) } ?: emptyList()
-            } else {
-                emptyList()
+
+                "assistant" -> messageText(payload).takeIf { it.isNotBlank() }
+                    ?.let {
+                        val usage = pendingUsage
+                        pendingUsage = null
+                        listOf(
+                            AgentEvent.AssistantMessage(
+                                blocks = listOf(Block.Text(it)),
+                                usage = usage,
+                                model = model,
+                                at = at,
+                            ),
+                        )
+                    } ?: emptyList()
+
+                else -> emptyList()
             }
 
             "function_call", "custom_tool_call", "local_shell_call" -> {
@@ -121,10 +132,20 @@ class CodexTailer(private val home: Path) : Tailer {
                 if (callId == null || rawName == null) {
                     emptyList()
                 } else {
-                    val tool = Normalize.tool("openai", rawName)
-                    val args = Normalize.args(arguments(payload))
                     callStartedAt[callId] = at
-                    listOf(AgentEvent.ToolStarted(callId, tool, args, at))
+                    val inputStr = payload["input"].str()
+                    if (rawName == "exec" && inputStr != null) {
+                        val parsed = parseExecTools(callId, inputStr, at)
+                        if (parsed.isNotEmpty()) {
+                            parsed
+                        } else {
+                            listOf(AgentEvent.ToolStarted(callId, "Bash", Normalize.args(arguments(payload)), at))
+                        }
+                    } else {
+                        val tool = Normalize.tool("openai", rawName)
+                        val args = Normalize.args(arguments(payload))
+                        listOf(AgentEvent.ToolStarted(callId, tool, args, at))
+                    }
                 }
             }
 
@@ -222,6 +243,22 @@ class CodexTailer(private val home: Path) : Tailer {
                 ),
             )
 
+            "task_complete" -> {
+                val errorMsg = payload["error"].obj()?.get("message").str() ?: payload["error"].str()
+                if (errorMsg != null) {
+                    listOf(
+                        AgentEvent.AssistantMessage(
+                            blocks = emptyList(),
+                            stopReason = "aborted:$errorMsg",
+                            model = model,
+                            at = at,
+                        ),
+                    )
+                } else {
+                    emptyList()
+                }
+            }
+
             else -> emptyList()
         }
 
@@ -255,19 +292,133 @@ class CodexTailer(private val home: Path) : Tailer {
         return runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull()
     }
 
+    private fun parseExecTools(callId: String, code: String, at: Long): List<AgentEvent.ToolStarted> {
+        val events = mutableListOf<AgentEvent.ToolStarted>()
+
+        if (code.contains("tools.apply_patch")) {
+            val unescaped = code.replace("\\\\n", "\n").replace("\\n", "\n")
+            for (line in unescaped.lineSequence()) {
+                val trimmed = line.trim()
+                val addMatch = ADD_FILE_REGEX.matchEntire(trimmed)
+                if (addMatch != null) {
+                    val path = addMatch.groupValues[1].trim().removeSurrounding("\"").removeSurrounding("'")
+                    events += AgentEvent.ToolStarted(callId, "Write", mapOf("file_path" to path), at)
+                }
+                val updateMatch = UPDATE_FILE_REGEX.matchEntire(trimmed)
+                if (updateMatch != null) {
+                    val path = updateMatch.groupValues[1].trim().removeSurrounding("\"").removeSurrounding("'")
+                    events += AgentEvent.ToolStarted(callId, "Edit", mapOf("file_path" to path), at)
+                }
+                val deleteMatch = DELETE_FILE_REGEX.matchEntire(trimmed)
+                if (deleteMatch != null) {
+                    val path = deleteMatch.groupValues[1].trim().removeSurrounding("\"").removeSurrounding("'")
+                    events += AgentEvent.ToolStarted(callId, "Edit", mapOf("file_path" to path), at)
+                }
+            }
+            if (events.none { it.tool == "Write" || it.tool == "Edit" }) {
+                events += AgentEvent.ToolStarted(callId, "Edit", emptyMap(), at)
+            }
+        }
+
+        if (code.contains("tools.exec_command")) {
+            for (m in EXEC_CMD_REGEX.findAll(code)) {
+                val cmd = unescapeJsString(m.groupValues[1])
+                if (cmd.isNotBlank()) {
+                    events += AgentEvent.ToolStarted(callId, "Bash", mapOf("command" to cmd), at)
+                }
+            }
+            for (m in EXEC_CMD_SQ_REGEX.findAll(code)) {
+                val cmd = unescapeJsString(m.groupValues[1])
+                if (cmd.isNotBlank()) {
+                    events += AgentEvent.ToolStarted(callId, "Bash", mapOf("command" to cmd), at)
+                }
+            }
+            for (m in EXEC_CMD_BT_REGEX.findAll(code)) {
+                val cmd = unescapeJsString(m.groupValues[1])
+                if (cmd.isNotBlank()) {
+                    events += AgentEvent.ToolStarted(callId, "Bash", mapOf("command" to cmd), at)
+                }
+            }
+            if (events.none { it.tool == "Bash" }) {
+                events += AgentEvent.ToolStarted(callId, "Bash", emptyMap(), at)
+            }
+        }
+
+        if (code.contains("tools.write_stdin")) {
+            events += AgentEvent.ToolStarted(callId, "Bash", mapOf("command" to "write_stdin"), at)
+        }
+
+        if (code.contains("tools.web__run")) {
+            for (m in WEB_QUERY_REGEX.findAll(code)) {
+                val q = unescapeJsString(m.groupValues[1])
+                if (q.isNotBlank()) {
+                    events += AgentEvent.ToolStarted(callId, "WebSearch", mapOf("query" to q), at)
+                }
+            }
+            for (m in WEB_URL_REGEX.findAll(code)) {
+                val url = unescapeJsString(m.groupValues[1])
+                if (url.isNotBlank()) {
+                    events += AgentEvent.ToolStarted(callId, "WebFetch", mapOf("url" to url), at)
+                }
+            }
+            if (events.none { it.tool == "WebSearch" || it.tool == "WebFetch" }) {
+                events += AgentEvent.ToolStarted(callId, "WebSearch", emptyMap(), at)
+            }
+        }
+
+        if (code.contains("tools.view_image")) {
+            for (m in VIEW_IMAGE_REGEX.findAll(code)) {
+                val path = unescapeJsString(m.groupValues[1])
+                if (path.isNotBlank()) {
+                    events += AgentEvent.ToolStarted(callId, "Read", mapOf("file_path" to path), at)
+                }
+            }
+            if (events.none { it.tool == "Read" }) {
+                events += AgentEvent.ToolStarted(callId, "Read", emptyMap(), at)
+            }
+        }
+
+        return events
+    }
+
+    private fun unescapeJsString(raw: String): String {
+        if (!raw.contains('\\')) return raw
+        val sanitized = raw.replace("\r", "\\r").replace("\n", "\\n")
+        return runCatching {
+            json.parseToJsonElement("\"$sanitized\"").str() ?: raw
+        }.getOrElse {
+            raw.replace("\\\"", "\"")
+                .replace("\\'", "'")
+                .replace("\\`", "`")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\\\", "\\")
+        }
+    }
+
     private fun messageText(payload: JsonObject): String =
-        (payload["content"].arr())?.mapNotNull {
-            it.obj()?.get("text").str()
-        }?.joinToString("\n").orEmpty()
+        payload["content"].str()
+            ?: (payload["content"].arr())?.mapNotNull {
+                it.obj()?.get("text").str() ?: it.str()
+            }?.joinToString("\n").orEmpty()
 
     private fun summaryText(payload: JsonObject): String =
-        (payload["summary"].arr())?.mapNotNull {
-            it.obj()?.get("text").str()
-        }?.joinToString("\n").orEmpty()
+        payload["summary"].str()
+            ?: (payload["summary"].arr())?.mapNotNull {
+                it.obj()?.get("text").str() ?: it.str()
+            }?.joinToString("\n").orEmpty()
 
     private fun outputText(payload: JsonObject): String {
         payload["output"].str()?.let { return it }
-        payload["output"].obj()?.get("content").str()?.let { return it }
+        payload["output"].arr()?.let { arr ->
+            return arr.mapNotNull { it.obj()?.get("text").str() ?: it.str() }.joinToString("\n")
+        }
+        payload["output"].obj()?.let { obj ->
+            obj["content"].str()?.let { return it }
+            obj["content"].arr()?.let { arr ->
+                return arr.mapNotNull { it.obj()?.get("text").str() ?: it.str() }.joinToString("\n")
+            }
+        }
         return ""
     }
 
@@ -300,7 +451,17 @@ class CodexTailer(private val home: Path) : Tailer {
          */
         const val CLOCK_SLACK_MS = 5_000L
 
-        val EXIT_CODE = Regex("""Process exited with code (-?\d+)""")
-        const val EXIT_CODE_SEARCH_CHARS = 400
+        val EXIT_CODE = Regex("""(?:Process exited with code |"exit_code"\s*:\s*)(-?\d+)""")
+        const val EXIT_CODE_SEARCH_CHARS = 1000
+
+        val ADD_FILE_REGEX = Regex("""\*\*\*\s*Add File:\s*(.+)""")
+        val UPDATE_FILE_REGEX = Regex("""\*\*\*\s*Update File:\s*(.+)""")
+        val DELETE_FILE_REGEX = Regex("""\*\*\*\s*Delete File:\s*(.+)""")
+        val EXEC_CMD_REGEX = Regex("""["']?cmd["']?\s*:\s*"((?:[^"\\]|\\.)*)"""")
+        val EXEC_CMD_SQ_REGEX = Regex("""["']?cmd["']?\s*:\s*'((?:[^'\\]|\\.)*)'""")
+        val EXEC_CMD_BT_REGEX = Regex("""["']?cmd["']?\s*:\s*`((?:[^`\\]|\\.)*)`""")
+        val WEB_QUERY_REGEX = Regex("""["']?q["']?\s*:\s*["'`]((?:[^"'`\\]|\\.)*)["'`]""")
+        val WEB_URL_REGEX = Regex("""["']?(?:url|ref_id)["']?\s*:\s*["'`]((?:[^"'`\\]|\\.)*)["'`]""")
+        val VIEW_IMAGE_REGEX = Regex("""["']?(?:path|file_path)["']?\s*:\s*["'`]((?:[^"'`\\]|\\.)*)["'`]""")
     }
 }

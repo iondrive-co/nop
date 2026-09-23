@@ -176,7 +176,7 @@ object Handoff {
         val created = linkedSetOf<String>()
         val changed = linkedSetOf<String>()
         val commands = linkedMapOf<String, Int?>()
-        val commandByCall = mutableMapOf<String, String>()
+        val commandByCall = mutableMapOf<String, MutableList<String>>()
 
         for (event in events) {
             if (event !is AgentEvent.ToolStarted) continue
@@ -186,8 +186,9 @@ object Handoff {
                 "Write" -> created += subject
                 "Edit", "NotebookEdit" -> changed += subject
                 "Bash" -> if (INTERESTING_COMMAND.containsMatchIn(subject)) {
-                    commands[subject.take(COMMAND_LIMIT)] = null
-                    commandByCall[event.callId] = subject.take(COMMAND_LIMIT)
+                    val cmd = subject.take(COMMAND_LIMIT)
+                    commands[cmd] = null
+                    commandByCall.getOrPut(event.callId) { mutableListOf() } += cmd
                 }
             }
         }
@@ -195,7 +196,7 @@ object Handoff {
         // than once when it started and again when it finished.
         for (event in events) {
             if (event !is AgentEvent.ToolFinished) continue
-            commandByCall[event.callId]?.let { command ->
+            commandByCall[event.callId]?.forEach { command ->
                 commands[command] = event.exitCode ?: if (event.isError) 1 else null
             }
         }

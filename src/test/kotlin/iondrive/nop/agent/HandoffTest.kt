@@ -107,6 +107,26 @@ class HandoffTest {
     }
 
     @Test
+    fun `multiple commands under one call id all receive their exit code`() {
+        val events = listOf(
+            AgentEvent.SessionStarted("/project", at()),
+            AgentEvent.RunStarted(provider = "openai", account = "codex-main", at = at()),
+            AgentEvent.UserMessage("Run build and test", at()),
+            AgentEvent.ToolStarted("c1", "Bash", mapOf("command" to "gradle build"), at()),
+            AgentEvent.ToolStarted("c1", "Bash", mapOf("command" to "gradle test"), at()),
+            AgentEvent.ToolFinished("c1", "all passed", exitCode = 0, at = at()),
+            AgentEvent.AssistantMessage(
+                blocks = listOf(Block.Text("Done.")),
+                stopReason = "end_turn", model = "gpt-5.5", at = at(),
+            ),
+        )
+
+        val text = Handoff.summary(events, Provider.Anthropic)
+        assertTrue("`gradle build` — succeeded" in text, "first command lacked success status: $text")
+        assertTrue("`gradle test` — succeeded" in text, "second command lacked success status: $text")
+    }
+
+    @Test
     fun `an incidental command is not listed`() {
         val events = log() + listOf(
             AgentEvent.ToolStarted("c9", "Bash", mapOf("command" to "ls -la"), at()),
