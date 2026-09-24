@@ -849,7 +849,12 @@ fun App(
         agentSessions.hasRunOut = { account ->
             val reading = listOfNotNull(agentUsage[account.name], Usage.liveCodexReading(account.homePath))
                 .maxByOrNull { it.asOf ?: java.time.Instant.EPOCH }
-            reading?.looksSpent()
+            // Written down, because a handover on "its usage reading is spent" used to leave no trace
+            // of what the reading said — the 14:11 handover in hermes acted on one that still read
+            // spent after the reset, and nothing on disk could say which window, or how old.
+            reading?.looksSpent()?.also { spent ->
+                if (spent) Log.info("usage for ${account.name} reads spent: $reading")
+            }
         }
         agentSessions.spentUntil = { account ->
             val reading = listOfNotNull(agentUsage[account.name], Usage.liveCodexReading(account.homePath))

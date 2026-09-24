@@ -624,6 +624,102 @@ class AgentSessionsTest {
         assertEquals("codex", session.account.name)
     }
 
+    /**
+     * The 14:11 handover in hermes on 2026-09-24. nop waited out the 14:10 reset; Claude Code carried
+     * on at 14:11:07, and its redraw put the same wall back in front of the re-armed watcher while the
+     * usage reading still read spent. Five tabs went to Codex seconds after they had started working.
+     */
+    @Test
+    fun `a wall already waited out is not handed over when the CLI redraws it`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        state.hasRunOut = { true }
+        var resetsAt = java.time.Instant.now().plusSeconds(30)
+        state.spentUntil = { resetsAt }
+        val session = state.open(tmp.toFile(), claude)
+        val wall = "You've hit your session limit"
+        val filedAt = session.run.startedAt
+        val transcript = tmp.resolve("session.jsonl").also {
+            Files.writeString(
+                it,
+                """{"type":"assistant","isApiErrorMessage":true,"timestamp":"$filedAt",""" +
+                    """"message":{"content":[{"type":"text","text":"$wall · resets 2:10pm"}]}}""" + "\n",
+            )
+        }
+        session.run.transcriptPath = transcript
+        val hit = QuotaHit("usage limit", "$wall · resets 2:10pm", matched = wall)
+
+        session.onQuotaWall(hit, now = filedAt.plusSeconds(3))
+        assertEquals("claude-main", session.account.name, "a wall that lifts in 30s is waited out")
+
+        // Past the reset, and the reading has not caught up: still spent, and the next window hours away.
+        resetsAt = java.time.Instant.now().plus(Duration.ofHours(5))
+        session.onQuotaWall(hit, now = filedAt.plusSeconds(90))
+
+        assertEquals("claude-main", session.account.name, "the wall on screen is the one already waited out")
+        assertFalse(session.ended)
+        assertNull(session.autoHandover)
+    }
+
+    /** The watcher re-arms after a wait so that a wall still to come is caught; this is one. */
+    @Test
+    fun `a new wall after one waited out is still acted on`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val state = sessions()
+        state.handoverTarget = { from -> listOf(claude, codex).handoverTarget(from) }
+        state.hasRunOut = { true }
+        var resetsAt = java.time.Instant.now().plusSeconds(30)
+        state.spentUntil = { resetsAt }
+        val session = state.open(tmp.toFile(), claude)
+        val wall = "You've hit your session limit"
+        val filedAt = session.run.startedAt
+        fun refusal(at: java.time.Instant) =
+            """{"type":"assistant","isApiErrorMessage":true,"timestamp":"$at",""" +
+                """"message":{"content":[{"type":"text","text":"$wall · resets 2:10pm"}]}}""" + "\n"
+        val transcript = tmp.resolve("session.jsonl").also { Files.writeString(it, refusal(filedAt)) }
+        session.run.transcriptPath = transcript
+        val hit = QuotaHit("usage limit", "$wall · resets 2:10pm", matched = wall)
+
+        session.onQuotaWall(hit, now = filedAt.plusSeconds(3))
+        assertEquals("claude-main", session.account.name)
+
+        resetsAt = java.time.Instant.now().plus(Duration.ofHours(5))
+        Files.writeString(transcript, refusal(filedAt.plusSeconds(10)), java.nio.file.StandardOpenOption.APPEND)
+        session.onQuotaWall(hit, now = filedAt.plusSeconds(12))
+
+        assertEquals("codex", session.account.name, "the CLI filed a refusal after the wait, so this wall is new")
+    }
+
+    /**
+     * The other half of the 14:11 handover. The first tab to hand over let go of its Claude session
+     * as its run ended, and two sibling tabs on the same project, still running, adopted it as a
+     * `/clear` of their own. Their handoffs were built from its conversation, so Codex did its work
+     * twice.
+     */
+    @Test
+    fun `a session stays its tab's after the run following it ends`(@TempDir tmp: Path) {
+        val state = sessions()
+        val first = state.open(tmp.toFile(), account("claude-main"))
+        val sibling = state.open(tmp.toFile(), account("claude-main"))
+        val id = first.run.nativeSessionId!!
+
+        first.endRun(EndReason.Quota)
+
+        assertTrue(
+            iondrive.nop.agent.transcript.LiveTranscripts.isForeign(id, sibling.sessionId),
+            "a sibling tab must not adopt a session because the tab that ran it has moved on",
+        )
+        assertFalse(iondrive.nop.agent.transcript.LiveTranscripts.isForeign(id, first.sessionId))
+
+        // Reopening it from another tab is a deliberate claim, and moves it.
+        sibling.reopen(resumeId = id)
+        assertFalse(iondrive.nop.agent.transcript.LiveTranscripts.isForeign(id, sibling.sessionId))
+        assertTrue(iondrive.nop.agent.transcript.LiveTranscripts.isForeign(id, first.sessionId))
+    }
+
     @Test
     fun `changing handover nomination mid-session to ask me prevents auto-handover`(@TempDir tmp: Path) {
         val claudeStarted = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex")

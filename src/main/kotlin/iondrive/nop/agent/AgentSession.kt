@@ -100,6 +100,16 @@ class AgentRun(
     /** What the vendor said as it ran out, when that is why the run ended. */
     @Volatile
     var quota: QuotaHit? = null
+
+    /**
+     * When nop last chose to wait out a wall in this run rather than act on it. Null until it has.
+     *
+     * The wall stays on screen after the reset, and the CLI carrying on redraws it, so what the
+     * re-armed watcher sees first is the wall already waited out. Only a refusal filed after this
+     * is a new one — see [AgentSession.onQuotaWall].
+     */
+    @Volatile
+    var waitedOutWallAt: Instant? = null
 }
 
 /**
@@ -501,9 +511,8 @@ class AgentSession(
         run.endReason = reason
         run.follower?.stop()
         run.follower = null
-        // Let go of the transcript before the next run looks for one. A dead run still holding its
-        // id would make its own session look like somebody else's to the tab that resumes it.
-        LiveTranscripts.release(run.nativeSessionId)
+        // The transcript stays claimed: it is still this tab's, and a sibling tab adopting it the
+        // moment this run lets go is what sent Codex to do another tab's work — see [LiveTranscripts].
         log.append(AgentEvent.RunEnded(run.session.exitCode, reason, System.currentTimeMillis()))
         endedAt = System.currentTimeMillis()
         activitySince = endedAt
@@ -590,7 +599,26 @@ class AgentSession(
         // now (Verdict.Refused) is ground truth that the vendor spoke, outranking any poller reading
         // that may be stale or measuring a different pool.
         val runOut = hasRunOut(current.account)
-        val verdict = QuotaEcho.judge(current.transcriptPath, hit.matched, since = current.startedAt)
+        val waitedOutAt = current.waitedOutWallAt
+        val verdict = QuotaEcho.judge(
+            current.transcriptPath,
+            hit.matched,
+            since = waitedOutAt?.let { maxOf(it, current.startedAt) } ?: current.startedAt,
+        )
+        // The 14:11 handover in hermes on 2026-09-24. Four tabs there and one in ops hit the session
+        // limit at 14:03-04, and nop waited out the 14:10 reset for each. Claude Code carried on at
+        // 14:11:07, its redraw put the old wall back in front of the re-armed watcher, the usage
+        // reading still read spent, and all five were handed to Codex seconds after they had started
+        // working again. Only a CLI that files its refusals is waited for, so after a wait the screen
+        // is no evidence of its own: a new wall files a new refusal and reads as Refused.
+        if (waitedOutAt != null && verdict != QuotaEcho.Verdict.Refused) {
+            Log.info(
+                "ignoring a usage-limit phrase on ${current.account.name}: it is the wall this run " +
+                    "waited out at $waitedOutAt, redrawn, and the CLI has filed no refusal since — ${hit.line}",
+            )
+            quotaWatcher.reset()
+            return
+        }
         if (verdict != QuotaEcho.Verdict.Refused && runOut == false && hit.resetsIn == null) {
             Log.warn(
                 "ignoring a usage-limit phrase on ${current.account.name}: the account still has " +
@@ -648,6 +676,7 @@ class AgentSession(
                 "agent quota wall on ${current.account.name} ($why), but it resets in " +
                     "${untilReset.seconds}s; waiting for that rather than handing over: ${hit.line}",
             )
+            current.waitedOutWallAt = now
             javax.swing.Timer(untilReset.toMillis().toInt() + REARM_SLACK_MS) {
                 if (run === current && current.endReason == null) quotaWatcher.reset()
             }.apply { isRepeats = false }.start()
@@ -848,7 +877,7 @@ class AgentSession(
         // exactly when a tab opened beside this one would mistake this session's file for a `/clear`
         // of its own. Claude's id is known before the spawn; Codex's is claimed in [onLocated]
         // below, as soon as the CLI has named it.
-        LiveTranscripts.claim(command.nativeSessionId)
+        LiveTranscripts.claim(command.nativeSessionId, sessionId)
         val startedAt = newRun.startedAt.toEpochMilli()
         log.beginRun()
         log.append(
@@ -872,7 +901,7 @@ class AgentSession(
             startedAt = startedAt,
             // Everything nop is following *except* this run. It is what stops the tailer adopting
             // the transcript of another agent tab on the same project — see [LiveTranscripts].
-            foreign = { id -> id != newRun.nativeSessionId && LiveTranscripts.isLive(id) },
+            foreign = { id -> id != newRun.nativeSessionId && LiveTranscripts.isForeign(id, sessionId) },
             // A conversation this session has already written down: the tab came back from the
             // state file, or was reopened from the picker. Its transcript is not news, and reading
             // it as though it were is what used to rename the tab back to whatever the CLI last
@@ -916,11 +945,10 @@ class AgentSession(
                 newRun.nativeSessionId = tailer.nativeSessionId() ?: previous
                 // The id can change under a run twice: a Codex session is named only once its first
                 // rollout line lands, and a `/clear` typed in either TUI moves the run to a new one.
-                // Both have to move the claim, or the session nop is now following is one the tab
-                // next door is free to adopt.
+                // Both have to be claimed, or the session nop is now following is one the tab next
+                // door is free to adopt. The one left behind stays this tab's.
                 if (newRun.nativeSessionId != previous) {
-                    LiveTranscripts.release(previous)
-                    LiveTranscripts.claim(newRun.nativeSessionId)
+                    LiveTranscripts.claim(newRun.nativeSessionId, sessionId)
                 }
                 log.append(
                     AgentEvent.RunStarted(
