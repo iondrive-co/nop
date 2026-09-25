@@ -328,14 +328,21 @@ fun App(
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
             }
             headSha = withContext(Dispatchers.IO) { runCatching { repo.headSha() }.getOrNull() }
+            val freshPaths = fresh.changes.map { it.path }.toSet()
+            selectedPaths = if (statusLoaded) {
+                val previousPaths = status.changes.map { it.path }.toSet()
+                val appeared = freshPaths - previousPaths
+                // Keep selections the user still cares about, drop vanished ones, default-select new ones.
+                (selectedPaths intersect freshPaths) + appeared
+            } else {
+                freshPaths
+            }
             status = fresh
             statusLoaded = true
             stashes = freshStashes
             canSoftReset = withContext(Dispatchers.IO) {
                 runCatching { repo.canSoftResetHead() }.getOrDefault(false)
             }
-            // Default-select every change after a reload
-            selectedPaths = fresh.changes.map { it.path }.toSet()
             // A status reload usually means files appeared / disappeared too (commit, stash, pop)
             // — re-walk the project tree so the sidebar matches the filesystem.
             fsRefreshKey += 1
@@ -1778,65 +1785,33 @@ fun App(
                                             if (repo != null && !commitInFlight) {
                                                 scope.launch {
                                                     commitInFlight = true
-                                                    // Timed from the click, not from the staging call:
-                                                    // the status check below is part of the wait the
-                                                    // user is sitting through.
                                                     val startedAt = System.currentTimeMillis()
                                                     commitProgressFlow.value =
-                                                        CommitProgress(CommitProgress.Phase.CHECKING, startedAtMillis = startedAt)
+                                                        CommitProgress(CommitProgress.Phase.STAGING, startedAtMillis = startedAt)
                                                     try {
-                                                        // Held across the block so the "nothing was
-                                                        // committed" case can be reported after
-                                                        // runGitOp returns — assigning gitOpError
-                                                        // inside it would be overwritten by the null
-                                                        // it returns on success (cf.
-                                                        // performRevertCommit).
-                                                        var movedPaths = emptySet<String>()
                                                         gitOpError = runGitOp("Commit failed") {
-                                                            // Refresh before committing: if new unreviewed
-                                                            // changes appeared since the last load, show them
-                                                            // and let the user decide rather than silently
-                                                            // committing a partial snapshot.
-                                                            val fresh = withContext(Dispatchers.IO) { repo.loadStatus() }
-                                                            val knownPaths = status.changes.map { it.path }.toSet()
-                                                            val newPaths = fresh.changes.map { it.path }.toSet() - knownPaths
-                                                            if (newPaths.isNotEmpty()) {
-                                                                status = fresh
-                                                                selectedPaths = fresh.changes.map { it.path }.toSet()
-                                                                fsRefreshKey += 1
-                                                                movedPaths = newPaths
-                                                            } else {
-                                                                withContext(Dispatchers.IO) {
-                                                                    repo.stageAndCommit(
-                                                                        message,
-                                                                        included,
-                                                                        // Unticked paths are held out
-                                                                        // of the commit, not merely
-                                                                        // left unstaged.
-                                                                        partial = included.size != status.changes.size,
-                                                                        startedAtMillis = startedAt,
-                                                                        onProgress = { commitProgressFlow.value = it },
-                                                                    )
-                                                                }
-                                                                rememberMessage(message)
-                                                                messageClearTrigger += 1
-                                                                // The button stays disabled through the
-                                                                // reload, so it keeps reporting: on a big
-                                                                // repo this walk is seconds of its own.
-                                                                commitProgressFlow.value = CommitProgress(
-                                                                    CommitProgress.Phase.REFRESHING,
+                                                            withContext(Dispatchers.IO) {
+                                                                repo.stageAndCommit(
+                                                                    message,
+                                                                    included,
+                                                                    // Unticked paths are held out
+                                                                    // of the commit, not merely
+                                                                    // left unstaged.
+                                                                    partial = included.size != status.changes.size,
                                                                     startedAtMillis = startedAt,
+                                                                    onProgress = { commitProgressFlow.value = it },
                                                                 )
-                                                                reloadStatus()
                                                             }
-                                                        }
-                                                        // A click that stood the commit down looks
-                                                        // no different from one that started a ten
-                                                        // minute commit, so say what happened. The
-                                                        // message field keeps its text, ready for
-                                                        // the second click.
-                                                        if (gitOpError == null && movedPaths.isNotEmpty()) {
-                                                            gitOpError = changeListMovedNotice(movedPaths)
+                                                            rememberMessage(message)
+                                                            messageClearTrigger += 1
+                                                            // The button stays disabled through the
+                                                            // reload, so it keeps reporting: on a big
+                                                            // repo this walk is seconds of its own.
+                                                            commitProgressFlow.value = CommitProgress(
+                                                                CommitProgress.Phase.REFRESHING,
+                                                                startedAtMillis = startedAt,
+                                                            )
+                                                            reloadStatus()
                                                         }
                                                     } finally {
                                                         commitInFlight = false

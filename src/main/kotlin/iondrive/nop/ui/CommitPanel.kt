@@ -174,7 +174,9 @@ fun CommitPanel(
                                 val msg = messageState.text.toString().trim()
                                 if (msg.isNotEmpty()) {
                                     val included = status.changes.filter { it.path in selectedPaths }
-                                    onCommit(msg, included)
+                                    if (included.isNotEmpty()) {
+                                        onCommit(msg, included)
+                                    }
                                 }
                             },
                             enabled = !commitInFlight && !stashInFlight && !revertInFlight &&

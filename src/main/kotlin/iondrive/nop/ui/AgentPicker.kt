@@ -17,7 +17,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -114,7 +116,9 @@ fun AgentPicker(
             // sessions nop did not run: two checkouts on the machine this was written on had 199
             // between them. What a picker is for is getting back into work from the last day or
             // two, and a row five hundred deep is found by searching, which this is not.
-            sessions.take(EARLIER_SESSIONS_SHOWN).forEach { past ->
+            var showAll by remember(projectDir) { mutableStateOf(false) }
+            val shown = if (showAll) sessions else sessions.take(EARLIER_SESSIONS_SHOWN)
+            shown.forEach { past ->
                 key(past.sessionId) {
                     PastSessionRow(
                         past = past,
@@ -126,20 +130,20 @@ fun AgentPicker(
                     )
                 }
             }
-            val hidden = sessions.size - EARLIER_SESSIONS_SHOWN
+            val hidden = sessions.size - shown.size
             if (hidden > 0) {
                 Spacer(Modifier.height(4.dp))
-                Text("and $hidden older", color = AgentMuted)
+                Link("and $hidden older", onClick = { showAll = true })
             }
         }
     }
 }
 
 /**
- * How many earlier sessions the picker lists. See the comment at the call site for why there is a
- * limit at all.
+ * How many earlier sessions the picker lists by default. See the comment at the call site for why
+ * there is a default limit at all.
  */
-private const val EARLIER_SESSIONS_SHOWN = 20
+private const val EARLIER_SESSIONS_SHOWN = 50
 
 /**
  * How much path the picker spells out before it starts dropping leading directories. Longer than
