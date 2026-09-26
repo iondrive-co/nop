@@ -965,6 +965,35 @@ class AgentSessionsTest {
         assertEquals("claude-haiku-4-5", session.run.account.model)
     }
 
+    @Test
+    fun `a handover eagerly starts the new terminal run if the previous run was started`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        assertFalse(session.run.session.isStarted, "freshly opened session in test is not started until widget requested")
+
+        // Simulate that the session was focused and started in the UI
+        val customBg = java.awt.Color(10, 20, 30)
+        val customFg = java.awt.Color(200, 210, 220)
+        val customLink = java.awt.Color(50, 100, 150)
+        session.run.session.getOrCreateWidget(customBg, customFg, customLink)
+        assertTrue(session.run.session.isStarted)
+
+        // Handover happens (e.g. while the user is focused on another project or tab)
+        session.handOver(account("claude-iondrive"))
+
+        // The new session must be started immediately without waiting for focus!
+        assertTrue(session.run.session.isStarted, "new run after handover must start eagerly so work continues in background")
+        assertEquals(customBg, session.run.session.themeColors?.first, "new run should inherit previous run's theme colors")
+    }
+
+    @Test
+    fun `a handover of an unstarted run does not eagerly start the terminal`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        assertFalse(session.run.session.isStarted)
+
+        session.handOver(account("claude-iondrive"))
+        assertFalse(session.run.session.isStarted, "an unstarted run should remain unstarted across handover in tests")
+    }
+
     /**
      * The picker's tab closes the way a terminal's does: it goes out of the strip. There is no
      * process behind it to kill — closing the last terminal leaves the strip with only its "+", and

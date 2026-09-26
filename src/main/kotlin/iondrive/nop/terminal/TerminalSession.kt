@@ -6,9 +6,11 @@ import androidx.compose.runtime.setValue
 import com.jediterm.terminal.ui.JediTermWidget
 import com.pty4j.PtyProcess
 import com.pty4j.PtyProcessBuilder
+import iondrive.nop.Log
 import iondrive.nop.launchers.Launcher
 import java.awt.Color
 import java.awt.Container
+import java.awt.GraphicsEnvironment
 import java.awt.dnd.DnDConstants
 import java.awt.dnd.DropTarget
 import java.io.File
@@ -96,6 +98,13 @@ class TerminalSession private constructor(
     private var settings: NopTerminalSettings? = null
     private var process: PtyProcess? = null
 
+    /** True once the widget has been created. */
+    val isStarted: Boolean get() = widget != null
+
+    /** Current terminal theme colors, or null if not yet created. */
+    val themeColors: Triple<Color, Color, Color>?
+        get() = settings?.let { Triple(it.bg, it.fg, it.link) }
+
     @Volatile
     private var restarting = false
 
@@ -103,7 +112,11 @@ class TerminalSession private constructor(
      * Builds the widget + starts the PTY on first call, returning the same widget thereafter (so
      * the host can re-attach it to its card without respawning). Must run on the AWT EDT.
      */
-    fun getOrCreateWidget(bg: Color, fg: Color, link: Color): JediTermWidget {
+    fun getOrCreateWidget(
+        bg: Color = DEFAULT_BG,
+        fg: Color = DEFAULT_FG,
+        link: Color = DEFAULT_LINK,
+    ): JediTermWidget {
         widget?.let { return it }
         val s = NopTerminalSettings(bg, fg, link)
         val w = NopTerminalWidget(INITIAL_COLUMNS, INITIAL_ROWS, s)
@@ -113,17 +126,19 @@ class TerminalSession private constructor(
         w.addHyperlinkFilter(UrlHyperlinkFilter())
         // Dropped files are typed in as paths — see TerminalFileDrop. On the terminal panel rather
         // than on the widget: the panel is what fills the widget, so it is what the pointer is over.
-        w.terminalPanel.dropTarget = DropTarget(
-            w.terminalPanel,
-            DnDConstants.ACTION_COPY,
-            TerminalFileDrop { paths ->
-                // A trailing space so a second drop doesn't run into the first, and focus so the
-                // next keystroke — usually Enter — goes to the terminal rather than to whatever the
-                // drag started from.
-                sendText(paths.joinToString(" ") { quoteForPrompt(it) } + " ")
-                w.requestFocusInWindow()
-            },
-        )
+        if (!GraphicsEnvironment.isHeadless()) {
+            w.terminalPanel.dropTarget = DropTarget(
+                w.terminalPanel,
+                DnDConstants.ACTION_COPY,
+                TerminalFileDrop { paths ->
+                    // A trailing space so a second drop doesn't run into the first, and focus so the
+                    // next keystroke — usually Enter — goes to the terminal rather than to whatever the
+                    // drag started from.
+                    sendText(paths.joinToString(" ") { quoteForPrompt(it) } + " ")
+                    w.requestFocusInWindow()
+                },
+            )
+        }
         // Shift+Enter writes a line feed rather than submitting the line — see [ShiftEnterNewline].
         // Added before the widget is started, which is what puts it in front of JediTerm's own key
         // handler in the panel's listener list: the panel adds that one when the session connects,
@@ -144,7 +159,10 @@ class TerminalSession private constructor(
         })
         settings = s
         widget = w
-        attach(w, startProcess())
+        runCatching { attach(w, startProcess()) }.onFailure {
+            Log.warn("failed to start terminal process: ${it.message}")
+            running = false
+        }
         return w
     }
 
@@ -324,13 +342,18 @@ class TerminalSession private constructor(
         // HOME is the point rather than an accident: it is how the Codex CLI is made to read one
         // account's ~/.codex instead of the machine owner's.
         childEnv.putAll(env)
-        val proc = PtyProcessBuilder()
-            .setCommand(command.toTypedArray())
-            .setEnvironment(childEnv)
-            .setDirectory(workingDir.absolutePath)
-            .setInitialColumns(INITIAL_COLUMNS)
-            .setInitialRows(INITIAL_ROWS)
-            .start()
+        val factory = processFactory
+        val proc = if (factory != null) {
+            factory(command, childEnv, workingDir)
+        } else {
+            PtyProcessBuilder()
+                .setCommand(command.toTypedArray())
+                .setEnvironment(childEnv)
+                .setDirectory(workingDir.absolutePath)
+                .setInitialColumns(INITIAL_COLUMNS)
+                .setInitialRows(INITIAL_ROWS)
+                .start()
+        }
         process = proc
         running = true
         exitCode = null
@@ -393,6 +416,12 @@ class TerminalSession private constructor(
     companion object {
         private const val INITIAL_COLUMNS = 80
         private const val INITIAL_ROWS = 24
+
+        val DEFAULT_BG: Color = Color(0x1E, 0x1F, 0x22)
+        val DEFAULT_FG: Color = Color(0xDF, 0xE1, 0xE5)
+        val DEFAULT_LINK: Color = Color(0x68, 0x97, 0xBB)
+
+        internal var processFactory: ((List<String>, Map<String, String>, File) -> PtyProcess)? = null
 
         /** The TTY interrupt character (ETX) — what a terminal sends on Ctrl-C. See [stop]. */
         private const val CTRL_C = 3

@@ -14,6 +14,8 @@ import iondrive.nop.agent.transcript.Tailer
 import iondrive.nop.agent.transcript.TranscriptFollower
 import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalTab
+import java.awt.Color
+import java.awt.GraphicsEnvironment
 import java.io.File
 import java.time.Duration
 import java.time.Instant
@@ -474,6 +476,8 @@ class AgentSession(
         seededFromHandoff: Boolean = false,
         handoffPath: String? = null,
     ) {
+        val wasStarted = run.session.isStarted
+        val prevColors = run.session.themeColors
         val from = run.account.provider.id
         endRun(reason)
         run.session.dispose()
@@ -496,6 +500,25 @@ class AgentSession(
         // Whatever the last run had to own up to belongs to that run. A switch the user made by
         // hand should not arrive carrying an explanation of one nop made ten minutes ago.
         autoHandover = null
+        if (wasStarted) {
+            startTerminal(prevColors)
+        }
+    }
+
+    /**
+     * Eagerly starts the terminal process for the current run so it works in the background even if
+     * this tab is not currently focused (e.g. user is focused on another project or tab during handover).
+     */
+    private fun startTerminal(colors: Triple<Color, Color, Color>? = null) {
+        if (GraphicsEnvironment.isHeadless()) return
+        val currentRun = run
+        if (run === currentRun && !ended) {
+            if (colors != null) {
+                currentRun.session.getOrCreateWidget(colors.first, colors.second, colors.third)
+            } else {
+                currentRun.session.getOrCreateWidget()
+            }
+        }
     }
 
     /**
