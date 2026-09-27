@@ -40,13 +40,14 @@ object Spawn {
         projectDir: File,
         seed: String? = null,
         resumeId: String? = null,
+        mcp: McpServers.Launch = McpServers.Launch.NONE,
     ): AgentCommand = when (account.provider) {
-        Provider.Anthropic -> claude(account, seed, resumeId)
-        Provider.OpenAI -> codex(account, projectDir, seed, resumeId)
+        Provider.Anthropic -> claude(account, seed, resumeId, mcp)
+        Provider.OpenAI -> codex(account, projectDir, seed, resumeId, mcp)
         Provider.Antigravity -> antigravity(account, projectDir, seed, resumeId)
     }
 
-    private fun claude(account: Account, seed: String?, resumeId: String?): AgentCommand {
+    private fun claude(account: Account, seed: String?, resumeId: String?, mcp: McpServers.Launch): AgentCommand {
         val argv = mutableListOf(CliTools.resolve(Provider.Anthropic), "--permission-mode", "bypassPermissions")
         account.model?.takeIf { it != DEFAULT_CHOICE }?.let { argv += listOf("--model", it) }
 
@@ -59,6 +60,8 @@ object Spawn {
         // The text itself, not --append-system-prompt-file: the CLI carries appended text into a fork
         // of the session, but refuses to fork one whose system prompt came from a file.
         argv += listOf("--append-system-prompt", SharedMemory.instructions())
+        // The user's own servers, which CLAUDE_CONFIG_DIR hides from this run — see McpServers.
+        mcp.claudeConfig?.let { argv += listOf("--mcp-config", it.toString()) }
 
         // Positional, not piped: with a TTY on stdin the CLI reads the terminal, so anything
         // written to the PTY before the UI is up is lost. Long text goes in a file the seed points
@@ -130,7 +133,13 @@ object Spawn {
         )
     }
 
-    private fun codex(account: Account, projectDir: File, seed: String?, resumeId: String?): AgentCommand {
+    private fun codex(
+        account: Account,
+        projectDir: File,
+        seed: String?,
+        resumeId: String?,
+        mcp: McpServers.Launch,
+    ): AgentCommand {
         val argv = mutableListOf(
             CliTools.resolve(Provider.OpenAI),
             "--dangerously-bypass-approvals-and-sandbox",
@@ -143,6 +152,7 @@ object Spawn {
         // A developer message is Codex's one per-run way in for extra instructions. It replaces any
         // `developer_instructions` in the account's own config.toml for runs nop starts.
         argv += listOf("-c", "developer_instructions=${tomlString(SharedMemory.instructions())}")
+        argv += McpServers.codexOverrides(mcp.servers)
 
         // `resume` is a subcommand, so it follows the options rather than joining them.
         if (resumeId != null) argv += listOf("resume", resumeId)

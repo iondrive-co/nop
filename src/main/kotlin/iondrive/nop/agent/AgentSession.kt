@@ -848,7 +848,9 @@ class AgentSession(
         resumeId: String?,
         seededFromHandoff: Boolean,
     ): AgentRun {
-        val command = Spawn.command(account, projectDir, seed, resumeId)
+        // The MCP servers the user's own CLI would have, which the account's isolated home hides.
+        val mcp = McpServers.prepare(account, projectDir)
+        val command = Spawn.command(account, projectDir, seed, resumeId, mcp)
         // The vendor's TUI decides whether to run its first-run flow from its own config, not from
         // whether it has a token — so an account inherited with a perfectly good login would be
         // asked to sign in again. See VendorConfig.
