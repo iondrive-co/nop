@@ -174,7 +174,13 @@ fun App(
     // once the real status landed a moment later.
     var statusLoaded by remember(projectPath) { mutableStateOf(false) }
     var stashes by remember(projectPath) { mutableStateOf<List<StashEntry>>(emptyList()) }
-    var selectedPaths by remember(projectPath) { mutableStateOf(emptySet<String>()) }
+    // The commit panel's ticks, and which of them nop set by itself. See [CommitSelection].
+    var commitSelection by remember(projectPath) { mutableStateOf(CommitSelection()) }
+    // Whether the commit message is not blank. Held here because the status loaders below read it,
+    // and the message state itself is declared after them.
+    var commitMessageWriting by remember(projectPath) { mutableStateOf(false) }
+    // A commit waiting on the "ticked for you" confirmation, or null when no dialog is open.
+    var pendingCommit by remember(projectPath) { mutableStateOf<PendingCommit?>(null) }
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
     // How far the running commit has got, for the commit button's progress bar. A StateFlow and
     // not snapshot state because GitRepo reports it from its staging worker threads, which have no
@@ -327,16 +333,15 @@ fun App(
             val freshStashes = withContext(Dispatchers.IO) {
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
             }
-            headSha = withContext(Dispatchers.IO) { runCatching { repo.headSha() }.getOrNull() }
+            val freshHead = withContext(Dispatchers.IO) { runCatching { repo.headSha() }.getOrNull() }
             val freshPaths = fresh.changes.map { it.path }.toSet()
-            selectedPaths = if (statusLoaded) {
+            commitSelection = if (statusLoaded) {
                 val previousPaths = status.changes.map { it.path }.toSet()
-                val appeared = freshPaths - previousPaths
-                // Keep selections the user still cares about, drop vanished ones, default-select new ones.
-                (selectedPaths intersect freshPaths) + appeared
+                commitSelection.reconcile(previousPaths, freshPaths, headMoved = freshHead != headSha, writing = commitMessageWriting)
             } else {
-                freshPaths
+                CommitSelection.loaded(freshPaths)
             }
+            headSha = freshHead
             status = fresh
             statusLoaded = true
             stashes = freshStashes
@@ -380,10 +385,10 @@ fun App(
         refresh()
     }
 
-    // Gentle background poll. Unlike reloadStatus() it preserves the user's commit selection —
-    // only dropping paths that vanished and auto-selecting changes that newly appeared — and it
-    // touches no state (so no recomposition, no tree re-walk) when git state is unchanged. It
-    // also stands down while a commit/stash/manual-refresh is in flight so it can't clobber them.
+    // Gentle background poll. Like reloadStatus() it keeps the user's commit ticks (see
+    // [CommitSelection]), and it touches no state (so no recomposition, no tree re-walk) when git
+    // state is unchanged. It also stands down while a commit/stash/manual-refresh is in flight so
+    // it can't clobber them.
     suspend fun pollStatus() {
         if (repo == null || commitInFlight || stashInFlight || refreshing || revertInFlight) return
         // Reconcile before the git-state check below: an external edit to an already-modified file
@@ -403,12 +408,14 @@ fun App(
         val freshHead = withContext(Dispatchers.IO) { runCatching { repo.headSha() }.getOrNull() }
         polledGeneration = generation
         if (fresh == status && freshStashes == stashes && freshHead == headSha) return
-        headSha = freshHead
-        val previousPaths = status.changes.map { it.path }.toSet()
         val freshPaths = fresh.changes.map { it.path }.toSet()
-        val appeared = freshPaths - previousPaths
-        // Keep selections the user still cares about, drop vanished ones, default-select new ones.
-        selectedPaths = (selectedPaths intersect freshPaths) + appeared
+        commitSelection = if (statusLoaded) {
+            val previousPaths = status.changes.map { it.path }.toSet()
+            commitSelection.reconcile(previousPaths, freshPaths, headMoved = freshHead != headSha, writing = commitMessageWriting)
+        } else {
+            CommitSelection.loaded(freshPaths)
+        }
+        headSha = freshHead
         status = fresh
         statusLoaded = true
         stashes = freshStashes
@@ -638,6 +645,7 @@ fun App(
             .distinctUntilChanged()
             .collect { draft ->
                 Settings.setCommitMessageDraftMemory(rootPath, draft)
+                commitMessageWriting = draft.isNotBlank()
             }
     }
     LaunchedEffect(rootPath, commitMessageState) {
@@ -1019,6 +1027,40 @@ fun App(
             // without a repo), then reload git status for the survivors' colours.
             fsRefreshKey += 1
             reloadStatus()
+        }
+    }
+
+    // Commits [included]: straight from the Commit button, or from the confirmation it raises when
+    // nop ticked some of those files by itself.
+    fun performCommit(message: String, included: List<FileChange>) {
+        if (repo == null || commitInFlight) return
+        scope.launch {
+            commitInFlight = true
+            val startedAt = System.currentTimeMillis()
+            commitProgressFlow.value = CommitProgress(CommitProgress.Phase.STAGING, startedAtMillis = startedAt)
+            try {
+                gitOpError = runGitOp("Commit failed") {
+                    withContext(Dispatchers.IO) {
+                        repo.stageAndCommit(
+                            message,
+                            included,
+                            // Unticked paths are held out of the commit, not merely left unstaged.
+                            partial = included.size != status.changes.size,
+                            startedAtMillis = startedAt,
+                            onProgress = { commitProgressFlow.value = it },
+                        )
+                    }
+                    rememberMessage(message)
+                    messageClearTrigger += 1
+                    // The button stays disabled through the reload, so it keeps reporting: on a big
+                    // repo this walk is seconds of its own.
+                    commitProgressFlow.value = CommitProgress(CommitProgress.Phase.REFRESHING, startedAtMillis = startedAt)
+                    reloadStatus()
+                }
+            } finally {
+                commitInFlight = false
+                commitProgressFlow.value = null
+            }
         }
     }
 
@@ -1770,54 +1812,24 @@ fun App(
                                 commit = {
                                     CommitPanel(
                                         status = status,
-                                        selectedPaths = selectedPaths,
-                                        onToggle = { path ->
-                                            selectedPaths = if (path in selectedPaths) selectedPaths - path else selectedPaths + path
-                                        },
+                                        selectedPaths = commitSelection.ticked,
+                                        returnedPaths = commitSelection.returned,
+                                        arrivedPaths = commitSelection.arrived,
+                                        onToggle = { path -> commitSelection = commitSelection.toggle(path) },
                                         onChangeClick = { change ->
                                             if (repo != null) {
+                                                commitSelection = commitSelection.acknowledge(change.path)
                                                 tabsState.open(Tab.Diff(change, repo.rootDir.toFile()))
                                             }
                                         },
                                         onRevert = { change -> pendingRevert = change },
                                         onRevertAll = { pendingRevertAll = status.changes },
                                         onCommit = { message, included ->
-                                            if (repo != null && !commitInFlight) {
-                                                scope.launch {
-                                                    commitInFlight = true
-                                                    val startedAt = System.currentTimeMillis()
-                                                    commitProgressFlow.value =
-                                                        CommitProgress(CommitProgress.Phase.STAGING, startedAtMillis = startedAt)
-                                                    try {
-                                                        gitOpError = runGitOp("Commit failed") {
-                                                            withContext(Dispatchers.IO) {
-                                                                repo.stageAndCommit(
-                                                                    message,
-                                                                    included,
-                                                                    // Unticked paths are held out
-                                                                    // of the commit, not merely
-                                                                    // left unstaged.
-                                                                    partial = included.size != status.changes.size,
-                                                                    startedAtMillis = startedAt,
-                                                                    onProgress = { commitProgressFlow.value = it },
-                                                                )
-                                                            }
-                                                            rememberMessage(message)
-                                                            messageClearTrigger += 1
-                                                            // The button stays disabled through the
-                                                            // reload, so it keeps reporting: on a big
-                                                            // repo this walk is seconds of its own.
-                                                            commitProgressFlow.value = CommitProgress(
-                                                                CommitProgress.Phase.REFRESHING,
-                                                                startedAtMillis = startedAt,
-                                                            )
-                                                            reloadStatus()
-                                                        }
-                                                    } finally {
-                                                        commitInFlight = false
-                                                        commitProgressFlow.value = null
-                                                    }
-                                                }
+                                            val unreviewed = commitSelection.unreviewed(included.map { it.path })
+                                            if (unreviewed.isEmpty()) {
+                                                performCommit(message, included)
+                                            } else {
+                                                pendingCommit = PendingCommit(message, included, unreviewed)
                                             }
                                         },
                                         onStash = { message, included ->
@@ -2053,6 +2065,18 @@ fun App(
                     pendingDelete = null
                 },
                 onCancel = { pendingDelete = null },
+            )
+        }
+
+        pendingCommit?.let { pending ->
+            ConfirmCommitDialog(
+                pending = pending,
+                returned = commitSelection.returned,
+                onConfirm = {
+                    performCommit(pending.message, pending.included)
+                    pendingCommit = null
+                },
+                onCancel = { pendingCommit = null },
             )
         }
 

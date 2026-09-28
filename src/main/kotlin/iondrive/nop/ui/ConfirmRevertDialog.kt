@@ -91,7 +91,7 @@ internal fun revertAllSummary(changes: List<FileChange>): List<String> {
 /** "1 file" / "3 files" — shared by every confirmation that counts what it is about to change. */
 internal fun plural(count: Int, noun: String) = if (count == 1) "1 $noun" else "$count ${noun}s"
 
-private const val MaxListedChanges = 12
+internal const val MaxListedChanges = 12
 
 /**
  * The shared frame the destructive-git confirmations sit in — title, body, Cancel/confirm row. Used

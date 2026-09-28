@@ -77,6 +77,9 @@ fun CommitPanel(
     stashInFlight: Boolean = false,
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    // Rows nop ticked by itself, marked "returned" or "new". See [CommitSelection].
+    returnedPaths: Set<String> = emptySet(),
+    arrivedPaths: Set<String> = emptySet(),
     messageHistory: List<String> = emptyList(),
     canSoftReset: Boolean = false,
     resetInFlight: Boolean = false,
@@ -244,6 +247,8 @@ fun CommitPanel(
                         ChangeRows(
                             group = group,
                             selectedPaths = selectedPaths,
+                            returnedPaths = returnedPaths,
+                            arrivedPaths = arrivedPaths,
                             onToggle = onToggle,
                             onChangeClick = onChangeClick,
                             onRevert = onRevert,
@@ -265,6 +270,8 @@ private val CHANGE_ROW_CHROME = 76.dp
 private fun ChangeRows(
     group: PathGroup<FileChange>,
     selectedPaths: Set<String>,
+    returnedPaths: Set<String>,
+    arrivedPaths: Set<String>,
     onToggle: (String) -> Unit,
     onChangeClick: (FileChange) -> Unit,
     onRevert: (FileChange) -> Unit,
@@ -276,6 +283,11 @@ private fun ChangeRows(
                 change = change,
                 label = group.labelFor(change.path),
                 checked = change.path in selectedPaths,
+                mark = when (change.path) {
+                    in returnedPaths -> commitMark(returned = true)
+                    in arrivedPaths -> commitMark(returned = false)
+                    else -> null
+                },
                 onToggle = { onToggle(change.path) },
                 onPathClick = { onChangeClick(change) },
                 onRevert = { onRevert(change) },
@@ -387,6 +399,7 @@ private fun ChangeRow(
     change: FileChange,
     label: String,
     checked: Boolean,
+    mark: String?,
     onToggle: () -> Unit,
     onPathClick: () -> Unit,
     onRevert: () -> Unit,
@@ -402,6 +415,7 @@ private fun ChangeRow(
         ) {
             CheckboxRow(checked = checked, onCheckedChange = { onToggle() }) {}
             Text(ChangeColors.prefixFor(change.kind), color = ChangeColors.forKind(change.kind))
+            if (mark != null) Text(mark, color = ChangeColors.CONFLICT)
             val pathText: @Composable () -> Unit = {
                 Text(
                     label,
