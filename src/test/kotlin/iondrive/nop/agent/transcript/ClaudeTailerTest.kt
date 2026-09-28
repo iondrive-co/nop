@@ -168,6 +168,10 @@ class ClaudeTailerTest {
         config.resolve("projects").resolve(ClaudeTailer.slug(project))
             .also { Files.createDirectories(it) }
 
+    /** A prompt as [entrypoint] files one: `cli` is the TUI, `sdk-cli` is `claude -p`. */
+    private fun prompt(entrypoint: String = ClaudeTailer.INTERACTIVE): String =
+        """{"type":"user","entrypoint":"$entrypoint","message":{"role":"user","content":"hi"}}""" + "\n"
+
     @Test
     fun `the transcript is found by the id nop minted, not by guessing`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").also { Files.createDirectories(it) }
@@ -215,7 +219,7 @@ class ClaudeTailerTest {
         assertNull(tailer.switched(run, first), "nothing new yet, so stay where we are")
 
         val second = dir.resolve("second.jsonl")
-        Files.writeString(second, "{}\n")
+        Files.writeString(second, prompt())
         Files.setLastModifiedTime(second, FileTime.fromMillis(startedAt + 5_000))
 
         assertEquals(second, tailer.switched(run, first))
@@ -241,7 +245,7 @@ class ClaudeTailerTest {
 
         // The tab next door, opened a moment later on the same project.
         val neighbour = dir.resolve("neighbour.jsonl")
-        Files.writeString(neighbour, "{}\n")
+        Files.writeString(neighbour, prompt())
         Files.setLastModifiedTime(neighbour, FileTime.fromMillis(startedAt + 5_000))
 
         val tailer = ClaudeTailer(config)
@@ -253,7 +257,7 @@ class ClaudeTailerTest {
 
         // A session nop is *not* following is still a fresh start, which is the case above.
         val cleared = dir.resolve("cleared.jsonl")
-        Files.writeString(cleared, "{}\n")
+        Files.writeString(cleared, prompt())
         Files.setLastModifiedTime(cleared, FileTime.fromMillis(startedAt + 9_000))
         assertEquals(cleared, tailer.switched(run, mine))
     }
@@ -284,10 +288,96 @@ class ClaudeTailerTest {
         assertEquals(mine, tailer.locate(run))
 
         // They type something, and their transcript becomes the newest file in the project.
+        Files.writeString(theirs, prompt())
         Files.setLastModifiedTime(theirs, FileTime.fromMillis(startedAt + 5_000))
 
         assertNull(tailer.switched(run, mine), "that conversation was here before this run was")
         assertEquals("mine", tailer.nativeSessionId(), "so this run is still its own session")
+    }
+
+    /**
+     * A `claude -p` worker started after this run, on the same account in the same checkout — what a
+     * manager agent in hermes delegates to. Nothing nop runs, and not here when the run began, so it
+     * passed every other rule: the tab followed it as its own `/clear`, went back whenever its own
+     * file was the newer, and read as waiting on the user while the worker sat in a long Bash call.
+     */
+    @Test
+    fun `a headless run started beside this one is not its fresh start`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val startedAt = System.currentTimeMillis()
+        val mine = dir.resolve("mine.jsonl")
+        Files.writeString(mine, prompt())
+        Files.setLastModifiedTime(mine, FileTime.fromMillis(startedAt))
+
+        val tailer = ClaudeTailer(config)
+        val run = RunContext(project, config, "mine", startedAt)
+        assertEquals(mine, tailer.locate(run))
+
+        val worker = dir.resolve("worker.jsonl")
+        Files.writeString(
+            worker,
+            """{"type":"queue-operation","operation":"enqueue"}""" + "\n" + prompt(entrypoint = "sdk-cli"),
+        )
+        Files.setLastModifiedTime(worker, FileTime.fromMillis(startedAt + 5_000))
+
+        assertNull(tailer.switched(run, mine), "the worker is not a /clear typed in this tab")
+        assertEquals("mine", tailer.nativeSessionId())
+    }
+
+    /**
+     * A `/clear` files its bookkeeping before its first prompt, and so does a `claude -p` worker —
+     * neither has said yet which front end wrote it. The switch waits for the prompt that says so.
+     */
+    @Test
+    fun `a fresh start is followed once it says the TUI wrote it`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val startedAt = System.currentTimeMillis()
+        val mine = dir.resolve("mine.jsonl")
+        Files.writeString(mine, prompt())
+        Files.setLastModifiedTime(mine, FileTime.fromMillis(startedAt))
+
+        val tailer = ClaudeTailer(config)
+        val run = RunContext(project, config, "mine", startedAt)
+        assertEquals(mine, tailer.locate(run))
+
+        val cleared = dir.resolve("cleared.jsonl")
+        Files.writeString(cleared, """{"type":"permission-mode","permissionMode":"bypassPermissions"}""" + "\n")
+        Files.setLastModifiedTime(cleared, FileTime.fromMillis(startedAt + 5_000))
+        assertNull(tailer.switched(run, mine), "nothing in it says what wrote it yet")
+
+        Files.writeString(cleared, prompt(), StandardOpenOption.APPEND)
+        Files.setLastModifiedTime(cleared, FileTime.fromMillis(startedAt + 6_000))
+        assertEquals(cleared, tailer.switched(run, mine))
+    }
+
+    /** `/clear` only goes forward, so a file this run has left is never its next one. */
+    @Test
+    fun `a session this run has left is not switched back to`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val startedAt = System.currentTimeMillis()
+        val first = dir.resolve("first.jsonl")
+        Files.writeString(first, prompt())
+        Files.setLastModifiedTime(first, FileTime.fromMillis(startedAt))
+
+        val tailer = ClaudeTailer(config)
+        val run = RunContext(project, config, "first", startedAt)
+        assertEquals(first, tailer.locate(run))
+
+        val second = dir.resolve("second.jsonl")
+        Files.writeString(second, prompt())
+        Files.setLastModifiedTime(second, FileTime.fromMillis(startedAt + 5_000))
+        assertEquals(second, tailer.switched(run, first))
+
+        // Something writes to the file this run left, and it is the newest again.
+        Files.setLastModifiedTime(first, FileTime.fromMillis(startedAt + 9_000))
+        assertNull(tailer.switched(run, second))
+        assertEquals("second", tailer.nativeSessionId())
     }
 
     @Test

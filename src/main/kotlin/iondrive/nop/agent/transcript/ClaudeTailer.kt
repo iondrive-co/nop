@@ -32,8 +32,6 @@ import java.util.concurrent.ConcurrentHashMap
  * mid-run rather than simply stopping there.
  */
 class ClaudeTailer(private val configDir: Path) : Tailer {
-    private val json = Json { ignoreUnknownKeys = true }
-
     /** When each `tool_use` was issued, so its result can carry a duration. */
     private val toolStartedAt = ConcurrentHashMap<String, Long>()
 
@@ -48,6 +46,9 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
      */
     @Volatile
     private var alreadyThere: Set<String>? = null
+
+    /** The sessions this run has switched away from. A `/clear` never leads back to one. */
+    private val left: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     override fun nativeSessionId(): String? = currentSessionId
 
@@ -91,6 +92,19 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
      * The cost is following a `/resume` typed into the TUI that picks an *older* session, which
      * appends to a file that was already here. The tab then keeps the name and the id of the
      * conversation nop opened it on, which is a stale answer rather than somebody else's.
+     *
+     * Nor is a session started *after* this run by something other than the TUI (see
+     * [entrypoint]). A `claude -p` worker a manager agent delegated to, on the same account in the
+     * same checkout, passed every rule above: on 2026-09-28 the tab that had started it followed it
+     * as its own `/clear`, went back to its own transcript whenever that was the newer file, and
+     * switched 81 times in two and a half hours, replaying one whole file or the other into its
+     * log each time. Its idle title over the worker's long Bash call read as a question to the user.
+     * nop only ever runs the TUI, so a candidate counts only once it says the TUI wrote it — which
+     * a fresh `/clear` does at its first prompt rather than its first bookkeeping record.
+     *
+     * And a session this run has already left is never switched back to, because `/clear` only goes
+     * forward. The cost is a `/resume` typed into the TUI that returns to one of them: the log stays
+     * with the conversation it left for.
      */
     override fun switched(run: RunContext, current: Path): Path? {
         val dir = projectDir(run)
@@ -101,12 +115,15 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
             Files.list(dir).use { stream ->
                 stream.filter { it.fileName.toString().endsWith(".jsonl") && it != current }
                     .filter { modified(it) > currentStamp && modified(it) >= run.startedAt }
-                    .filter { it.sessionId() !in already }
+                    .filter { it.sessionId() !in already && it.sessionId() !in left }
                     .filter { !run.foreign(it.sessionId()) }
+                    // Last, because it is the one rule that opens the file.
+                    .filter { entrypoint(it) == INTERACTIVE }
                     .max(compareBy { modified(it) })
                     .orElse(null)
             }
         }.getOrNull() ?: return null
+        left += current.sessionId()
         currentSessionId = candidate.sessionId()
         return candidate
     }
@@ -285,5 +302,43 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
          */
         fun slug(dir: Path): String =
             dir.toAbsolutePath().normalize().toString().replace('/', '-').replace('.', '-')
+
+        /** The [entrypoint] of a session typed into the TUI — the only kind nop runs. */
+        const val INTERACTIVE = "cli"
+
+        /** How far into a transcript [entrypoint] looks. The field is on the third to fifth record. */
+        private const val ENTRYPOINT_WITHIN = 50
+
+        private val json = Json { ignoreUnknownKeys = true }
+
+        /** Found entrypoints, by file. A transcript never changes what wrote it. */
+        private val entrypoints = ConcurrentHashMap<Path, String>()
+
+        /**
+         * Which front end wrote the transcript at [file]: `cli` for the TUI, `sdk-cli` for
+         * `claude -p`, and others for the IDE extensions. Null while no record carrying it has been
+         * written yet — the CLI's own bookkeeping records at the top of the file do not.
+         *
+         * It is what tells this tab's `/clear` from a headless run on the same account and project,
+         * which nop did not start and so cannot know about: a manager agent in hermes delegates to
+         * `claude -p` workers, and their transcripts land in the same directory as the tab's own.
+         */
+        fun entrypoint(file: Path): String? {
+            entrypoints[file]?.let { return it }
+            val found = runCatching {
+                Files.newBufferedReader(file).use { reader ->
+                    reader.lineSequence().take(ENTRYPOINT_WITHIN).firstNotNullOfOrNull { line ->
+                        // A key inside a record's text is escaped, so this only matches a real one.
+                        if ("\"entrypoint\"" !in line) return@firstNotNullOfOrNull null
+                        runCatching { json.parseToJsonElement(line).jsonObject["entrypoint"].str() }.getOrNull()
+                    }
+                }
+            }.getOrNull() ?: return null
+            entrypoints[file] = found
+            return found
+        }
+
+        /** Whether [file] is known to have been written by something other than the TUI. */
+        fun writtenOutsideTui(file: Path): Boolean = entrypoint(file).let { it != null && it != INTERACTIVE }
     }
 }

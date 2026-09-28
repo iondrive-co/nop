@@ -138,7 +138,11 @@ class AgentSessions {
                 AgentSession(
                     projectDir = dir,
                     account = account,
-                    resumeId = row.nativeSessionId,
+                    resumeId = if (row.provider == Provider.Anthropic.id) {
+                        EventLog.ownConversation(row.sessionId, row.nativeSessionId)
+                    } else {
+                        row.nativeSessionId
+                    },
                     sessionId = row.sessionId,
                     restoredTitle = row.title,
                     titleByUser = row.titleIsUsers,

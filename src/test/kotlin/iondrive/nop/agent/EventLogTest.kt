@@ -178,12 +178,13 @@ class EventLogTest {
      * [began] is when the conversation in it started. The record carrying it is the second line,
      * because the real thing opens with a bookkeeping record that has no time on it at all.
      */
-    private fun claudeTranscript(store: Path, id: String, began: Long? = null): Path {
+    private fun claudeTranscript(store: Path, id: String, began: Long? = null, entrypoint: String? = null): Path {
         val dir = store.resolve("projects").resolve("-home-someone-a-project")
         Files.createDirectories(dir)
+        val front = entrypoint?.let { ""","entrypoint":"$it"""" }.orEmpty()
         val body = began?.let {
             """{"type":"last-prompt","sessionId":"$id"}""" + "\n" +
-                """{"type":"user","timestamp":"${Instant.ofEpochMilli(it)}"}""" + "\n"
+                """{"type":"user"$front,"timestamp":"${Instant.ofEpochMilli(it)}"}""" + "\n"
         }.orEmpty()
         return dir.resolve("$id.jsonl").also { Files.writeString(it, body) }
     }
@@ -356,6 +357,60 @@ class EventLogTest {
         val listed = EventLog.sessions(tmp).single { it.sessionId == "clear" }
 
         assertEquals("after-the-clear", listed.lastNativeSessionId)
+    }
+
+    /**
+     * The tailer used to take a `claude -p` worker's transcript for this tab's `/clear`, since the
+     * worker began after the run did, and every log it happened to recorded the worker as the run's
+     * last session. Resuming that would put the worker's conversation behind this tab's title.
+     */
+    @Test
+    fun `a run that followed a headless worker resumes the conversation it was spawned on`(@TempDir tmp: Path) {
+        val store = transcripts.resolve("worker-followed")
+        val spawnedAt = now()
+        claudeTranscript(store, "ours", began = spawnedAt + 1_000, entrypoint = "cli")
+        val worker = claudeTranscript(store, "worker", began = spawnedAt + 60_000, entrypoint = "sdk-cli")
+        val written = log("followed-a-worker")
+        written.append(AgentEvent.SessionStarted(tmp.toString(), spawnedAt))
+        written.append(
+            AgentEvent.RunStarted(
+                provider = "anthropic", account = "work", nativeSessionId = "ours",
+                argv = listOf("claude", "--session-id", "ours"), at = spawnedAt,
+            ),
+        )
+        written.append(
+            AgentEvent.RunStarted(
+                provider = "anthropic", account = "work", nativeSessionId = "worker",
+                transcriptPath = worker.toString(), argv = listOf("claude", "--session-id", "ours"),
+                at = spawnedAt + 90_000,
+            ),
+        )
+
+        val listed = EventLog.sessions(tmp).single { it.sessionId == "followed-a-worker" }
+
+        assertEquals("ours", listed.lastNativeSessionId)
+        assertEquals("ours", EventLog.ownConversation("followed-a-worker", "worker"), "and so does a restore")
+        assertEquals("ours", EventLog.ownConversation("followed-a-worker", "ours"), "which keeps an id the TUI wrote")
+    }
+
+    /** A worker's session reopened on purpose, from its own row in the picker, is that tab's own. */
+    @Test
+    fun `a headless session the tab was opened on is kept`(@TempDir tmp: Path) {
+        val store = transcripts.resolve("worker-reopened")
+        val spawnedAt = now()
+        val worker = claudeTranscript(store, "worker", began = spawnedAt - 60_000, entrypoint = "sdk-cli")
+        val written = log("reopened-a-worker")
+        written.append(AgentEvent.SessionStarted(tmp.toString(), spawnedAt))
+        written.append(
+            AgentEvent.RunStarted(
+                provider = "anthropic", account = "work", nativeSessionId = "worker",
+                transcriptPath = worker.toString(), argv = listOf("claude", "--resume", "worker"),
+                at = spawnedAt,
+            ),
+        )
+
+        assertEquals("worker", EventLog.sessions(tmp).single { it.sessionId == "reopened-a-worker" }.lastNativeSessionId)
+        assertEquals("worker", EventLog.ownConversation("reopened-a-worker", "worker"))
     }
 
     /**

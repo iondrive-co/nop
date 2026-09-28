@@ -1,6 +1,7 @@
 package iondrive.nop.agent
 
 import iondrive.nop.Log
+import iondrive.nop.agent.transcript.ClaudeTailer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -442,6 +443,9 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             val followed = runCatching { Path.of(path) }.getOrNull() ?: return null
             val id = run.nativeSessionId
             val asked = askedFor(run)
+            // A run that ended up in a `claude -p` worker's transcript, which the tailer took for a
+            // `/clear` until 2026-09-28, resumes the conversation it was spawned on, never the worker's.
+            if (id != null && id != asked && headless(run, followed)) return tabsOwn(run, followed)
             // The run ended up somewhere other than where nop pointed it. Typing `/clear` does
             // that, and so did a tailer adopting a conversation somebody else was already in — see
             // ClaudeTailer.switched, which no longer makes that mistake but cannot unwrite the logs
@@ -471,6 +475,50 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 }
             }
             return id?.takeIf { Files.isRegularFile(followed) }
+        }
+
+        /**
+         * The conversation a restored tab resumes, given the id the state file saved for it.
+         *
+         * That id is whatever the tab's tailer was following at the last save, and until 2026-09-28
+         * the tailer could be following a `claude -p` worker's transcript instead of its own (see
+         * `ClaudeTailer.switched`). Resuming that would put the worker's conversation in the tab
+         * and carry on its work. So a Claude id whose transcript the TUI did not write is swapped for
+         * the one nop spawned the run on, read from the tab's own log; any other id is kept.
+         */
+        fun ownConversation(sessionId: String, saved: String): String? {
+            var located: AgentEvent.RunStarted? = null
+            runCatching {
+                Files.newBufferedReader(sessionsDir().resolve("$sessionId.jsonl")).use { reader ->
+                    for (line in reader.lineSequence()) {
+                        if ("\"run_started\"" !in line) continue
+                        val event = runCatching { JSON.decodeFromString(AgentEvent.serializer(), line) }
+                            .getOrNull() as? AgentEvent.RunStarted ?: continue
+                        if (event.nativeSessionId == saved && event.transcriptPath != null) located = event
+                    }
+                }
+            }
+            val run = located ?: return saved
+            val followed = runCatching { Path.of(run.transcriptPath!!) }.getOrNull() ?: return saved
+            // A session the user reopened on purpose is the tab's own, whatever wrote it.
+            if (saved == askedFor(run) || !headless(run, followed)) return saved
+            return tabsOwn(run, followed).also {
+                Log.warn("agent tab $sessionId was saved on $saved, a headless session; resuming ${it ?: "nothing"}")
+            }
+        }
+
+        /** Whether [run] was following a Claude transcript that something other than the TUI wrote. */
+        private fun headless(run: AgentEvent.RunStarted, followed: Path): Boolean =
+            run.provider == Provider.Anthropic.id && ClaudeTailer.writtenOutsideTui(followed)
+
+        /**
+         * The conversation nop spawned [run] on, for a run that ended up following a headless one:
+         * the tab's own, when it is still on disk beside [followed], and otherwise nothing. Never the
+         * headless session, which is somebody else's work.
+         */
+        private fun tabsOwn(run: AgentEvent.RunStarted, followed: Path): String? {
+            val asked = askedFor(run) ?: return null
+            return asked.takeIf { Files.isRegularFile(followed.resolveSibling("$asked.jsonl")) }
         }
 
         /**
