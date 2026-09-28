@@ -56,6 +56,39 @@ class CodexTailer(private val home: Path) : Tailer {
         if (!Files.isDirectory(root)) return null
         val wanted = run.projectDir.toAbsolutePath().normalize().toString()
 
+        if (run.nativeSessionId != null) {
+            val targetId = run.nativeSessionId
+            val candidates = runCatching {
+                Files.walk(root).use { stream ->
+                    stream.filter {
+                        Files.isRegularFile(it) &&
+                            it.fileName.toString().startsWith("rollout-") &&
+                            it.fileName.toString().endsWith(".jsonl") &&
+                            (it.fileName.toString().endsWith("-$targetId.jsonl") ||
+                                it.fileName.toString() == "$targetId.jsonl" ||
+                                it.fileName.toString() == "rollout-$targetId.jsonl")
+                    }.toList()
+                }
+            }.getOrDefault(emptyList())
+
+            val found = candidates.firstOrNull() ?: runCatching {
+                Files.walk(root).use { stream ->
+                    stream.filter {
+                        Files.isRegularFile(it) &&
+                            it.fileName.toString().startsWith("rollout-") &&
+                            it.fileName.toString().endsWith(".jsonl")
+                    }.filter { sessionMeta(it)?.get("id").str() == targetId }
+                        .findFirst().orElse(null)
+                }
+            }.getOrNull()
+
+            if (found != null) {
+                sessionId = targetId
+                return found
+            }
+            return null
+        }
+
         val candidates = runCatching {
             Files.walk(root).use { stream ->
                 stream.filter {
@@ -70,6 +103,7 @@ class CodexTailer(private val home: Path) : Tailer {
         for (file in candidates) {
             val meta = sessionMeta(file) ?: continue
             if (meta["cwd"].str() != wanted) continue
+            if (meta["source"].str() == "exec" || meta["originator"].str() == "codex_exec") continue
             val id = meta["id"].str()
             // A rollout another run is already following is not this run's, however new it is: two
             // Codex tabs on one project both match "newest rollout opened here", and the one that

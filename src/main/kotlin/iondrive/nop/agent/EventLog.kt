@@ -449,7 +449,26 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             // merely walked into was already going.
             if (asked != null && id != null && id != asked && !beganAfter(followed, spawnedAt)) {
                 val its = followed.resolveSibling("$asked.jsonl")
-                return asked.takeIf { Files.isRegularFile(its) }
+                if (Files.isRegularFile(its)) return asked
+                if (run?.provider == Provider.OpenAI.id) {
+                    val codexHome = (run.home ?: storeOf(run))?.let { Path.of(it) }
+                    val sessionsRoot = codexHome?.resolve(".codex")?.resolve("sessions")
+                    if (sessionsRoot != null && Files.isDirectory(sessionsRoot)) {
+                        val exists = runCatching {
+                            Files.walk(sessionsRoot).use { stream ->
+                                stream.anyMatch {
+                                    Files.isRegularFile(it) &&
+                                        it.fileName.toString().startsWith("rollout-") &&
+                                        it.fileName.toString().endsWith(".jsonl") &&
+                                        (it.fileName.toString().endsWith("-$asked.jsonl") ||
+                                            it.fileName.toString() == "$asked.jsonl" ||
+                                            it.fileName.toString() == "rollout-$asked.jsonl")
+                                }
+                            }
+                        }.getOrDefault(false)
+                        if (exists) return asked
+                    }
+                }
             }
             return id?.takeIf { Files.isRegularFile(followed) }
         }

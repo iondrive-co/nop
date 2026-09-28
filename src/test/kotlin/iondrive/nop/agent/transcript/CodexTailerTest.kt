@@ -365,14 +365,21 @@ class CodexTailerTest {
 
     // ── Locating ──
 
-    private fun rollout(home: Path, name: String, cwd: String, at: Long): Path {
+    private fun rollout(
+        home: Path,
+        name: String,
+        cwd: String,
+        at: Long,
+        source: String = "cli",
+        originator: String = "codex-tui",
+    ): Path {
         val dir = home.resolve(".codex/sessions/2026/09/15")
         Files.createDirectories(dir)
         val file = dir.resolve(name)
         Files.writeString(
             file,
             """{"type":"session_meta","timestamp":"2026-09-15T00:00:00.000Z","payload":""" +
-                """{"id":"${name.removeSuffix(".jsonl")}","cwd":"$cwd","cli_version":"0.154.0"}}""" + "\n",
+                """{"id":"${name.removeSuffix(".jsonl")}","cwd":"$cwd","cli_version":"0.154.0","source":"$source","originator":"$originator"}}""" + "\n",
         )
         Files.setLastModifiedTime(file, FileTime.fromMillis(at))
         return file
@@ -416,6 +423,76 @@ class CodexTailerTest {
         assertNull(
             CodexTailer(tmp.resolve("empty-home"))
                 .locate(RunContext(project, tmp, null, System.currentTimeMillis())),
+        )
+    }
+
+    @Test
+    fun `resuming by nativeSessionId finds the old transcript even when mtime is old`(@TempDir tmp: Path) {
+        val home = tmp.resolve("home")
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val now = System.currentTimeMillis()
+
+        val oldRollout = rollout(
+            home,
+            "rollout-2026-09-22T18-55-23-target-session-id.jsonl",
+            project.toAbsolutePath().normalize().toString(),
+            now - 86_400_000,
+        )
+        // A newer background job or another session in the same project should NOT be adopted
+        val newerRollout = rollout(
+            home,
+            "rollout-2026-09-27T00-55-36-hijacker-id.jsonl",
+            project.toAbsolutePath().normalize().toString(),
+            now,
+        )
+
+        val tailer = CodexTailer(home)
+        val context = RunContext(project, home, "target-session-id", now)
+        val located = tailer.locate(context)
+
+        assertEquals(oldRollout, located, "resumed run must locate its requested transcript")
+        assertEquals("target-session-id", tailer.nativeSessionId())
+        assertTrue(Files.exists(newerRollout))
+    }
+
+    @Test
+    fun `resuming by nativeSessionId returns null rather than adopting an unrelated rollout`(@TempDir tmp: Path) {
+        val home = tmp.resolve("home")
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val now = System.currentTimeMillis()
+
+        val unrelated = rollout(
+            home,
+            "rollout-2026-09-27T00-55-36-other-session.jsonl",
+            project.toAbsolutePath().normalize().toString(),
+            now,
+        )
+
+        val tailer = CodexTailer(home)
+        val context = RunContext(project, home, "missing-session-id", now)
+        assertNull(tailer.locate(context), "must not adopt another rollout when requested id is not found")
+        assertTrue(Files.exists(unrelated))
+    }
+
+    @Test
+    fun `headless codex exec rollouts are ignored when locating a fresh session`(@TempDir tmp: Path) {
+        val home = tmp.resolve("home")
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val now = System.currentTimeMillis()
+
+        rollout(
+            home,
+            "rollout-2026-09-27T00-55-36-exec-session.jsonl",
+            project.toAbsolutePath().normalize().toString(),
+            now,
+            source = "exec",
+            originator = "codex_exec",
+        )
+
+        val tailer = CodexTailer(home)
+        assertNull(
+            tailer.locate(RunContext(project, home, null, now)),
+            "interactive tailer must not adopt a headless exec rollout",
         )
     }
 }
