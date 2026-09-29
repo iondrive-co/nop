@@ -85,7 +85,9 @@ compose.desktop {
             // java.net.http carries the HttpClient the agent launcher reads account usage with;
             // without it the packaged app throws NoClassDefFoundError the first time it polls,
             // which the dev build never shows because a full JDK has the module anyway.
-            modules("java.management", "java.compiler", "jdk.compiler", "java.net.http")
+            // jdk.net is the same story for the peer-credential check on the socket the agents
+            // message each other through (agent/AgentSocket.kt); without it every message is refused.
+            modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net")
             packageName = "nop"
             packageVersion = "0.89.0"
             description = "Desktop editor and change reviewer"

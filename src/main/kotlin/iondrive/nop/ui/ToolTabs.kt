@@ -536,8 +536,11 @@ private fun SessionStrip(
                             if (selected) agentSession.watch()
                             onDispose { if (selected) agentSession.unwatch() }
                         }
-                        val activity = agentSession.activity
-                        val unseen = agentSession.unseen && !selected
+                        // A message from another agent waits on the user exactly as a question does,
+                        // so it is marked as one until it is delivered or discarded.
+                        val held = agentSession.inbox.any { !it.approved }
+                        val activity = if (held) Activity.Asking else agentSession.activity
+                        val unseen = (agentSession.unseen || held) && !selected
                         val colors = remember(isDark) { AgentStatusColors(isDark) }
                         val emphasis = if (unseen) colors.label(activity, isDark) ?: palette.selectedText else null
                         ToolStripTab(

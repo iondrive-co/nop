@@ -83,6 +83,8 @@ fun AgentPanel(
             onUpdateAccount = onUpdateAccount,
             onHandOver = { account -> selected.handOver(account) },
         )
+        // What other agents have sent this one, held until the user delivers or discards it.
+        AgentInbox(selected)
         if (showExit) {
             AgentExitPanel(
                 session = selected,

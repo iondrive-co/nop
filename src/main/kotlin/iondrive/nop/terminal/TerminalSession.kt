@@ -94,6 +94,27 @@ class TerminalSession private constructor(
     @Volatile
     var onUserInput: (() -> Unit)? = null
 
+    /**
+     * Whether the program's prompt may be holding text the user has not sent: something was typed,
+     * pasted, dropped or recalled since the last Enter. A message from another agent is submitted
+     * with Enter, which would send such a draft along with it as though it were one instruction, so
+     * the inbox warns while this holds.
+     *
+     * It errs towards yes. A prompt cleared with Ctrl+U or Esc still reads as holding a draft until
+     * the next Enter, because nop cannot see the prompt, and a warning nobody needed costs less than
+     * a half-written instruction going out under another agent's message. Compose state, so the
+     * warning comes and goes as the user types.
+     */
+    var draftPending: Boolean by mutableStateOf(false)
+        private set
+
+    /**
+     * Whether the program in the terminal has asked for bracketed paste (`ESC [ ? 2004 h`) and not
+     * turned it off since. Read off the output, because JediTerm keeps its own copy private.
+     */
+    @Volatile
+    private var bracketedPaste = false
+
     private var widget: JediTermWidget? = null
     private var settings: NopTerminalSettings? = null
     private var process: PtyProcess? = null
@@ -249,7 +270,12 @@ class TerminalSession private constructor(
      * Nothing happens if no process is running — there is nothing to type at.
      */
     fun sendText(text: String) {
+        noteDraft(text.toByteArray(Charsets.UTF_8))
         onUserInput?.invoke()
+        write(text)
+    }
+
+    private fun write(text: String) {
         val proc = process ?: return
         runCatching {
             val out = proc.outputStream
@@ -258,6 +284,40 @@ class TerminalSession private constructor(
         }
         SwingUtilities.invokeLater {
             (widget as? NopTerminalWidget)?.scrollToBottom()
+        }
+    }
+
+    /**
+     * Types [text] into the program's prompt and presses Enter, as one message however many lines
+     * it has. Must run on the AWT EDT, where the keyboard's own writes happen, so the two cannot
+     * interleave.
+     *
+     * A newline typed into a TUI's prompt is Enter, so a multi-line message goes in as a bracketed
+     * paste when the program has asked for those, and is joined onto one line when it has not. Enter
+     * follows after [SUBMIT_DELAY_MS] rather than in the same write: a TUI that decides what is a
+     * paste by how much arrives at once would otherwise take it for a newline inside the paste.
+     */
+    fun submit(text: String) {
+        // Nothing in the text may reach the program as anything but text: an ESC would let it end
+        // the paste early (`ESC [ 2 0 1 ~`) and carry on as keystrokes, and a bare CR or any other
+        // control byte is a key of its own. Its sender cleans it too (AgentMessages); this is the
+        // last line.
+        val safe = text.replace("\r\n", "\n").replace('\r', '\n').filter { it == '\n' || it == '\t' || !it.isISOControl() }
+        val body = if (bracketedPaste) {
+            "$PASTE_START$safe$PASTE_END"
+        } else {
+            // Unbracketed, a newline is Enter and a tab is Tab (completion, in most of these TUIs).
+            safe.trim().replace(LINE_BREAKS, " ").replace('\t', ' ')
+        }
+        onUserInput?.invoke()
+        write(body)
+        javax.swing.Timer(SUBMIT_DELAY_MS) {
+            write("\r")
+            // Enter sends the whole prompt, so whatever was in it has gone too.
+            draftPending = false
+        }.apply {
+            isRepeats = false
+            start()
         }
     }
 
@@ -374,14 +434,30 @@ class TerminalSession private constructor(
     private fun attach(w: JediTermWidget, proc: PtyProcess) {
         w.ttyConnector = PtyTtyConnector(
             process = proc,
-            tap = outputTap,
+            tap = { text ->
+                noteBracketedPaste(text)
+                outputTap?.invoke(text)
+            },
             inputTap = { bytes ->
+                noteDraft(bytes)
                 if (bytes.any { it == '\r'.code.toByte() || it == '\n'.code.toByte() }) {
                     onUserInput?.invoke()
                 }
             },
         )
         w.start()
+    }
+
+    /** Keeps [draftPending] up to date with [bytes] on their way to the program. */
+    private fun noteDraft(bytes: ByteArray) {
+        draftPending = draftAfter(draftPending, bytes)
+    }
+
+    /** The last word in [text] on bracketed paste wins; a switch split across two reads is missed. */
+    private fun noteBracketedPaste(text: String) {
+        val on = text.lastIndexOf(BRACKETED_PASTE_ON)
+        val off = text.lastIndexOf(BRACKETED_PASTE_OFF)
+        if (on > off) bracketedPaste = true else if (off > on) bracketedPaste = false
     }
 
     private fun killProcess() {
@@ -416,6 +492,55 @@ class TerminalSession private constructor(
     companion object {
         private const val INITIAL_COLUMNS = 80
         private const val INITIAL_ROWS = 24
+
+        /**
+         * Whether the prompt may hold a draft after [bytes] reach the program, given whether it did
+         * before. An Enter sends what was there; anything after the last Enter is new draft, unless
+         * all of it is the terminal answering the program rather than the user — see
+         * [isTerminalReport].
+         */
+        internal fun draftAfter(before: Boolean, bytes: ByteArray): Boolean {
+            if (bytes.isEmpty() || isTerminalReport(bytes)) return before
+            val enter = bytes.lastIndexOf('\r'.code.toByte())
+            if (enter < 0) return true
+            return enter < bytes.size - 1 && !isTerminalReport(bytes.copyOfRange(enter + 1, bytes.size))
+        }
+
+        /**
+         * Whether [bytes] are JediTerm replying to something the program asked it — the cursor's
+         * position, the device's attributes, a mode's state, a colour, focus coming and going — or a
+         * mouse report. None of those put anything in a prompt. Keys that do (arrows recalling
+         * history, Alt+letters) are escape sequences too, and are not in this list.
+         */
+        internal fun isTerminalReport(bytes: ByteArray): Boolean {
+            if (bytes.size < 2 || bytes[0] != ESC) return false
+            val text = String(bytes, Charsets.ISO_8859_1)
+            return REPORTS.any { it.matches(text) }
+        }
+
+        private val REPORTS = listOf(
+            Regex("""\u001b\[\d+;\d+R"""),                  // cursor position
+            Regex("""\u001b\[[?>=][\d;]*c"""),               // device attributes
+            Regex("""\u001b\[\??[\d;]*\${'$'}y"""),              // mode state (DECRPM)
+            Regex("""\u001b\[\d*n"""),                        // status
+            Regex("""\u001b\[[IO]"""),                          // focus in / out
+            Regex("""\u001b\[\?\d*u"""),                       // keyboard protocol flags
+            Regex("""\u001b\[[\d;]*t"""),                      // window reports
+            Regex("""\u001b\[<[\d;]*[Mm]"""),                  // SGR mouse
+            Regex("""\u001b\[M[\s\S]{3}"""),                   // X10 mouse
+            Regex("""\u001b\][\s\S]*(\u0007|\u001b\\)"""),   // OSC reply (colours, ...)
+            Regex("""\u001bP[\s\S]*\u001b\\"""),                  // DCS reply
+        )
+
+        private const val ESC: Byte = 0x1b
+        private const val BRACKETED_PASTE_ON = "\u001b[?2004h"
+        private const val BRACKETED_PASTE_OFF = "\u001b[?2004l"
+        private const val PASTE_START = "\u001b[200~"
+        private const val PASTE_END = "\u001b[201~"
+        private val LINE_BREAKS = Regex("""\s*\R\s*""")
+
+        /** Between the text of a [submit] and its Enter. */
+        private const val SUBMIT_DELAY_MS = 250
 
         val DEFAULT_BG: Color = Color(0x1E, 0x1F, 0x22)
         val DEFAULT_FG: Color = Color(0xDF, 0xE1, 0xE5)

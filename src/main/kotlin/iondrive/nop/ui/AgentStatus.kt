@@ -248,6 +248,9 @@ internal fun rememberNow(period: Long = 30_000L): Long {
 data class ProjectAgentNews(val activity: Activity, val unseen: Boolean)
 
 fun projectAgentNews(sessions: List<iondrive.nop.agent.AgentSession>): ProjectAgentNews? {
+    // A message from another agent, held for the user, needs them as a question does.
+    val held = sessions.filter { s -> s.inbox.any { !it.approved } }
+    if (held.isNotEmpty()) return ProjectAgentNews(Activity.Asking, unseen = true)
     val asking = sessions.filter { it.activity == Activity.Asking }
     if (asking.isNotEmpty()) return ProjectAgentNews(Activity.Asking, asking.any { it.unseen })
     val stopped = sessions.firstOrNull { it.unseen && (it.activity == Activity.Idle || it.activity == Activity.Ended) }

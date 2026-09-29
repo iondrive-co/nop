@@ -195,6 +195,25 @@ class AgentSession(
 ) : TerminalTab {
 
     /**
+     * What this tab's runs carry in their environment to prove to [AgentSocket] which tab they are.
+     * One per tab, kept across handovers and reopens, so the id other agents reply to stays the same
+     * however many runs the tab goes through. Declared ahead of [run], whose first run is started
+     * while the rest of this class is still being built.
+     */
+    val agentTicket: String = AgentSocket.newTicket()
+
+    /** The id other agents address this tab by: the start of [sessionId], which names its log files too. */
+    val shortId: String get() = sessionId.take(8)
+
+    /**
+     * Messages other agents have sent this tab, waiting for the user to deliver or discard them —
+     * see [AgentMessages]. Compose state: the tab's inbox and its mark in the strip are drawn from it.
+     * Kept for the life of the tab and never written down; a message is not worth more than the
+     * nop it was sent to.
+     */
+    val inbox = androidx.compose.runtime.mutableStateListOf<AgentMessages.Held>()
+
+    /**
      * What happened in this session, in a vocabulary neither vendor uses — which is what makes a
      * handoff between them possible at all. Written by the tailer, and by the terminal tap while a
      * run has produced no transcript event yet.
@@ -866,8 +885,9 @@ class AgentSession(
         val titles = TitleReader()
         val terminal = TerminalSession.agent(
             command = command.argv,
-            // Marked as nop's, so a nop the agent starts can tell it would be reaching into this one.
-            env = command.env + (SingleInstance.INSIDE_AGENT_ENV to sessionId),
+            // Marked as nop's, so a nop the agent starts can tell it would be reaching into this one,
+            // and given what `nop-msg` needs to message the other tabs.
+            env = command.env + (SingleInstance.INSIDE_AGENT_ENV to sessionId) + AgentSocket.runEnv(agentTicket),
             dir = projectDir,
             title = account.name,
             // Three jobs, one copy of the output, and none of them touches what is drawn. The

@@ -83,6 +83,10 @@ object AgentSessionStore {
         return byRoot.values.firstOrNull { key in it.projects }?.sessions?.sessions.orEmpty()
     }
 
+    /** Every agent session in every project, for the agents that message each other — see [AgentMessages]. */
+    @Synchronized
+    fun all(): List<AgentSession> = byRoot.values.flatMap { it.sessions.sessions }
+
     /**
      * Kills the sessions of every project no window has a tab on any more.
      *
