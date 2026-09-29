@@ -57,6 +57,10 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isShiftPressed as isPointerShiftPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.SpanStyle
@@ -517,12 +521,29 @@ private fun DiffRowsList(
     val requestStructural: ((Int, StructuralEdit) -> Boolean)? = onStructuralEdit?.let { fn ->
         { line, op -> fn(line, op)?.also { pendingFocus = it } != null }
     }
-    // The first row of each hunk, so we can hang a single revert chip off a hunk's top line.
+    // Every changed row maps to its hunk so a revert button is offered on each changed line.
     val hunks = remember(result) { hunkRanges(result.rows) }
-    val firstRowToHunk = remember(hunks) { hunks.indices.associateBy { hunks[it].first } }
-    val revertAt: (Int) -> (() -> Unit)? = { rowIndex ->
-        val hunkId = firstRowToHunk[rowIndex]
-        if (hunkId != null && onRevertHunk != null) ({ onRevertHunk(hunks[hunkId]) }) else null
+    val hunkOfRow = remember(result.rows, hunks) {
+        val map = arrayOfNulls<IntRange>(result.rows.size)
+        for (hunk in hunks) {
+            for (r in hunk) {
+                map[r] = hunk
+            }
+        }
+        map
+    }
+    val revertAt: (Int) -> RowRevert? = { rowIndex ->
+        if (onRevertHunk == null) null
+        else {
+            val hunk = hunkOfRow.getOrNull(rowIndex)
+            if (hunk != null) {
+                RowRevert(
+                    onRevertLine = { onRevertHunk(rowIndex..rowIndex) },
+                    onRevertHunk = { onRevertHunk(hunk) },
+                    isMultiLineHunk = hunk.last > hunk.first,
+                )
+            } else null
+        }
     }
 
     DiffListScaffold(
@@ -741,24 +762,56 @@ private fun ActionChip(
     }
 }
 
+internal class RowRevert(
+    val onRevertLine: () -> Unit,
+    val onRevertHunk: () -> Unit,
+    val isMultiLineHunk: Boolean,
+)
+
 @OptIn(ExperimentalJewelApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HunkRevertButton(
     modifier: Modifier = Modifier,
-    onClick: () -> Unit,
+    isMultiLineHunk: Boolean,
+    onRevertLine: () -> Unit,
+    onRevertHunk: () -> Unit,
 ) {
     val isDark = JewelTheme.isDark
     val bg = if (isDark) Color(0xFF2B2D30) else Color(0xFFFFFFFF)
     val borderCol = if (isDark) Color(0xFF4E5157) else Color(0xFFD1D2D4)
     val iconCol = if (isDark) Color(0xFF8C9098) else Color(0xFF6C707E)
 
-    Tooltip(tooltip = { Text("Revert hunk (apply from HEAD)") }) {
+    val tooltipText = if (isMultiLineHunk) {
+        "Revert line (apply from HEAD) · Shift+click to revert hunk"
+    } else {
+        "Revert line (apply from HEAD)"
+    }
+
+    var lastShiftPressed by remember { mutableStateOf(false) }
+
+    Tooltip(tooltip = { Text(tooltipText) }) {
         Box(
             modifier = modifier
                 .size(16.dp)
                 .background(bg, RoundedCornerShape(3.dp))
                 .border(0.5.dp, borderCol, RoundedCornerShape(3.dp))
-                .clickable(onClick = onClick),
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type == PointerEventType.Press) {
+                                lastShiftPressed = event.keyboardModifiers.isPointerShiftPressed
+                            }
+                        }
+                    }
+                }
+                .clickable {
+                    if (lastShiftPressed && isMultiLineHunk) {
+                        onRevertHunk()
+                    } else {
+                        onRevertLine()
+                    }
+                },
             contentAlignment = Alignment.Center,
         ) {
             DisableSelection {
@@ -821,7 +874,6 @@ private fun MergeLineRow(
             onResolveAt = onResolveAt,
             onJump = onJump,
             modifier = diffHalf(DiffSide.NEW),
-            selectable = false,
         )
     }
 }
@@ -853,7 +905,7 @@ private fun DiffBlockView(
     density: Density,
     editor: BlockEditor?,
     currentFile: File,
-    revertAt: (Int) -> (() -> Unit)?,
+    revertAt: (Int) -> RowRevert?,
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
 ) {
@@ -908,7 +960,6 @@ private fun DiffBlockView(
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                     modifier = diffHalf(DiffSide.NEW),
-                    selectable = false,
                 )
             }
         }
@@ -927,7 +978,9 @@ private fun DiffBlockView(
                     } else {
                         Modifier.align(Alignment.TopCenter).offset(y = y)
                     },
-                    onClick = revert,
+                    isMultiLineHunk = revert.isMultiLineHunk,
+                    onRevertLine = revert.onRevertLine,
+                    onRevertHunk = revert.onRevertHunk,
                 )
             }
         }
@@ -979,7 +1032,7 @@ private fun ReadOnlyBlockHalf(
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
-                    .padding(end = LINE_END_PAD)
+                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp, end = LINE_END_PAD)
                     // After the padding, so the squiggles are placed in the text's own coordinates.
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     // Ctrl-click resolves against the whole block's text — JumpResolver reads the
@@ -1277,8 +1330,17 @@ private fun BlockHalfFrame(
             .then(if (wrap) Modifier else Modifier.drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) }),
         verticalAlignment = Alignment.Top,
     ) {
-        BlockGutter(numbers, lineHeights)
-        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
+        val gutter = @Composable { BlockGutter(numbers, lineHeights) }
+        val content = @Composable {
+            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
+        }
+        if (side == DiffSide.OLD) {
+            content()
+            gutter()
+        } else {
+            gutter()
+            content()
+        }
     }
 }
 

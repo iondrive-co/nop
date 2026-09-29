@@ -34,6 +34,13 @@ import java.security.SecureRandom
  * to the old running code.
  */
 object SingleInstance {
+    /**
+     * Set in the environment of every agent CLI nop runs, to that tab's session id. A nop started
+     * with it set was started by an agent — see `main`, which will not let one reach the nop it is
+     * running inside.
+     */
+    const val INSIDE_AGENT_ENV = "NOP_AGENT_SESSION"
+
     private const val SIDECAR_RELATIVE = "nop/instance"
     private const val LOOPBACK = "127.0.0.1"
     private const val CONNECT_TIMEOUT_MS = 500
@@ -100,6 +107,16 @@ object SingleInstance {
             runCatching { Files.deleteIfExists(sidecar) }
             false
         }
+    }
+
+    /**
+     * Whether a primary is running for [configRoot]: its sidecar is there and names a live process.
+     * Asks the primary nothing, so it cannot be mistaken for a launch.
+     */
+    fun isRunning(configRoot: Path): Boolean {
+        val info = readSidecar(configRoot.resolve(SIDECAR_RELATIVE)) ?: return false
+        val pid = info.pid ?: return true
+        return runCatching { ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }.getOrDefault(true)
     }
 
     /**

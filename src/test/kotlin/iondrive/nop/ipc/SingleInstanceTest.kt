@@ -145,4 +145,23 @@ class SingleInstanceTest {
             handle.close()
         }
     }
+
+    @Test
+    fun `isRunning is true for a live primary and false once it has gone`(@TempDir tmp: Path) {
+        assertFalse(SingleInstance.isRunning(tmp), "no sidecar, nothing running")
+        val handle = SingleInstance.bind(tmp, onOpen = {}, onFocus = {}) ?: error("bind failed")
+        try {
+            assertTrue(SingleInstance.isRunning(tmp))
+        } finally {
+            handle.close()
+        }
+        assertFalse(SingleInstance.isRunning(tmp))
+    }
+
+    @Test
+    fun `a sidecar left by a dead primary does not count as running`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve("nop"))
+        Files.writeString(tmp.resolve("nop/instance"), "port=1\ntoken=abc\npid=2147483000\n")
+        assertFalse(SingleInstance.isRunning(tmp))
+    }
 }

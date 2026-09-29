@@ -12,6 +12,7 @@ import iondrive.nop.agent.transcript.LiveTranscripts
 import iondrive.nop.agent.transcript.RunContext
 import iondrive.nop.agent.transcript.Tailer
 import iondrive.nop.agent.transcript.TranscriptFollower
+import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalTab
 import java.awt.Color
@@ -865,7 +866,8 @@ class AgentSession(
         val titles = TitleReader()
         val terminal = TerminalSession.agent(
             command = command.argv,
-            env = command.env,
+            // Marked as nop's, so a nop the agent starts can tell it would be reaching into this one.
+            env = command.env + (SingleInstance.INSIDE_AGENT_ENV to sessionId),
             dir = projectDir,
             title = account.name,
             // Three jobs, one copy of the output, and none of them touches what is drawn. The

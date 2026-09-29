@@ -269,7 +269,6 @@ private fun ReadOnlyDiffRowView(row: DiffRow, rowIndex: Int) {
             inlineHighlight = diffColors.inlineWordBg,
             rowIndex = rowIndex,
             modifier = diffHalf(DiffSide.NEW),
-            selectable = false,
         )
     }
 }

@@ -65,9 +65,7 @@ import org.jetbrains.jewel.ui.ComponentStyling
 import org.jetbrains.jewel.ui.component.styling.LocalMenuStyle
 import java.awt.Frame
 import java.io.File
-import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.Paths
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
@@ -83,12 +81,35 @@ private const val PROJECT_GIT_POLL_MS = 3000L
 
 @OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
+    // Before anything that can reach a running nop, or even write to its log: a launch that was
+    // only asking what nop takes must not be one that restarts it. See [LaunchArgs].
+    val argPaths = when (val launch = LaunchArgs.parse(args)) {
+        is LaunchArgs.Open -> launch.projects
+        LaunchArgs.Help -> {
+            println(LaunchArgs.USAGE)
+            exitProcess(0)
+        }
+        is LaunchArgs.Invalid -> {
+            System.err.println("nop: ${launch.why}\n\n${LaunchArgs.USAGE}")
+            exitProcess(2)
+        }
+    }
+
+    // An agent in one of nop's own tabs has no business driving the nop it runs in: forwarding
+    // raises the user's windows, and a launch from a fresh build quits it, killing that agent and
+    // every other. A nop of its own, with its own XDG_CONFIG_HOME, has no sidecar here to find.
+    if (System.getenv(SingleInstance.INSIDE_AGENT_ENV) != null && SingleInstance.isRunning(Settings.configRoot)) {
+        System.err.println(
+            "nop: refusing to start from inside one of nop's agent tabs while nop is running with this " +
+                "config (${Settings.configRoot.resolve("nop")}): it would take over the running nop, or " +
+                "restart it and end every agent tab. Give this one its own XDG_CONFIG_HOME and XDG_DATA_HOME.",
+        )
+        exitProcess(2)
+    }
+
     // First thing, before any UI: route uncaught throwables to ~/.config/nop/nop.log. Without this
     // a crash on the AWT thread takes the window down and leaves no trace anywhere findable.
     Log.install(args)
-
-    val argPaths = args.map { Paths.get(it).toAbsolutePath().normalize() }
-        .filter { Files.isDirectory(it) }
 
     // If another nop is already running, hand the requested paths off to it (or just ask it
     // to come to the foreground when no paths were supplied) and exit. The primary owns every

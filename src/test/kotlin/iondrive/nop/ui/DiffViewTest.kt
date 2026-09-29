@@ -311,6 +311,55 @@ class DiffViewTest {
     }
 
     @Test
+    fun `revertHunk reverts a single line in a multi-line hunk`() {
+        // Multi-line change: revert only line 2 (index 1)
+        val rows = listOf(
+            equal("a", 1),
+            change("b", "B", 2, 2),
+            change("c", "C", 3, 3),
+            equal("d", 4),
+        )
+        // Reverting only row 1 ("b" -> "B") keeps row 2's "C"
+        assertEquals("a\nb\nC\nd\n", revertHunk(rows, 1..1, trailingNewline = true))
+        // Reverting only row 2 ("c" -> "C") keeps row 1's "B"
+        assertEquals("a\nB\nc\nd\n", revertHunk(rows, 2..2, trailingNewline = true))
+        // Reverting the whole hunk (1..2) reverts both
+        assertEquals("a\nb\nc\nd\n", revertHunk(rows, 1..2, trailingNewline = true))
+    }
+
+    @Test
+    fun `revertHunk drops a single inserted line in a multi-line insertion`() {
+        val rows = listOf(
+            equal("a", 1),
+            insert("b", 2),
+            insert("c", 3),
+            equal("d", 4),
+        )
+        // Reverting only row 1 drops "b" and keeps "c"
+        assertEquals("a\nc\nd\n", revertHunk(rows, 1..1, trailingNewline = true))
+        // Reverting only row 2 drops "c" and keeps "b"
+        assertEquals("a\nb\nd\n", revertHunk(rows, 2..2, trailingNewline = true))
+        // Reverting whole hunk drops both
+        assertEquals("a\nd\n", revertHunk(rows, 1..2, trailingNewline = true))
+    }
+
+    @Test
+    fun `revertHunk restores a single deleted line in a multi-line deletion`() {
+        val rows = listOf(
+            equal("a", 1),
+            delete("b", 2),
+            delete("c", 3),
+            equal("d", 2),
+        )
+        // Reverting only row 1 restores "b" without "c"
+        assertEquals("a\nb\nd\n", revertHunk(rows, 1..1, trailingNewline = true))
+        // Reverting only row 2 restores "c" without "b"
+        assertEquals("a\nc\nd\n", revertHunk(rows, 2..2, trailingNewline = true))
+        // Reverting whole hunk restores both
+        assertEquals("a\nb\nc\nd\n", revertHunk(rows, 1..2, trailingNewline = true))
+    }
+
+    @Test
     fun `applyStructuralEdit merges a line into the one above`() {
         val (text, focus) = applyStructuralEdit("alpha\nbeta\ngamma", 2, StructuralEdit.MERGE_PREV)!!
         assertEquals("alphabeta\ngamma", text)
