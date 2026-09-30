@@ -5,7 +5,6 @@ import iondrive.nop.Settings
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -15,11 +14,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * One configured vendor account: a name, the provider it belongs to, and the directory holding its
  * credentials.
  *
- * [home] is stored rather than derived from [name]. Deriving it would be tidier right up until the
- * first launch, which would then want a login nop could have inherited: the accounts already set
- * up on this machine live under `~/.chad/claude-configs/<name>` and `~/.chad/codex-homes/<name>`,
- * and pointing at them costs nothing and saves signing every one of them in again. It also keeps
- * nop from having an opinion about where someone else's credentials belong.
+ * [home] is stored rather than derived from [name], because a home is not only a login: Claude Code
+ * files every conversation an account has had under it, and moving one is a decision, not a
+ * rename. A new account's home is made under nop's own data directory ([Accounts.defaultHome]).
  *
  * [model] and [reasoning] are null when the CLI's own default should apply — that is what the
  * "default" entry in the pickers means, and it is why neither is an empty string.
@@ -84,15 +81,9 @@ fun List<Account>.handoverTarget(from: Account): Account? {
 /**
  * Every account nop knows about.
  *
- * There is deliberately no passphrase here, and the predecessor's is not carried over. chad
- * prompted for one at startup, but tracing it through the source shows it unlocked nothing: the
- * password it verified was handed to `launch_cli_ui(password=…)`, whose own docstring calls it
- * "unused, kept for compatibility"; the one encrypted per-account field was written as an empty
- * string with an empty password for every OAuth account; and the function that decrypted it had no
- * callers.
- *
- * A gate on nop would be weaker still than that. Every credential in play belongs to a vendor CLI
- * that reads it straight off disk, so anyone who can reach this machine can run `claude` in a
+ * There is deliberately no passphrase here: a gate on nop would protect nothing. Every credential
+ * in play belongs to a vendor CLI that reads it straight off disk, so anyone who can reach the
+ * machine can run `claude` in a
  * terminal and be signed in as you without nop's involvement. A prompt in front of nop's own UI
  * would buy the appearance of protection and none of it.
  */
@@ -149,7 +140,7 @@ object Accounts {
 
     /**
      * The stored config, or — the first time, when there is no file yet — one seeded from whatever
-     * vendor logins are already on this machine ([discover]). Nothing is written by looking: a user
+     * vendor logins are already on the machine ([discover]). Nothing is written by looking: a user
      * who wants none of the discovered accounts should not have to delete a file they never made.
      */
     fun load(): AgentConfig {
@@ -182,66 +173,17 @@ object Accounts {
     }
 
     /**
-     * The accounts to start from, the first time nop is asked and has no config of its own.
-     *
-     * Read from `~/.chad.conf` — the list its predecessor's user actually curated — and not from
-     * whatever directories happen to exist. Scanning `~/.chad/claude-configs` and
-     * `~/.chad/codex-homes` was the obvious thing and the wrong one: those hold every home ever
-     * made, abandoned experiments and one-off test accounts included, so the picker opened on
-     * fifteen entries of which four were real. A directory is not an account; a configured account
-     * is. Only the name, provider and model settings are read — the encrypted key beside them is
-     * never touched, because nop has no use for it and no way to read it.
-     *
-     * With no chad on the machine, the fallback is the CLI's own default login: the one you get
-     * from running `claude` or `codex` in a plain terminal.
+     * The accounts to start from, the first time nop is asked and has no config of its own: the
+     * CLIs' own default logins, the ones you get from running `claude` or `codex` in a plain
+     * terminal.
      *
      * A one-time seed, not a live view. Once [save] has written a config, that file is the list,
      * and an account the user deleted must stay deleted.
      */
-    fun discover(): List<Account> {
-        val home = Path.of(System.getProperty("user.home"))
-        return fromChadConfig(home).ifEmpty { defaultLogins(home) }
-    }
-
-    /** The accounts `~/.chad.conf` declares, for the providers nop can actually run. */
-    private fun fromChadConfig(home: Path): List<Account> {
-        val file = home.resolve(".chad.conf")
-        if (!Files.isRegularFile(file)) return emptyList()
-        val accounts = runCatching {
-            Json.parseToJsonElement(Files.readString(file)).jsonObject["accounts"].obj()
-        }.getOrNull() ?: return emptyList()
-
-        return accounts.mapNotNull { (name, value) ->
-            val entry = value.obj() ?: return@mapNotNull null
-            // Anything nop cannot run is silently left out rather than listed and then refused.
-            // chad also configured qwen, kimi and a local llama-server, none of which nop launches.
-            val provider = Provider.byId(entry["provider"].str()) ?: return@mapNotNull null
-            Account(
-                name = name,
-                provider = provider,
-                home = chadHome(home, provider, name).toString(),
-                model = entry["model"].str()?.takeIf { it != DEFAULT_CHOICE },
-                reasoning = entry["reasoning"].str()?.takeIf { it != DEFAULT_CHOICE },
-            )
-        }.sortedBy { it.name }
-    }
+    fun discover(): List<Account> = defaultLogins(Path.of(System.getProperty("user.home")))
 
     /**
-     * Where chad kept each provider's per-account credentials.
-     *
-     * The antigravity homes are the odd ones: chad could not point the CLI at a credential file, so
-     * it kept its own copy as `credential.json` at the root of the home and wrote it into the
-     * keyring before each run. Pointing at the same home is still right — [Antigravity] moves that
-     * copy to where `agy` now reads it, which is what saves signing the account in again.
-     */
-    private fun chadHome(home: Path, provider: Provider, name: String): Path = when (provider) {
-        Provider.Anthropic -> home.resolve(".chad/claude-configs").resolve(name)
-        Provider.OpenAI -> home.resolve(".chad/codex-homes").resolve(name)
-        Provider.Antigravity -> home.resolve(".chad/antigravity-homes").resolve(name)
-    }
-
-    /**
-     * This machine's own vendor logins. Offered only when they exist, so a CLI that has never been
+     * The CLIs' own default logins. Offered only when they exist, so a CLI that has never been
      * signed in doesn't arrive as an account that cannot be launched.
      */
     private fun defaultLogins(home: Path): List<Account> = listOf(

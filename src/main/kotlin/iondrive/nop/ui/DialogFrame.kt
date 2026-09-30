@@ -79,8 +79,8 @@ fun DialogFrame(
     val currentOnClose by rememberUpdatedState(onClose)
     val currentOnSubmit by rememberUpdatedState(onSubmit)
     // Compose can size a window to its content itself, but measures that content at an unbounded
-    // width, so text that wraps in the real window came out a line or two short and the buttons
-    // under it were cut off. So the height is fitted here, from the content as laid out at the
+    // width, so text that wraps in the real window would come out a line or two short and cut off
+    // the buttons under it. So the height is fitted here, from the content as laid out at the
     // window's own width; until then it is a guess.
     val fitsContent = !size.height.isSpecified
     val state = rememberDialogState(size = if (fitsContent) DpSize(size.width, 200.dp) else size)

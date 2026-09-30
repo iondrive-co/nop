@@ -170,8 +170,8 @@ class IndexerTest {
         )
 
         val index = Indexer.build(tmp)
-        // The members are the point: the line regex Java used to share with Kotlin saw the class
-        // and nothing inside it, so Ctrl-clicking a method name resolved to nothing.
+        // The members are the point: a line regex sees the class and nothing inside it, so
+        // Ctrl-clicking a method name would resolve to nothing.
         assertEquals(SymbolKind.JAVA_TYPE, index.lookup("Greeter").single().kind)
         assertEquals(SymbolKind.JAVA_METHOD, index.lookup("greet").single().kind)
         assertEquals(SymbolKind.JAVA_FIELD, index.lookup("name").single().kind)
@@ -253,6 +253,18 @@ class IndexerTest {
         // A freshly-touched file under node_modules must not count as a project change.
         junk.toFile().setLastModified(future)
         junk.parent.toFile().setLastModified(future)
+        assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
+    }
+
+    @Test fun `isStale ignores churn behind a link out of the project`(@TempDir tmp: Path, @TempDir share: Path) {
+        tmp.resolve("a.kt").writeText("x\n")
+        val live = share.resolve("bulk/rows.json")
+        live.parent.createDirectories(); live.writeText("{}\n")
+        java.nio.file.Files.createSymbolicLink(tmp.resolve("data"), share.resolve("bulk"))
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        // A recorder writing to the share must not make the project look changed.
+        live.toFile().setLastModified(future)
+        live.parent.toFile().setLastModified(future)
         assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
     }
 }

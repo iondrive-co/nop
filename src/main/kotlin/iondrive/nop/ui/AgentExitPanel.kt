@@ -89,11 +89,10 @@ fun AgentExitPanel(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Two ways back onto the same account, because they are different things and only one
-            // of them used to be here. "Resume" lands in the conversation that just ended; "New
+            // Two ways back onto the same account, because they are different things. "Resume" lands in the conversation that just ended; "New
             // session" starts the CLI as a fresh shell would. A session that ended *because* it was
             // stuck, or because its work was done, wants the second one, and offering only the
-            // first made switching provider the sole way to get it.
+            // first would make switching provider the sole way to get it.
             //
             // Resuming needs the vendor's own session id, and a run whose transcript was never
             // located hasn't got one — so with nothing to resume, the fresh start is the only

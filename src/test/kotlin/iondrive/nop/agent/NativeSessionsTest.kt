@@ -29,9 +29,9 @@ class NativeSessionsTest {
 
     /**
      * A CLI left open at its prompt goes on touching its transcript — housekeeping records, file
-     * history — long after the conversation stopped. Dating the row by the file's mtime put a
+     * history — long after the conversation stopped. Dating the row by the file's mtime would put a
      * `claude` somebody started in a terminal two days ago and never closed at the top of the
-     * picker, over the session they were in an hour ago, which is the one they were looking for.
+     * picker, over the session they were in an hour ago, which is the one they are looking for.
      */
     @Test
     fun `a stale conversation an idle CLI keeps touching does not float to the top`(@TempDir tmp: Path) {
@@ -48,8 +48,8 @@ class NativeSessionsTest {
         val recent = dir.resolve("bbbb-recent.jsonl")
         Files.writeString(
             recent,
-            prompt("close plan 40", "2026-09-20T09:00:00.000Z") + "\n" +
-                title("Plan 40 completion check", "2026-09-20T09:00:05.000Z") + "\n",
+            prompt("close task 40", "2026-09-20T09:00:00.000Z") + "\n" +
+                title("Task 40 completion check", "2026-09-20T09:00:05.000Z") + "\n",
         )
         // The week-old one is the file the operating system calls newest, because its CLI is still
         // sitting there with it open.
@@ -59,7 +59,7 @@ class NativeSessionsTest {
         val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("outside nop", store)))
 
         assertEquals(
-            listOf("Plan 40 completion check", "Remove pre-commit hooks"),
+            listOf("Task 40 completion check", "Remove pre-commit hooks"),
             rows.map { it.title },
             "the picker orders by what each conversation last did, not by what touched its file",
         )
@@ -119,7 +119,7 @@ class NativeSessionsTest {
             prompt("why is the build slow", "2026-09-16T02:00:00.000Z") + "\n",
         )
 
-        val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("claude-work", store)))
+        val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("claude-main", store)))
 
         assertEquals("why is the build slow", rows.single().title)
     }
@@ -163,22 +163,22 @@ class NativeSessionsTest {
 
         val rows = NativeSessions.claude(
             project,
-            listOf(NativeSessions.Store("claude-work", work), NativeSessions.Store("claude-home", personal)),
+            listOf(NativeSessions.Store("claude-main", work), NativeSessions.Store("claude-home", personal)),
         )
 
         assertEquals(listOf("newer", "older"), rows.map { it.title })
-        assertEquals(listOf("claude-home", "claude-work"), rows.map { it.lastAccount })
+        assertEquals(listOf("claude-home", "claude-main"), rows.map { it.lastAccount })
     }
 
     /**
-     * The hermes session of 2026-09-19: begun at 14:20, worked in until 18:59, and listed as "5h ago"
-     * beneath sessions begun after it, however long ago they were last touched. When a conversation
-     * last did anything is what the picker sorts by and shows.
+     * A session begun at 14:20 and worked in until 18:59 must not be listed as "5h ago" beneath
+     * sessions begun after it, however long ago they were last touched: when a conversation last did
+     * anything is what the picker sorts by and shows.
      *
      * Each transcript here carries a record at the time it was last worked in, because that is what
-     * a transcript worked in until 18:59 looks like. The fixture used to say the same thing with
-     * the files' mtimes alone, which was the one part of it that was not true of a real store: see
-     * the idle-CLI case above, where the mtime goes on moving long after the conversation stopped.
+     * a transcript worked in until 18:59 looks like. The files' mtimes alone would not be true of a
+     * real store: see the idle-CLI case above, where the mtime goes on moving long after the
+     * conversation stopped.
      */
     @Test
     fun `a session is listed by when it was last active, not when it began`(@TempDir tmp: Path) {
@@ -187,12 +187,12 @@ class NativeSessionsTest {
         val dir = slugDir(store, project)
         Files.writeString(
             dir.resolve("aaaa-1420.jsonl"),
-            prompt("LIQFADE", "2026-09-19T04:20:52.000Z") + "\n" +
+            prompt("BACKFILL", "2026-09-19T04:20:52.000Z") + "\n" +
                 prompt("and again", "2026-09-19T08:59:40.000Z") + "\n",
         ).also { touch(it, "2026-09-19T08:59:40Z") }
         Files.writeString(
             dir.resolve("bbbb-1901.jsonl"),
-            prompt("Plan 36", "2026-09-19T09:01:07.000Z") + "\n" +
+            prompt("Task 36", "2026-09-19T09:01:07.000Z") + "\n" +
                 prompt("and again", "2026-09-19T09:02:00.000Z") + "\n",
         ).also { touch(it, "2026-09-19T09:02:00Z") }
         Files.writeString(
@@ -203,7 +203,7 @@ class NativeSessionsTest {
 
         val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("s", store)))
 
-        assertEquals(listOf("Plan 36", "LIQFADE", "brief"), rows.map { it.title })
+        assertEquals(listOf("Task 36", "BACKFILL", "brief"), rows.map { it.title })
         assertEquals(java.time.Instant.parse("2026-09-19T08:59:40Z").toEpochMilli(), rows[1].lastActiveAt)
         assertEquals(java.time.Instant.parse("2026-09-19T04:20:52Z").toEpochMilli(), rows[1].startedAt)
     }
@@ -240,14 +240,14 @@ class NativeSessionsTest {
     @Test
     fun `the default config directory is added when no account already is it`() {
         val configured = listOf(
-            Account("claude-work", Provider.Anthropic, "/homes/work"),
+            Account("claude-main", Provider.Anthropic, "/homes/work"),
             Account("codex", Provider.OpenAI, "/homes/codex"),
         )
 
         val stores = NativeSessions.stores(configured)
 
         assertEquals(
-            listOf("claude-work", NativeSessions.DEFAULT_STORE_LABEL),
+            listOf("claude-main", NativeSessions.DEFAULT_STORE_LABEL),
             stores.map { it.label },
             "Codex keeps no projects/ directory, and the default store is what nop never launches",
         )

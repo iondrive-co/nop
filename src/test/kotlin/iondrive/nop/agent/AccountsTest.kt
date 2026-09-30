@@ -135,7 +135,7 @@ class AccountsTest {
     }
 
     @Test
-    fun `providers are stored under the names chad used`(@TempDir tmp: Path) {
+    fun `providers are stored under stable names`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         Accounts.save(AgentConfig(listOf(Account("a", Provider.Anthropic, "/h"))))
 
@@ -188,104 +188,7 @@ class AccountsTest {
         )
     }
 
-    /**
-     * The seed list is what the user curated, not what is lying around. Scanning the home
-     * directories was the obvious approach and the wrong one: those hold every account ever made,
-     * so the picker opened on fifteen entries of which four were real.
-     */
-    @Test
-    fun `discovery takes the accounts chad had configured`(@TempDir tmp: Path) {
-        chadConfig(
-            tmp,
-            """
-            {"accounts": {
-              "claude-main": {"provider": "anthropic", "key": "encrypted", "model": "default", "reasoning": "default"},
-              "codex-main": {"provider": "openai", "key": "encrypted", "model": "gpt-5.5", "reasoning": "high"}
-            }}
-            """.trimIndent(),
-        )
-        // A home that exists but was never in the config — an abandoned experiment.
-        Files.createDirectories(tmp.resolve(".chad/claude-configs/left-over"))
-        Files.writeString(tmp.resolve(".chad/claude-configs/left-over/.credentials.json"), "{}")
-
-        val found = withHome(tmp) { Accounts.discover() }
-
-        assertEquals(listOf("claude-main", "codex-main"), found.map { it.name })
-        assertEquals(
-            tmp.resolve(".chad/claude-configs/claude-main").toString(),
-            found.first { it.name == "claude-main" }.home,
-        )
-        assertEquals(
-            tmp.resolve(".chad/codex-homes/codex-main").toString(),
-            found.first { it.name == "codex-main" }.home,
-        )
-    }
-
-    @Test
-    fun `a configured model and reasoning come across, and the default choice means neither`(@TempDir tmp: Path) {
-        chadConfig(
-            tmp,
-            """
-            {"accounts": {
-              "plain": {"provider": "anthropic", "model": "default", "reasoning": "default"},
-              "tuned": {"provider": "openai", "model": "gpt-5.5", "reasoning": "high"}
-            }}
-            """.trimIndent(),
-        )
-
-        val found = withHome(tmp) { Accounts.discover() }.associateBy { it.name }
-
-        assertNull(found["plain"]!!.model)
-        assertNull(found["plain"]!!.reasoning)
-        assertEquals("gpt-5.5", found["tuned"]!!.model)
-        assertEquals("high", found["tuned"]!!.reasoning)
-    }
-
-    /**
-     * chad configured providers nop does not launch — qwen, kimi, and a local llama-server. Listing
-     * one and then refusing to launch it would be worse than leaving it out.
-     */
-    @Test
-    fun `an account for a provider nop cannot run is left out`(@TempDir tmp: Path) {
-        chadConfig(
-            tmp,
-            """
-            {"accounts": {
-              "qwen-one": {"provider": "qwen"},
-              "claude-one": {"provider": "anthropic"}
-            }}
-            """.trimIndent(),
-        )
-
-        assertEquals(listOf("claude-one"), withHome(tmp) { Accounts.discover() }.map { it.name })
-    }
-
-    /**
-     * Antigravity was one of those until `agy` moved its login out of the shared OS-keyring slot and
-     * into a file under its own home. An account chad configured now comes through pointing at the
-     * home chad made for it, which is what lets nop run it without signing it in again.
-     */
-    @Test
-    fun `an antigravity account from chad points at the home chad made for it`(@TempDir tmp: Path) {
-        chadConfig(
-            tmp,
-            """
-            {"accounts": {"google-one": {"provider": "antigravity", "model": "gemini-3.1-pro-high"}}}
-            """.trimIndent(),
-        )
-
-        val found = withHome(tmp) { Accounts.discover() }.single()
-
-        assertEquals("google-one", found.name)
-        assertEquals(Provider.Antigravity, found.provider)
-        assertEquals(tmp.resolve(".chad/antigravity-homes/google-one").toString(), found.home)
-        assertEquals("gemini-3.1-pro-high", found.model)
-    }
-
-    /**
-     * And its credential is the file `agy` reads, not the copy chad kept beside it — the whole
-     * point of the provider being launchable at all. See [Antigravity].
-     */
+    /** An antigravity account's credential is the file `agy` reads. See [Antigravity]. */
     @Test
     fun `an antigravity account's credential is the file the CLI reads`(@TempDir tmp: Path) {
         val account = Account("google-one", Provider.Antigravity, tmp.toString())
@@ -297,14 +200,7 @@ class AccountsTest {
     }
 
     @Test
-    fun `an unreadable chad config falls through rather than throwing`(@TempDir tmp: Path) {
-        chadConfig(tmp, "{ not json")
-
-        assertTrue(withHome(tmp) { Accounts.discover() }.isEmpty())
-    }
-
-    @Test
-    fun `with no chad, this machine's own vendor logins are offered`(@TempDir tmp: Path) {
+    fun `the CLIs' own default logins are offered`(@TempDir tmp: Path) {
         Files.createDirectories(tmp.resolve(".claude"))
         Files.writeString(tmp.resolve(".claude/.credentials.json"), "{}")
         Files.createDirectories(tmp.resolve(".codex"))
@@ -330,20 +226,16 @@ class AccountsTest {
     @Test
     fun `an untouched config offers the discovered accounts`(@TempDir tmp: Path) {
         Settings.configRoot = tmp.resolve("config")
-        chadConfig(tmp, """{"accounts": {"claude-main": {"provider": "anthropic"}}}""")
+        Files.createDirectories(tmp.resolve(".claude"))
+        Files.writeString(tmp.resolve(".claude/.credentials.json"), "{}")
 
         val loaded = withHome(tmp) { Accounts.load() }
 
-        assertEquals(listOf("claude-main"), loaded.accounts.map { it.name })
+        assertEquals(listOf("claude"), loaded.accounts.map { it.name })
         assertFalse(
             Files.exists(Accounts.configFile),
             "looking must not write: a user who wants none of these should not have to delete a file",
         )
-    }
-
-    private fun chadConfig(home: Path, json: String) {
-        Files.createDirectories(home)
-        Files.writeString(home.resolve(".chad.conf"), json)
     }
 
     /** Runs [body] with `user.home` pointed at [home], so discovery looks inside a temp directory. */

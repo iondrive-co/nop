@@ -68,10 +68,9 @@ object TabsPersistence {
     private const val KIND_DIFF = "diff"
     private const val KIND_GROUP = "group"
 
-    // "history" rows are not written any more: the git log is a tool-panel tab now, persisted
-    // alongside the other tool tabs (see Settings.loadOpenHistories). A file written by an older
-    // build still carries them, and they fall through to the `else -> continue` below — the log
-    // comes back from the tool panel's own file, or not at all for a strip saved before this build.
+    // "history" rows are not written: the git log is a tool-panel tab, persisted alongside the
+    // other tool tabs (see Settings.loadOpenHistories). A file that still carries them falls through
+    // to the `else -> continue` below, and the log comes back from the tool panel's own file.
 
     fun save(target: Path, snapshot: TabsSnapshot) {
         val rows = buildList {

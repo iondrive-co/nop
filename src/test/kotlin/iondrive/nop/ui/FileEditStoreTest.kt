@@ -51,7 +51,7 @@ class FileEditStoreTest {
     @Test
     fun `each file gets its own viewport and find state`(@TempDir tmp: Path) {
         // Only the selected tab's editor is composed, so this state can't live in a remember inside
-        // it: the previous file's scroll offset and query used to be restored into the next tab.
+        // it, or the previous file's scroll offset and query would be restored into the next tab.
         val store = FileEditStore()
         val a = store.edit(Tab.FileView(tmp.resolve("a.txt").also { it.writeText("a\n") }.toFile()))
         val b = store.edit(Tab.FileView(tmp.resolve("b.txt").also { it.writeText("b\n") }.toFile()))
@@ -104,12 +104,12 @@ class FileEditStoreTest {
     }
 
     @Test
-    fun `save refuses to overwrite a file that diverged under us (the revert bug)`(@TempDir tmp: Path) {
+    fun `save refuses to overwrite a file that diverged under us`(@TempDir tmp: Path) {
         val f = tmp.resolve("deploy.sh").also { it.writeText("committed\n") }.toFile()
         val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "committed\n"
 
         // The buffer drifts so it counts as "modified" (e.g. a stale diff-view writeback echo) —
-        // this is exactly the state in which the old autosave would clobber the file.
+        // this is exactly the state in which an autosave that went by isModified would clobber the file.
         edit.state.edit { replace(0, length, "stale-buffer\n") }
         assertTrue(edit.isModified)
 
@@ -315,7 +315,7 @@ class FileEditStoreTest {
         if (edit.hasUserEdit && edit.state.text.toString() != edit.savedText) edit.save() else null
 
     @Test
-    fun `a buffer nop changed on its own is never autosaved (the merge-revert bug)`(@TempDir tmp: Path) {
+    fun `a buffer nop changed on its own is never autosaved`(@TempDir tmp: Path) {
         val f = tmp.resolve("app.kt").also { it.writeText("working\n") }.toFile()
         val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "working\n", hasUserEdit = false
 
@@ -379,14 +379,14 @@ class FileEditStoreTest {
     }
 
     @Test
-    fun `a buffer that drifted without a user edit is reloaded from disk (the stale-diff bug)`(@TempDir tmp: Path) {
-        // Reproduces the reported bug: a working-tree diff shows a stale, wrong change (a "no-op in a
-        // comment") instead of the real edit that's on disk. Root cause below.
+    fun `a buffer that drifted without a user edit is reloaded from disk`(@TempDir tmp: Path) {
+        // A working-tree diff must not show a stale, wrong change (a "no-op in a comment") instead
+        // of the real edit that's on disk. The cause is set up below.
         val f = tmp.resolve("vars").also { it.writeText("a\nb\n") }.toFile()
         val edit = FileEditStore().edit(Tab.FileView(f)) // baseline = "a\nb\n", hasUserEdit = false
 
         // The diff view's per-line cells re-seed the shared buffer programmatically (a "stale
-        // writeback echo" — see the revert-bug test above). That drifts state.text off the baseline
+        // writeback echo" — see the diverged-file test above). That drifts state.text off the baseline
         // WITHOUT any genuine user edit, so isModified is true but hasUserEdit is false.
         edit.state.edit { replace(0, length, "a\nX\n") }
         assertTrue(edit.isModified, "programmatic drift reads as modified")
@@ -397,7 +397,7 @@ class FileEditStoreTest {
 
         // There is no user work to protect, so reconcile must surface the disk copy: the drift is
         // discarded and the diff will reflect the real on-disk change. Gating this on !isModified
-        // (instead of !hasUserEdit) strands the buffer forever and is exactly the bug.
+        // (instead of !hasUserEdit) would strand the buffer forever.
         assertEquals(
             "a\nb\nc\nd\n",
             edit.diskTextIfDivergedAndClean(),
@@ -572,7 +572,7 @@ class FileEditStoreTest {
     }
 
     @Test
-    fun `a write that throws is reported, not propagated — it used to kill autosave outright`(
+    fun `a write that throws is reported, not propagated, so autosave keeps running`(
         @TempDir tmp: Path,
     ) {
         // A path that can't be written: writeText on a directory throws. Standing in for the real

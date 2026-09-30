@@ -78,27 +78,26 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
      * under one directory, so a second agent tab on the same project writes a file that matches this
      * rule exactly as well as a `/clear` does — and the older tab would follow it, start logging
      * someone else's turns, and take the name the CLI gave that session. With several tabs open they
-     * all chased the newest and ended up sharing its title. Only nop can tell the two apart, because
+     * would all chase the newest and end up sharing its title. Only nop can tell the two apart, because
      * only nop knows which sessions it started: see [RunContext.foreign].
      *
      * And neither is a session that was already filed here before this run began. That guard only
      * covers the tabs nop is running, and a `claude` started from a shell in the same checkout is
-     * invisible to it: a run of *this* tab adopted a conversation somebody else was in the middle
-     * of, logged its turns, took its name, and — because the id it moved to is what the picker
-     * writes down — offered to resume that stranger's session under this one's title. A `/clear`
-     * and an in-TUI `/resume` both land in a file this run has just created, so "it was here before
-     * I started" separates the case this exists for from the case that broke it.
+     * invisible to it: a run of *this* tab could adopt a conversation somebody else is in the
+     * middle of, log its turns, take its name, and — because the id it moved to is what the picker
+     * writes down — offer to resume that stranger's session under this one's title. A `/clear` and
+     * an in-TUI `/resume` both land in a file this run has just created, so "it was here before I
+     * started" separates the case this exists for from that one.
      *
      * The cost is following a `/resume` typed into the TUI that picks an *older* session, which
      * appends to a file that was already here. The tab then keeps the name and the id of the
      * conversation nop opened it on, which is a stale answer rather than somebody else's.
      *
      * Nor is a session started *after* this run by something other than the TUI (see
-     * [entrypoint]). A `claude -p` worker a manager agent delegated to, on the same account in the
-     * same checkout, passed every rule above: on 2026-09-28 the tab that had started it followed it
-     * as its own `/clear`, went back to its own transcript whenever that was the newer file, and
-     * switched 81 times in two and a half hours, replaying one whole file or the other into its
-     * log each time. Its idle title over the worker's long Bash call read as a question to the user.
+     * [entrypoint]). A `claude -p` worker a manager agent delegates to, on the same account in the
+     * same checkout, passes every rule above: the tab that started it would follow it as its own
+     * `/clear`, go back to its own transcript whenever that was the newer file, and switch between
+     * the two again and again, replaying one whole file or the other into its log each time.
      * nop only ever runs the TUI, so a candidate counts only once it says the TUI wrote it — which
      * a fresh `/clear` does at its first prompt rather than its first bookkeeping record.
      *
@@ -320,7 +319,7 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
          * written yet — the CLI's own bookkeeping records at the top of the file do not.
          *
          * It is what tells this tab's `/clear` from a headless run on the same account and project,
-         * which nop did not start and so cannot know about: a manager agent in hermes delegates to
+         * which nop did not start and so cannot know about: a manager agent can delegate to
          * `claude -p` workers, and their transcripts land in the same directory as the tab's own.
          */
         fun entrypoint(file: Path): String? {

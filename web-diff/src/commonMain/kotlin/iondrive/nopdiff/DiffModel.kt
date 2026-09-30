@@ -34,9 +34,9 @@ data class DiffRow(
 )
 
 // ---------------------------------------------------------------------------
-// Parsed unified-diff model. Mirrors the shape chad's backend already produces
-// (FileDiff / DiffHunk / DiffLine), so chad can feed its structured data in
-// without re-serialising to text. See StructuredInput for the JS adapter.
+// Parsed unified-diff model: files, hunks and lines, the shape a backend that has
+// already parsed a diff tends to produce, so structured data can be fed in without
+// re-serialising to text. See StructuredInput for the JS adapter.
 // ---------------------------------------------------------------------------
 
 enum class LineType { CONTEXT, ADD, DELETE }

@@ -112,9 +112,8 @@ fun AgentPicker(
             // which is what makes this list, and not the strip, the thing that has to be reachable
             // while a session is running.
             //
-            // Capped, because this list stopped being short the moment it started including the
-            // sessions nop did not run: two checkouts on the machine this was written on had 199
-            // between them. What a picker is for is getting back into work from the last day or
+            // Capped, because a list that includes the sessions nop did not run is not short: a
+            // busy checkout can have hundreds. What a picker is for is getting back into work from the last day or
             // two, and a row five hundred deep is found by searching, which this is not.
             var showAll by remember(projectDir) { mutableStateOf(false) }
             val shown = if (showAll) sessions else sessions.take(EARLIER_SESSIONS_SHOWN)

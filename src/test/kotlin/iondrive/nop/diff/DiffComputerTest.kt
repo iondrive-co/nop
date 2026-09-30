@@ -96,7 +96,7 @@ class DiffComputerTest {
     @Test
     fun `every span is in range for the line it annotates`() {
         // A bigger, jagged diff — exercises CHANGE / INSERT / DELETE / EQUAL with inline word
-        // edits. Regression for the StringIndexOOB seen while scrolling: every emitted span
+        // edits. A span out of range throws StringIndexOOB while scrolling, so every emitted span
         // must satisfy 0 <= startChar <= endCharExclusive <= line.length.
         val old = buildString {
             for (i in 0 until 60) appendLine("fun line$i(x: Int): Int { return x * $i }")

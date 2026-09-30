@@ -24,29 +24,27 @@ import java.time.Instant
  * transcript as one of those. Finding it there says the screen was showing something, not refusing
  * something.
  *
- * Two versions of this got the vendor's side wrong, and each cost every real wall of some session.
+ * Two things make the vendor's side subtle.
  *
- * The first assumed a vendor announcing it will not continue writes that to its UI alone, because a
- * refusal is not a turn and so never becomes conversation. Claude Code does not work that way. It
- * files its own wall in the very transcript this reads, twice over — an `assistant` record flagged
+ * A vendor announcing it will not continue does not write that to its UI alone. Claude Code files
+ * its own wall in the very transcript this reads, twice over — an `assistant` record flagged
  * `isApiErrorMessage` with the 429's text ("You've hit your session limit · resets 8:10pm"), and a
  * `system` notice for the banner under it ("Usage limit reached · continuing automatically at
- * 8:10pm") — so reading the transcript as flat text found the phrase on every genuine Claude wall
- * and vetoed it.
+ * 8:10pm") — so reading the transcript as flat text would find the phrase on every genuine Claude
+ * wall and veto it.
  *
- * The second skipped those records and still asked only whether the phrase was anywhere else in the
- * conversation. It usually is, in exactly the sessions that need the handover most. A session nop
- * handed over reads a handoff whose last line is the previous account's wall, word for word, so its
- * own wall is vetoed as an echo of that one; a user who pastes a wall to ask about it has done the
- * same by hand. The phrase being in the conversation says the agent *could* be showing it, not that
- * the vendor did not say it.
+ * And the phrase is usually somewhere else in the conversation too, in exactly the sessions that
+ * need the handover most. A session nop handed over reads a handoff whose last line is the previous
+ * account's wall, word for word, so its own wall would be vetoed as an echo of that one; a user who
+ * pastes a wall to ask about it has done the same by hand. The phrase being in the conversation says
+ * the agent *could* be showing it, not that the vendor did not say it.
  *
- * So the vendor's own record is now positive evidence, and it outranks any echo: a refusal the CLI
+ * So the vendor's own record is positive evidence, and it outranks any echo: a refusal the CLI
  * filed during this run, moments ago, is the vendor saying it — see [Verdict.Refused]. What remains
  * of the guard is the case with no such record, where the phrase being in the conversation still
  * vetoes, and costs a missed wall only when a provider files nothing nop recognises. That is the
  * right way round to be wrong. A miss ends the run at the vendor's own error and the user picks it
- * up — the same thing that happened before any of this existed. A false positive kills a working
+ * up. A false positive kills a working
  * session mid-turn, and, because the text that triggered it is in the conversation, kills it again
  * on every resume until the session cannot be re-entered at all. There is no undo for that; there
  * is for this.
@@ -55,8 +53,8 @@ import java.time.Instant
  * moments ago — see [Verdict.Said]. A reading at 99% says a wall is believable, not that the text on
  * screen is one, and a session that has just finished explaining a rate limit is not out of quota.
  *
- * A provider with no transcript nop can read is [Verdict.Unrecorded] here and is decided exactly as
- * it was before — see [AgentSession.onQuotaWall], which has the account's own usage reading as well.
+ * A provider with no transcript nop can read is [Verdict.Unrecorded] here, and is decided by
+ * [AgentSession.onQuotaWall], which has the account's own usage reading as well.
  */
 object QuotaEcho {
 
@@ -71,8 +69,8 @@ object QuotaEcho {
         /**
          * No fresh refusal, and the agent itself wrote the phrase moments ago, in a reply of this
          * run. A refused request produces no reply at all, so the words on screen are the agent's —
-         * the 18:59 handover in hermes was of a session that had just answered a question about a
-         * 429 "too many requests" from an exchange, and had finished its turn doing so.
+         * a session that has just answered a question about a 429 "too many requests" from some
+         * other service has the phrase on screen and nothing wrong with its account.
          */
         Said,
 

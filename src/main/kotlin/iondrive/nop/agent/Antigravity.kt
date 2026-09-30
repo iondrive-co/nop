@@ -20,10 +20,10 @@ import kotlin.concurrent.thread
 /**
  * The three things `agy` does differently from the other two CLIs.
  *
- * **Where the login lives.** This is the whole reason antigravity was deferred. The CLI used to keep
- * its token in one OS-keyring slot — service `gemini`, user `antigravity` — that every account
- * overwrote, so a second account signing in replaced the first and no amount of `HOME` redirection
- * separated them. `agy` 1.2.4 stores it in a *file* instead, `$HOME/.gemini/antigravity-cli/
+ * **Where the login lives.** With a usable keyring the CLI keeps its token in one OS-keyring slot —
+ * service `gemini`, user `antigravity` — that every account overwrites, so a second account signing
+ * in replaces the first and no amount of `HOME` redirection separates them. It stores it in a
+ * *file* instead, `$HOME/.gemini/antigravity-cli/
  * antigravity-oauth-token`, whenever it decides the keyring is not usable; it records that decision
  * in [KEYRING_MARKER], a file beside it holding the time it was taken. nop writes that marker
  * itself before every run, which turns a fallback the CLI happened to be in into the one it is held
@@ -117,7 +117,6 @@ internal object Antigravity {
     fun prepareHome(account: Account) {
         val home = account.homePath
         runCatching { OwnerOnly.directory(cliDir(home).resolve("cache")) }
-        adoptChadCredential(account)
         pinFileTokenStore(home)
         markOnboarded(home)
     }
@@ -158,9 +157,8 @@ internal object Antigravity {
      * carries [Instant.now] as its age, because unlike a Codex reading it really was taken now.
      */
     fun readUsage(account: Account): UsageReading {
-        // Before the check, not after: an account inherited from chad has its login in chad's file
-        // and none in the CLI's until this has run, and "not signed in" is exactly the wrong answer
-        // for an account nop is one copy away from being able to run.
+        // Before the check, not after: the token store is only where [signedIn] looks once this has
+        // pinned the CLI to it.
         prepareHome(account)
         if (!signedIn(account)) return UsageReading.unavailable("not signed in")
         val output = run(account, listOf("-p", "/usage", "--output-format", "text"), USAGE_TIMEOUT)
@@ -237,37 +235,12 @@ internal object Antigravity {
     }
 
     /**
-     * The login chad captured for this account, moved to where `agy` now reads it.
-     *
-     * chad kept each account's credential in a file of its own and wrote it into the keyring just
-     * before that account ran — the same JSON, in a different place. Copying it across is what
-     * makes an account inherited from chad work without signing it in again, which is the whole
-     * point of nop declaring each account's home explicitly (see [Account.home]).
-     *
-     * Only ever *into* an empty slot: a token file already there is the one the CLI has been
-     * refreshing, and chad's copy is by now months stale.
-     */
-    private fun adoptChadCredential(account: Account) {
-        val target = account.credentialFile
-        if (Files.exists(target)) return
-        val legacy = account.homePath.resolve("credential.json")
-        if (!Files.isRegularFile(legacy)) return
-        runCatching {
-            OwnerOnly.directory(target.parent)
-            Files.copy(legacy, target, StandardCopyOption.COPY_ATTRIBUTES)
-            OwnerOnly.tighten(target)
-            Log.info("adopted chad's antigravity login for ${account.name}")
-        }.onFailure { Log.warn("could not adopt chad's antigravity login for ${account.name}: $it") }
-    }
-
-    /**
      * Holds the CLI in the token store nop can isolate.
      *
      * `agy` chooses between the keyring and the file on each run, records "the keyring was not
      * usable" in a marker file stamped with the time, and prefers the file while that stamp is
      * recent. Left alone that is luck: it works on a machine whose keyring is locked and silently
-     * stops the day one is unlocked, at which point every account shares one slot again and nop is
-     * back to the bug this provider was deferred over.
+     * stops the day one is unlocked, at which point every account shares one slot again.
      *
      * So nop writes the marker itself, with the current time, immediately before the CLI starts.
      * It is the account's own home, the CLI's own file and its own format — nop is voting in an
@@ -369,7 +342,7 @@ internal object Antigravity {
     private const val GEMINI_FAMILY = "gemini models"
     private const val OTHER_FAMILY = "claude and gpt models"
 
-    /** A `/usage` run is a CLI start and a round trip; six seconds is normal on this machine. */
+    /** A `/usage` run is a CLI start and a round trip; several seconds is normal. */
     private val USAGE_TIMEOUT: Duration = Duration.ofSeconds(60)
     private val MODELS_TIMEOUT: Duration = Duration.ofSeconds(60)
 

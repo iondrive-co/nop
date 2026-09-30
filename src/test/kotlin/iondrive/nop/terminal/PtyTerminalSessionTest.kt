@@ -17,8 +17,8 @@ import java.time.Duration
 
 /**
  * Exercises the pty4j + [PtyTtyConnector] core without any Swing/JediTerm UI. The headline test is
- * [child sees a real TTY]: it's the whole reason this feature exists — the old pipe-based runner
- * would print NOTTY and could never accept a typed password. Unix-only because the assertions use
+ * [child sees a real TTY]: it's the whole reason this feature exists — a pipe-based runner prints
+ * NOTTY and can never accept a typed password. Unix-only because the assertions use
  * `sh`; the JediTerm rendering itself is verified separately under Xvfb.
  */
 @DisabledOnOs(OS.WINDOWS)
@@ -122,10 +122,10 @@ class PtyTerminalSessionTest {
         }
 
     /**
-     * The Stop button no longer hard-kills: TerminalSession.stop() writes the TTY interrupt
+     * The Stop button does not hard-kill: TerminalSession.stop() writes the TTY interrupt
      * character (ETX, 0x03) so the line discipline raises SIGINT on the foreground process group —
      * exactly what pressing Ctrl-C does. This guards that contract: the child traps SIGINT and exits
-     * 42, so seeing exit 42 proves it got a clean SIGINT. A SIGKILL (the old behaviour) would skip
+     * 42, so seeing exit 42 proves it got a clean SIGINT. A SIGKILL would skip
      * the trap entirely, so the test would never see 42.
      */
     @Test
@@ -164,7 +164,7 @@ class PtyTerminalSessionTest {
             val first = PtyTtyConnector(ptyProcess("sh", "-c", cmd))
             assertTrue("Serving HTTP" in first.readUntil("Serving HTTP"), "first server never bound")
 
-            // The fix: fully tear down (and wait) before relaunching.
+            // Fully tear down (and wait) before relaunching.
             first.getProcess().destroyForcibly()
             first.waitFor()
 

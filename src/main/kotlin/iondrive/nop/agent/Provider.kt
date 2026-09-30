@@ -9,15 +9,12 @@ import kotlinx.serialization.Serializable
  * All three keep their credentials in a *file* inside a directory nop points an environment
  * variable at, which is what makes running several accounts side by side possible at all.
  *
- * Antigravity was the exception, and the plan's D3 deferred it for that reason: its login lived in
- * one shared OS-keyring slot every account overwrote, so isolating it meant owning that slot over
- * DBus. `agy` 1.2.4 no longer works that way — it keeps the token in a file under its own home and
- * falls back to that file whenever the keyring is not usable, which is the state nop pins it into.
- * See [Antigravity], which owns the difference; everything else here treats it as a third provider
- * isolated by `HOME`, exactly like Codex.
+ * Antigravity keeps its token in that file only while the OS keyring is unusable — with a usable
+ * keyring its login lives in one shared slot every account overwrites — which is the state nop pins
+ * it into. See [Antigravity], which owns the difference; everything else here treats it as a third
+ * provider isolated by `HOME`, exactly like Codex.
  *
- * The serialized name is the string chad used, so an account written by hand against the old
- * config reads back as the same provider.
+ * The serialized names are part of `agent.json`'s format, so they do not change.
  */
 @Serializable
 enum class Provider(
@@ -65,10 +62,9 @@ enum class Provider(
      * [AgentSession.onQuotaWall].
      *
      * `agy` does not, and waiting on it would strand the work rather than resume it: at the wall
-     * on 2026-09-20 it retried eight times over three minutes, filed `agent executor error:
-     * generating and executing: RESOURCE_EXHAUSTED (code 429)`, and sat idle at its prompt with
-     * four minutes still to run on the window. Codex has not been seen at a wall close enough to
-     * its reset for this to decide anything, and keeps the behaviour it has always had.
+     * it retries for a few minutes, files `agent executor error: generating and executing:
+     * RESOURCE_EXHAUSTED (code 429)`, and sits idle at its prompt while the window runs out. Codex
+     * is taken to wait as Claude Code does.
      */
     val waitsOutItsOwnWall: Boolean
         get() = when (this) {

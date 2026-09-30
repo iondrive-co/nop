@@ -41,11 +41,11 @@ import kotlin.math.roundToInt
 fun TerminalView(tab: TerminalTab, cards: JPanel) {
     val isDark = JewelTheme.isDark
     val bg = JewelTheme.globalColors.panelBackground
-    // The terminal is a *content* surface, like the editor — not chrome. It used to be painted in
-    // the panel background with Darcula's #A9B7C6 on top, which is 6.8:1: less contrast than the
-    // 5.9:1 a TUI uses for the text it means to play *down*. Claude Code's dim/normal/bold ladder
-    // was arriving with its rungs almost touching, and TerminalContrast's 4.5:1 floor pushed the
-    // dim end back up to meet the normal one. #DFE1E5 on #1E1F22 — nop's own dark near-white and
+    // The terminal is a *content* surface, like the editor — not chrome. In the panel background
+    // with Darcula's #A9B7C6 on top it would be 6.8:1: less contrast than the 5.9:1 a TUI uses
+    // for the text it means to play *down*. Claude Code's dim/normal/bold ladder would arrive with
+    // its rungs almost touching, and TerminalContrast's 4.5:1 floor would push the dim end back up
+    // to meet the normal one. #DFE1E5 on #1E1F22 — nop's own dark near-white and
     // the tone ToolTabs already paints its strip — is 12.6:1, and leaves an ANSI mid-grey sitting
     // untouched at ~4.7:1 below it, which is the separation the plain terminal has.
     val surface = if (isDark) Color(0xFF1E1F22) else Color(0xFFFFFFFF)
@@ -129,11 +129,11 @@ fun TerminalView(tab: TerminalTab, cards: JPanel) {
  *
  * A [SwingPanel] is a heavyweight AWT component: it is composited above everything Compose draws,
  * so any Compose content under its rectangle is simply not on screen. A terminal that filled its
- * panel drew straight over the usage strip and there was no way to see or click it.
+ * panel would draw straight over the usage strip, leaving no way to see or click it.
  *
  * Measured rather than guessed. The strip's height depends on how many accounts are configured and
- * how they wrap, so a fixed clearance is wrong for everyone but the person it was tuned for — it
- * was 34dp, which was one account's worth. [UsageIndicator] reports what it actually occupies and
+ * how they wrap, so a fixed clearance is wrong for everyone but the person it was tuned for.
+ * [UsageIndicator] reports what it actually occupies and
  * [App] puts the number here.
  */
 val LocalTerminalBottomInset = androidx.compose.runtime.compositionLocalOf { 0.dp }

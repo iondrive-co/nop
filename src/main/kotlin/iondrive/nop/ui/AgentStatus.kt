@@ -39,8 +39,8 @@ import java.time.format.DateTimeFormatter
 /**
  * The colours an agent's state is drawn in, in both themes.
  *
- * Amber for a question and green for a finished turn, as in clio, which the same person reads the
- * same CLIs through: amber is "blocked on you", green is "your move when you like". Neither is red,
+ * Amber for a question and green for a finished turn: amber is "blocked on you", green is "your
+ * move when you like". Neither is red,
  * because neither is anything having gone wrong.
  */
 internal class AgentStatusColors(isDark: Boolean) {
@@ -188,8 +188,7 @@ internal fun AgentStatusMark(
 
 /**
  * The words for a state, as the session bar says it: what the agent is doing and, for the states
- * that are waiting on someone, since when. "Waiting for your answer · asked 21:03, 11 h 45 min ago"
- * is the sentence that would have saved a night.
+ * that are waiting on someone, since when: "Waiting for your answer · asked 21:03, 11 h 45 min ago".
  */
 internal fun activityText(activity: Activity, since: Long, now: Long, worked: Boolean): String = when (activity) {
     Activity.Asleep -> "Asleep — starts when you open it"

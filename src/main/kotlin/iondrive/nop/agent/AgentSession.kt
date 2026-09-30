@@ -266,10 +266,9 @@ class AgentSession(
      * reads the summary, asks for a turn, is refused, and hands on again.
      *
      * The times are what keeps that from outliving its reason. A wall lasts hours and a session
-     * can last longer: claude-aloancloud ran out in hermes at 13:09 on 2026-09-20 and handed its
-     * work to claude-iondrive, and when iondrive ran out in turn at 16:49 the first account had
-     * long since rolled over and read 0% used — but it had been struck off for good, so the run
-     * ended at the post-exit panel with a rested account sitting in it as a button to press. See
+     * can last longer: by the time the second account of a pair runs out, the first may long since
+     * have rolled over and read 0% used, and struck off for good it would leave the run ending at
+     * the post-exit panel with a rested account sitting in it as a button to press. See
      * [canTakeOver] for what gets an account back into the rotation.
      */
     private val spent: MutableMap<String, Instant> = ConcurrentHashMap()
@@ -293,8 +292,8 @@ class AgentSession(
      * The tab's label.
      *
      * Every session starts under the same name, for the reason every terminal is called "Term":
-     * a label nop guesses at is a label the user has to read past. The account name was the guess,
-     * and it answers the wrong question — which quota is being spent, not which piece of work the
+     * a label nop guesses at is a label the user has to read past. The account name is the obvious
+     * guess, and it answers the wrong question — which quota is being spent, not which piece of work the
      * tab is doing — while the settings dialog and the picker both already say it.
      *
      * Two better names replace it. The CLI writes a title into its own transcript a turn or two in
@@ -589,7 +588,7 @@ class AgentSession(
      *
      * Either the work moves to the account this one nominated, or — with nobody nominated, or with
      * that account refused in this session and nothing to say it has rested since — the run ends and
-     * the post-exit panel puts the choice in front of the user, which is what always used to happen.
+     * the post-exit panel puts the choice in front of the user.
      *
      * Internal rather than private so its own test can drive it, and [now] is passed for the same
      * reason: every clock this decision reads is that one, so a test can put an earlier wall hours
@@ -632,9 +631,9 @@ class AgentSession(
         //
         // And it can only contradict the screen about a limit it reports. A refusal that times
         // itself — "Individual quota reached ... Resets in 7m31s" — names an allowance of minutes,
-        // and the windows nop reads are five hours and a week: `agy` refused a hermes session on
-        // 2026-09-20 with both of its own windows nearly untouched, so "the account still has
-        // quota" was true and said nothing about the wall in front of it. A reading with room in
+        // and the windows nop reads are five hours and a week: `agy` can refuse with both of its own
+        // windows nearly untouched, and then "the account still has quota" is true and says nothing
+        // about the wall in front of it. A reading with room in
         // every window it knows about is either about some other allowance or twenty minutes stale;
         // either way it is not evidence against a vendor that has just said when it will serve
         // again. The transcript below still gets its say.
@@ -648,12 +647,11 @@ class AgentSession(
             hit.matched,
             since = waitedOutAt?.let { maxOf(it, current.startedAt) } ?: current.startedAt,
         )
-        // The 14:11 handover in hermes on 2026-09-24. Four tabs there and one in ops hit the session
-        // limit at 14:03-04, and nop waited out the 14:10 reset for each. Claude Code carried on at
-        // 14:11:07, its redraw put the old wall back in front of the re-armed watcher, the usage
-        // reading still read spent, and all five were handed to Codex seconds after they had started
-        // working again. Only a CLI that files its refusals is waited for, so after a wait the screen
-        // is no evidence of its own: a new wall files a new refusal and reads as Refused.
+        // After a wait for a reset, the screen is no evidence of its own. Claude Code carries on by
+        // itself once the window resets, its redraw can put the old wall back in front of the
+        // re-armed watcher, and a usage reading taken before the reset still reads spent — which
+        // would hand the session over seconds after it started working again. Only a CLI that files
+        // its refusals is waited for, so a new wall files a new refusal and reads as Refused.
         if (waitedOutAt != null && verdict != QuotaEcho.Verdict.Refused) {
             Log.info(
                 "ignoring a usage-limit phrase on ${current.account.name}: it is the wall this run " +
@@ -733,8 +731,8 @@ class AgentSession(
         val nominated = handoverTarget(current.account)
         val target = nominated?.takeIf { canTakeOver(it, now) }
         if (target == null) {
-            // Said out loud, because the silence was the hard part of reading the 16:49 wall back:
-            // a handover that does not happen looks exactly like a wall that was never seen.
+            // Said out loud: otherwise, in the log, a handover that does not happen looks exactly
+            // like a wall that was never seen.
             Log.info(
                 "${current.account.name} ran out and nothing took the work on: " +
                     (nominated?.let { "${it.name} ran out in this session too" }
@@ -787,11 +785,10 @@ class AgentSession(
      * Starts the same account again in this tab with nothing carried over: no resume, no handoff —
      * the CLI as it would come up from a fresh shell.
      *
-     * The sibling [reopen] needs, and for a while was the only thing offered. Resuming is usually
-     * right, but not always: a session can end because the model has wedged itself, or because the
-     * work in it is finished and the next piece is unrelated, and in both of those landing back in
-     * the old conversation is the one thing the user did not want. Switching provider was the only
-     * escape, which made "start again on the same account" the one obvious choice nop couldn't make.
+     * The sibling [reopen] needs. Resuming is usually right, but not always: a session can end
+     * because the model has wedged itself, or because the work in it is finished and the next piece
+     * is unrelated, and in both of those landing back in the old conversation is the one thing the
+     * user does not want.
      */
     fun startFresh() {
         switchTo(account = run.account, resumeId = null, reason = EndReason.Switched)
@@ -838,7 +835,7 @@ class AgentSession(
      * `$CODEX_HOME/sessions/`, `$HOME/.gemini/antigravity-cli/conversations/` — with no setting
      * that separates the two. So running several
      * accounts side by side, which is the point of the picker, splits the transcripts as a side
-     * effect: a session nop ran under `claude-work` is not in the store a plain `claude` reads, and
+     * effect: a session nop ran under `claude-main` is not in the store a plain `claude` reads, and
      * no amount of work on nop's side changes where that CLI looks.
      *
      * What nop can do is say where it put it. One environment variable in front of the ordinary
@@ -951,8 +948,7 @@ class AgentSession(
             foreign = { id -> id != newRun.nativeSessionId && LiveTranscripts.isForeign(id, sessionId) },
             // A conversation this session has already written down: the tab came back from the
             // state file, or was reopened from the picker. Its transcript is not news, and reading
-            // it as though it were is what used to rename the tab back to whatever the CLI last
-            // called it. A resume into a log with nothing in it — a vendor session nop has never
+            // it as though it were would rename the tab back to whatever the CLI last called it. A resume into a log with nothing in it — a vendor session nop has never
             // followed — still replays, because there the history is the whole point.
             resumingLoggedWork = resumeId != null && log.hadHistory,
         )

@@ -106,7 +106,7 @@ data class UsageReading(
      * Null is the honest answer more often than it looks. A Codex reading is scavenged from that
      * account's last session transcript, so it can be days old and says nothing about now; so can a
      * Claude reading nop has not managed to take. An answer nobody should act on is not one to guess
-     * at — null leaves the decision exactly where it was before this existed.
+     * at — null leaves the decision to the rest of the evidence.
      */
     fun looksSpent(now: Instant = Instant.now()): Boolean? {
         val windows = current(now)?.takeIf { it.isNotEmpty() } ?: return null
@@ -229,9 +229,8 @@ object Usage {
      * Rations the asks that cost something: the Claude usage API and the Antigravity CLI start.
      *
      * Every project tab and every window polls for itself, and a project switch starts a new poll
-     * at once, so a few quick switches used to send a burst of requests per account. Anthropic's
-     * usage endpoint answers a burst with 429 and `Retry-After`, and nop showed that as "no answer
-     * from the usage API" until the next poll. The gate stands between all of those callers and
+     * at once, so a few quick switches would send a burst of requests per account, and Anthropic's
+     * usage endpoint answers a burst with 429 and `Retry-After`. The gate stands between all of those callers and
      * the provider. See [UsageGate].
      */
     private val gate = UsageGate()
@@ -271,8 +270,8 @@ object Usage {
      */
     fun discoverModels(account: Account): List<String> {
         UsageFixture.file?.let { return UsageFixture.models(it, account) }
-        // Kept for the life of nop once found. The poller in each project tab used to ask again
-        // after every project switch: another HTTPS GET for Claude, another CLI start for Antigravity.
+        // Kept for the life of nop once found, so a project switch does not ask again: another HTTPS
+        // GET for Claude, another CLI start for Antigravity.
         val key = gateKey(account)
         discovered[key]?.let { return it }
         val now = Instant.now()

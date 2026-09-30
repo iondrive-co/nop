@@ -26,7 +26,7 @@ class McpServersTest {
         """
         {
           "mcpServers": {
-            "xenia": {"type": "stdio", "command": "/opt/xenia-mcp", "args": [], "env": {}},
+            "tracker": {"type": "stdio", "command": "/opt/tracker-mcp", "args": [], "env": {}},
             "old": {"type": "stdio", "command": "/opt/old"}
           },
           "projects": {
@@ -48,7 +48,7 @@ class McpServersTest {
 
         val servers = McpServers.forProject(project, userHome = home, configDir = null)
 
-        assertEquals(setOf("xenia", "api"), servers.keys)
+        assertEquals(setOf("tracker", "api"), servers.keys)
     }
 
     @Test
@@ -56,13 +56,13 @@ class McpServersTest {
         val dir = Files.createDirectories(home.resolve("elsewhere"))
         userConfig(dir)
 
-        assertEquals(setOf("xenia", "api"), McpServers.forProject(project, home, dir.toString()).keys)
+        assertEquals(setOf("tracker", "api"), McpServers.forProject(project, home, dir.toString()).keys)
         assertTrue(McpServers.forProject(project, home, null).isEmpty())
     }
 
     @Test
     fun `claude is pointed at an owner-only file holding them`(@TempDir tmp: Path) {
-        val servers = mapOf("xenia" to obj("""{"type":"stdio","command":"/opt/xenia-mcp"}"""))
+        val servers = mapOf("tracker" to obj("""{"type":"stdio","command":"/opt/tracker-mcp"}"""))
         val file = McpServers.writeClaudeConfig(project, servers, tmp)!!
         val account = Account("c", Provider.Anthropic, "/home/dev/.claude-c")
 
@@ -76,7 +76,7 @@ class McpServersTest {
     @Test
     fun `codex gets one override per server, and none it cannot speak`() {
         val servers = mapOf(
-            "xenia" to obj("""{"type":"stdio","command":"/opt/x","args":["-v"],"env":{"K":"v\"q"}}"""),
+            "tracker" to obj("""{"type":"stdio","command":"/opt/x","args":["-v"],"env":{"K":"v\"q"}}"""),
             "api" to obj("""{"type":"http","url":"https://api.example/mcp","headers":{"A":"b"}}"""),
             "stream" to obj("""{"type":"sse","url":"https://sse.example"}"""),
             "has space" to obj("""{"command":"/opt/y"}"""),
@@ -84,7 +84,7 @@ class McpServersTest {
 
         assertEquals(
             listOf(
-                "-c", """mcp_servers.xenia={command="/opt/x", args=["-v"], env={"K"="v\"q"}}""",
+                "-c", """mcp_servers.tracker={command="/opt/x", args=["-v"], env={"K"="v\"q"}}""",
                 "-c", """mcp_servers.api={url="https://api.example/mcp", http_headers={"A"="b"}}""",
             ),
             McpServers.codexOverrides(servers),
@@ -99,30 +99,30 @@ class McpServersTest {
         Files.createDirectories(config.parent)
         Files.writeString(config, """{"mcpServers":{"mine":{"command":"/opt/mine"}},"other":1}""")
         Files.createDirectories(user.resolve(".gemini/config"))
-        Files.writeString(user.resolve(".gemini/config/mcp_config.json"), """{"mcpServers":{"adn":{"serverUrl":"https://adn"}}}""")
+        Files.writeString(user.resolve(".gemini/config/mcp_config.json"), """{"mcpServers":{"shared":{"serverUrl":"https://shared.example"}}}""")
 
         McpServers.installForAntigravity(
             home,
             mapOf(
-                "xenia" to obj("""{"type":"stdio","command":"/opt/x","args":[]}"""),
+                "tracker" to obj("""{"type":"stdio","command":"/opt/x","args":[]}"""),
                 "mine" to obj("""{"command":"/opt/not-mine"}"""),
             ),
             user,
         )
         var written = obj(Files.readString(config))
-        assertEquals(setOf("mine", "adn", "xenia"), written["mcpServers"]!!.jsonObject.keys)
+        assertEquals(setOf("mine", "shared", "tracker"), written["mcpServers"]!!.jsonObject.keys)
         assertEquals(obj("""{"command":"/opt/mine"}"""), written["mcpServers"]!!.jsonObject["mine"])
-        assertEquals("/opt/x", (written["mcpServers"]!!.jsonObject["xenia"] as JsonObject)["command"].str())
+        assertEquals("/opt/x", (written["mcpServers"]!!.jsonObject["tracker"] as JsonObject)["command"].str())
         assertEquals("1", written["other"].str())
 
         McpServers.installForAntigravity(home, emptyMap(), user)
         written = obj(Files.readString(config))
-        assertEquals(setOf("mine", "adn"), written["mcpServers"]!!.jsonObject.keys)
+        assertEquals(setOf("mine", "shared"), written["mcpServers"]!!.jsonObject.keys)
     }
 
     @Test
     fun `the user's own agy home is never written to`(@TempDir user: Path) {
-        McpServers.installForAntigravity(user, mapOf("xenia" to obj("""{"command":"/opt/x"}""")), user)
+        McpServers.installForAntigravity(user, mapOf("tracker" to obj("""{"command":"/opt/x"}""")), user)
 
         assertFalse(Files.exists(user.resolve(".gemini/config/mcp_config.json")))
     }

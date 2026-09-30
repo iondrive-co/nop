@@ -32,6 +32,7 @@ class FileIndex(val files: List<String> = emptyList()) {
                 // Dotfiles and dot-directories (.claude, .github, …) are indexed; only the curated
                 // build/VCS names in IGNORED_DIR_NAMES are pruned, mirroring the project tree.
                 if (f.name in IGNORED_DIR_NAMES) continue
+                if (ProjectWalk.leavesProject(root, f)) continue
                 if (f.isDirectory) {
                     walk(root, f, out)
                 } else if (f.isFile) {

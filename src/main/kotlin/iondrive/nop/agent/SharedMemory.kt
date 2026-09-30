@@ -12,9 +12,9 @@ import java.nio.file.StandardCopyOption
  *
  * Each vendor CLI keeps a memory of its own, and keeps it per account — Claude Code files it under
  * `$CLAUDE_CONFIG_DIR`, which nop points at a different home for every account. So what one session
- * learned (how the user wants a fix delivered, a test that only fails under load, a command never to
- * run on this machine) was invisible to the next session opened on another account, and the user
- * found out by watching the same mistake happen twice.
+ * learns (how the user wants a fix delivered, a test that only fails under load, a command never to
+ * run on the machine) is invisible to the next session opened on another account, and the same
+ * mistake happens twice.
  *
  * A run is told where the file is, never what is in it. The contents would be a snapshot from launch
  * that goes stale as other sessions write, would sit in the process list — argv is readable by every

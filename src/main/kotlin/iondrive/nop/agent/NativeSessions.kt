@@ -11,10 +11,10 @@ import java.nio.file.Path
 /**
  * The sessions a vendor CLI has on this project, read out of the vendor's own store.
  *
- * nop keeps an event log of every session *it* started, and the picker was built on that alone —
- * which quietly made "sessions on this project" mean "sessions nop ran". It is not the same set. A
- * `claude` run from a shell in the same checkout is a session on this project by any reading the
- * user would recognise, and it was invisible here; so was everything from before nop was installed.
+ * nop keeps an event log of every session *it* started, but "sessions on this project" is not the
+ * same set as "sessions nop ran". A `claude` run from a shell in the same checkout is a session on
+ * this project by any reading the user would recognise, and so is everything from before nop was
+ * installed.
  *
  * The two sets cannot be merged by moving files around, because of how the CLIs are built: Claude
  * Code files a transcript under `$CLAUDE_CONFIG_DIR/projects/<slug>/`, and that same directory is
@@ -28,8 +28,8 @@ import java.nio.file.Path
  * Claude only, for now. Codex files its rollouts by date rather than by project, so finding the
  * ones belonging to a checkout means walking the whole tree and reading the head of every file —
  * see [iondrive.nop.agent.transcript.CodexTailer.locate], which does exactly that once per run and
- * is already the slowest thing a run does. Codex sessions still reach the picker through nop's own
- * event log, the way every session did before this.
+ * is already the slowest thing a run does. Codex sessions reach the picker through nop's own event
+ * log.
  */
 object NativeSessions {
 

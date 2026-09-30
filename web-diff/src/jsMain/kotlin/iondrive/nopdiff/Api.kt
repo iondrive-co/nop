@@ -16,7 +16,7 @@ fun renderUnifiedDiff(target: HTMLElement, diffText: String, theme: String = "au
     el.asDynamic().diff = diffText
 }
 
-/** Render an already-parsed structured diff (e.g. chad's `FileDiff[]`) into [target]. */
+/** Render an already-parsed structured diff (see [StructuredInput]) into [target]. */
 fun renderStructured(target: HTMLElement, files: dynamic, theme: String = "auto") {
     val el = makeElement(theme)
     mount(target, el)

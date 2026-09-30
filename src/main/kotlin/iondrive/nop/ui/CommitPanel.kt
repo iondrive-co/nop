@@ -185,9 +185,8 @@ fun CommitPanel(
                             enabled = !commitInFlight && !stashInFlight && !revertInFlight &&
                                 messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
                         ) {
-                            // A disabled button is all a commit of a large change set used to show
-                            // for minutes at a time, so while one runs the label becomes a progress
-                            // bar with the percentage and an ETA in it.
+                            // A commit of a large change set can run for minutes, so while one runs
+                            // the label becomes a progress bar with the percentage and an ETA in it.
                             if (commitInFlight) CommitProgressBar(commitProgress, now) else Text("Commit")
                         }
                     }

@@ -26,8 +26,8 @@ data class AgentCommand(
  * This is the file that makes per-account isolation real: every provider in scope keeps its login
  * in a file under a directory named by one environment variable, so setting that variable to the
  * account's own home is the whole mechanism. Get it wrong and three accounts quietly share one
- * login — which is why `SpawnTest` checks the environment against a capture taken from the Python
- * implementation this was ported from, rather than against its own idea of what it should be.
+ * login — which is why `SpawnTest` checks the environment against a recorded capture rather than
+ * against its own idea of what it should be.
  *
  * Both YOLO flags are unconditional. This is a launcher for agents that are trusted to edit the
  * project they were opened on; a permission prompt the user cannot see the reason for, inside a

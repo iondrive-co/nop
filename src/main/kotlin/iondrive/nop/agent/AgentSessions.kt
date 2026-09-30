@@ -228,9 +228,8 @@ class AgentSessions {
     /**
      * Kills every session in the project — the project's last tab closed, or nop exiting.
      *
-     * Not a look at another window or another project tab, which is what this used to mean and what
-     * made a running agent something the user could lose by clicking on the wrong thing. See
-     * [AgentSessionStore] for what calls this now.
+     * Not a look at another window or another project tab: a running agent must not be something the
+     * user can lose by clicking on the wrong thing. See [AgentSessionStore] for what calls this.
      */
     fun disposeAll() {
         _sessions.forEach { it.dispose() }

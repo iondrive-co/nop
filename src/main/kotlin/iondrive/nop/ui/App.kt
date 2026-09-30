@@ -130,7 +130,7 @@ private sealed interface TreeEntryDialog {
 fun App(
     projectPath: Path,
     // Borrowed from the workspace, which watches every open project's tree. Null means "no watcher"
-    // — every poll then walks the tree, which is what this panel did before there was one.
+    // — every poll then walks the tree.
     repoWatcher: RepoWatcher? = null,
     // Reports this project's dirty state up to its project tab, which is why the workspace poller
     // leaves the project in front alone: the status below is fresher than a re-walk would find.
@@ -634,8 +634,8 @@ fun App(
     var searchFieldFocusTrigger by remember(projectPath) { mutableStateOf(0) }
     val searchQueryState = remember(rootPath) { TextFieldState() }
     // Held out here for the same reason, and a sharper one: the panel is composed only while its
-    // tab is selected, so a message remembered inside it was lost the moment anything flipped the
-    // panel away — which now includes opening a markdown file or starting a script. Persisted via
+    // tab is selected, so a message remembered inside it would be lost the moment anything flipped
+    // the panel away — opening a markdown file or starting a script included. Persisted via
     // Settings so an unsaved draft survives switching between tabs, switching projects, or app restarts.
     val commitMessageState = remember(rootPath) {
         TextFieldState(Settings.loadCommitMessageDraft(rootPath))
@@ -707,8 +707,8 @@ fun App(
     // The vendor agent sessions behind the Agent tab. The one collection on this screen that is not
     // owned here: it comes from a store that lives as long as nop does, because a composition is the
     // wrong lifetime for a model half-way through a refactor — looking at another project, or moving
-    // this tab to another window, tears this composition down and used to take every running agent
-    // with it. See AgentSessionStore for what ends a session now (its tab, its project, or nop).
+    // this tab to another window, tears this composition down, and must not take every running
+    // agent with it. See AgentSessionStore for what ends a session (its tab, its project, or nop).
     val agentSessions = remember(projectPath, rootPath) {
         AgentSessionStore.of(root = rootPath, project = projectPath)
     }
@@ -753,7 +753,7 @@ fun App(
     // Re-read whenever the conversations running in the strip change, and whenever the accounts do,
     // since they are what says which stores to read. The conversations, not the count of tabs: a
     // handover, a reopen or a `/clear` keeps the tab and moves it to another conversation, and the
-    // one it left is exactly what the picker is for. Keyed on the count alone, the list went on
+    // one it left is exactly what the picker is for. Keyed on the count alone, the list would go on
     // hiding the conversation a handover had just left, as though it were still running in its tab.
     // And re-read each time the picker comes up, which also finds what a shell has filed since.
     val runningConversations = agentSessions.sessions.map { it.sessionId to it.run.nativeSessionId }
@@ -864,9 +864,8 @@ fun App(
         agentSessions.hasRunOut = { account ->
             val reading = listOfNotNull(agentUsage[account.name], Usage.liveCodexReading(account.homePath))
                 .maxByOrNull { it.asOf ?: java.time.Instant.EPOCH }
-            // Written down, because a handover on "its usage reading is spent" used to leave no trace
-            // of what the reading said — the 14:11 handover in hermes acted on one that still read
-            // spent after the reset, and nothing on disk could say which window, or how old.
+            // Written down, because a handover on "its usage reading is spent" should leave a trace of
+            // what the reading said: which window, and how old.
             reading?.looksSpent()?.also { spent ->
                 if (spent) Log.info("usage for ${account.name} reads spent: $reading")
             }
@@ -1079,7 +1078,7 @@ fun App(
                     // Push the reverted on-disk content into any editor tab open on this file, so it
                     // stops showing the now-discarded edits. Find those buffers first and read the file
                     // only when one exists: reverting a large binary (never open in the text editor)
-                    // must not pull its whole content into heap — an unconditional read OOM-crashed the app.
+                    // must not pull its whole content into heap — an unconditional read would OOM-crash the app.
                     val editors = editStore.editorsFor(reverted)
                     if (editors.isNotEmpty()) {
                         val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
@@ -1109,7 +1108,7 @@ fun App(
                         val reverted = File(repo.rootDir.toFile(), change.path)
                         if (reverted.isFile) {
                             // Read the file only when a buffer is actually open on it — see
-                            // performRevert: an unconditional read of a large binary OOM-crashed the app.
+                            // performRevert: an unconditional read of a large binary would OOM-crash the app.
                             val editors = editStore.editorsFor(reverted)
                             if (editors.isNotEmpty()) {
                                 val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
@@ -1165,7 +1164,7 @@ fun App(
                     for (path in outcome.updated) {
                         val file = File(repo.rootDir.toFile(), path)
                         // Read the file only when a buffer is actually open on it — see
-                        // performRevert: an unconditional read of a large binary OOM-crashed the app.
+                        // performRevert: an unconditional read of a large binary would OOM-crash the app.
                         val editors = editStore.editorsFor(file)
                         if (editors.isNotEmpty()) {
                             val disk = withContext(Dispatchers.IO) { runCatching { file.readText() }.getOrNull() }
@@ -1720,10 +1719,10 @@ fun App(
                                         //
                                         // Only while it is running, though. A tab whose run has
                                         // ended holds nothing but the post-exit choices, and it is
-                                        // the one case where hiding the row hid the work: a session
-                                        // that handed over and then stopped is listed by nop
+                                        // the one case where hiding the row would hide the work: a
+                                        // session that handed over and then stopped is listed by nop
                                         // under the conversation it ended in, so hiding that row
-                                        // left the picker showing only the conversation the
+                                        // would leave the picker showing only the conversation the
                                         // handover walked away from — on the account that had
                                         // just run out.
                                         sessions = pastAgentSessions.filterNot { past ->
@@ -1995,10 +1994,10 @@ fun App(
             )
         }
 
-        // The corner the theme toggle used to float in. Usage earns it: which account has quota
+        // The window's bottom-right corner. Usage earns it: which account has quota
         // left is the thing you look at to decide what to do next, and it is global state, so
         // burying it behind a tab would cost a click you only make once you already suspect the
-        // answer. The toggle moved to the project bar, which is drawn once per window.
+        // answer. The theme toggle is in the project bar, which is drawn once per window.
         UsageIndicator(
             accounts = agentAccounts,
             readings = agentUsage,

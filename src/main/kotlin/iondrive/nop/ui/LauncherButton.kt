@@ -218,10 +218,10 @@ private fun LauncherAddDialog(
     }
 
     // A window rather than a centred popup: the middle of nop's window is often the tool region,
-    // and a terminal there — an agent session, most of the time — is drawn over any popup. All
-    // that showed of this one was whatever overhung the editor, and since it still held the
-    // keyboard and ignored clicks outside it, a dialog hidden entirely behind the terminal left
-    // the window looking frozen. See [DialogFrame].
+    // and a terminal there — an agent session, most of the time — is drawn over any popup. A
+    // popup would show only whatever overhung the editor, and since it would still hold the
+    // keyboard and ignore clicks outside it, a dialog hidden entirely behind the terminal would
+    // leave the window looking frozen. See [DialogFrame].
     DialogFrame(
         title = "Add launcher",
         onClose = onCancel,

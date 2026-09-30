@@ -169,10 +169,9 @@ fun ProjectBar(
             }
         }
         Box(modifier = Modifier.width(1.dp).height(BAR_HEIGHT).background(divider))
-        // The light/dark toggle used to float in the window's bottom-right corner; the agent usage
-        // indicator has that corner now. It lands here rather than in the editor tab strip because
-        // this bar is drawn once per window while that strip is per viewer panel — in a split view
-        // the toggle would have rendered twice, which is one theme control too many.
+        // The light/dark toggle. The window's bottom-right corner belongs to the agent usage
+        // indicator, and the editor tab strip is per viewer panel where this bar is drawn once per
+        // window — in a split view the toggle would render twice, one theme control too many.
         Box(
             modifier = Modifier.height(BAR_HEIGHT),
             contentAlignment = Alignment.Center,
@@ -465,7 +464,7 @@ private fun ProjectTabView(
                     )
                     // An agent in this project waiting on the user, or finished while nobody was
                     // looking — the same mark its own tab carries in the strip, so a question asked in
-                    // hermes is visible from nop. Only while there is something to say: unlike the
+                    // one project is visible from another. Only while there is something to say: unlike the
                     // dirty dot, no room is kept for it, because it comes and goes far less often
                     // than the pointer crosses the bar.
                     if (agentNews != null) {

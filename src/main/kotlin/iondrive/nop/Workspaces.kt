@@ -7,8 +7,8 @@ import java.nio.file.Paths
  * One nop window: a name, the ordered project tabs it shows along its top bar, and which of those
  * is the tab the workspace beneath the bar is currently showing.
  *
- * A window is the unit the user organises projects into — what named separators in a single bar used
- * to do, a whole window now does, so "games" is a window rather than a fold in a very long strip.
+ * A window is the unit the user organises projects into, so "games" is a window rather than a fold
+ * in a very long strip.
  *
  * Closing a window parks it rather than discarding it: [open] goes false, [closedAt] records when,
  * and the workspace stays on the list with its tabs, waiting in the window picker for the user to
@@ -44,7 +44,7 @@ data class Workspace(
     /**
      * What the title bar and the window list call this window. A named workspace goes by its name;
      * an unnamed one — every window on a fresh install, until the user names it — falls back to what
-     * the tab it is showing says, which is what the title used to say after the old "nop — " prefix.
+     * the tab it is showing says.
      */
     val title: String
         get() = name.ifBlank { (activeTab ?: tabs.firstOrNull())?.label ?: "nop" }
@@ -295,8 +295,8 @@ object Workspaces {
  *
  * On some window managers the two disagree — the frame decoration is counted once when the window is
  * sized and again when it is measured — so a size read straight back off a window and saved would
- * reopen it that much bigger, and again the launch after that. Measured here on this machine: a
- * window asked for 600px tall reports 604, and reopening it walks the saved height up 4px a launch.
+ * reopen it that much bigger, and again the launch after that: a window asked for 600px tall can
+ * report 604, and reopening it would walk the saved height up 4px a launch.
  *
  * The gap is a property of the decoration, not of the size, so it is measured once per window from
  * the first size it reports against the size it was asked for, and taken back off everything saved

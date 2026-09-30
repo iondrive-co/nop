@@ -13,9 +13,8 @@ import java.nio.file.Path
 /**
  * Telling a tab that is working from one that is waiting on its user.
  *
- * The case this is for: a Claude session in hermes asked a question at 21:03 and was answered at
- * 08:48, and for the eleven and three-quarter hours between, its tab looked the same as a working
- * one. The titles here are the ones the CLIs really write, taken from nop's own session logs.
+ * A session that has asked a question and one that is working look alike from outside, however
+ * long the question waits. The titles here are the shapes the CLIs really write.
  */
 class ActivityTest {
     private val esc = "\u001b"
@@ -34,14 +33,14 @@ class ActivityTest {
     @Test
     fun `the last title in a read is the one that counts`() {
         val reader = TitleReader()
-        assertEquals("◑ Plan 36", reader.feed(osc("◐ Plan 36") + "x" + osc("◑ Plan 36")))
+        assertEquals("◑ Task 36", reader.feed(osc("◐ Task 36") + "x" + osc("◑ Task 36")))
     }
 
     @Test
     fun `a title split across two reads is put back together`() {
         val reader = TitleReader()
-        assertNull(reader.feed("before $esc]0;◐ Plan"))
-        assertEquals("◐ Plan 36 review", reader.feed(" 36 review$bel after"))
+        assertNull(reader.feed("before $esc]0;◐ Task"))
+        assertEquals("◐ Task 36 review", reader.feed(" 36 review$bel after"))
     }
 
     @Test
@@ -54,7 +53,7 @@ class ActivityTest {
     @Test
     fun `hyperlinks and colour queries are not titles`() {
         val reader = TitleReader()
-        assertNull(reader.feed("$esc]8;id=jk1;file:///home/miles/hermes/$esc\\link$esc]8;;$esc\\ $esc]11;?$bel"))
+        assertNull(reader.feed("$esc]8;id=jk1;file:///home/dev/shop/$esc\\link$esc]8;;$esc\\ $esc]11;?$bel"))
     }
 
     @Test
@@ -76,7 +75,7 @@ class ActivityTest {
     @Test
     fun `Claude's spinner is working and its star is stopped`() {
         assertEquals(TitleSignal.Says.Working, TitleSignal.read("◐ Claude Code"))
-        assertEquals(TitleSignal.Says.Working, TitleSignal.read("◓ Plan 36 review and implementation"))
+        assertEquals(TitleSignal.Says.Working, TitleSignal.read("◓ Task 36 review and implementation"))
         assertEquals(TitleSignal.Says.Stopped, TitleSignal.read("✳ Claude Code"))
     }
 
@@ -107,23 +106,23 @@ class ActivityTest {
     @Test
     fun `a spinner is working and the star after it is idle`() {
         val tracker = ActivityTracker()
-        tracker.onTitle("◐ Plan 36", at = 0)
+        tracker.onTitle("◐ Task 36", at = 0)
         assertEquals(Activity.Working, tracker.activity(now = 100))
-        tracker.onTitle("✳ Plan 36", at = 200)
+        tracker.onTitle("✳ Task 36", at = 200)
         assertEquals(Activity.Idle, tracker.activity(now = 200))
     }
 
-    /** The night itself: the question was an open AskUserQuestion call, and nothing else was moving. */
+    /** A question left open: an AskUserQuestion call still waiting, and nothing else moving. */
     @Test
     fun `an open question is asking whatever the title says`() {
         val tracker = ActivityTracker()
-        tracker.onTitle("◐ Plan 36", at = 0)
+        tracker.onTitle("◐ Task 36", at = 0)
         tracker.onEvent(started("toolu_013f", "AskUserQuestion"))
         assertEquals(Activity.Asking, tracker.activity(now = 10))
-        tracker.onTitle("✳ Plan 36", at = 20)
+        tracker.onTitle("✳ Task 36", at = 20)
         assertEquals(Activity.Asking, tracker.activity(now = 42_333_190))
         tracker.onEvent(finished("toolu_013f"))
-        tracker.onTitle("◐ Plan 36", at = 42_333_300)
+        tracker.onTitle("◐ Task 36", at = 42_333_300)
         assertEquals(Activity.Working, tracker.activity(now = 42_333_300))
     }
 

@@ -70,8 +70,7 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
      * They live here, beside the buffer, because only one FileEditView is composed at a time — the
      * selected tab's — so anything remembered inside it either dies on a tab switch or, if hoisted
      * into Compose's saveable registry, is restored into whichever *other* file lands in that slot
-     * next. Both were the latter: switching tabs dropped you at the previous file's scroll offset
-     * with its query in your find bar. Keyed to the file and dropped when its tab closes.
+     * next — which drops you at the previous file's scroll offset with its query in your find bar. Keyed to the file and dropped when its tab closes.
      */
     val scroll: ScrollState = ScrollState(0)
 
@@ -103,15 +102,14 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
      * never trigger a disk write. nop only ever writes back what the user actually edited; this is
      * what stops it reverting a file after a checkout/pull/merge it didn't make.
      *
-     * Both halves are load-bearing, and the second was missing. As a bare latch this could only be
+     * Both halves are load-bearing. As a bare latch this could only be
      * cleared by a save or an adopt, and neither runs when the buffer already equals [savedText]:
      * the autosave skips it (nothing to write) and reconcile is gated on this very flag. Typing a
-     * character and deleting it again inside the autosave debounce was enough to reach that state,
-     * and the buffer then ignored every external write for the rest of the session — no refresh,
-     * no save attempt, and so no [saveBlock] and nothing on screen to explain it. Closing the tab
-     * was the only way out.
+     * character and deleting it again inside the autosave debounce would reach that state, and the
+     * buffer would then ignore every external write for the rest of the session — no refresh, no
+     * save attempt, and so no [saveBlock] and nothing on screen to explain it.
      *
-     * Qualifying the latch with [isModified] fixes that at the source and can't lose work: when the
+     * Qualifying the latch with [isModified] avoids that at the source and can't lose work: when the
      * buffer matches the baseline there is, by definition, nothing unsaved to protect. A buffer that
      * drifted *without* the user (the diff view's writeback echo) still reads false here, so it
      * still reloads from disk, which is why this is [isModified] on top of the latch rather than

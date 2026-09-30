@@ -18,13 +18,11 @@ import java.util.concurrent.ConcurrentHashMap
  * genuinely indistinguishable on disk — a `/clear` successor and a sibling tab's session are both
  * just a newer file — and nop is the one that knows the difference: it started them.
  *
- * A session stays its tab's after the run following it has ended. The registry used to forget a
- * session the moment its run ended, and a run ends at every handover — the second the CLI is killed
- * and still flushing its last records. At the 14:11 handover in hermes on 2026-09-24, one tab
- * handed over, let go of its Claude session, and two sibling tabs, still running, adopted it as
- * their own `/clear`: their handoffs were built from its conversation, and Codex was sent to do
- * the other tab's work in both. The same thing happened again with the Codex rollouts that
- * followed. Nothing that another tab started is ever this tab's `/clear` or this tab's rollout, so
+ * A session stays its tab's after the run following it has ended. A run ends at every handover —
+ * the second the CLI is killed and still flushing its last records — and a session let go then is
+ * one a sibling tab still running would adopt as its own `/clear`: its handoff would be built from
+ * the other tab's conversation, and the next provider sent to do the other tab's work. Codex
+ * rollouts are open to the same mistake. Nothing that another tab started is ever this tab's `/clear` or this tab's rollout, so
  * nothing is let go. A later claim from another tab — a session reopened from the picker — moves
  * it.
  *

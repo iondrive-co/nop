@@ -11,9 +11,8 @@ import java.time.Instant
 /**
  * How often a provider is asked for usage, whoever is asking.
  *
- * The bug this exists for: every project switch polled every account at once, a few quick switches
- * got Anthropic's usage endpoint to answer 429, and the strip showed "no answer from the usage API"
- * for all the Claude accounts until the next poll.
+ * Every project switch polls for usage, so without a gate a few quick switches ask every account
+ * at once, and Anthropic's usage endpoint answers a burst with 429.
  */
 class UsageGateTest {
 

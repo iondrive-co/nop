@@ -693,9 +693,8 @@ class SettingsTest {
     }
 
     /**
-     * The baseline sha arrived after the format was in use, as a seventh field. A six-field row is
-     * an older nop's, and the tab it comes back as simply has no baseline — dropping it would cost
-     * the user the session rather than the feature.
+     * The baseline sha is an optional seventh field. A six-field row comes back as a tab with no
+     * baseline — dropping it would cost the user the session rather than the feature.
      */
     @Test
     fun `a six-field agent row restores with no baseline`(@TempDir tmp: Path) {

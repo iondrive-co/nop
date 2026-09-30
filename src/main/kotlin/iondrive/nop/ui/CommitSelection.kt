@@ -7,8 +7,8 @@ package iondrive.nop.ui
  * A path that leaves the change list while HEAD stays put (stashed, reverted, or set aside by an
  * agent) is remembered with the tick it had. When it comes back it gets that tick again, not the
  * default a new change gets, and it is marked [returned]. Without the mark a returning file looks
- * the same as one that never left: an agent stashed a fix to test a test alone, popped it back,
- * and the user committed the fix believing the list held only the test. A path that leaves because
+ * the same as one that never left: an agent can stash a fix to run a test alone and pop it back,
+ * and the user commit the fix believing the list holds only the test. A path that leaves because
  * HEAD moved (a commit, a checkout) is forgotten, so its next edit is a new change.
  *
  * [arrived] holds the new paths ticked while a commit message was being written. Opening a path's

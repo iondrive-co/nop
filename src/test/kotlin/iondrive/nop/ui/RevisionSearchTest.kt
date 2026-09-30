@@ -11,9 +11,9 @@ class RevisionSearchTest {
         CommitInfo(sha = sha, author = author, whenEpochSeconds = 1_700_000_000L, shortMessage = message)
 
     private val log = listOf(
-        commit("b09a25a656445718a494da86beba0f623e78ce56", "Fix the markdown preview split", "miles"),
+        commit("b09a25a656445718a494da86beba0f623e78ce56", "Fix the markdown preview split", "grace"),
         commit("1f2e3d4c5b6a79880011223344556677889900aa", "Resizable markdown preview", "Ada Lovelace"),
-        commit("cafebabe00112233445566778899aabbccddeeff", "Release v0.52.0", "miles"),
+        commit("cafebabe00112233445566778899aabbccddeeff", "Release v0.52.0", "grace"),
     )
 
     @Test
@@ -37,8 +37,8 @@ class RevisionSearchTest {
 
     @Test
     fun `every term has to match, in any order`() {
-        assertEquals(listOf(log[0]), RevisionSearch.filter("markdown miles", log))
-        assertEquals(listOf(log[0]), RevisionSearch.filter("miles markdown", log))
+        assertEquals(listOf(log[0]), RevisionSearch.filter("markdown grace", log))
+        assertEquals(listOf(log[0]), RevisionSearch.filter("grace markdown", log))
         // "preview" is in two commits, but only one of them is Ada's.
         assertEquals(listOf(log[1]), RevisionSearch.filter("preview ada", log))
     }

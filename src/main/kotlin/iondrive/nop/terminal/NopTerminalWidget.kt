@@ -237,8 +237,8 @@ private class NopTerminalPanel(
  * when a physical font is asked for one it doesn't have.
  *
  * Codex animates its composer background with `·✦✧` (`chat_composer/sparkle.rs`). JetBrains Mono
- * has the middle dot and neither star, so two frames in three came out a hollow rectangle and the
- * animation read as boxes crawling behind the prompt rather than as anything twinkling. The same
+ * has the middle dot and neither star, so two frames in three would come out a hollow rectangle and
+ * the animation read as boxes crawling behind the prompt rather than as anything twinkling. The same
  * gap swallows the braille spinners other CLIs use (U+2800..U+28FF) and most of Dingbats.
  *
  * The stand-in is AWT's *logical* monospace. A font from `Font.createFont` — which is what the

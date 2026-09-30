@@ -16,14 +16,13 @@ import java.io.File
  * Guards the two things a spawn has to get right: the argv that decides how the CLI behaves, and
  * the environment that decides *whose account it runs as*.
  *
- * The environment half is checked against `agent/chad-env-capture.json` — a capture taken from the
- * Python implementation this was ported from, rather than a restatement of what the port is meant
- * to do. Isolation failing is silent: three accounts sharing one login look exactly like three
- * accounts working, right up until the usage of one of them is spent by all three.
+ * The environment half is checked against `agent/env-capture.json`, a record of the environment
+ * every account and reasoning level must get, rather than a restatement of the code. Isolation
+ * failing is silent: three accounts sharing one login look exactly like three accounts working,
+ * right up until the usage of one of them is spent by all three.
  *
- * The argv half is *not* checked against that capture, and shouldn't be. chad drove these CLIs
- * headless (`-p --output-format stream-json`); nop runs their interactive TUIs, which is a
- * deliberate difference, so those assertions are against the design instead.
+ * The argv half is checked against the design instead: nop runs the CLIs' interactive TUIs, and
+ * what each is started with follows from that.
  */
 class SpawnTest {
 
@@ -32,7 +31,7 @@ class SpawnTest {
     private fun claude(model: String? = null, reasoning: String? = null) = Account(
         name = "claude-main",
         provider = Provider.Anthropic,
-        home = "/home/dev/.chad/claude-configs/claude-main",
+        home = "/home/dev/.local/share/nop/agent/homes/claude-main",
         model = model,
         reasoning = reasoning,
     )
@@ -40,7 +39,7 @@ class SpawnTest {
     private fun codex(model: String? = null, reasoning: String? = null) = Account(
         name = "codex-main",
         provider = Provider.OpenAI,
-        home = "/home/dev/.chad/codex-homes/codex-main",
+        home = "/home/dev/.local/share/nop/agent/homes/codex-main",
         model = model,
         reasoning = reasoning,
     )
@@ -48,14 +47,14 @@ class SpawnTest {
     private fun antigravity(model: String? = null, reasoning: String? = null) = Account(
         name = "google-main",
         provider = Provider.Antigravity,
-        home = "/home/dev/.chad/antigravity-homes/google-main",
+        home = "/home/dev/.local/share/nop/agent/homes/google-main",
         model = model,
         reasoning = reasoning,
     )
 
     @Test
-    fun `the environment matches what chad's builder produced for every account and reasoning level`() {
-        val text = checkNotNull(javaClass.getResourceAsStream("/agent/chad-env-capture.json"))
+    fun `the environment matches the capture for every account and reasoning level`() {
+        val text = checkNotNull(javaClass.getResourceAsStream("/agent/env-capture.json"))
             .bufferedReader().readText()
         val capture = Json.parseToJsonElement(text).jsonObject
         val homes = capture["homes"]!!.jsonObject
@@ -172,7 +171,7 @@ class SpawnTest {
 
         assertEquals(
             mapOf(
-                "HOME" to "/home/dev/.chad/antigravity-homes/google-main",
+                "HOME" to "/home/dev/.local/share/nop/agent/homes/google-main",
                 "AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS" to "1",
             ),
             command.env,

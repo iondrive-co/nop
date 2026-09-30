@@ -69,11 +69,9 @@ import org.jetbrains.jewel.ui.component.TextField
  * asking for one — so this dialog stays what it is: the list of vendor accounts, what each one runs
  * as, and how to sign one in or out.
  *
- * Nothing gates it. chad asked for a password at startup, but that password unlocked nothing — it
- * was handed to a function whose own docstring calls it unused, and the one encrypted field was an
- * empty string encrypted with an empty password. A gate here would be weaker still: the vendors'
- * credential files sit on disk for their own CLIs to read, so anyone who can reach this machine can
- * run `claude` in a terminal and be signed in as you. See [AgentConfig].
+ * Nothing gates it. A gate here would protect nothing: the vendors' credential files sit on disk for
+ * their own CLIs to read, so anyone who can reach the machine can run `claude` in a terminal and be
+ * signed in as you. See [AgentConfig].
  */
 @Composable
 fun AccountsDialog(

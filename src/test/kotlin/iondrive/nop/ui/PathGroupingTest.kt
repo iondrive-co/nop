@@ -181,14 +181,14 @@ class PathGroupingTest {
         // The shape a docs repo produces: one big "docs" column spanning a deep tree, arriving in
         // whatever order git status listed it in.
         val groups = group(
-            "adnuntius-advertising/admin-ui/inventory/sites.md",
+            "acme-advertising/admin-ui/inventory/sites.md",
             "SUMMARY.md",
-            "adnuntius-advertising/admin-api/endpoints/lineitems.md",
-            "adnuntius-self-service/marketing-tips.md",
-            "adnuntius-advertising/admin-ui/advertising/line-items.md",
-            "adnuntius-advertising/admin-api/endpoints/adunits.md",
+            "acme-advertising/admin-api/endpoints/lineitems.md",
+            "acme-self-service/marketing-tips.md",
+            "acme-advertising/admin-ui/advertising/line-items.md",
+            "acme-advertising/admin-api/endpoints/adunits.md",
             "README.md",
-            "adnuntius-advertising/admin-ui/advertising/advertisers.md",
+            "acme-advertising/admin-ui/advertising/advertisers.md",
         )
         assertEquals(
             listOf(
@@ -196,12 +196,12 @@ class PathGroupingTest {
                 // together and alphabetical within it.
                 "README.md",
                 "SUMMARY.md",
-                "adnuntius-advertising/admin-api/endpoints/adunits.md",
-                "adnuntius-advertising/admin-api/endpoints/lineitems.md",
-                "adnuntius-advertising/admin-ui/advertising/advertisers.md",
-                "adnuntius-advertising/admin-ui/advertising/line-items.md",
-                "adnuntius-advertising/admin-ui/inventory/sites.md",
-                "adnuntius-self-service/marketing-tips.md",
+                "acme-advertising/admin-api/endpoints/adunits.md",
+                "acme-advertising/admin-api/endpoints/lineitems.md",
+                "acme-advertising/admin-ui/advertising/advertisers.md",
+                "acme-advertising/admin-ui/advertising/line-items.md",
+                "acme-advertising/admin-ui/inventory/sites.md",
+                "acme-self-service/marketing-tips.md",
             ),
             group(groups, "docs").paths,
         )

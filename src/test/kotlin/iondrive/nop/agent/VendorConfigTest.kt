@@ -13,11 +13,11 @@ import java.nio.file.Path
 
 /**
  * Claude Code decides whether to run its first-run flow from `hasCompletedOnboarding` in its own
- * config, not from whether it holds a usable token. An account inherited from a tool that only ever
- * drove the CLI headless has a good `.credentials.json` and no such flag, so launching it
- * interactively asked the user to sign in to an account that was already signed in.
+ * config, not from whether it holds a usable token. A home that has only ever run the CLI headless
+ * has a good `.credentials.json` and no such flag, so launching it interactively would ask the user
+ * to sign in to an account that is already signed in.
  *
- * These guard the narrowness of the fix as much as the fix: it is someone else's config file, and
+ * These guard how narrow nop's write is as much as the write itself: it is someone else's config file, and
  * nop writes two keys into it and only when they are missing — that, and the diff sidebar's default.
  */
 class VendorConfigTest {

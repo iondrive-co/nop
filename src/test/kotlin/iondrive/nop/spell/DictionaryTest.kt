@@ -63,18 +63,18 @@ class DictionaryTest {
     fun `a word added by the user is known and persisted`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         Dictionary.invalidate()
-        assertFalse(Dictionary.knows("adnuntius"))
+        assertFalse(Dictionary.knows("zyntaq"))
 
-        Dictionary.add("Adnuntius")
+        Dictionary.add("Zyntaq")
 
-        assertTrue(Dictionary.knows("adnuntius"), "added word should be known immediately")
-        assertTrue(Dictionary.knows("Adnuntius"))
-        assertEquals(listOf("adnuntius"), Dictionary.userWords())
-        assertEquals("adnuntius\n", Files.readString(tmp.resolve("nop/dictionary")))
+        assertTrue(Dictionary.knows("zyntaq"), "added word should be known immediately")
+        assertTrue(Dictionary.knows("Zyntaq"))
+        assertEquals(listOf("zyntaq"), Dictionary.userWords())
+        assertEquals("zyntaq\n", Files.readString(tmp.resolve("nop/dictionary")))
 
         // A fresh load of the same config root still has it.
         Dictionary.invalidate()
-        assertTrue(Dictionary.knows("adnuntius"))
+        assertTrue(Dictionary.knows("zyntaq"))
     }
 
     @Test

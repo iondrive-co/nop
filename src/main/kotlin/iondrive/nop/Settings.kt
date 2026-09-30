@@ -348,9 +348,8 @@ object Settings {
         map["split.tools"] = tools.toString()
         map["split.diff"] = diff.toString()
         map["split.session"] = session.toString()
-        // "split.preview" was the markdown editor/preview divider. The preview moved into the tool
-        // panel, which is sized by "split.tools", so the key is no longer read or written; a state
-        // file left over from an older build simply carries a line nothing looks at.
+        // A state file may carry a "split.preview" line; nothing reads it. The markdown preview is
+        // in the tool panel, which "split.tools" sizes.
         save(map)
     }
 
@@ -613,9 +612,8 @@ object Settings {
                     // AgentSession.DEFAULT_TITLE.
                     title = parts[4].trim(),
                     titleIsUsers = parts[5].trim() == "1",
-                    // Seventh field, added after the format was in use: a six-field row is a tab
-                    // written by an older nop, and the session it comes back as simply has no
-                    // baseline to diff against rather than being skipped as malformed.
+                    // The seventh field is optional: a six-field row comes back as a session with
+                    // no baseline to diff against rather than being skipped as malformed.
                     baselineSha = parts.getOrNull(6)?.trim().orEmpty(),
                 )
             }

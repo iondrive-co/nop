@@ -70,7 +70,7 @@ import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
 
-// The size a window opens at when neither it nor an older build's saved geometry says otherwise.
+// The size a window opens at when no saved geometry says otherwise.
 private const val DEFAULT_WINDOW_WIDTH = 1000
 private const val DEFAULT_WINDOW_HEIGHT = 700
 

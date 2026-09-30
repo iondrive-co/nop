@@ -8,13 +8,12 @@ import java.nio.file.Path
  * dot on each project tab.
  *
  * The obvious way to do this is the reason this class exists: opening each repository, walking it,
- * and closing it again every few seconds. Measured on a 23-project bar that held one core at ~7%
- * around the clock with nop idle and untouched — ~19k syscalls and ~7.3k file stats a second. A JGit
- * status costs the size of the working tree rather than the number of changes in it, and rebuilding
- * the repository each tick re-read every level of git config and rescanned the pack directory on top
- * of that.
+ * and closing it again every few seconds keeps a core busy around the clock with nop idle and
+ * untouched. A JGit status costs the size of the working tree rather than the number of changes in
+ * it, and rebuilding the repository each tick re-reads every level of git config and rescans the
+ * pack directory on top of that.
  *
- * So none of those three things happen per tick any more. Each project's [GitRepo] is opened once
+ * So none of those three things happen per tick. Each project's [GitRepo] is opened once
  * and kept (see [retain]); a [RepoWatcher] reports which trees have moved, so an unchanged project
  * costs a counter comparison; and a project nobody is looking at re-walks at most once per
  * [backgroundIntervalMs] however busy it gets — which matters on a machine where agents write to
@@ -132,7 +131,7 @@ class ProjectGitPoller(
          * How often a project nobody is looking at may re-walk its tree. Its dot only has to be
          * roughly right — the panel for the project actually on screen refreshes on its own, far
          * quicker cadence — and this is the ceiling that keeps a busy background checkout (an agent
-         * writing to it, a build running in it) from costing what the whole bar used to.
+         * writing to it, a build running in it) cheap.
          */
         const val BACKGROUND_INTERVAL_MS = 30_000L
     }

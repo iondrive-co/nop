@@ -141,8 +141,7 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         )
 
         /**
-         * The account is out. Ported from chad's own list, which was built against real error text
-         * from these CLIs, plus the sentence Claude Code prints in its TUI when a plan limit is
+         * The account is out. Built against real error text from these CLIs, plus the sentence Claude Code prints in its TUI when a plan limit is
          * reached — the one case the API-shaped patterns miss, because the TUI never shows the API
          * error at all.
          *
@@ -172,10 +171,9 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 """\bcredit_balance\b.*\binsufficient\b""",
                 """rate\s+limit\s+exceeded""",
                 // Antigravity's, which names no window at all: "Individual quota reached. Please
-                // upgrade your subscription to increase your limits. Resets in 7m31s." The `agy`
-                // account nop watched run out on 2026-09-20 had hours left in both windows its
-                // `/usage` reports — the allowance this refuses against is a third one, minutes
-                // long, that no reading here has ever seen. The countdown on the end is the only
+                // upgrade your subscription to increase your limits. Resets in 7m31s." It can come
+                // with hours left in both windows `/usage` reports: the allowance it refuses against
+                // is a third one, minutes long, that no reading here sees. The countdown on the end is the only
                 // thing that says so, and it is read separately: see [resetsInFrom].
                 """\bquota\s+reached\b""",
                 // Generic, and common to both.

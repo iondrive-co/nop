@@ -12,7 +12,7 @@ import java.nio.file.Path
  * What a project's agent sessions outlive, and what they don't.
  *
  * No session is opened here: the store's whole job is who holds the collection and when it is let
- * go, and asking twice for the same project is the thing that used to lose a running CLI.
+ * go, and asking twice for the same project must not lose a running CLI.
  */
 class AgentSessionStoreTest {
 
@@ -22,7 +22,7 @@ class AgentSessionStoreTest {
     }
 
     /**
-     * The bug this exists for. Looking at another project, or another window, tears the composition
+     * Looking at another project, or another window, tears the composition
      * down and builds it again — and the second look has to find the same sessions, not new ones.
      */
     @Test

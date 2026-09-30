@@ -39,12 +39,11 @@ data class RunContext(
      * the state file, or a session reopened from the picker.
      *
      * When it is, the transcript on disk opens full of history that is already in the session's own
-     * event log, and the follower starts at the end of it rather than replaying it. Replaying was
-     * not harmless: it filed a duplicate of every message the conversation had ever carried, and
-     * the titles came back through with them, so the last one in the file renamed the tab. A
-     * session restored as "Plan 40 completion check" came back up called "Handoff from Claude
-     * Code" — its own name from an hour earlier — and looked, to the person hunting for it, like a
-     * session that had not come back at all.
+     * event log, and the follower starts at the end of it rather than replaying it. Replaying is
+     * not harmless: it would file a duplicate of every message the conversation had ever carried,
+     * and the titles would come back through with them, so the last one in the file would rename
+     * the tab — a restored session could come back under a name it had hours earlier, and look like
+     * one that had not come back at all.
      *
      * False for everything else, which is every case where the replay is how nop learns the
      * history: a fresh session, a handover into a new conversation, and a vendor session reopened

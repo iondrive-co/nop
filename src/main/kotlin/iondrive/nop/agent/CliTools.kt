@@ -59,16 +59,11 @@ object CliTools {
         Provider.Anthropic, Provider.OpenAI -> "https://www.npmjs.com/"
     }
 
-    /**
-     * Where these CLIs install outside PATH: npm's default global prefix, a user-local prefix, and
-     * the managed tools directory chad kept its own copies in.
-     */
+    /** Where these CLIs install outside PATH: npm's default global prefix and user-local prefixes. */
     private val EXTRA_BIN_DIRS = listOf(
         ".local/bin",
         ".npm-global/bin",
         ".npm-packages/bin",
         "node_modules/.bin",
-        ".chad/tools/bin",
-        ".chad/tools/node_modules/.bin",
     )
 }

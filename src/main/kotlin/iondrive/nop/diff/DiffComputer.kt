@@ -102,8 +102,8 @@ object DiffComputer {
                 }
                 ch.toString() == close -> {
                     // A close sentinel without a matching open (defensive — shouldn't happen with
-                    // well-formed java-diff-utils output) used to emit `InlineSpan(-1, …)` which
-                    // crashed annotateLine on substring(-1, _) when the row scrolled into view.
+                    // well-formed java-diff-utils output) would emit `InlineSpan(-1, …)`, which
+                    // crashes annotateLine on substring(-1, _) when the row scrolls into view.
                     if (spanStart >= 0) {
                         spans.add(InlineSpan(spanStart, out.length, changed = true))
                         lastFlushedAt = out.length

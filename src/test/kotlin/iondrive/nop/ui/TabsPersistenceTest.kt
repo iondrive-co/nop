@@ -57,7 +57,7 @@ class TabsPersistenceTest {
         File(repo, "docs").mkdirs()
         File(repo, "docs/guide.md").writeText("hello")
         // The tab a click in the commit panel opens — the kind of tab a docs project is mostly made
-        // of, and the one that used to vanish on every project switch.
+        // of, and the one that has to survive a project switch.
         val original = Tab.Diff(FileChange("docs/guide.md", ChangeKind.MODIFIED), repo)
         TabsPersistence.save(target, snapshotOf(listOf(original), selectedId = original.id))
 
@@ -325,9 +325,9 @@ class TabsPersistenceTest {
         val target = tmp.resolve("tabs.tsv")
         val file = tmp.resolve("x.kt").toFile().apply { writeText("") }
         val repo = tmp.resolve("repo").toFile().apply { mkdirs() }
-        // The shape an older build wrote a git-log tab in. The log lives in the tool panel now and
-        // is persisted beside the other tool tabs, so the row names no tab in this strip — with or
-        // without a repo to rebuild it against — and must not resurrect one.
+        // A git-log row in the strip's file. The log lives in the tool panel and is persisted beside
+        // the other tool tabs, so the row names no tab in this strip — with or without a repo to
+        // rebuild it against — and must not resurrect one.
         Files.writeString(target, "history\t${file.absolutePath}\t1\n")
 
         for (root in listOf(null, repo)) {

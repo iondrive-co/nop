@@ -14,7 +14,7 @@ object JumpResolver {
     /**
      * Returns the word straddling [offset] in [text], or null when the cursor isn't on a word.
      * Word chars are letters, digits, underscore, and hyphen — hyphens appear in Ansible role
-     * names and template filenames (`adn-deploy-tool`) and we want those to round-trip.
+     * names and template filenames (`acme-deploy-tool`) and we want those to round-trip.
      */
     fun wordAt(text: String, offset: Int): String? {
         val range = wordRangeAt(text, offset) ?: return null

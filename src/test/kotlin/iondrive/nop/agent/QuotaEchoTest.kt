@@ -12,15 +12,15 @@ import java.time.Instant
  * The provider-independent half of deciding a quota wall: did the vendor say it, or was the agent
  * showing it?
  *
- * The bug this answers had no undo. A session working on nop's own quota code printed the phrases
- * those tests are built from, the watcher read them off the screen and killed the run mid-turn — and
- * because the text was then in the conversation, every resume replayed it and was killed again, until
- * the session could not be re-entered at all. The transcript is what tells the two apart without
+ * Getting this wrong has no undo. A session working on quota code prints the phrases those tests
+ * are built from; a watcher that believed the screen would kill the run mid-turn — and because the
+ * text is then in the conversation, every resume would replay it and be killed again, until the
+ * session could not be re-entered at all. The transcript is what tells the two apart without
  * asking the vendor anything.
  */
 class QuotaEchoTest {
 
-    /** When the run began, and the moment it is being judged: the times of the 19:48 wall. */
+    /** When the run began, and the moment it is being judged. */
     private val since = Instant.parse("2026-09-18T08:14:28Z")
     private val now = Instant.parse("2026-09-18T09:48:59Z")
 
@@ -54,7 +54,7 @@ class QuotaEchoTest {
     /**
      * The wall itself. It wears the assistant's role so the TUI can redraw it, but the model did not
      * say it — the 429 did, and this is the vendor refusing. The record lands within milliseconds of
-     * the words on screen: 72ms before nop matched them, at 19:48.
+     * the words on screen.
      */
     @Test
     fun `a refusal the CLI filed moments ago is the vendor's`(@TempDir tmp: Path) {
@@ -92,11 +92,10 @@ class QuotaEchoTest {
     }
 
     /**
-     * The 19:48 wall, and the reason the second version of this guard still never handed a thing
-     * over. The session was itself a handover: its first act was to read a handoff whose last line
-     * was the previous account's wall, word for word. With the phrase in the conversation from then
-     * on, its own wall was vetoed as an echo of that one — nine times over, as the user kept typing
-     * into a dead session. The refusal the CLI filed is what settles it.
+     * A session that is itself a handover: its first act is to read a handoff whose last line is the
+     * previous account's wall, word for word. With the phrase in the conversation from then on, its
+     * own wall would be vetoed as an echo of that one, every time the user typed into the dead
+     * session. The refusal the CLI filed is what settles it.
      */
     @Test
     fun `a fresh refusal outweighs the same words quoted in the conversation`(@TempDir tmp: Path) {
@@ -119,16 +118,16 @@ class QuotaEchoTest {
         """{"type":"assistant","timestamp":"$at","message":{"content":[{"type":"text","text":"$text"}]}}"""
 
     /**
-     * The 18:59 handover in hermes. The agent had just answered a question about an exchange
-     * refusing its requests, and finished its turn; the screen showed its answer, and nop took the
-     * answer for the vendor. A refused request writes no reply, so a fresh one is the agent talking.
+     * The agent has just answered a question about a service refusing its requests, and finished its
+     * turn; the screen shows its answer, which must not be taken for the vendor. A refused request
+     * writes no reply, so a fresh one is the agent talking.
      */
     @Test
     fun `a phrase in the agent's own reply from moments ago is said by the agent`(@TempDir tmp: Path) {
         val file = transcript(
             tmp,
             """{"type":"user","timestamp":"${now.minusSeconds(44)}","message":{"content":"any rate limits?"}}""",
-            reply(now.minusSeconds(12), """02:10Z: Hyperliquid refused a request (a 429 \"too many requests\" reply)."""),
+            reply(now.minusSeconds(12), """02:10Z: The payments API refused a request (a 429 \"too many requests\" reply)."""),
         )
 
         assertEquals(Verdict.Said, judge(file, "too many requests"))

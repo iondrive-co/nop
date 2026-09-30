@@ -23,7 +23,7 @@ import java.time.Instant
  * The file maps account names to what their reading should be:
  * ```
  * {
- *   "claude-work": {
+ *   "claude-main": {
  *     "session": { "percent": 72, "resetsInMinutes": 108, "windowMinutes": 300 },
  *     "weekly": { "percent": 41, "resetsInMinutes": 4380, "windowMinutes": 10080 },
  *     "models": ["claude-opus-5", "claude-sonnet-5"]

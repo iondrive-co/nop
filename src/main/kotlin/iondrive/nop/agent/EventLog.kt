@@ -169,7 +169,8 @@ data class PastSession(
     /**
      * When the session last did anything, as far as its files say: what the picker sorts by and
      * shows. Not [startedAt] — a conversation opened at breakfast and worked in all day is the one
-     * the user was just in, and dating it by its first message sank it below everything begun since.
+     * the user was just in, and dating it by its first message would sink it below everything begun
+     * since.
      */
     val lastActiveAt: Long = startedAt,
 ) {
@@ -178,9 +179,9 @@ data class PastSession(
      *
      * One rule, in one place, because two of them disagreeing is what a dead row looks like: the
      * picker decides from this whether the row is clickable at all, and the click itself resolves
-     * the same way. They used to differ — the row asked only whether the session named an account,
-     * the click asked whether that name was one of [configured] — so a session run under a store
-     * label offered itself, accepted the press and did nothing with it.
+     * the same way. Were they to differ — the row asking only whether the session names an account,
+     * the click whether that name is one of [configured] — a session run under a store label would
+     * offer itself, accept the press and do nothing with it.
      *
      * A configured account wins over the recorded directory even when both are there: they are the
      * same credentials either way, and only the configured one carries the model and reasoning the
@@ -396,15 +397,14 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
         }
 
         /**
-         * The credential directory a run's transcript is sitting inside, for a log written before
-         * that directory was recorded beside it.
+         * The credential directory a run's transcript is sitting inside, for a log that does not
+         * record that directory beside it.
          *
          * Claude files a session at `<configDir>/projects/<slug>/<id>.jsonl`, so the store is three
-         * directories up — and the transcript path is the one piece of it every located run has
-         * written down since long before [AgentEvent.RunStarted.home] existed. Without this, every
-         * session in an existing log whose account is a store label rather than a configured
-         * account stays unreachable for good: the row cannot be placed, the picker greys it out,
-         * and recording the store from now on only helps the sessions that have not happened yet.
+         * directories up — and the transcript path is written down for every located run, where
+         * [AgentEvent.RunStarted.home] may be missing. Without this, a session in such a log whose
+         * account is a store label rather than a configured account would stay unreachable: the row
+         * could not be placed, and the picker would grey it out.
          *
          * Claude only, and only for a path shaped the way Claude shapes one. Codex nests its
          * rollouts by date under `<home>/.codex/sessions/`, where the same arithmetic lands on a
@@ -443,13 +443,12 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             val followed = runCatching { Path.of(path) }.getOrNull() ?: return null
             val id = run.nativeSessionId
             val asked = askedFor(run)
-            // A run that ended up in a `claude -p` worker's transcript, which the tailer took for a
-            // `/clear` until 2026-09-28, resumes the conversation it was spawned on, never the worker's.
+            // A run whose log followed a `claude -p` worker's transcript resumes the conversation it
+            // was spawned on, never the worker's.
             if (id != null && id != asked && headless(run, followed)) return tabsOwn(run, followed)
             // The run ended up somewhere other than where nop pointed it. Typing `/clear` does
-            // that, and so did a tailer adopting a conversation somebody else was already in — see
-            // ClaudeTailer.switched, which no longer makes that mistake but cannot unwrite the logs
-            // that recorded it. A conversation this run started began after this run did; one it
+            // that, and so does a log that recorded a tailer adopting a conversation somebody else
+            // was already in (see ClaudeTailer.switched). A conversation this run started began after this run did; one it
             // merely walked into was already going.
             if (asked != null && id != null && id != asked && !beganAfter(followed, spawnedAt)) {
                 val its = followed.resolveSibling("$asked.jsonl")
@@ -480,9 +479,9 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
         /**
          * The conversation a restored tab resumes, given the id the state file saved for it.
          *
-         * That id is whatever the tab's tailer was following at the last save, and until 2026-09-28
-         * the tailer could be following a `claude -p` worker's transcript instead of its own (see
-         * `ClaudeTailer.switched`). Resuming that would put the worker's conversation in the tab
+         * That id is whatever the tab's tailer was following at the last save, which can be a
+         * `claude -p` worker's transcript instead of its own (see `ClaudeTailer.switched`). Resuming
+         * that would put the worker's conversation in the tab
          * and carry on its work. So a Claude id whose transcript the TUI did not write is swapped for
          * the one nop spawned the run on, read from the tab's own log; any other id is kept.
          */

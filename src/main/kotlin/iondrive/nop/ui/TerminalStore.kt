@@ -7,9 +7,9 @@ import java.nio.file.Path
  * Every project's terminals, held for as long as nop is running: the shells behind the Term tabs and
  * the launcher runs behind the Run tab.
  *
- * They used to be owned by the project's composition. nop composes one project tab at a time, so
- * switching to another project killed every shell and run in the one left behind, along with its
- * scrollback and whatever it was running. Coming back opened a fresh Term. These are the same terms
+ * They are not owned by the project's composition: nop composes one project tab at a time, so
+ * switching to another project would kill every shell and run in the one left behind, along with
+ * its scrollback and whatever it was running. These are the same terms
  * as [AgentSessionStore][iondrive.nop.agent.AgentSessionStore], for the same reason: a terminal is a
  * live process the user has not closed.
  *
@@ -27,8 +27,8 @@ object TerminalStore {
     class Terminals(val shells: RunSessions, val runs: RunSessions) {
         /**
          * Which collection the session pane was showing when the project was last looked at: Term,
-         * Run, Agent, or null for the agent picker. Without it, coming back to the project showed
-         * the picker, and a Term left running looked as though it had been lost.
+         * Run, Agent, or null for the agent picker. Without it, coming back to the project would
+         * show the picker, and a Term left running would look as though it had been lost.
          */
         var sessionTab: ToolTab? = null
 

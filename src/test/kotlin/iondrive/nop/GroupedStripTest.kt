@@ -89,8 +89,8 @@ class GroupedStripTest {
 
     @Test
     fun `dragStep moves a group above the previous group with its tabs`() {
-        // The reported bug: dragging the last group's header up used to move the bare label, leaving
-        // its tabs behind to be swallowed by whichever separator ended up above them.
+        // Dragging the last group's header up must not move the bare label, leaving its tabs behind
+        // to be swallowed by whichever separator ends up above them.
         val items = listOf(sep("A"), proj("/a"), sep("B"), proj("/b"), sep("C"), proj("/c"))
         val moved = step(items, from = 4, asGroup = true, delta = -60f)!!
         assertEquals(
@@ -148,8 +148,8 @@ class GroupedStripTest {
 
     @Test
     fun `dragStep carries a project over a closed group above rather than into it`() {
-        // The reported bug: one step up used to swap /b1 with its own separator, parking it after the
-        // closed group's tabs — i.e. inside it — where it stopped being drawn at all. Both rows above
+        // One step up must not swap /b1 with its own separator, parking it after the closed group's
+        // tabs — i.e. inside it — where it would not be drawn at all. Both rows above
         // have to be crossed to reach the next slot /b1 still shows in, at the top of the rail.
         val items = listOf(sepC("A"), proj("/a1"), proj("/a2"), sep("B"), proj("/b1"), proj("/b2"))
         assertNull(step(items, from = 4, asGroup = false, delta = -30f)) // past B's row, nowhere to land

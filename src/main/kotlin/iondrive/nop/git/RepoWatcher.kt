@@ -210,8 +210,8 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
         const val UNKNOWN = -1L
 
         /**
-         * Per-repository directory ceiling. All 23 projects on this machine need 1.5k, so the
-         * ceiling is not there to be reached in normal use — it is the point past which watching a
+         * Per-repository directory ceiling. A project needs far fewer once ignored directories are
+         * pruned, so the ceiling is not there to be reached in normal use — it is the point past which watching a
          * tree costs more than the walks it saves, and where falling back to polling is the right
          * answer. Linux's default watch limit (~500k) is far above either number.
          */

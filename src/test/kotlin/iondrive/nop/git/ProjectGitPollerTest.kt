@@ -53,7 +53,7 @@ class ProjectGitPollerTest {
                 )
 
                 // Inside the interval nothing is walked however much the tree moves — this is what
-                // stops a checkout an agent is writing to from costing what every open project used to.
+                // keeps a checkout an agent is writing to cheap.
                 // Both halves need the watcher to have seen the write first. It reports on its own
                 // thread, and a sweep that runs before then finds a quiet tree: the first assertion
                 // passes without testing anything, and the second fails whenever the machine is busy.

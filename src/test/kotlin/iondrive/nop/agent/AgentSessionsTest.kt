@@ -162,13 +162,13 @@ class AgentSessionsTest {
     fun `a session nop killed on its own way out still comes back`(@TempDir tmp: Path) {
         val state = sessions()
         val session = state.open(tmp.toFile(), account("claude-main"))
-        state.rename(session.sessionId, "plan 40")
+        state.rename(session.sessionId, "task 40")
 
         session.dispose()
 
         val row = session.asOpenAgent()
         assertNotNull(row, "nop ending the session is not the user ending it")
-        assertEquals("plan 40", row?.title)
+        assertEquals("task 40", row?.title)
         assertEquals(session.sessionId, row?.sessionId, "the tab keeps the log it already has")
     }
 
@@ -280,15 +280,14 @@ class AgentSessionsTest {
     }
 
     /**
-     * The bug this guard exists for, and it is worth spelling out because the symptom was nothing
-     * like the cause.
+     * Worth spelling out, because the symptom is nothing like the cause.
      *
-     * A session editing nop's own quota code printed the phrases those tests are built from, the
-     * watcher read its own fixtures off the screen, and the run was killed mid-turn. Resuming made
-     * it worse rather than better: the text is in the conversation, so every resume replayed it and
-     * was killed again within seconds, and the session became one nop could not get back into at
-     * all — the user had to copy the resume command out to a terminal. Output is not evidence about
-     * an account; the provider's own number is, and it gets to say no.
+     * A session editing quota code prints the phrases those tests are built from, and a watcher that
+     * trusted the screen would read them and kill the run mid-turn. Resuming would make it worse
+     * rather than better: the text is in the conversation, so every resume would replay it and be
+     * killed again within seconds, and the session would become one nop could not get back into at
+     * all. Output is not evidence about an account; the provider's own number is, and it gets to
+     * say no.
      */
     @Test
     fun `a limit phrase the agent merely printed does not kill a session with quota left`(@TempDir tmp: Path) {
@@ -316,7 +315,7 @@ class AgentSessionsTest {
     }
 
     /**
-     * Not knowing must behave exactly as it did before there was anything to know — a Codex reading
+     * Not knowing must not stop a handover — a Codex reading
      * is days old and a Claude one may not have arrived yet, and neither is a reason to sit on a
      * wall the CLI has plainly hit.
      */
@@ -440,13 +439,13 @@ class AgentSessionsTest {
 
     @Test
     fun `resuming a session on a spent account does not hand over until a prompt is submitted`(@TempDir tmp: Path) {
-        val aloancloud = Account("claude-aloancloud", Provider.Anthropic, "/homes/claude-aloancloud", handoverTo = "claude-iondrive")
-        val iondrive = Account("claude-iondrive", Provider.Anthropic, "/homes/claude-iondrive")
+        val alpha = Account("claude-alpha", Provider.Anthropic, "/homes/claude-alpha", handoverTo = "claude-bravo")
+        val bravo = Account("claude-bravo", Provider.Anthropic, "/homes/claude-bravo")
         val state = sessions()
-        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
-        state.hasRunOut = { it == aloancloud }
+        state.handoverTarget = { from -> listOf(alpha, bravo).handoverTarget(from) }
+        state.hasRunOut = { it == alpha }
 
-        val session = state.open(tmp.toFile(), aloancloud, resumeId = "native-1")
+        val session = state.open(tmp.toFile(), alpha, resumeId = "native-1")
         assertTrue(session.run.isResume)
         assertFalse(session.run.userPromptSubmitted)
 
@@ -455,13 +454,13 @@ class AgentSessionsTest {
 
         assertFalse(session.ended, "merely viewing a resumed session must not end it")
         assertNull(session.autoHandover, "merely viewing a resumed session must not trigger auto-handover")
-        assertEquals(aloancloud.name, session.account.name, "session must remain on original account while inspecting")
+        assertEquals(alpha.name, session.account.name, "session must remain on original account while inspecting")
 
         // Now user enters a question
         session.run.userPromptSubmitted = true
         session.onQuotaWall(replayed)
 
-        assertEquals(iondrive.name, session.account.name, "work must have handed over to iondrive after prompt")
+        assertEquals(bravo.name, session.account.name, "work must have handed over to bravo after prompt")
     }
 
     /**
@@ -471,17 +470,17 @@ class AgentSessionsTest {
      */
     @Test
     fun `a handed-over session hands over again at its own wall`(@TempDir tmp: Path) {
-        val iondrive = Account(
-            "claude-iondrive",
+        val bravo = Account(
+            "claude-bravo",
             Provider.Anthropic,
-            "/homes/claude-iondrive",
-            handoverTo = "claude-aloancloud",
+            "/homes/claude-bravo",
+            handoverTo = "claude-alpha",
         )
-        val aloancloud = Account("claude-aloancloud", Provider.Anthropic, "/homes/claude-aloancloud")
+        val alpha = Account("claude-alpha", Provider.Anthropic, "/homes/claude-alpha")
         val state = sessions()
-        state.handoverTarget = { from -> listOf(iondrive, aloancloud).handoverTarget(from) }
+        state.handoverTarget = { from -> listOf(bravo, alpha).handoverTarget(from) }
         state.hasRunOut = { null }
-        val session = state.open(tmp.toFile(), iondrive)
+        val session = state.open(tmp.toFile(), bravo)
         val wall = "You've hit your session limit"
         session.run.transcriptPath = tmp.resolve("session.jsonl").also {
             Files.writeString(
@@ -497,8 +496,8 @@ class AgentSessionsTest {
 
         session.onQuotaWall(QuotaHit("usage limit", "$wall · resets 11pm", matched = wall))
 
-        assertEquals("claude-aloancloud", session.account.name)
-        assertEquals("claude-iondrive", session.autoHandover?.from)
+        assertEquals("claude-alpha", session.account.name)
+        assertEquals("claude-bravo", session.autoHandover?.from)
     }
 
     /**
@@ -549,33 +548,32 @@ class AgentSessionsTest {
     }
 
     /**
-     * The 18:59 handover in hermes, as it happened: an account reading 99%, a session that had just
-     * finished answering a question about an exchange's 429 "too many requests", and a nominated
-     * account ready to take over. The reading makes a wall believable; the agent's own reply, twelve
-     * seconds old, says this was not one.
+     * An account reading 99%, a session that has just finished answering a question about some
+     * service's 429 "too many requests", and a nominated account ready to take over. The reading
+     * makes a wall believable; the agent's own reply, twelve seconds old, says this is not one.
      */
     @Test
     fun `a session that has just talked about a rate limit is not handed over, spent or not`(
         @TempDir tmp: Path,
     ) {
-        val aloancloud = Account(
-            "claude-aloancloud",
+        val alpha = Account(
+            "claude-alpha",
             Provider.Anthropic,
-            "/homes/claude-aloancloud",
-            handoverTo = "claude-iondrive",
+            "/homes/claude-alpha",
+            handoverTo = "claude-bravo",
         )
-        val iondrive = Account("claude-iondrive", Provider.Anthropic, "/homes/claude-iondrive")
+        val bravo = Account("claude-bravo", Provider.Anthropic, "/homes/claude-bravo")
         val state = sessions()
-        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        state.handoverTarget = { from -> listOf(alpha, bravo).handoverTarget(from) }
         state.hasRunOut = { true }
-        val session = state.open(tmp.toFile(), aloancloud)
-        // Written during this run, as the reply was: that run had been going for eighteen minutes.
+        val session = state.open(tmp.toFile(), alpha)
+        // Written during this run, as the reply is.
         val said = java.time.Instant.now()
         session.run.transcriptPath = tmp.resolve("session.jsonl").also {
             Files.writeString(
                 it,
                 """{"type":"assistant","timestamp":"$said","message":{"content":[{"type":"text",""" +
-                    """"text":"02:10Z: Hyperliquid refused a request (a 429 \"too many requests\" reply)."}]}}""",
+                    """"text":"02:10Z: The payments API refused a request (a 429 \"too many requests\" reply)."}]}}""",
             )
         }
 
@@ -583,7 +581,7 @@ class AgentSessionsTest {
             QuotaHit("rate limit", "429 \"too many requests\" reply", matched = "too many requests"),
         )
 
-        assertEquals("claude-aloancloud", session.account.name)
+        assertEquals("claude-alpha", session.account.name)
         assertFalse(session.ended)
         assertNull(session.autoHandover)
     }
@@ -625,9 +623,9 @@ class AgentSessionsTest {
     }
 
     /**
-     * The 14:11 handover in hermes on 2026-09-24. nop waited out the 14:10 reset; Claude Code carried
-     * on at 14:11:07, and its redraw put the same wall back in front of the re-armed watcher while the
-     * usage reading still read spent. Five tabs went to Codex seconds after they had started working.
+     * A wait for a reset, and then Claude Code carrying on by itself: its redraw puts the same wall
+     * back in front of the re-armed watcher while the usage reading still reads spent. The session
+     * must not be handed over seconds after it has started working again.
      */
     @Test
     fun `a wall already waited out is not handed over when the CLI redraws it`(@TempDir tmp: Path) {
@@ -694,10 +692,9 @@ class AgentSessionsTest {
     }
 
     /**
-     * The other half of the 14:11 handover. The first tab to hand over let go of its Claude session
-     * as its run ended, and two sibling tabs on the same project, still running, adopted it as a
-     * `/clear` of their own. Their handoffs were built from its conversation, so Codex did its work
-     * twice.
+     * A tab that hands over ends its run, and two sibling tabs on the same project, still running,
+     * must not adopt its Claude session as a `/clear` of their own: their handoffs would be built
+     * from its conversation, and the next provider would do its work twice.
      */
     @Test
     fun `a session stays its tab's after the run following it ends`(@TempDir tmp: Path) {
@@ -739,22 +736,20 @@ class AgentSessionsTest {
     }
 
     /**
-     * The `agy` wall in hermes on 2026-09-20, which nop watched happen twice and did nothing about.
-     *
      * "Individual quota reached ... Resets in 7m31s" is a limit `agy`'s own `/usage` never mentions:
-     * both of the windows it does report had hours left, so the account's reading said there was
-     * quota and was telling the truth about something else. A vendor that has just said when it
+     * both of the windows it does report can have hours left, so the account's reading says there is
+     * quota and is telling the truth about something else. A vendor that has just said when it
      * will serve again outranks a number that is not about the allowance it refused against.
      */
     @Test
     fun `a wall the vendor timed itself is acted on though the reading has room`(@TempDir tmp: Path) {
         val google = Account(
-            "google-aloancloud",
+            "google-alpha",
             Provider.Antigravity,
-            "/homes/google-aloancloud",
-            handoverTo = "codex-iondrive",
+            "/homes/google-alpha",
+            handoverTo = "codex-bravo",
         )
-        val codex = Account("codex-iondrive", Provider.OpenAI, "/homes/codex-iondrive")
+        val codex = Account("codex-bravo", Provider.OpenAI, "/homes/codex-bravo")
         val state = sessions()
         state.handoverTarget = { from -> listOf(google, codex).handoverTarget(from) }
         state.hasRunOut = { false }
@@ -770,8 +765,8 @@ class AgentSessionsTest {
             ),
         )
 
-        assertEquals("codex-iondrive", session.account.name)
-        assertEquals("google-aloancloud", session.autoHandover?.from)
+        assertEquals("codex-bravo", session.account.name)
+        assertEquals("google-alpha", session.autoHandover?.from)
     }
 
     /**
@@ -783,7 +778,7 @@ class AgentSessionsTest {
     fun `a phrase with no countdown is still nothing on an account with quota`(@TempDir tmp: Path) {
         val state = sessions()
         state.hasRunOut = { false }
-        val session = state.open(tmp.toFile(), account("google-aloancloud", Provider.Antigravity))
+        val session = state.open(tmp.toFile(), account("google-alpha", Provider.Antigravity))
 
         session.onQuotaWall(QuotaHit("usage limit", """the log said "quota reached" at 17:03"""))
 
@@ -793,7 +788,7 @@ class AgentSessionsTest {
 
     @Test
     fun `a fresh refusal hands over even when poller says the account still has quota`(@TempDir tmp: Path) {
-        val codex = Account("codex-iondrive", Provider.OpenAI, "/homes/codex-iondrive", handoverTo = "claude-main")
+        val codex = Account("codex-bravo", Provider.OpenAI, "/homes/codex-bravo", handoverTo = "claude-main")
         val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main")
         val state = sessions()
         state.handoverTarget = { from -> listOf(codex, claude).handoverTarget(from) }
@@ -815,19 +810,19 @@ class AgentSessionsTest {
     }
 
     /**
-     * `agy` does not sit out a window and carry on the way Claude Code does: at the 2026-09-20 wall
-     * it retried for three minutes, filed an executor error and sat idle at its prompt with four
-     * minutes left to run. Waiting on that is not patience, it is a tab nobody comes back to.
+     * `agy` does not sit out a window and carry on the way Claude Code does: at a wall it retries for
+     * a few minutes, files an executor error and sits idle at its prompt. Waiting on that is not
+     * patience, it is a tab nobody comes back to.
      */
     @Test
     fun `a CLI that gives up at a wall is handed over rather than waited for`(@TempDir tmp: Path) {
         val google = Account(
-            "google-aloancloud",
+            "google-alpha",
             Provider.Antigravity,
-            "/homes/google-aloancloud",
-            handoverTo = "codex-iondrive",
+            "/homes/google-alpha",
+            handoverTo = "codex-bravo",
         )
-        val codex = Account("codex-iondrive", Provider.OpenAI, "/homes/codex-iondrive")
+        val codex = Account("codex-bravo", Provider.OpenAI, "/homes/codex-bravo")
         val state = sessions()
         state.handoverTarget = { from -> listOf(google, codex).handoverTarget(from) }
         state.hasRunOut = { true }
@@ -836,44 +831,43 @@ class AgentSessionsTest {
 
         session.onQuotaWall(QuotaHit("usage limit", "Individual quota reached", matched = "quota reached"))
 
-        assertEquals("codex-iondrive", session.account.name, "nothing was going to resume that session")
+        assertEquals("codex-bravo", session.account.name, "nothing was going to resume that session")
     }
 
     /**
-     * The 16:49 wall in hermes. claude-aloancloud ran out at 13:09 and handed the work to
-     * claude-iondrive; three and a half hours later iondrive ran out in turn, and the account that
-     * had taken its place was by then rested and reading 0% used — and was skipped anyway, because
-     * running out once had struck it off for the rest of the session. The run ended at the post-exit
+     * Two accounts nominating each other: claude-alpha runs out and hands the work to claude-bravo;
+     * hours later bravo runs out in turn, and alpha is by then rested and reading 0% used. Running
+     * out once must not strike it off for the rest of the session, or the run ends at the post-exit
      * panel with the right answer sitting in it as a button to press.
      */
     @Test
     fun `an account that has rested since its own wall is handed the work again`(@TempDir tmp: Path) {
-        val aloancloud = Account(
-            "claude-aloancloud",
+        val alpha = Account(
+            "claude-alpha",
             Provider.Anthropic,
-            "/homes/claude-aloancloud",
-            handoverTo = "claude-iondrive",
+            "/homes/claude-alpha",
+            handoverTo = "claude-bravo",
         )
-        val iondrive = Account(
-            "claude-iondrive",
+        val bravo = Account(
+            "claude-bravo",
             Provider.Anthropic,
-            "/homes/claude-iondrive",
-            handoverTo = "claude-aloancloud",
+            "/homes/claude-bravo",
+            handoverTo = "claude-alpha",
         )
         val state = sessions()
-        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        state.handoverTarget = { from -> listOf(alpha, bravo).handoverTarget(from) }
         var rested = false
-        state.hasRunOut = { who -> if (who.name == "claude-aloancloud") !rested else true }
-        val session = state.open(tmp.toFile(), aloancloud)
+        state.hasRunOut = { who -> if (who.name == "claude-alpha") !rested else true }
+        val session = state.open(tmp.toFile(), alpha)
 
         val firstWall = java.time.Instant.now().minus(Duration.ofHours(3)).minusSeconds(40 * 60)
         session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"), now = firstWall)
-        assertEquals("claude-iondrive", session.account.name)
+        assertEquals("claude-bravo", session.account.name)
         rested = true
 
         session.onQuotaWall(QuotaHit("usage limit", "You've hit your session limit"))
 
-        assertEquals("claude-aloancloud", session.account.name, "its window rolled over hours ago")
+        assertEquals("claude-alpha", session.account.name, "its window rolled over hours ago")
         assertFalse(session.ended)
     }
 
@@ -884,23 +878,23 @@ class AgentSessionsTest {
      */
     @Test
     fun `an account is not handed the work back moments after its own wall`(@TempDir tmp: Path) {
-        val aloancloud = Account(
-            "claude-aloancloud",
+        val alpha = Account(
+            "claude-alpha",
             Provider.Anthropic,
-            "/homes/claude-aloancloud",
-            handoverTo = "claude-iondrive",
+            "/homes/claude-alpha",
+            handoverTo = "claude-bravo",
         )
-        val iondrive = Account(
-            "claude-iondrive",
+        val bravo = Account(
+            "claude-bravo",
             Provider.Anthropic,
-            "/homes/claude-iondrive",
-            handoverTo = "claude-aloancloud",
+            "/homes/claude-bravo",
+            handoverTo = "claude-alpha",
         )
         val state = sessions()
-        state.handoverTarget = { from -> listOf(aloancloud, iondrive).handoverTarget(from) }
+        state.handoverTarget = { from -> listOf(alpha, bravo).handoverTarget(from) }
         // Both read as having room throughout, which is what makes this the dangerous shape.
         state.hasRunOut = { false }
-        val session = state.open(tmp.toFile(), aloancloud)
+        val session = state.open(tmp.toFile(), alpha)
         val timed = QuotaHit(
             "usage limit",
             "Individual quota reached. Resets in 5m7s.",
@@ -909,28 +903,28 @@ class AgentSessionsTest {
         )
 
         session.onQuotaWall(timed)
-        assertEquals("claude-iondrive", session.account.name)
+        assertEquals("claude-bravo", session.account.name)
 
         session.onQuotaWall(timed)
 
-        assertEquals("claude-iondrive", session.account.name, "aloancloud walled seconds ago")
+        assertEquals("claude-bravo", session.account.name, "alpha walled seconds ago")
         assertTrue(session.ended, "with nowhere rested to go, the user is asked")
     }
 
     /**
-     * The CLI that takes over names its conversation after the handoff it was given. The tab was
-     * already named after the work, and "Handoff from Claude Code" is what hid it from the user.
+     * The CLI that takes over names its conversation after the handoff it was given. The tab is
+     * already named after the work, and "Handoff from Claude Code" would hide it from the user.
      */
     @Test
     fun `a handover keeps the tab's name when the new CLI names the handoff`(@TempDir tmp: Path) {
-        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
-        session.titleFromTranscript("LIQFADE rule health")
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
+        session.titleFromTranscript("BACKFILL rule health")
 
-        session.handOver(account("claude-iondrive"))
+        session.handOver(account("claude-bravo"))
         session.titleFromTranscript("Handoff from Claude Code")
 
-        assertEquals("LIQFADE rule health", session.title)
-        assertEquals(listOf("LIQFADE rule health"), session.log.events().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+        assertEquals("BACKFILL rule health", session.title)
+        assertEquals(listOf("BACKFILL rule health"), session.log.events().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
     }
 
     @Test
@@ -938,7 +932,7 @@ class AgentSessionsTest {
         val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
         assertEquals("Agent", session.title)
 
-        session.handOver(account("claude-iondrive"))
+        session.handOver(account("claude-bravo"))
         session.titleFromTranscript("Handoff from Codex continuation")
 
         assertEquals("Agent", session.title)
@@ -947,10 +941,10 @@ class AgentSessionsTest {
 
     @Test
     fun `a handover keeps a user-chosen tab name when the new CLI names the handoff`(@TempDir tmp: Path) {
-        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
         session.rename("Custom investigation")
 
-        session.handOver(account("claude-iondrive"))
+        session.handOver(account("claude-bravo"))
         session.titleFromTranscript("Handoff from Claude Code")
 
         assertEquals("Custom investigation", session.title)
@@ -959,15 +953,15 @@ class AgentSessionsTest {
 
     @Test
     fun `a handover starts the new run with the chosen model`(@TempDir tmp: Path) {
-        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
-        session.handOver(account("claude-iondrive").copy(model = "claude-haiku-4-5"))
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
+        session.handOver(account("claude-bravo").copy(model = "claude-haiku-4-5"))
 
         assertEquals("claude-haiku-4-5", session.run.account.model)
     }
 
     @Test
     fun `a handover eagerly starts the new terminal run if the previous run was started`(@TempDir tmp: Path) {
-        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
         assertFalse(session.run.session.isStarted, "freshly opened session in test is not started until widget requested")
 
         // Simulate that the session was focused and started in the UI
@@ -978,7 +972,7 @@ class AgentSessionsTest {
         assertTrue(session.run.session.isStarted)
 
         // Handover happens (e.g. while the user is focused on another project or tab)
-        session.handOver(account("claude-iondrive"))
+        session.handOver(account("claude-bravo"))
 
         // The new session must be started immediately without waiting for focus!
         assertTrue(session.run.session.isStarted, "new run after handover must start eagerly so work continues in background")
@@ -987,10 +981,10 @@ class AgentSessionsTest {
 
     @Test
     fun `a handover of an unstarted run does not eagerly start the terminal`(@TempDir tmp: Path) {
-        val session = sessions().open(tmp.toFile(), account("claude-aloancloud"))
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
         assertFalse(session.run.session.isStarted)
 
-        session.handOver(account("claude-iondrive"))
+        session.handOver(account("claude-bravo"))
         assertFalse(session.run.session.isStarted, "an unstarted run should remain unstarted across handover in tests")
     }
 

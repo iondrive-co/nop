@@ -251,12 +251,12 @@ class GitRepoTest {
 
     @Test
     fun `parallel staging declines paths a clean filter applies to`(@TempDir tmp: Path) {
-        // The guard the whole fast path rests on, and the one case nothing above reaches: the eol
-        // tests pass on this box because core.autocrlf=input is set globally, which is also the
+        // The guard the whole fast path rests on, and the one case nothing above reaches: with
+        // core.autocrlf=input set globally the eol tests pass either way, because that is also the
         // answer an iterator with no walk gives — so they hold whether or not .gitattributes was
         // ever read. A clean filter has no such fallback, and it is the one that costs real bytes:
-        // hermes stored 39.55 GiB of corpus as raw blobs instead of Git LFS pointers before this
-        // was found. `tr` stands in for git-lfs because it is binary-safe and needs no install.
+        // without it, data tracked by Git LFS is committed as raw blobs instead of LFS pointers.
+        // `tr` stands in for git-lfs because it is binary-safe and needs no install.
         val mine = (tmp / "mine").also { it.createDirectories() }
         val reference = (tmp / "reference").also { it.createDirectories() }
         for (dir in listOf(mine, reference)) {
@@ -331,7 +331,7 @@ class GitRepoTest {
     /**
      * Files the fast path is guaranteed to take, whatever the machine's git config says. A NUL in
      * the first 8k is git's own binary test, and binary content converts to nothing under
-     * autocrlf — which this box sets globally, and which sends plain text to AddCommand instead.
+     * autocrlf — which a machine may set globally, and which sends plain text to AddCommand instead.
      */
     private fun seedBinaryTree(tmp: Path, count: Int = 70): Long {
         (tmp / "data").createDirectories()

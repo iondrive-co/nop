@@ -15,10 +15,10 @@ import java.nio.file.StandardCopyOption
  *
  * Claude Code decides whether to show its first-run flow — theme picker, then sign in — from
  * `hasCompletedOnboarding` in `$CLAUDE_CONFIG_DIR/.claude.json`, and not from whether it has a
- * usable token. An account inherited from a tool that only ever drove the CLI headless (`-p` skips
- * onboarding entirely) has a perfectly good `.credentials.json` and no such flag, so launching it
- * interactively asked the user to sign in to an account that was already signed in — which is
- * exactly what it looks like: a launcher that lost your login.
+ * usable token. A home that has only ever run the CLI headless (`-p` skips onboarding entirely) has
+ * a perfectly good `.credentials.json` and no such flag, so launching it interactively would ask
+ * the user to sign in to an account that is already signed in — which looks exactly like a launcher
+ * that lost your login.
  *
  * So nop sets the flag, and only when there are credentials beside it to make it true. An account
  * that has genuinely never signed in still gets the real flow, because for that account the flow is

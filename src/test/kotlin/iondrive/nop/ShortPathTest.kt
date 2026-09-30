@@ -35,7 +35,7 @@ class ShortPathTest {
 
     @Test
     fun `a short path is never truncated`() {
-        assertEquals("~/hermes", short("/home/dev/hermes"))
+        assertEquals("~/shop", short("/home/dev/shop"))
     }
 
     /**
@@ -79,6 +79,6 @@ class ShortPathTest {
 
     @Test
     fun `a path is normalised before it is shortened`() {
-        assertEquals("~/nop", short("/home/dev/hermes/../nop"))
+        assertEquals("~/nop", short("/home/dev/shop/../nop"))
     }
 }

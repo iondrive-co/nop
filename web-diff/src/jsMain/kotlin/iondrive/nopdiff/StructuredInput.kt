@@ -2,16 +2,16 @@ package iondrive.nopdiff
 
 /**
  * Adapts an already-parsed structured diff (a plain JS array) into [DiffFile]s, so a host that
- * already has parsed diff data — e.g. chad's `FileDiff[]` from its backend — can feed it straight
- * in without re-serialising to unified-diff text.
+ * already has parsed diff data from its backend can feed it straight in without re-serialising to
+ * unified-diff text.
  *
- * Expected per-file shape (snake_case, matching chad; missing fields tolerated):
+ * Expected per-file shape (snake_case; missing fields tolerated):
  * ```
  * { old_path, new_path, is_new, is_deleted, is_rename, is_binary,
  *   hunks: [ { old_start, old_count, new_start, new_count,
  *              lines: [ { type: "context"|"add"|"delete", content, old_line, new_line } ] } ] }
  * ```
- * Lines of any other type (e.g. chad's "header") are ignored — hunk headers are synthesised.
+ * Lines of any other type (e.g. "header") are ignored — hunk headers are synthesised.
  */
 object StructuredInput {
 

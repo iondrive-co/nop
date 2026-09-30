@@ -71,4 +71,23 @@ class FileIndexTest {
         val loaded = FileIndex.load(tmp.resolve("does-not-exist.txt"))
         assertEquals(emptyList<String>(), loaded.files)
     }
+
+    /**
+     * A link out to bulk data on a network share would cost a round trip per file on every refresh.
+     * A link that stays inside the project is followed.
+     */
+    @Test
+    fun `build does not follow a link out of the project but follows one within it`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project")
+        val elsewhere = tmp.resolve("share")
+        Files.createDirectories(elsewhere.resolve("bulk"))
+        Files.writeString(elsewhere.resolve("bulk/big.json"), "")
+        Files.createDirectories(project.resolve("src"))
+        Files.writeString(project.resolve("src/Main.kt"), "")
+        Files.createSymbolicLink(project.resolve("data"), elsewhere.resolve("bulk"))
+        Files.createSymbolicLink(project.resolve("alias"), project.resolve("src"))
+
+        val idx = FileIndex.build(project)
+        assertEquals(listOf("alias/Main.kt", "src/Main.kt"), idx.files)
+    }
 }

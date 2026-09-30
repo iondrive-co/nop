@@ -785,8 +785,8 @@ private fun CollapseToolsButton(collapsed: Boolean, isDark: Boolean, onClick: ()
  * The strips' own colours, in place of the theme's tab style.
  *
  * The theme's selected tab is a shade off its neighbours with a thin rule under it, and on a strip
- * of agent tabs all called after their conversations that was not enough: the user lost track of
- * which one they were in. So the strip sits a step darker than the panels, the tabs are divided from
+ * of agent tabs all called after their conversations that is not enough to keep track of which one
+ * you are in. So the strip sits a step darker than the panels, the tabs are divided from
  * each other, and the selected one is lifted to the panel's own colour, set in bold, and ruled in
  * the accent — three marks at once, any one of which would say it.
  */

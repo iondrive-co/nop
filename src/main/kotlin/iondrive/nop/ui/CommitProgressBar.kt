@@ -32,8 +32,7 @@ import kotlin.math.roundToLong
 
 /**
  * The commit button's face while a commit runs: a progress bar with the percentage and an ETA
- * written inside it, replacing the "Committing…" label that used to be all a multi-minute commit
- * had to show. Sized to its widest possible label so the readout doesn't shuffle the button's
+ * written inside it. Sized to its widest possible label so the readout doesn't shuffle the button's
  * width as the numbers change.
  *
  * Falls back to a bar with no fill and a phase-plus-elapsed label whenever the work isn't

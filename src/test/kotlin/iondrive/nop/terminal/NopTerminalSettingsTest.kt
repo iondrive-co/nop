@@ -93,9 +93,9 @@ class NopTerminalSettingsTest {
 
     /**
      * The cell a character lands in. A terminal beside nop puts a monospace glyph on a 9px advance;
-     * nop was on 8, because JetBrains Mono's advance rounds down below 15f (14f still gives 8), and
-     * then stretched the row to 20px with a 1.1 line spacing the font's own metrics had already
-     * paid for. Both halves are easy to undo by tidying a constant, hence the test.
+     * JetBrains Mono's advance rounds down to 8 below 15f (14f still gives 8), and a 1.1 line
+     * spacing would stretch the row to 20px the font's own metrics have already paid for. Both are
+     * easy to undo by tidying a constant, hence the test.
      */
     @Test
     fun `a character occupies the same cell as a plain terminal`() {

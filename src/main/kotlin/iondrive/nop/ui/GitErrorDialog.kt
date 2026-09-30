@@ -21,8 +21,8 @@ import org.jetbrains.jewel.ui.component.Text
 /**
  * Reports a failed git operation (commit, stash, …). Git mutations can fail for reasons outside the
  * app's control — a file too large to add, a locked index, a stash that won't apply cleanly — and
- * before this these failures escaped their launched coroutine and crashed the window. Now the
- * underlying message is shown here (selectable, so it can be copied into a bug report) and dismissed.
+ * rather than escape their launched coroutine and crash the window, the underlying message is
+ * shown here (selectable, so it can be copied into a bug report) and dismissed.
  *
  * A window of its own, not a popup centred in nop's: these come from the commit panel, beside the
  * agent pane, and a terminal there is drawn over any popup. See [DialogFrame].

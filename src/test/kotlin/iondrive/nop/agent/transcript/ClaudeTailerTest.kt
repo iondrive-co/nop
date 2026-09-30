@@ -38,8 +38,8 @@ class ClaudeTailerTest {
     fun `the slug is the working directory with its slashes and dots flattened`() {
         assertEquals("-home-dev-nop", ClaudeTailer.slug(Path.of("/home/dev/nop")))
         assertEquals(
-            "-home-dev-nop--chad-worktrees-d680e65f",
-            ClaudeTailer.slug(Path.of("/home/dev/nop/.chad-worktrees/d680e65f")),
+            "-home-dev-nop--worktrees-tmp-d680e65f",
+            ClaudeTailer.slug(Path.of("/home/dev/nop/.worktrees-tmp/d680e65f")),
         )
     }
 
@@ -265,9 +265,9 @@ class ClaudeTailerTest {
     /**
      * The file that is neither a `/clear` nor another nop tab: a `claude` somebody started from a
      * shell in the same checkout. [RunContext.foreign] cannot see it, because it only knows the
-     * sessions nop is running — so this run walked into a conversation that was already going,
-     * logged its turns, took its name, and left the picker offering to resume a stranger's session
-     * under this one's title.
+     * sessions nop is running — so without this the run would walk into a conversation that was
+     * already going, log its turns, take its name, and leave the picker offering to resume a
+     * stranger's session under this one's title.
      */
     @Test
     fun `a session already under way when this run started is not adopted`(@TempDir tmp: Path) {
@@ -297,9 +297,9 @@ class ClaudeTailerTest {
 
     /**
      * A `claude -p` worker started after this run, on the same account in the same checkout — what a
-     * manager agent in hermes delegates to. Nothing nop runs, and not here when the run began, so it
-     * passed every other rule: the tab followed it as its own `/clear`, went back whenever its own
-     * file was the newer, and read as waiting on the user while the worker sat in a long Bash call.
+     * manager agent delegates to. Nothing nop runs, and not here when the run began, so it passes
+     * every other rule: without this the tab would follow it as its own `/clear`, and go back
+     * whenever its own file was the newer.
      */
     @Test
     fun `a headless run started beside this one is not its fresh start`(@TempDir tmp: Path) {
@@ -460,14 +460,13 @@ class ClaudeTailerTest {
     }
 
     /**
-     * The bug that made a restart look like lost work.
+     * A restart must not look like lost work.
      *
      * A tab put back from the state file resumes a conversation whose transcript is already hours
-     * long, and every line of it is already in the session's own event log. Reading it again filed
-     * a second copy of the lot — and Claude re-states its title on most records, so the last one
-     * through renamed the tab to whatever the CLI had last called it. A session saved as "Plan 40
-     * completion check" came back up called "Handoff from Claude Code", which is not a name its
-     * owner was looking for.
+     * long, and every line of it is already in the session's own event log. Reading it again would
+     * file a second copy of the lot — and Claude re-states its title on most records, so the last
+     * one through would rename the tab to whatever the CLI had last called it, which is not a name
+     * its owner is looking for.
      */
     @Test
     fun `a resumed run joins its transcript at the end instead of replaying it`(@TempDir tmp: Path) {

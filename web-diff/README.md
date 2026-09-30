@@ -11,7 +11,7 @@ to real DOM (not a canvas) so it deploys as static files and embeds cleanly insi
 |---|---|
 | Output | static `nop-diff.js` (~85 KiB min) + `index.html` |
 | Rendering | real DOM in a Shadow-DOM web component (`<nop-diff>`) |
-| Input | a unified-diff string **or** a structured `FileDiff[]` (chad's shape) |
+| Input | a unified-diff string **or** an already-parsed array of files (see below) |
 | Reused from nop | `DiffModel`, the 7 language tokenizers (`SyntaxHighlight`), the diff row model |
 | Net-new | unified-diff parser, word-level inline diff (replaces java-diff-utils), DOM renderer, web component |
 
@@ -85,33 +85,34 @@ NopDiff.renderStructured(targetEl, fileDiffArray, 'auto');
 }
 ```
 
-This is **deliberately identical to chad's `FileDiff[]`**, so chad's parsed diff data feeds straight
-in with no transformation.
+## Embedding in a React app
 
-## Integrating with chad's web view
+The bundle is CSP-safe under a strict policy (`script-src 'self'`, `style-src 'self' 'unsafe-inline'`):
+it is local (no CDN), there is no `eval`/`Function`, and styles are scoped inside the Shadow DOM.
 
-chad (React + Vite) already fetches structured diffs from its backend (`api.getFullDiff` →
-`DiffFull.files: FileDiff[]`) and renders them with a plain `DiffViewer.tsx` that has **no syntax
-highlighting and no intra-line word diff**. nop-diff is a drop-in upgrade that consumes the *same*
-`FileDiff[]` and adds both — with zero backend changes.
-
-It is CSP-safe under chad's policy (`script-src 'self'`, `style-src 'self' 'unsafe-inline'`): the
-bundle is local (no CDN), there is no `eval`/`Function`, and styles are scoped inside the Shadow DOM.
-
-**Step 1 — vendor the bundle.** Build it and copy the JS into chad:
+**Step 1 — vendor the bundle.** Build it and copy the JS into the app:
 
 ```bash
 ./gradlew :web-diff:jsBrowserDistribution
-cp web-diff/build/dist/js/productionExecutable/nop-diff.js  ~/chad/ui/src/vendor/nop-diff.js
+cp web-diff/build/dist/js/productionExecutable/nop-diff.js  <app>/src/vendor/nop-diff.js
 ```
 
-**Step 2 — a thin React wrapper** (`~/chad/ui/src/components/NopDiffView.tsx`). The side-effect import
-registers `<nop-diff>`; a ref hands chad's `FileDiff[]` to the element's `.files` property:
+**Step 2 — a thin React wrapper.** The side-effect import registers `<nop-diff>`; a ref hands the
+parsed files to the element's `.files` property:
 
 ```tsx
 import { useEffect, useRef } from "react";
 import "../vendor/nop-diff.js";              // registers <nop-diff>, defines window.NopDiff
-import type { FileDiff } from "chad-client";
+
+// The structured input shape above.
+export interface FileDiff {
+  old_path?: string; new_path?: string;
+  is_new?: boolean; is_deleted?: boolean; is_rename?: boolean; is_binary?: boolean;
+  hunks: {
+    old_start: number; old_count: number; new_start: number; new_count: number;
+    lines: { type: "context" | "add" | "delete"; content: string; old_line?: number; new_line?: number }[];
+  }[];
+}
 
 // Tell TS/JSX about the custom element.
 declare global {
@@ -131,14 +132,13 @@ export function NopDiffView({ files, theme = "auto" }: { files: FileDiff[]; them
 }
 ```
 
-**Step 3 — use it** where `DiffViewer` is used today (e.g. in `MergePanel.tsx`):
+**Step 3 — use it** wherever the app renders a diff:
 
 ```tsx
-// was: <DiffViewer files={diff.files} />
 <NopDiffView files={diff.files} />
 ```
 
-**Theming.** The widget reads the host's CSS variables when present, so it adopts chad's theme
+**Theming.** The widget reads the host's CSS variables when present, so it adopts the host's theme
 automatically: `--bg`, `--text`, `--font-mono`, `--diff-add-bg`, `--diff-delete-bg`. Override any
 widget colour explicitly with the `--nd-*` variables (see `Styles.kt`), e.g.:
 

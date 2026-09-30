@@ -35,10 +35,10 @@ import org.jetbrains.jewel.ui.component.Tooltip
 /**
  * The one row of nop's own chrome above a running agent TUI.
  *
- * It exists for a question the design had no answer to: you are in a Codex session and want to be
- * in a Claude one, carrying the work across. Handing over used to be reachable only from the
- * post-exit panel, so the only route was to quit the CLI first — and quitting is precisely what you
- * do *not* want to do when the reason to switch is that this provider is going badly.
+ * It exists for handing over mid-session: you are in a Codex session and want to be in a Claude
+ * one, carrying the work across. The post-exit panel offers that only once the CLI has quit — and
+ * quitting is precisely what you do *not* want to do when the reason to switch is that this
+ * provider is going badly.
  *
  * Collapsed it is a single line saying what the agent is doing and naming the account. Expanded it
  * lists the others with what each has left, because "which one instead" is the same question the

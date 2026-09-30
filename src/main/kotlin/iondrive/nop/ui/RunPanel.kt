@@ -167,11 +167,10 @@ class RunSessions {
 /**
  * The Run tool tab: the output of whichever launcher run the tool strip has selected.
  *
- * There used to be a second tab strip in here, one tab per run, under the tool strip's own. Two
- * rows of tabs stacked on a panel a few hundred pixels wide is most of the panel gone before any
- * output is drawn, and it made a run the one live process in the window that wasn't reachable from
- * the strip everything else is on. The runs are tabs in the tool strip now, beside the terminals
- * and the agent sessions they are a sibling of — see [ToolTabs].
+ * It has no tab strip of its own: the runs are tabs in the tool strip, beside the terminals and the
+ * agent sessions they are a sibling of — see [ToolTabs]. A second row of tabs on a panel a few
+ * hundred pixels wide would be most of the panel gone before any output is drawn, and would make a
+ * run the one live process in the window not reachable from the strip everything else is on.
  */
 @Composable
 fun RunPanel(state: RunSessions, cards: JPanel) {

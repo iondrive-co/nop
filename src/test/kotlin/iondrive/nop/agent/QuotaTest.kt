@@ -174,9 +174,8 @@ class QuotaTest {
     }
 
     /**
-     * The wall that went straight past nop on 2026-09-20: an `agy` session in hermes refused twice
-     * inside five minutes, and the watcher had no pattern for either. None of the wording this list
-     * was built from appears in it — no limit "hit" or "reached", no quota "exceeded".
+     * `agy`'s refusal, in which none of the wording the rest of this list is built from appears — no
+     * limit "hit" or "reached", no quota "exceeded".
      */
     @Test
     fun `Antigravity's own refusal is caught`() {

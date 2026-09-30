@@ -141,7 +141,7 @@ internal fun applyTokens(buffer: TextFieldBuffer, tokens: List<Token>, palette: 
 // Quoted literals are scanned by hand instead of with the obvious regex, `"(?:\\.|[^"\\])*"`.
 // Java compiles a starred *group* containing an alternation into a recursive matcher — roughly six
 // stack frames per character consumed — so a long literal blows the stack rather than failing to
-// match. An 11KB template literal in a .ts file used to take the whole editor down with a
+// match. An 11KB template literal in a .ts file is enough to take the whole editor down with a
 // StackOverflowError thrown mid-composition. This loop uses O(1) stack and is faster besides.
 //
 // Returns the ranges of each literal, inclusive of both delimiters. An unterminated literal yields

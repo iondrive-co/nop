@@ -105,6 +105,7 @@ object Indexer {
             val children = dir.listFiles() ?: continue
             for (f in children) {
                 if (f.name in IGNORED_DIR_NAMES) continue
+                if (ProjectWalk.leavesProject(rootFile, f)) continue
                 if (f.isDirectory) {
                     if (f.lastModified() > since) return true
                     stack.addLast(f)
@@ -122,6 +123,7 @@ object Indexer {
         val files = dir.listFiles() ?: return
         for (f in files) {
             if (f.name in IGNORED_DIR_NAMES) continue
+            if (ProjectWalk.leavesProject(root, f)) continue
             if (f.isDirectory) {
                 indexDirectory(root, f, out)
                 walk(root, f, out, javaFiles)
@@ -195,8 +197,8 @@ object Indexer {
             }
         }
 
-        // Kotlin top-level declarations. Java used to come through here too, on the same line
-        // regex; it now gets a real parse (see [indexJavaFiles]), which is what gives it methods,
+        // Kotlin top-level declarations. Java gets a real parse instead (see [indexJavaFiles]),
+        // which is what gives it methods,
         // fields and owners rather than just the handful of declarations a regex can recognise.
         if (ext in KOTLIN_EXT) {
             extractKotlinDefs(file).forEach { (name, ln) ->

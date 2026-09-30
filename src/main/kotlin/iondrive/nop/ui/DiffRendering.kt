@@ -407,7 +407,7 @@ internal fun annotateLine(
         for (s in spans) {
             if (!s.changed) continue
             // Defensive: clamp into the line. A malformed span (e.g. start > end after clamping,
-            // or a negative start from a stray close sentinel) used to throw StringIndexOOB and
+            // or a negative start from a stray close sentinel) would throw StringIndexOOB and
             // tear down the whole row during scroll.
             val start = s.startChar.coerceIn(0, text.length)
             val end = s.endCharExclusive.coerceIn(start, text.length)

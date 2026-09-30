@@ -169,8 +169,8 @@ class RunSessionsTest {
     }
 
     /**
-     * The regression that killed the numbering this replaced: a count of everything ever opened
-     * only goes up, so closing terminals used to leave a strip holding one tab labelled "Term 4".
+     * A count of everything ever opened only goes up, so numbering by it would leave a strip holding
+     * one tab labelled "Term 4" after the others were closed.
      */
     @Test
     fun `a shell opened after others are closed is named like any other`(@TempDir tmp: Path) {

@@ -65,11 +65,11 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      *
      * Both halves go in as one command apiece rather than one per file, for the same reason
      * [revertFiles] batches. Every AddCommand parses the whole index, walks, then writes the whole
-     * index back and fsyncs it, so a per-file loop costs O(files x index size): staging 2.4k paths
-     * against an 19k-entry index measured at 59s that way against 5s batched. It also makes staging
+     * index back and fsyncs it, so a per-file loop costs O(files x index size): for thousands of
+     * paths against a large index, a minute where batching takes seconds. It also makes staging
      * atomic — JGit holds `index.lock` for the length of a command and unlocks without publishing if
      * it throws, so a file that vanishes mid-walk (a build or download still writing into the tree)
-     * now leaves the index untouched instead of stranding the paths that happened to be staged
+     * leaves the index untouched instead of stranding the paths that happened to be staged
      * before the failure, half-committed and needing an unstage by hand.
      *
      * Pass [partial] when [changes] deliberately leaves some of the working tree's pending changes
@@ -210,10 +210,8 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * job so [stageAndCommit] falls back to JGit's [org.eclipse.jgit.api.AddCommand].
      *
      * AddCommand walks and inserts on one thread, and writing a blob is zlib deflate — pure CPU.
-     * On a change set of already-compressed files that is the entire cost of a commit: 400 real
-     * .npz totalling 1.9 GB measured 63.5s of a 63.7s commit, at user=59.4s against real=61.8s,
-     * i.e. exactly one core of sixteen while deflate bought nothing (the object store came back
-     * byte-identical with compression off). Files are independent, so they are handed to a worker
+     * On a change set of already-compressed files that is nearly the entire cost of a commit, spent
+     * on one core while deflate buys almost nothing. Files are independent, so they are handed to a worker
      * apiece, each with its own [ObjectInserter] — inserters are not thread-safe, but a
      * FileRepository's loose objects are written to per-insert temp files and renamed, so parallel
      * inserters do not contend.
@@ -331,10 +329,10 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
     /**
      * Sorts [staged] into the paths that can be read raw and the paths that cannot.
      *
-     * The decision is per file, not per repository, and that distinction is the whole point: this
-     * machine has `core.autocrlf=input` set globally and git-lfs registered in ~/.gitconfig, and
-     * hermes carries a .gitattributes — so a repo-wide "might a filter apply?" test says yes
-     * everywhere and the fast path never runs. Asking JGit per path instead is what lets a commit
+     * The decision is per file, not per repository, and that distinction is the whole point: with
+     * `core.autocrlf=input` set globally, git-lfs registered in ~/.gitconfig and a .gitattributes in
+     * the repository, a repo-wide "might a filter apply?" test says yes everywhere and the fast path
+     * never runs. Asking JGit per path instead is what lets a commit
      * of binary data go fast in a repo that also holds filtered text.
      *
      * The walk itself is stat-only and costs about what one status pass costs; it is the content
@@ -359,10 +357,9 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
                 //     is not symmetric: `text eol=lf` converts on the way in, not on the way out;
                 //   - setDirCacheIterator, because an iterator with no walk to ask has nothing to
                 //     read attributes with. getCleanFilterCommand() then returns null for EVERY
-                //     path and getEolStreamType() answers from core.autocrlf alone. That made the
-                //     clean-filter test below dead code and sent every binary file down the fast
-                //     path: hermes stored 15 commits of corpus as raw bytes instead of Git LFS
-                //     pointers, 39.55 GiB of it, before the cause was found on 2026-09-18;
+                //     path and getEolStreamType() answers from core.autocrlf alone. That makes the
+                //     clean-filter test below dead code and sends every binary file down the fast
+                //     path, committing LFS-tracked data as raw bytes instead of Git LFS pointers;
                 //   - the DirCache, because `text=auto` leaves a file alone when the index already
                 //     holds CRLF, and only the index can answer that.
                 // This is the setup AddCommand uses, and agreeing with AddCommand is the contract.
@@ -1139,9 +1136,8 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * [loadStatus] covers, so a caller can be *told* when to re-run it instead of re-running it to
      * find out.
      *
-     * Pruning ignored directories is what makes watching every open project affordable: on
-     * this machine's 23, the 61.8k directories on disk came to 1.5k once virtualenvs and build
-     * output were dropped. Directories the index already holds an entry under are kept even when an
+     * Pruning ignored directories is what makes watching every open project affordable:
+     * virtualenvs and build output are most of the directories in a typical checkout. Directories the index already holds an entry under are kept even when an
      * ignore rule matches them — git goes on tracking what it already tracks, so changes there do
      * move status, and pruning them would lose changes silently.
      *

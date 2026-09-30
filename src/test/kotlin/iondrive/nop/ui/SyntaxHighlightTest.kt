@@ -111,9 +111,9 @@ class SyntaxHighlightTest {
         assertTrue(tokens.any { it.kind == TokenKind.STRING })
     }
 
-    // Regression: a .ts file with a multi-thousand-character template literal used to throw
-    // StackOverflowError out of the tokenizer — the old `(?:\\.|[^`\\])*` regex recursed once per
-    // character — and because tokenizing happens during composition it killed the whole window.
+    // A .ts file with a multi-thousand-character template literal must not throw StackOverflowError
+    // out of the tokenizer — a `(?:\\.|[^`\\])*` regex recurses once per character — because
+    // tokenizing happens during composition, and that would kill the whole window.
     @Test
     fun `js ts lexer handles a very long multi-line template literal`() {
         val body = (1..4000).joinToString("\n") { "  line $it of a long template" }
@@ -124,7 +124,7 @@ class SyntaxHighlightTest {
     }
 
     // Same failure shape, reached through a plain double-quoted string: one long line, as in a
-    // minified bundle. The old regex was newline-bounded, which only meant it needed a long line.
+    // minified bundle. A newline-bounded regex would only need a long line to fail.
     @Test
     fun `js ts lexer handles a very long single-line string`() {
         val body = "x".repeat(50_000)
@@ -410,7 +410,7 @@ class SyntaxHighlightTest {
 
     @Test
     fun `yaml plain scalar containing spaces stays one scalar`() {
-        // A space inside a plain scalar must not restart token scanning (which used to misread a
+        // A space inside a plain scalar must not restart token scanning (which would misread a
         // later quote as a string opener).
         val src = "msg: this is a plain value with 'quotes' and : colons"
         val tokens = tokenizeYaml(src)

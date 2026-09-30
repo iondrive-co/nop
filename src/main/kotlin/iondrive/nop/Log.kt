@@ -47,7 +47,7 @@ object Log {
     /**
      * Installs the process-wide crash handler and logs a startup line. Call once from main() before
      * any UI exists. The default handler also covers the AWT event thread, which is where Compose
-     * rethrows anything a composition threw — the path that used to lose crashes entirely.
+     * rethrows anything a composition threw — a path that would otherwise lose crashes entirely.
      */
     fun install(args: Array<String>) {
         val previous = Thread.getDefaultUncaughtExceptionHandler()

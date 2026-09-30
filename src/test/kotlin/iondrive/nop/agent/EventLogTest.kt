@@ -360,9 +360,8 @@ class EventLogTest {
     }
 
     /**
-     * The tailer used to take a `claude -p` worker's transcript for this tab's `/clear`, since the
-     * worker began after the run did, and every log it happened to recorded the worker as the run's
-     * last session. Resuming that would put the worker's conversation behind this tab's title.
+     * A log can record a `claude -p` worker as the run's last session, since the worker began after
+     * the run did. Resuming that would put the worker's conversation behind this tab's title.
      */
     @Test
     fun `a run that followed a headless worker resumes the conversation it was spawned on`(@TempDir tmp: Path) {
@@ -414,10 +413,9 @@ class EventLogTest {
     }
 
     /**
-     * Recording the store from now on only helps sessions that have not happened yet. Every log
-     * already on disk names its account and nothing else, so the store label ones — which is every
-     * session resumed out of the default directory — would stay unreachable for good. The path the
-     * tailer wrote down is where that directory still is.
+     * A log that names its account and nothing else can still belong to a store label — every
+     * session resumed out of the default directory — and would stay unreachable if only a recorded
+     * store counted. The path the tailer wrote down is where that directory is.
      */
     @Test
     fun `a log written before the store was recorded finds it under the transcript`(@TempDir tmp: Path) {

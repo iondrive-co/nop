@@ -31,7 +31,7 @@ class TerminalStoreTest {
     private fun of(root: Path, project: Path = root) = TerminalStore.of(root, project) { terminals(root) }
 
     /**
-     * The bug this exists for. Switching to another project and back builds the project's
+     * Switching to another project and back builds the project's
      * composition again, and it has to find the same shells, not a fresh Term.
      */
     @Test

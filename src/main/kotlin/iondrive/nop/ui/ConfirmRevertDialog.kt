@@ -99,8 +99,8 @@ internal const val MaxListedChanges = 12
  * warning about losing uncommitted work looks the same wherever it is raised from.
  *
  * A window of its own, not a popup centred in nop's: revert is asked for from the commit panel,
- * right beside the agent pane, and a terminal there is drawn over any popup — the confirmation came
- * up with its buttons hidden behind it. See [DialogFrame]. Enter is deliberately not a shortcut for
+ * right beside the agent pane, and a terminal there is drawn over any popup — a popup confirmation
+ * would come up with its buttons hidden behind it. See [DialogFrame]. Enter is deliberately not a shortcut for
  * confirming: nothing here can be undone.
  */
 @Composable

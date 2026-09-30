@@ -7,15 +7,14 @@ import java.nio.file.Paths
 /**
  * What nop was asked to do on its command line, decided before anything else happens.
  *
- * nop used to read no flags at all: an argument that was not a directory was dropped, and what was
- * left was a bare launch. A bare launch from a different build is how a rebuilt nop takes over from
- * the one still running (see [iondrive.nop.ipc.SingleInstance]), so on 2026-09-29 an agent's
- * `nop --help`, run to see what the CLI took, quit the user's nop and ended every agent tab in fifteen
- * projects. An hour later a script's `nop "$UNSET"` did the same thing's forwarding half. So an
- * argument nop does not understand is now an error, and asking for help prints it and touches
- * nothing — no log line, no running instance.
+ * A bare launch from a different build is how a rebuilt nop takes over from the one still running
+ * (see [iondrive.nop.ipc.SingleInstance]), so an argument read as a bare launch is dangerous: a
+ * `nop --help` run to see what the CLI takes would quit the running nop and end every agent tab in
+ * it, and a script's `nop "$UNSET"` would forward an empty launch to it. So an argument nop does not
+ * understand is an error, and asking for help prints it and touches nothing — no log line, no
+ * running instance.
  *
- * A file rather than a directory is still accepted and ignored, as before: the desktop entry passes
+ * A file rather than a directory is accepted and ignored: the desktop entry passes
  * `%F`, so a file dropped on the launcher arrives here, and the launch it means is "show me nop".
  */
 sealed interface LaunchArgs {

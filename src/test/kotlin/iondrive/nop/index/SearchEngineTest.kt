@@ -129,4 +129,50 @@ class SearchEngineTest {
         assertEquals(0, h.matchStart)
         assertEquals(3, h.matchEnd)
     }
+
+    @Test
+    fun `a match past the sniffed head of a text file is still found`(@TempDir tmp: Path) {
+        // The binary check reads the first 8 KB on its own; the rest must still be searched.
+        val padding = "x".repeat(79) + "\n"
+        Files.writeString(tmp.resolve("a.txt"), padding.repeat(200) + "needle\n")
+        val hits = search(tmp, "needle")
+        assertEquals(1, hits.size)
+        assertEquals(201, hits.single().line)
+    }
+
+    @Test
+    fun `several hits on one line keep their own offsets and the whole line`(@TempDir tmp: Path) {
+        Files.writeString(tmp.resolve("a.txt"), "first\nab NEEDLE cd needle\n")
+        val hits = search(tmp, "needle")
+        assertEquals(listOf(3, 13), hits.map { it.matchStart })
+        assertEquals(listOf(2, 2), hits.map { it.line })
+        assertTrue(hits.all { it.lineText == "ab NEEDLE cd needle" })
+    }
+
+    /**
+     * Lowercasing a capital dotted I gives two chars, so a file holding one takes the line-by-line
+     * path — and there the highlight must still land on the match, not one char past it.
+     */
+    @Test
+    fun `a line whose lowercase is longer still reports offsets into the line itself`(@TempDir tmp: Path) {
+        Files.writeString(tmp.resolve("a.txt"), "İstanbul needle\nneedle\n")
+        val hits = search(tmp, "needle")
+        assertEquals(2, hits.size)
+        assertEquals(9, hits[0].matchStart)
+        assertEquals("needle", hits[0].lineText.substring(hits[0].matchStart, hits[0].matchEnd))
+        assertEquals(2, hits[1].line)
+    }
+
+    @Test
+    fun `progress counts every file looked at and holds the hits found`(@TempDir tmp: Path) {
+        Files.writeString(tmp.resolve("a.txt"), "needle\n")
+        Files.writeString(tmp.resolve("b.txt"), "nothing\n")
+        Files.writeString(tmp.resolve("c.png"), "needle\n")
+        val progress = SearchProgress()
+        val hits = runBlocking {
+            SearchEngine.search(tmp, FileIndex.build(tmp).files, "needle", progress = progress)
+        }
+        assertEquals(3, progress.scanned.get())
+        assertEquals(hits, progress.hitsSoFar())
+    }
 }

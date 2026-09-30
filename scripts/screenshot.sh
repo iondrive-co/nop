@@ -52,9 +52,9 @@ SHOT_CLIENT_WIDTH=1710
 
 mkdir -p "$SHOT_DIR"
 
-# Only the two `latest-*.png` are checked in and referenced by the README; older runs used to leave
-# a timestamped pair behind on every invocation. Sweep any such leftovers so the directory doesn't
-# accumulate (the `[0-9]*` prefix matches the YYYYMMDD-HHMMSS names without touching `latest-*`).
+# Only the `latest-*.png` are checked in and referenced by the README. Sweep any timestamped
+# leftovers so the directory doesn't accumulate (the `[0-9]*` prefix matches the YYYYMMDD-HHMMSS
+# names without touching `latest-*`).
 find "$SHOT_DIR" -maxdepth 1 -type f \
     \( -name '[0-9]*-diff.png' -o -name '[0-9]*-preview.png' \) -delete 2>/dev/null || true
 

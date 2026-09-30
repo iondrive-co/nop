@@ -4,7 +4,7 @@ package iondrive.nopdiff
  * Shadow-DOM stylesheet for the diff view. Colours come from the desktop palettes (Darcula dark /
  * IntelliJ light syntax, nop's green/red/blue diff tints). Every colour is a CSS custom property so
  * a host app can retheme by setting `--nd-*`, and the most common ones fall back to the host's own
- * variables (chad's `--bg`, `--text`, `--font-mono`, `--diff-add-bg`, `--diff-delete-bg`) so the
+ * variables (`--bg`, `--text`, `--font-mono`, `--diff-add-bg`, `--diff-delete-bg`) so the
  * widget adopts the surrounding theme automatically.
  *
  * Theme: `theme="light"` / `theme="dark"` force a scheme; absent or `theme="auto"` follows the host

@@ -32,16 +32,16 @@ class NopTerminalSettings(
      * beside a file looks like part of the same application.
      *
      * The face matters more here than anywhere else in nop: AWT's logical `MONOSPACED` family —
-     * what this used to ask for, and what JediTerm falls back to — resolves on most Linux boxes to
-     * DejaVu Sans Mono, whose small x-height and heavy hinting is what made the terminal read as a
-     * different, older program than the one around it.
+     * what JediTerm falls back to — resolves on most Linux boxes to DejaVu Sans Mono, whose small
+     * x-height and heavy hinting make a terminal read as a different, older program than the one
+     * around it.
      *
      * Asked for **by family name**, not by deriving the `Font.createFont` handle. JediTerm draws
      * bold, italic and bold-italic cells with `getTerminalFont().deriveFont(style)`, and a font
      * built by `createFont` is not in any family AWT can search: `deriveFont(BOLD)` on one keeps
      * reporting `JetBrains Mono Regular` and the renderer smears the regular outlines instead.
      * Every weight a TUI leans on — Claude Code's section headings, `git`'s branch names, a
-     * compiler's error prefix — was arriving as algorithmic fake bold. [registerMonoFaces] puts
+     * compiler's error prefix — would arrive as algorithmic fake bold. [registerMonoFaces] puts
      * the four real faces in the graphics environment so this lookup resolves them.
      */
     override fun getTerminalFont(): Font =
@@ -51,11 +51,9 @@ class NopTerminalSettings(
     /**
      * Rows packed at exactly the font's height, which is what a real terminal does.
      *
-     * This was 1.1 — "a little air between rows" — on the theory that JediTerm's 1.0 was tighter
-     * than the terminals beside it. Measured against one, it is the other way round: JetBrains
-     * Mono's own hhea metrics are tall (18px of line box for a 13px font), so 1.1 made a 20px row
-     * for an 8px-wide glyph, a cell 2.6x taller than wide where a terminal's is nearer 1.8x. The
-     * air was already in the font.
+     * Not 1.1 for "a little air between rows": JetBrains Mono's own hhea metrics are tall (18px of
+     * line box for a 13px font), so 1.1 would make a 20px row for an 8px-wide glyph, a cell 2.6x
+     * taller than wide where a terminal's is nearer 1.8x. The air is already in the font.
      */
     override fun getLineSpacing(): Float = 1.0f
 
@@ -147,15 +145,13 @@ class NopTerminalSettings(
 
     private companion object {
         /**
-         * Two points above the editor's 13sp, which this used to match on the grounds that code
-         * should read the same size in a file and in a shell.
-         *
-         * They are not the same surface. The editor is Compose text; the terminal is AWT text in
+         * Two points above the editor's 13sp. Matching it looks right — code should read the same
+         * size in a file and in a shell — but they are not the same surface. The editor is Compose text; the terminal is AWT text in
          * an embedded Swing panel, laid out on a whole-pixel grid, and at 13f JetBrains Mono's
          * advance rounds down to 8px — against the 9px cell of the terminal the user has beside
          * this one. 15f is the smallest size that rounds to 9 (14f still gives 8), so it is what
          * makes a character here the width of a character there. Paired with a 1.0 line spacing
-         * the cell is 9x21 against the old 8x20: wider glyphs, near enough the same rows.
+         * the cell is 9x21 against 13f's 8x20: wider glyphs, near enough the same rows.
          *
          * Load-bearing beyond its own legibility: the panel draws with fractional metrics on (see
          * `NopTerminalPanel.setupAntialiasing`), which is only safe while the advance sits on the

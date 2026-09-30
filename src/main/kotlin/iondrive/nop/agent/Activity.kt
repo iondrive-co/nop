@@ -3,11 +3,9 @@ package iondrive.nop.agent
 /**
  * What an agent tab is doing, as far as nop can tell without reading its screen.
  *
- * It exists because of a night a tab spent on a question. A Claude session in hermes asked for two
- * rulings at 21:03 and sat on the answer for eleven and three-quarter hours while another tab was
- * selected; in the morning it looked exactly like a tab that was working, because nothing in the strip
- * said otherwise. A tab blocked on its user and a tab busy on its own are opposite situations, and
- * the strip is the one place the user looks that can tell them apart without being opened.
+ * A tab blocked on its user and a tab busy on its own are opposite situations that look alike from
+ * outside: a session that has asked a question can wait on it for hours while another tab is
+ * selected. The strip is the one place the user looks that can tell them apart without opening them.
  */
 enum class Activity {
     /**
@@ -125,11 +123,10 @@ class TitleReader {
 /**
  * What a terminal title says about the CLI that wrote it.
  *
- * The same reading clio makes of the same CLIs, and for the same reason: the title is the only
- * thing a vendor says out loud that tells working from stopped. Claude Code puts a spinner in front
- * of it while it works (`◐ Plan 36 review`, a new frame about twice a second) and a still glyph when
- * it stops (`✳ Plan 36 review`). Codex spins the braille frames, since 0.154 sometimes inside
- * brackets (`[ ⠹ ] Working | ops`), and says so outright when it is blocked on the person at the
+ * The title is the only thing a vendor says out loud that tells working from stopped. Claude Code
+ * puts a spinner in front of it while it works (`◐ Fix login bug`, a new frame about twice a
+ * second) and a still glyph when it stops (`✳ Fix login bug`). Codex spins the braille frames,
+ * sometimes inside brackets (`[ ⠹ ] Working | app`), and says so outright when it is blocked on the person at the
  * keyboard (`[ ! ] Action Required`).
  *
  * Which glyphs these are is nobody's promise, so a title that is neither a spinner nor a known

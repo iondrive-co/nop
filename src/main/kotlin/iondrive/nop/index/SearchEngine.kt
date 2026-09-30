@@ -2,6 +2,7 @@ package iondrive.nop.index
 
 import java.io.File
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,27 @@ data class SearchHit(
     val matchStart: Int,
     val matchEnd: Int,
 )
+
+/**
+ * How far a running [SearchEngine.search] has got, readable from another thread while it runs.
+ *
+ * It exists for the search that is taking too long. A count of files read is what tells someone
+ * waiting whether to keep waiting, and the hits found so far are what a stopped search still has
+ * to show for itself — without them, stopping a scan twenty minutes in would throw away everything
+ * it had found.
+ */
+class SearchProgress {
+    /** Files looked at so far, skipped ones included, so it ends at the size of the list searched. */
+    val scanned = AtomicInteger(0)
+    private val found = ConcurrentLinkedQueue<SearchHit>()
+
+    internal fun record(hits: List<SearchHit>) {
+        if (hits.isNotEmpty()) found.addAll(hits)
+    }
+
+    /** The hits found so far, in the order a finished search would give them. */
+    fun hitsSoFar(): List<SearchHit> = SearchEngine.ordered(found.toList())
+}
 
 /**
  * Case-insensitive literal scan over the project file index. Reads each file off the EDT,
@@ -64,6 +86,9 @@ object SearchEngine {
         "woff", "woff2", "ttf", "otf", "eot",
         // databases / opaque data
         "db", "sqlite", "sqlite3", "dat",
+        // columnar and array data, pickles — what a data-heavy repository holds most of
+        "parquet", "arrow", "feather", "orc", "avro", "npy", "npz", "pkl", "pickle", "h5", "hdf5",
+        "lz4", "whl",
     )
 
     suspend fun search(
@@ -71,6 +96,7 @@ object SearchEngine {
         files: List<String>,
         query: String,
         dispatcher: CoroutineDispatcher = Dispatchers.IO,
+        progress: SearchProgress? = null,
     ): List<SearchHit> {
         if (query.isEmpty()) return emptyList()
         val root = projectRoot.toAbsolutePath().normalize().toFile()
@@ -92,17 +118,29 @@ object SearchEngine {
                             ensureActive()
                             // Coarse global-cap check between files; final list is trimmed exactly.
                             if (total.get() >= MAX_TOTAL_HITS) break
+                            val before = local.size
                             val added = scanFile(root, rel, needle, local)
-                            if (added > 0) total.addAndGet(added)
+                            if (added > 0) {
+                                total.addAndGet(added)
+                                progress?.record(local.subList(before, local.size))
+                            }
+                            progress?.scanned?.incrementAndGet()
                         }
                         local
                     }
                 }.awaitAll()
             }.flatten())
-            // Deterministic order regardless of worker completion: by path, then line, then column.
-            merged.sortWith(compareBy({ it.path.lowercase() }, { it.line }, { it.matchStart }))
-            if (merged.size > MAX_TOTAL_HITS) ArrayList(merged.subList(0, MAX_TOTAL_HITS)) else merged
+            ordered(merged)
         }
+    }
+
+    /**
+     * Deterministic order regardless of worker completion — by path, then line, then column — cut
+     * to [MAX_TOTAL_HITS].
+     */
+    internal fun ordered(hits: List<SearchHit>): List<SearchHit> {
+        val sorted = hits.sortedWith(compareBy({ it.path.lowercase() }, { it.line }, { it.matchStart }))
+        return if (sorted.size > MAX_TOTAL_HITS) sorted.subList(0, MAX_TOTAL_HITS).toList() else sorted
     }
 
     /** Scans one file into [out], returning the number of hits added (0 if skipped). */
@@ -110,8 +148,14 @@ object SearchEngine {
         if (hasBinaryExtension(rel)) return 0
         val file = File(root, rel)
         if (!file.isFile || file.length() > MAX_FILE_BYTES) return 0
-        val bytes = runCatching { file.readBytes() }.getOrNull() ?: return 0
-        if (looksBinary(bytes)) return 0
+        // The sniff comes before the rest of the file is read, not after. Most of what a large tree
+        // holds is data, and a NUL in the first 8 KB settles a 2 MB file without reading the rest.
+        val bytes = runCatching {
+            file.inputStream().use { input ->
+                val head = input.readNBytes(BINARY_SNIFF_BYTES)
+                if (looksBinary(head)) null else head + input.readAllBytes()
+            }
+        }.getOrNull() ?: return 0
         val text = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull() ?: return 0
         return scanText(rel, text, needle, out)
     }
@@ -131,7 +175,48 @@ object SearchEngine {
         return false
     }
 
+    /**
+     * Finds [needle] in [text] with one lowercased copy of the whole file, going back to the line
+     * only where there is a hit.
+     *
+     * Almost every file in a big search has no match at all, and for those the line-by-line scan
+     * below paid a substring and a lowercased copy for every line just to learn that. Lowercasing
+     * can change a string's length, though (a Turkish dotted capital I becomes two chars), and then
+     * offsets into the copy stop pointing into [text] — a file like that takes the line-by-line
+     * path instead.
+     */
     private fun scanText(rel: String, text: String, needle: String, out: MutableList<SearchHit>): Int {
+        // The query box is one line, and a match was only ever looked for within a line.
+        if ('\n' in needle || '\r' in needle) return 0
+        val haystack = text.lowercase()
+        if (haystack.length != text.length) return scanLines(rel, text, needle, out)
+        var perFile = 0
+        var lineNumber = 1
+        var counted = 0
+        var from = 0
+        while (perFile < MAX_HITS_PER_FILE) {
+            val at = haystack.indexOf(needle, from)
+            if (at < 0) break
+            for (i in counted until at) if (text[i] == '\n') lineNumber++
+            counted = at
+            val lineStart = text.lastIndexOf('\n', at - 1) + 1
+            var lineEnd = text.indexOf('\n', at).let { if (it < 0) text.length else it }
+            // Strip a trailing \r so Windows line endings don't bleed into the highlight.
+            if (lineEnd > lineStart && text[lineEnd - 1] == '\r') lineEnd--
+            out += SearchHit(
+                path = rel,
+                line = lineNumber,
+                lineText = text.substring(lineStart, lineEnd),
+                matchStart = at - lineStart,
+                matchEnd = at - lineStart + needle.length,
+            )
+            perFile++
+            from = at + maxOf(needle.length, 1)
+        }
+        return perFile
+    }
+
+    private fun scanLines(rel: String, text: String, needle: String, out: MutableList<SearchHit>): Int {
         var perFile = 0
         var lineNumber = 1
         var lineStart = 0
@@ -163,11 +248,13 @@ object SearchEngine {
         out: MutableList<SearchHit>,
     ): Int {
         if (remaining <= 0) return 0
-        val haystack = line.lowercase()
+        // Offsets into a lowercased copy only point into [line] while the two are the same length,
+        // and this path is taken exactly when some line in the file is not — so it compares in
+        // place instead, which is slower and never needs a copy.
         var from = 0
         var added = 0
         while (true) {
-            val at = haystack.indexOf(needle, from)
+            val at = line.indexOf(needle, from, ignoreCase = true)
             if (at < 0) break
             out += SearchHit(
                 path = rel,

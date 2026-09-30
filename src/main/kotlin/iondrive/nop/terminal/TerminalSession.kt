@@ -22,7 +22,7 @@ import kotlin.concurrent.thread
  * A single PTY-backed terminal session: owns a pty4j [PtyProcess] and the JediTerm Swing widget
  * that renders it. Because the child runs under a real pseudo-terminal it sees a TTY (`isatty`
  * true), which is what makes password prompts, full-screen TUIs (vim/htop), colour and
- * `SIGWINCH`-on-resize work — none of which the old pipe-based `LauncherRun` could do.
+ * `SIGWINCH`-on-resize work — none of which a pipe-based runner can do.
  *
  * Build one with [forLauncher], [shell] or [agent]. The widget + process are created lazily on the AWT
  * event dispatch thread via [getOrCreateWidget] (called by the terminal host's `SwingPanel`); the
@@ -219,7 +219,7 @@ class TerminalSession private constructor(
      * The kill + relaunch happen on a background thread because we must *wait* for the old tree to
      * fully exit before launching the new run — otherwise a server's listening socket may still be
      * held and the fresh run dies with "address already in use". A naive kill-then-immediately-start
-     * (which is what this used to do) races on exactly that.
+     * races on exactly that.
      */
     fun restart() {
         val w = widget ?: return
@@ -555,7 +555,7 @@ class TerminalSession private constructor(
             System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")
 
         /**
-         * Runs [launcher]'s command through a shell, mirroring the old runner's invocation.
+         * Runs [launcher]'s command through a shell.
          *
          * No ▶ in the name, for the reason a shell carries no keyboard glyph: the tool strip draws
          * the mark itself, so it survives a rename rather than being the first thing a rename

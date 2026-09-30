@@ -52,7 +52,7 @@ import java.time.format.DateTimeFormatter
  * rather than a block wrapped into the right-hand corner. Height matters here beyond looks: this
  * floats over a terminal, which is a heavyweight AWT component that would otherwise be drawn
  * straight over the top of it, so whatever height this ends up is also the height the terminal
- * below has to give back (see [onHeight]). Every row the accounts wrapped onto was a row of agent
+ * below has to give back (see [onHeight]). Every row the accounts wrap onto is a row of agent
  * taken away, and across the whole region they fit on one.
  *
  * It still flows rather than forcing the line, because the region is draggable and a fixed share
@@ -60,9 +60,9 @@ import java.time.format.DateTimeFormatter
  * less than nothing. A second row is the honest answer to a region too narrow for one.
  *
  * Two bars per account, session then week, and no words on either. A percentage and its reset are
- * four words each, and a handful of accounts' worth of them is the block that was wrapping; the
- * pair of bars is the same glance — roughly how full, and which window — in the width of a word,
- * with the clock marked on it besides, which no amount of words was saying. The numbers
+ * four words each, and a handful of accounts' worth of them is a block that wraps; the pair of
+ * bars is the same glance — roughly how full, and which window — in the width of a word, with the
+ * clock marked on it besides, which the words do not say. The numbers
  * themselves are still spelled out where they are being *compared*: the picker row, where the
  * question is which account to spend the next hour on, and the accounts dialog (see [usageLine]),
  * with the tooltip here for a reading of one bar in passing.
@@ -141,8 +141,8 @@ private fun UsageChip(account: Account, reading: UsageReading?) {
             color = AgentMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            // Wide enough to display configured account names (such as "claude-aloancloud"
-            // and "google-aloancloud") in full rather than cutting them short with an ellipsis.
+            // Wide enough to display configured account names (such as "claude-personal"
+            // and "google-workspace") in full rather than cutting them short with an ellipsis.
             modifier = Modifier.widthIn(max = NAME_MAX_WIDTH),
         )
         when {

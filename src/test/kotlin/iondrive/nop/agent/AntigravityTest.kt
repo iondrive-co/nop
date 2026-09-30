@@ -15,7 +15,7 @@ import java.nio.file.Path
 import java.time.Instant
 
 /**
- * The provider that was deferred, and the two things that un-deferred it.
+ * The two things that make Antigravity a provider nop can run.
  *
  * One is that `agy` will keep its login in a file under the home nop points it at — but only while
  * it believes the OS keyring is unusable, which is a belief with a timestamp on it. If the pinning
@@ -29,7 +29,7 @@ import java.time.Instant
  */
 class AntigravityTest {
 
-    /** The shape `agy` writes, and the shape chad's `credential.json` already had. */
+    /** The shape `agy` writes. */
     private fun token(refresh: String? = "1//refresh"): String = buildString {
         append("""{"token":{"access_token":"ya29.x","token_type":"Bearer"""")
         if (refresh != null) append(""","refresh_token":"$refresh"""")
@@ -65,41 +65,8 @@ class AntigravityTest {
     }
 
     /**
-     * The migration that makes an inherited account work without signing it in again: chad kept the
-     * same JSON in a file of its own and wrote it into the keyring before each run.
-     */
-    @Test
-    fun `chad's stored credential is moved to where the CLI now reads it`(@TempDir tmp: Path) {
-        val account = account(tmp)
-        Files.createDirectories(tmp)
-        Files.writeString(tmp.resolve("credential.json"), token())
-
-        Antigravity.prepareHome(account)
-
-        assertTrue(Antigravity.signedIn(account))
-        assertEquals(token(), Files.readString(account.credentialFile))
-    }
-
-    /**
-     * Only ever into an empty slot. The token the CLI has been refreshing is current; chad's copy
-     * has not been touched since chad last ran, and overwriting one with the other would sign a
-     * working account back into a stale session.
-     */
-    @Test
-    fun `a login the CLI has been keeping current is not replaced by chad's older copy`(@TempDir tmp: Path) {
-        val account = signedIn(tmp)
-        Files.writeString(account.credentialFile, token(refresh = "1//current"))
-        Files.writeString(tmp.resolve("credential.json"), token(refresh = "1//stale"))
-
-        Antigravity.prepareHome(account)
-
-        assertTrue("1//current" in Files.readString(account.credentialFile))
-    }
-
-    /**
      * The pin itself. Without a current marker the CLI re-tries the keyring, and on a machine where
-     * one is available it goes back to the single shared slot — the bug this provider was deferred
-     * over.
+     * one is available it goes back to the single slot every account shares.
      */
     @Test
     fun `preparing a home tells the CLI its keyring is unusable, as of now`(@TempDir tmp: Path) {
@@ -159,22 +126,6 @@ class AntigravityTest {
         val onboarding = Json.parseToJsonElement(Files.readString(file)).jsonObject
         assertEquals("true", onboarding["enterpriseOnboardingComplete"]!!.jsonPrimitive.content)
         assertEquals("true", onboarding["onboardingComplete"]!!.jsonPrimitive.content)
-    }
-
-    @Test
-    fun `the login is kept owner-only, like every other credential nop puts on disk`(@TempDir tmp: Path) {
-        val account = account(tmp)
-        Files.createDirectories(tmp)
-        Files.writeString(tmp.resolve("credential.json"), token())
-
-        Antigravity.prepareHome(account)
-
-        assertEquals(
-            "rw-------",
-            java.nio.file.attribute.PosixFilePermissions.toString(
-                Files.getPosixFilePermissions(account.credentialFile),
-            ),
-        )
     }
 
     // ── what it says about quota ──

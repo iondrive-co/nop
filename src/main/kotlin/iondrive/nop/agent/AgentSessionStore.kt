@@ -14,10 +14,9 @@ import java.nio.file.Path
  * from disk — a git log is re-read, a run tab comes back waiting to be pressed — but an agent session
  * is a model part-way through a piece of work, and the only thing that can be rebuilt from is the
  * conversation the vendor happens to have kept. So it cannot be owned by a Compose lifetime: nop
- * composes one project tab at a time, inside one window at a time, and a session owned there was
- * killed by looking at another project, moving its tab to another window, or closing the window it
- * was started in. Which is what happened: agents running in tabs disappeared when the user switched
- * windows, and the work in them went with the PTY.
+ * composes one project tab at a time, inside one window at a time, and a session owned there would
+ * be killed by looking at another project, moving its tab to another window, or closing the window
+ * it was started in — and the work in it would go with the PTY.
  *
  * Sessions are filed under the project's **repo root**, not the tab that opened them, for two
  * reasons. It is the directory the CLI was launched in and the key its state file is written under
