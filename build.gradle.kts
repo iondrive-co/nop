@@ -89,7 +89,7 @@ compose.desktop {
             // message each other through (agent/AgentSocket.kt); without it every message is refused.
             modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net")
             packageName = "nop"
-            packageVersion = "0.91.0"
+            packageVersion = "0.92.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
