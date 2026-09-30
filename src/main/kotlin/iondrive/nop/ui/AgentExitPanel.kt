@@ -45,6 +45,7 @@ fun AgentExitPanel(
     onUpdateAccount: ((Account) -> Unit)? = null,
     onReopen: () -> Unit,
     onStartFresh: () -> Unit,
+    onContinueFromRecord: () -> Unit,
     onSwitch: (Account) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -77,6 +78,15 @@ fun AgentExitPanel(
             }
         }
 
+        if (session.run.conversationMissing) {
+            Text(
+                "Its transcript is no longer in ${session.account.home}, and no backup has it, so " +
+                    "resuming would fail again. nop still has its own record of the session: carrying " +
+                    "on from that starts ${session.account.name} on a summary of everything in it.",
+                color = AgentMuted,
+            )
+        }
+
         if (fromScreenOnly) {
             // Said plainly, because it explains a first turn on the new provider that may be worse
             // than it looks: there was no transcript to read, so the summary is built from terminal
@@ -89,15 +99,24 @@ fun AgentExitPanel(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Two ways back onto the same account, because they are different things. "Resume" lands in the conversation that just ended; "New
-            // session" starts the CLI as a fresh shell would. A session that ended *because* it was
+            // Two ways back onto the same account, because they are different things. "Resume" lands
+            // in the conversation that just ended; "New session" starts the CLI as a fresh shell would. A session that ended *because* it was
             // stuck, or because its work was done, wants the second one, and offering only the
             // first would make switching provider the sole way to get it.
             //
             // Resuming needs the vendor's own session id, and a run whose transcript was never
             // located hasn't got one — so with nothing to resume, the fresh start is the only
             // honest offer and takes the primary button.
-            if (session.run.nativeSessionId != null) {
+            //
+            // And a conversation whose transcript is gone has nothing to resume either, whatever its
+            // id. The same account can still pick the work up from nop's own record, which is what a
+            // handover to another provider would be built from anyway.
+            if (session.run.conversationMissing) {
+                DefaultButton(onClick = onContinueFromRecord) {
+                    Text("Continue on ${session.account.name} from nop's record")
+                }
+                OutlinedButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
+            } else if (session.run.nativeSessionId != null) {
                 DefaultButton(onClick = onReopen) { Text("Resume ${session.account.name}") }
                 OutlinedButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
             } else {
@@ -125,7 +144,9 @@ fun AgentExitPanel(
 }
 
 /** Why the run ended, in the terms the user would use about it. */
-private fun headline(session: AgentSession): String = when (session.run.endReason) {
+private fun headline(session: AgentSession): String = if (session.run.conversationMissing) {
+    "The conversation this tab resumes is gone"
+} else when (session.run.endReason) {
     EndReason.Quota -> "${session.account.name} ran out: ${session.run.quota?.kind ?: "usage limit"}"
     EndReason.Killed -> "${session.account.name} was stopped"
     EndReason.Switched -> "${session.account.name} was replaced"

@@ -53,6 +53,13 @@ class AgentRun(
      * provider was asking is not one the next is.
      */
     internal val tracker: ActivityTracker = ActivityTracker(),
+    /**
+     * True when this run resumes a conversation whose transcript is not on disk, not even after
+     * asking the [Backup] for it. The CLI will say it has no such conversation and exit, and resuming
+     * again would do the same; nop's own log still has the session, which is what the post-exit panel
+     * offers to carry on from instead.
+     */
+    val conversationMissing: Boolean = false,
 ) {
     /** True when this command resumes an existing session rather than starting a fresh one. */
     val isResume: Boolean get() = command.isResume
@@ -560,6 +567,8 @@ class AgentSession(
         activitySince = endedAt
         noteChange(live, Activity.Ended)
         Usage.invalidate(run.account)
+        // The CLI has just written its last lines, which is when a copy of them is worth having.
+        Backup.requestSoon()
     }
 
     /**
@@ -865,6 +874,11 @@ class AgentSession(
         resumeId: String?,
         seededFromHandoff: Boolean,
     ): AgentRun {
+        // A resume reads the CLI's own transcript and nothing of nop's. When the home has lost it the
+        // backup may still have it, and it is put back before the CLI looks.
+        val conversationMissing = resumeId != null && Transcripts.missing(account, projectDir, resumeId) &&
+            !Backup.restore(account, projectDir, resumeId)
+        if (conversationMissing) Log.info("${account.name} has no transcript for conversation $resumeId")
         // The MCP servers the user's own CLI would have, which the account's isolated home hides.
         val mcp = McpServers.prepare(account, projectDir)
         val command = Spawn.command(account, projectDir, seed, resumeId, mcp)
@@ -906,7 +920,7 @@ class AgentSession(
                 }
             },
         )
-        newRun = AgentRun(account, command, terminal, seededFromHandoff, tracker)
+        newRun = AgentRun(account, command, terminal, seededFromHandoff, tracker, conversationMissing)
         if (!seed.isNullOrBlank()) {
             newRun.userPromptSubmitted = true
         }
@@ -948,8 +962,9 @@ class AgentSession(
             foreign = { id -> id != newRun.nativeSessionId && LiveTranscripts.isForeign(id, sessionId) },
             // A conversation this session has already written down: the tab came back from the
             // state file, or was reopened from the picker. Its transcript is not news, and reading
-            // it as though it were would rename the tab back to whatever the CLI last called it. A resume into a log with nothing in it — a vendor session nop has never
-            // followed — still replays, because there the history is the whole point.
+            // it as though it were would rename the tab back to whatever the CLI last called it. A
+            // resume into a log with nothing in it — a vendor session nop has never followed — still
+            // replays, because there the history is the whole point.
             resumingLoggedWork = resumeId != null && log.hadHistory,
         )
         val tailer = tailerFor(account)

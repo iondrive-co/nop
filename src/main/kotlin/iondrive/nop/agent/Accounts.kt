@@ -90,6 +90,8 @@ fun List<Account>.handoverTarget(from: Account): Account? {
 @Serializable
 data class AgentConfig(
     val accounts: List<Account> = emptyList(),
+    /** The folder agent sessions are backed up to, or null when nothing is. See [Backup]. */
+    val backupDir: String? = null,
 )
 
 /**

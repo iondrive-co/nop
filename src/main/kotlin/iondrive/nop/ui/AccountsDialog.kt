@@ -45,9 +45,12 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import iondrive.nop.Ago
 import iondrive.nop.agent.Account
+import iondrive.nop.agent.AccountHomes
 import iondrive.nop.agent.AgentConfig
 import iondrive.nop.agent.Accounts
+import iondrive.nop.agent.Backup
 import iondrive.nop.agent.DEFAULT_CHOICE
 import iondrive.nop.agent.Login
 import iondrive.nop.agent.Provider
@@ -60,14 +63,16 @@ import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
+import java.io.File
+import java.nio.file.Path
+import javax.swing.JFileChooser
 
 /**
- * nop's only settings window, and it is about accounts alone.
+ * nop's only settings window: the vendor accounts, what each one runs as, how to sign one in or
+ * out, and where their sessions are backed up to.
  *
- * Theme and word wrap keep their own toggles in the chrome. Building nop's first general settings
- * window is a larger piece of work than this feature should drag in, and no second section is
- * asking for one — so this dialog stays what it is: the list of vendor accounts, what each one runs
- * as, and how to sign one in or out.
+ * Theme and word wrap keep their own toggles in the chrome. The backup is here rather than in a
+ * general settings window because what it backs up is these accounts' work.
  *
  * Nothing gates it. A gate here would protect nothing: the vendors' credential files sit on disk for
  * their own CLIs to read, so anyone who can reach the machine can run `claude` in a terminal and be
@@ -86,6 +91,8 @@ fun AccountsDialog(
     DialogFrame(title = "Agent accounts", onClose = onClose, size = DpSize(640.dp, 660.dp)) {
         var draft by remember(config) { mutableStateOf(config) }
         var adding by remember { mutableStateOf(false) }
+        // What the last move of a home said, and about which account.
+        var moveNote by remember { mutableStateOf<Pair<String, String>?>(null) }
 
         fun update(next: AgentConfig) {
             draft = next
@@ -118,6 +125,22 @@ fun AccountsDialog(
                             // Bounce the draft so the row's "signed in" line re-reads the file.
                             update(draft.copy())
                         },
+                        offersMove = AccountHomes.offersMove(account),
+                        note = moveNote?.takeIf { it.first == account.name }?.second,
+                        onMoveHome = {
+                            val existed = java.nio.file.Files.exists(account.homePath)
+                            moveNote = runCatching { AccountHomes.moveIntoNop(account) }.fold(
+                                onSuccess = { moved ->
+                                    update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) moved else it }))
+                                    account.name to if (existed) {
+                                        "Moved. The old folder now links to it, for anything still running from there."
+                                    } else {
+                                        "Its folder was gone, so it has a fresh one there: sign it in again."
+                                    }
+                                },
+                                onFailure = { account.name to "Could not move it: ${it.message}" },
+                            )
+                        },
                         onRemove = {
                             update(
                                 draft.copy(
@@ -139,6 +162,9 @@ fun AccountsDialog(
                 Text("Nothing configured yet. Add an account, then sign it in.", color = AgentMuted)
             }
         }
+
+        Divider(orientation = Orientation.Horizontal)
+        BackupSection(config = draft, onChange = { update(it) })
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { adding = true }) { Text("Add account") }
@@ -178,6 +204,11 @@ private fun AccountEditor(
     onChange: (Account) -> Unit,
     onLogIn: () -> Unit,
     onLogOut: () -> Unit,
+    /** Whether the home is outside nop's folder and can be moved into it. See [AccountHomes]. */
+    offersMove: Boolean,
+    /** What the last attempt to move the home said. */
+    note: String?,
+    onMoveHome: () -> Unit,
     onRemove: () -> Unit,
 ) {
     // Whether the account can actually be used, which is not the same as whether its credential
@@ -204,6 +235,15 @@ private fun AccountEditor(
             Text(account.provider.label, color = AgentMuted)
         }
         Text(account.home, color = AgentMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // A home outside nop's folder holds this account's logins and every conversation it has had,
+        // somewhere that does not look like nop's to whoever tidies it up.
+        if (offersMove) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Kept outside nop's folder", color = ChangeColors.CONFLICT)
+                Link("Move it into nop's folder", onClick = onMoveHome)
+            }
+        }
+        note?.let { Text(it, color = AgentMuted) }
         Row(
             modifier = Modifier.padding(top = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -256,6 +296,63 @@ private fun AccountEditor(
             Link("Remove", onClick = onRemove)
         }
     }
+}
+
+/**
+ * Where the agent sessions are backed up to, and how the last backup went. See [Backup] for what is
+ * copied and how.
+ */
+@Composable
+private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
+    var refused by remember { mutableStateOf<String?>(null) }
+    val status = Backup.status
+    val dir = config.backupDir?.takeIf { it.isNotBlank() }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Session backup", fontWeight = FontWeight.SemiBold)
+        Text(
+            dir ?: "Not set up: nothing is backed up.",
+            color = if (dir == null) ChangeColors.CONFLICT else AgentMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Link(if (dir == null) "Choose a folder" else "Choose another folder", onClick = {
+                val picked = chooseBackupFolder(dir) ?: return@Link
+                refused = Backup.refusal(picked, config)
+                if (refused == null) {
+                    onChange(config.copy(backupDir = picked.toString()))
+                    Backup.runNow()
+                }
+            })
+            if (dir != null) {
+                Link("Back up now", onClick = { Backup.runNow() })
+                Link("Stop backing up", onClick = { onChange(config.copy(backupDir = null)) })
+            }
+        }
+        refused?.let { Text("Not that folder: $it", color = ChangeColors.REMOVED) }
+        if (dir != null) {
+            val line = when {
+                status.running -> "Backing up…"
+                status.lastError != null -> "Last backup failed: ${status.lastError}"
+                status.lastSuccessAt != null -> "Last backed up ${Ago.of(status.lastSuccessAt)}" +
+                    if (status.copiedFiles > 0) " · ${status.copiedFiles} files, ${formatBytes(status.copiedBytes)}" else " · nothing new"
+                else -> "Backs up every 10 minutes, and after each run ends."
+            }
+            Text(line, color = if (status.lastError != null && !status.running) ChangeColors.REMOVED else AgentMuted)
+        }
+    }
+}
+
+/** A directory chooser for the backup folder, or null when cancelled. */
+private fun chooseBackupFolder(current: String?): Path? {
+    val chooser = JFileChooser().apply {
+        dialogTitle = "nop — choose where to back up agent sessions"
+        fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+        currentDirectory = current?.let(::File)?.takeIf { it.isDirectory } ?: File(System.getProperty("user.home"))
+    }
+    if (chooser.showOpenDialog(null) != JFileChooser.APPROVE_OPTION) return null
+    return chooser.selectedFile?.toPath()?.toAbsolutePath()?.normalize()
 }
 
 /** An account's quota, or a status while the first reading is still on its way. */

@@ -35,6 +35,7 @@ import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import iondrive.nop.agent.AgentSessionStore
+import iondrive.nop.agent.Backup
 import iondrive.nop.git.ProjectGitPoller
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.ipc.SingleInstance
@@ -117,6 +118,9 @@ fun main(args: Array<String>) {
     if (SingleInstance.tryForward(argPaths, Settings.configRoot)) {
         exitProcess(0)
     }
+
+    // Only the nop that owns the windows backs the sessions up — see [Backup].
+    Backup.start()
 
     val startup = resolveStartup(argPaths.firstOrNull())
     if (startup.workspaces.isEmpty()) exitProcess(0)

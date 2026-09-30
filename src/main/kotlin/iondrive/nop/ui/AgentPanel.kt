@@ -103,6 +103,10 @@ fun AgentPanel(
                     dismissedAt = selected.endedAt
                     selected.startFresh()
                 },
+                onContinueFromRecord = {
+                    dismissedAt = selected.endedAt
+                    selected.handOver(selected.account)
+                },
                 onSwitch = { account ->
                     dismissedAt = selected.endedAt
                     selected.handOver(account)

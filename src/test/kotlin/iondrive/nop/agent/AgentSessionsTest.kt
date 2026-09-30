@@ -1327,4 +1327,24 @@ class AgentSessionsTest {
         title: String = "parser rewrite",
         titleIsUsers: Boolean = false,
     ) = Settings.OpenAgent(sessionId, provider, account, nativeSessionId, title, titleIsUsers)
+
+    /**
+     * A resume whose transcript is gone cannot succeed however many times it is asked, so the run
+     * says so, and the post-exit panel offers nop's own record instead.
+     */
+    @Test
+    fun `a resume whose transcript is gone is marked, and one whose transcript is there is not`(@TempDir tmp: Path) {
+        val home = tmp.resolve("home")
+        val account = Account("claude-alpha", Provider.Anthropic, home.toString())
+        val project = java.nio.file.Files.createDirectories(tmp.resolve("shop"))
+        val kept = home.resolve("projects")
+            .resolve(iondrive.nop.agent.transcript.ClaudeTailer.slug(project)).resolve("kept-1.jsonl")
+        java.nio.file.Files.createDirectories(kept.parent)
+        java.nio.file.Files.writeString(kept, "{}\n")
+        val state = sessions()
+
+        assertTrue(state.open(project.toFile(), account, resumeId = "gone-1").run.conversationMissing)
+        assertFalse(state.open(project.toFile(), account, resumeId = "kept-1").run.conversationMissing)
+        assertFalse(state.open(project.toFile(), account).run.conversationMissing, "a new session resumes nothing")
+    }
 }
