@@ -41,11 +41,13 @@ import iondrive.nop.agent.Provider
 import iondrive.nop.agent.Usage
 import iondrive.nop.agent.UsageReading
 import iondrive.nop.agent.handoverTarget
+import iondrive.nop.git.CommitIdentity
 import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
+import iondrive.nop.git.IdentityChoice
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.git.StashEntry
 import iondrive.nop.history.LocalHistory
@@ -182,6 +184,12 @@ fun App(
     // A commit waiting on the "ticked for you" confirmation, or null when no dialog is open.
     var pendingCommit by remember(projectPath) { mutableStateOf<PendingCommit?>(null) }
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
+    // Who the commit panel commits as: the identities on offer (the repository's default first),
+    // the one picked, or null to go with that default, and the "Save for this repo" tick. The pick
+    // lasts while the project is open and no longer, so a restart always shows the config's own.
+    var identityChoices by remember(projectPath) { mutableStateOf<List<IdentityChoice>>(emptyList()) }
+    var commitAsPick by remember(projectPath) { mutableStateOf<CommitIdentity?>(null) }
+    var saveCommitAs by remember(projectPath) { mutableStateOf(false) }
     // How far the running commit has got, for the commit button's progress bar. A StateFlow and
     // not snapshot state because GitRepo reports it from its staging worker threads, which have no
     // business touching composition state; collecting it hands the updates back on this thread.
@@ -326,6 +334,15 @@ fun App(
         }
     }
 
+    // Re-read on every status reload and whenever the "As" list opens: the git config the default
+    // identity comes from can be edited in a terminal at any time, and nothing watches it.
+    suspend fun reloadIdentities() {
+        if (repo == null) return
+        identityChoices = withContext(Dispatchers.IO) {
+            runCatching { repo.commitIdentities() }.getOrDefault(identityChoices)
+        }
+    }
+
     suspend fun reloadStatus() {
         if (repo != null) {
             reconcileEdits()
@@ -348,6 +365,7 @@ fun App(
             canSoftReset = withContext(Dispatchers.IO) {
                 runCatching { repo.canSoftResetHead() }.getOrDefault(false)
             }
+            reloadIdentities()
             // A status reload usually means files appeared / disappeared too (commit, stash, pop)
             // — re-walk the project tree so the sidebar matches the filesystem.
             fsRefreshKey += 1
@@ -1029,9 +1047,16 @@ fun App(
         }
     }
 
+    // Who the Commit button commits as, read at the click so that the confirmation below commits as
+    // whoever the panel showed when it was pressed.
+    fun commitAsNow(): CommitAs {
+        val identity = commitIdentity(identityChoices, commitAsPick)
+        return CommitAs(identity, save = saveCommitAs && canSaveIdentity(identityChoices, identity))
+    }
+
     // Commits [included]: straight from the Commit button, or from the confirmation it raises when
     // nop ticked some of those files by itself.
-    fun performCommit(message: String, included: List<FileChange>) {
+    fun performCommit(message: String, included: List<FileChange>, commitAs: CommitAs) {
         if (repo == null || commitInFlight) return
         scope.launch {
             commitInFlight = true
@@ -1040,14 +1065,24 @@ fun App(
             try {
                 gitOpError = runGitOp("Commit failed") {
                     withContext(Dispatchers.IO) {
+                        // Saved first, so that a config nop cannot write stops the commit rather
+                        // than letting it land as the user asked while the saving silently fails.
+                        if (commitAs.save && commitAs.identity != null) repo.saveIdentity(commitAs.identity)
                         repo.stageAndCommit(
                             message,
                             included,
                             // Unticked paths are held out of the commit, not merely left unstaged.
                             partial = included.size != status.changes.size,
                             startedAtMillis = startedAt,
+                            identity = commitAs.identity,
                             onProgress = { commitProgressFlow.value = it },
                         )
+                    }
+                    if (commitAs.save) {
+                        // Now the repository's default, which the panel shows once the reload
+                        // below has re-read the config.
+                        if (commitAsPick == commitAs.identity) commitAsPick = null
+                        saveCommitAs = false
                     }
                     rememberMessage(message)
                     messageClearTrigger += 1
@@ -1826,9 +1861,9 @@ fun App(
                                         onCommit = { message, included ->
                                             val unreviewed = commitSelection.unreviewed(included.map { it.path })
                                             if (unreviewed.isEmpty()) {
-                                                performCommit(message, included)
+                                                performCommit(message, included, commitAsNow())
                                             } else {
-                                                pendingCommit = PendingCommit(message, included, unreviewed)
+                                                pendingCommit = PendingCommit(message, included, unreviewed, commitAsNow())
                                             }
                                         },
                                         onStash = { message, included ->
@@ -1854,6 +1889,12 @@ fun App(
                                         commitProgress = commitProgress,
                                         messageClearTrigger = messageClearTrigger,
                                         messageState = commitMessageState,
+                                        identityChoices = identityChoices,
+                                        commitAs = commitAsPick,
+                                        onCommitAsChange = { commitAsPick = it },
+                                        saveCommitAs = saveCommitAs,
+                                        onSaveCommitAsChange = { saveCommitAs = it },
+                                        onIdentitiesOpen = { scope.launch { reloadIdentities() } },
                                         messageHeight = commitMessageHeight,
                                         onMessageHeightChange = { commitMessageHeight = it },
                                         stashInFlight = stashInFlight,
@@ -2072,7 +2113,7 @@ fun App(
                 pending = pending,
                 returned = commitSelection.returned,
                 onConfirm = {
-                    performCommit(pending.message, pending.included)
+                    performCommit(pending.message, pending.included, pending.commitAs)
                     pendingCommit = null
                 },
                 onCancel = { pendingCommit = null },

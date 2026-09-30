@@ -87,12 +87,16 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
      * thread-safe; snapshots arrive in order and never go backwards. [startedAtMillis] is the
      * clock the reported elapsed time and ETA run from — pass the moment the *user* asked for the
      * commit, which is earlier than this call by however long the pre-commit status check took.
+     *
+     * [identity] is who the commit is made as, author and committer both; null leaves it to the
+     * repository's config, as `git commit` does.
      */
     fun stageAndCommit(
         message: String,
         changes: Collection<FileChange>,
         partial: Boolean = false,
         startedAtMillis: Long = System.currentTimeMillis(),
+        identity: CommitIdentity? = null,
         onProgress: (CommitProgress) -> Unit = {},
     ): String {
         val (removed, staged) = changes.partition {
@@ -114,6 +118,10 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         }
         progress.enter(CommitProgress.Phase.COMMITTING)
         val commit = git.commit().setMessage(message).apply {
+            if (identity != null) {
+                setAuthor(identity.name, identity.email)
+                setCommitter(identity.name, identity.email)
+            }
             if (partial) {
                 changes.forEach { setOnly(it.path) }
                 // JGit refuses an empty commit once a pathspec is set, where a commit of the whole
@@ -124,6 +132,15 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         }.call()
         return commit.name
     }
+
+    /** Who this repository can commit as, the one it commits as by default first. See [identityChoices]. */
+    fun commitIdentities(): List<IdentityChoice> = identityChoices(repository)
+
+    /**
+     * Makes [identity] this repository's own `user.name` and `user.email`, as `git config` without
+     * `--global` would, so commits made here without a pick use it — from nop and a terminal alike.
+     */
+    fun saveIdentity(identity: CommitIdentity) = writeIdentity(repository, identity)
 
     /**
      * Collects the byte and file counts a commit reports back through

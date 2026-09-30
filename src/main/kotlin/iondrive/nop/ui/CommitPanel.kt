@@ -47,9 +47,11 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import iondrive.nop.git.CommitIdentity
 import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitStatus
+import iondrive.nop.git.IdentityChoice
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.CheckboxRow
@@ -93,6 +95,13 @@ fun CommitPanel(
     // Hoisted, like [SearchPanel]'s query: the tool panel composes one tab at a time, so a message
     // remembered here would be lost the moment the user looked at the preview or a search result.
     messageState: TextFieldState = rememberTextFieldState(),
+    // Who the commit is made as, hoisted for the same reason as the message. See [CommitAsPicker].
+    identityChoices: List<IdentityChoice> = emptyList(),
+    commitAs: CommitIdentity? = null,
+    onCommitAsChange: (CommitIdentity?) -> Unit = {},
+    saveCommitAs: Boolean = false,
+    onSaveCommitAsChange: (Boolean) -> Unit = {},
+    onIdentitiesOpen: () -> Unit = {},
 ) {
     // Emptied when a commit or stash has actually landed, never on the click that starts one.
     // Clearing on click cost the user their message whenever the commit didn't run — and because
@@ -153,11 +162,25 @@ fun CommitPanel(
         }
 
         if (inRepo && anyChanges) {
-            if (messageHistory.isNotEmpty()) {
-                RecentMessagesDropdown(
-                    messages = messageHistory,
-                    onPick = { messageState.setText(it) },
-                    modifier = Modifier.padding(bottom = 4.dp),
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (messageHistory.isNotEmpty()) {
+                    RecentMessagesDropdown(
+                        messages = messageHistory,
+                        onPick = { messageState.setText(it) },
+                    )
+                }
+                CommitAsPicker(
+                    choices = identityChoices,
+                    picked = commitAs,
+                    onPick = onCommitAsChange,
+                    save = saveCommitAs,
+                    onSaveChange = onSaveCommitAsChange,
+                    onOpen = onIdentitiesOpen,
                 )
             }
             Row(

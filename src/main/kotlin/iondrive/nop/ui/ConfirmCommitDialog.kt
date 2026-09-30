@@ -8,7 +8,12 @@ import iondrive.nop.git.FileChange
 import org.jetbrains.jewel.ui.component.Text
 
 /** A commit held back until the user confirms the [unreviewed] files nop ticked by itself. */
-data class PendingCommit(val message: String, val included: List<FileChange>, val unreviewed: List<String>)
+data class PendingCommit(
+    val message: String,
+    val included: List<FileChange>,
+    val unreviewed: List<String>,
+    val commitAs: CommitAs,
+)
 
 /**
  * Asks before committing files the user did not tick: ones that left the change list and came back,
