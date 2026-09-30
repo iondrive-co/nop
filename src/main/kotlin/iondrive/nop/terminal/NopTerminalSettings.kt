@@ -25,6 +25,26 @@ class NopTerminalSettings(
     @Volatile var fg: Color,
     @Volatile var link: Color,
 ) : DefaultSettingsProvider() {
+    @Volatile
+    internal var lastActiveAt: Long = System.currentTimeMillis()
+
+    /** Records user or process activity to keep the caret blinking. */
+    fun nudgeActive() {
+        lastActiveAt = System.currentTimeMillis()
+    }
+
+    /** Whether the terminal has had activity within [BLINK_IDLE_MS]. */
+    val isBlinkingActive: Boolean
+        get() = System.currentTimeMillis() - lastActiveAt < BLINK_IDLE_MS
+
+    /**
+     * JediTerm polls this dynamically on every redraw timer tick. When the session has been idle
+     * for [BLINK_IDLE_MS], returns [IDLE_BLINKING_PERIOD_MS] to suspend caret blink repaints
+     * entirely without un-painting the cursor.
+     */
+    override fun caretBlinkingMs(): Int =
+        if (isBlinkingActive) BLINK_PERIOD_MS else IDLE_BLINKING_PERIOD_MS
+
     override fun getTerminalFontSize(): Float = FONT_SIZE
 
     /**
@@ -143,7 +163,10 @@ class NopTerminalSettings(
 
     private fun Color.toJediColor() = com.jediterm.core.Color(red, green, blue)
 
-    private companion object {
+    companion object {
+        const val BLINK_IDLE_MS = 15_000L
+        const val BLINK_PERIOD_MS = 505
+        const val IDLE_BLINKING_PERIOD_MS = Int.MAX_VALUE
         /**
          * Two points above the editor's 13sp. Matching it looks right — code should read the same
          * size in a file and in a shell — but they are not the same surface. The editor is Compose text; the terminal is AWT text in

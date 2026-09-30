@@ -262,4 +262,71 @@ class NopTerminalSettingsTest {
         assertFalse(widget.userScrolledUp, "scrollToBottom must reset userScrolledUp")
         assertEquals(0, model.value)
     }
+
+    @Test
+    fun `caret blinking is active initially and suspended when idle`() {
+        val s = settings()
+        assertEquals(NopTerminalSettings.BLINK_PERIOD_MS, s.caretBlinkingMs(), "caret should blink when active")
+        assertTrue(s.isBlinkingActive)
+
+        // Advance activity time past the idle threshold
+        s.lastActiveAt = System.currentTimeMillis() - NopTerminalSettings.BLINK_IDLE_MS - 1_000L
+        assertFalse(s.isBlinkingActive)
+        assertEquals(
+            NopTerminalSettings.IDLE_BLINKING_PERIOD_MS,
+            s.caretBlinkingMs(),
+            "caret blinking should be suspended when idle",
+        )
+
+        // Nudge restores active blinking
+        s.nudgeActive()
+        assertTrue(s.isBlinkingActive)
+        assertEquals(NopTerminalSettings.BLINK_PERIOD_MS, s.caretBlinkingMs())
+    }
+
+    @Test
+    fun `contrast adjusting graphics batches brush color across character draws`() {
+        val s = settings()
+        val img = java.awt.image.BufferedImage(100, 100, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val baseG2d = img.createGraphics()
+
+        class RecordingGraphics2D(delegate: java.awt.Graphics2D, settings: NopTerminalSettings) :
+            ContrastAdjustingGraphics2D(delegate, settings) {
+            val colorAssignments = mutableListOf<Color?>()
+            override fun setColor(c: Color?) {
+                colorAssignments.add(c)
+                super.setColor(c)
+            }
+        }
+
+        val recording = RecordingGraphics2D(baseG2d, s)
+        val wrapper = ContrastAdjustingGraphics2D(recording, s)
+        wrapper.color = Color.BLACK
+        wrapper.fillRect(0, 0, 100, 20)
+
+        recording.colorAssignments.clear()
+
+        wrapper.color = Color.WHITE
+        val chars = "Hello World".toCharArray()
+        for (i in chars.indices) {
+            wrapper.drawChars(chars, i, 1, i * 9, 15)
+        }
+
+        // Must NOT ping-pong setColor on every single character cluster (previously 22 calls for 11 chars)
+        assertEquals(
+            1,
+            recording.colorAssignments.size,
+            "underlying Graphics2D color should only be updated once for a contiguous run of characters with identical contrast requirements",
+        )
+    }
+
+    @Test
+    fun `terminal panel switches between steady and blinking cursor on period change`() {
+        val s = settings()
+        val widget = NopTerminalWidget(80, 24, s)
+        val panel = widget.terminalPanel
+
+        panel.setBlinkingPeriod(NopTerminalSettings.IDLE_BLINKING_PERIOD_MS)
+        panel.setBlinkingPeriod(NopTerminalSettings.BLINK_PERIOD_MS)
+    }
 }

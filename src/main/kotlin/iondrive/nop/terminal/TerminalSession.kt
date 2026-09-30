@@ -270,6 +270,7 @@ class TerminalSession private constructor(
      * Nothing happens if no process is running — there is nothing to type at.
      */
     fun sendText(text: String) {
+        settings?.nudgeActive()
         noteDraft(text.toByteArray(Charsets.UTF_8))
         onUserInput?.invoke()
         write(text)
@@ -298,6 +299,7 @@ class TerminalSession private constructor(
      * paste by how much arrives at once would otherwise take it for a newline inside the paste.
      */
     fun submit(text: String) {
+        settings?.nudgeActive()
         // Nothing in the text may reach the program as anything but text: an ESC would let it end
         // the paste early (`ESC [ 2 0 1 ~`) and carry on as keystrokes, and a bare CR or any other
         // control byte is a key of its own. Its sender cleans it too (AgentMessages); this is the
@@ -331,6 +333,7 @@ class TerminalSession private constructor(
      * this terminal's prompt ready to send.
      */
     fun snipArea() {
+        settings?.nudgeActive()
         ScreenSnip.start { path ->
             sendText(quoteForPrompt(path.toAbsolutePath().toString()) + " ")
             requestFocus()

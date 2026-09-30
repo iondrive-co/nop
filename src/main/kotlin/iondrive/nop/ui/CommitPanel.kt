@@ -79,6 +79,9 @@ fun CommitPanel(
     stashInFlight: Boolean = false,
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
+    // The change whose diff is the editor's selected tab, drawn highlighted so the list shows which
+    // file the user is looking at, as the project tree does for the active file.
+    activePath: String? = null,
     // Rows nop ticked by itself, marked "returned" or "new". See [CommitSelection].
     returnedPaths: Set<String> = emptySet(),
     arrivedPaths: Set<String> = emptySet(),
@@ -269,6 +272,7 @@ fun CommitPanel(
                         ChangeRows(
                             group = group,
                             selectedPaths = selectedPaths,
+                            activePath = activePath,
                             returnedPaths = returnedPaths,
                             arrivedPaths = arrivedPaths,
                             onToggle = onToggle,
@@ -292,6 +296,7 @@ private val CHANGE_ROW_CHROME = 76.dp
 private fun ChangeRows(
     group: PathGroup<FileChange>,
     selectedPaths: Set<String>,
+    activePath: String?,
     returnedPaths: Set<String>,
     arrivedPaths: Set<String>,
     onToggle: (String) -> Unit,
@@ -305,6 +310,7 @@ private fun ChangeRows(
                 change = change,
                 label = group.labelFor(change.path),
                 checked = change.path in selectedPaths,
+                active = change.path == activePath,
                 mark = when (change.path) {
                     in returnedPaths -> commitMark(returned = true)
                     in arrivedPaths -> commitMark(returned = false)
@@ -421,6 +427,7 @@ private fun ChangeRow(
     change: FileChange,
     label: String,
     checked: Boolean,
+    active: Boolean,
     mark: String?,
     onToggle: () -> Unit,
     onPathClick: () -> Unit,
@@ -430,8 +437,19 @@ private fun ChangeRow(
     // putting a button on every row, which would clutter a long change list. The ellipsis signals
     // that a confirmation dialog follows (revert is destructive).
     ContextMenuArea(items = { listOf(ContextMenuItem("Revert…") { onRevert() }) }) {
+        val isDark = JewelTheme.isDark
+        // The project tree's active-file colours, so the two panels mark the same file the same way.
+        val rowBackground = when {
+            !active -> Color.Transparent
+            isDark -> Color(0xFF2B5282)
+            else -> Color(0xFFCEE0FD)
+        }
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(4.dp))
+                .background(rowBackground)
+                .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -441,6 +459,11 @@ private fun ChangeRow(
             val pathText: @Composable () -> Unit = {
                 Text(
                     label,
+                    color = when {
+                        !active -> Color.Unspecified
+                        isDark -> Color(0xFFFFFFFF)
+                        else -> Color(0xFF0F3E85)
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

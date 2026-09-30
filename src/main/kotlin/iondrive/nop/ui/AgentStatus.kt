@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -109,10 +110,19 @@ internal fun AgentStatusMark(
             targetValue = 0.35f,
             animationSpec = infiniteRepeatable(tween(650, easing = LinearEasing), RepeatMode.Reverse),
             label = "agent-pulse-alpha",
-        ).value
-    } else 1f
+        )
+    } else null
 
-    Box(modifier = Modifier.size(size).alpha(pulse), contentAlignment = Alignment.Center) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .graphicsLayer {
+                if (pulse != null) {
+                    alpha = pulse.value
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         when (activity) {
             Activity.Working -> {
                 val transition = rememberInfiniteTransition(label = "agent-spin")

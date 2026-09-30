@@ -1,5 +1,6 @@
 package iondrive.nop.terminal
 
+import com.jediterm.terminal.CursorShape
 import com.jediterm.terminal.DefaultTerminalCopyPasteHandler
 import com.jediterm.terminal.TerminalCopyPasteHandler
 import com.jediterm.terminal.TextStyle
@@ -67,6 +68,7 @@ internal class NopTerminalWidget(
     init {
         // Keep scroll at bottom on buffer updates unless the user has explicitly scrolled up
         terminalTextBuffer.addModelListener {
+            settings.nudgeActive()
             if (!userScrolledUp && !scrollScheduled) {
                 scrollScheduled = true
                 SwingUtilities.invokeLater {
@@ -80,6 +82,7 @@ internal class NopTerminalWidget(
 
         // Track when the viewport reaches bottom to reset userScrolledUp
         terminalPanel.verticalScrollModel.addChangeListener {
+            settings.nudgeActive()
             if (terminalPanel.verticalScrollModel.value == 0) {
                 userScrolledUp = false
             }
@@ -87,6 +90,7 @@ internal class NopTerminalWidget(
 
         // Mouse wheel: scrolling up sets userScrolledUp; scrolling down checks if bottom reached
         terminalPanel.addMouseWheelListener { e ->
+            settings.nudgeActive()
             if (e.wheelRotation < 0) {
                 userScrolledUp = true
             } else if (e.wheelRotation > 0) {
@@ -100,6 +104,7 @@ internal class NopTerminalWidget(
 
         // Scrollbar thumb dragging: user dragging up into history sets userScrolledUp
         scrollBarRef?.addAdjustmentListener { e ->
+            settings.nudgeActive()
             if (e.valueIsAdjusting && terminalPanel.verticalScrollModel.value < 0) {
                 userScrolledUp = true
             } else if (terminalPanel.verticalScrollModel.value == 0) {
@@ -110,6 +115,7 @@ internal class NopTerminalWidget(
         // Typing or submitting a command brings the viewport back to bottom
         terminalPanel.addCustomKeyListener(object : java.awt.event.KeyAdapter() {
             override fun keyPressed(e: java.awt.event.KeyEvent) {
+                settings.nudgeActive()
                 if (e.keyCode == java.awt.event.KeyEvent.VK_PAGE_UP || e.keyCode == java.awt.event.KeyEvent.VK_UP) {
                     return
                 }
@@ -125,6 +131,7 @@ internal class NopTerminalWidget(
         // Snap to bottom when focused or clicked, unless scrolled up into history
         terminalPanel.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
+                settings.nudgeActive()
                 if (!userScrolledUp) {
                     scrollToBottom()
                 }
@@ -132,6 +139,7 @@ internal class NopTerminalWidget(
         })
         terminalPanel.addFocusListener(object : FocusAdapter() {
             override fun focusGained(e: FocusEvent) {
+                settings.nudgeActive()
                 if (!userScrolledUp) {
                     scrollToBottom()
                 }
@@ -211,6 +219,17 @@ private class NopTerminalPanel(
             RenderingHints.KEY_FRACTIONALMETRICS,
             RenderingHints.VALUE_FRACTIONALMETRICS_ON,
         )
+    }
+
+    override fun setBlinkingPeriod(period: Int) {
+        if (period >= NopTerminalSettings.IDLE_BLINKING_PERIOD_MS) {
+            setDefaultCursorShape(CursorShape.STEADY_BLOCK)
+            super.setBlinkingPeriod(period)
+            repaint()
+        } else {
+            setDefaultCursorShape(CursorShape.BLINK_BLOCK)
+            super.setBlinkingPeriod(period)
+        }
     }
 
     override fun paintComponent(g: Graphics) {
@@ -324,19 +343,31 @@ internal class NopTerminalCopyPasteHandler : DefaultTerminalCopyPasteHandler() {
 /**
  * A delegating [Graphics2D] that intercepts text and line drawing in the terminal panel,
  * ensuring foreground text meets WCAG AA contrast (4.5:1) against the underlying cell background.
+ *
+ * Drawing colors are batched via [ensureBrush] so [delegate]'s color is only changed when the
+ * target brush actually differs from what is active. In particular, text drawing calls do not
+ * restore [currentColor] after each character cluster, allowing Java 2D's XRender pipeline to
+ * batch glyph runs rather than flushing and rebinding pictures per character.
  */
-private class ContrastAdjustingGraphics2D(
+internal open class ContrastAdjustingGraphics2D(
     private val delegate: Graphics2D,
     private val settings: NopTerminalSettings,
     private var currentBg: Color = settings.bg,
+    private var currentColor: Color = delegate.color ?: settings.fg,
 ) : Graphics2D() {
-    private var currentColor: Color = delegate.color ?: settings.fg
+    private var activeBrushColor: Color? = null
+
+    private fun ensureBrush(color: Color) {
+        if (activeBrushColor != color) {
+            delegate.color = color
+            activeBrushColor = color
+        }
+    }
 
     override fun setColor(c: Color?) {
         if (c != null) {
             currentColor = c
         }
-        delegate.color = c
     }
 
     override fun getColor(): Color = currentColor
@@ -345,63 +376,63 @@ private class ContrastAdjustingGraphics2D(
         if (width > 0 && height > 0) {
             currentBg = currentColor
         }
+        ensureBrush(currentColor)
         delegate.fillRect(x, y, width, height)
     }
 
     override fun drawChars(data: CharArray, offset: Int, length: Int, x: Int, y: Int) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawChars(data, offset, length, x, y)
-        delegate.color = currentColor
     }
 
     override fun drawString(str: String, x: Int, y: Int) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawString(str, x, y)
-        delegate.color = currentColor
     }
 
     override fun drawString(str: String, x: Float, y: Float) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawString(str, x, y)
-        delegate.color = currentColor
     }
 
     override fun drawString(iterator: AttributedCharacterIterator, x: Int, y: Int) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawString(iterator, x, y)
-        delegate.color = currentColor
     }
 
     override fun drawString(iterator: AttributedCharacterIterator, x: Float, y: Float) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawString(iterator, x, y)
-        delegate.color = currentColor
     }
 
     override fun drawGlyphVector(g: GlyphVector, x: Float, y: Float) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawGlyphVector(g, x, y)
-        delegate.color = currentColor
     }
 
     override fun drawLine(x1: Int, y1: Int, x2: Int, y2: Int) {
         val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        delegate.color = adjusted
+        ensureBrush(adjusted)
         delegate.drawLine(x1, y1, x2, y2)
-        delegate.color = currentColor
+    }
+
+    override fun drawRect(x: Int, y: Int, width: Int, height: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
+        delegate.drawRect(x, y, width, height)
     }
 
     override fun create(): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg)
+        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor)
 
     override fun create(x: Int, y: Int, width: Int, height: Int): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create(x, y, width, height) as Graphics2D, settings, currentBg)
+        ContrastAdjustingGraphics2D(delegate.create(x, y, width, height) as Graphics2D, settings, currentBg, currentColor)
 
     override fun translate(x: Int, y: Int) = delegate.translate(x, y)
     override fun translate(tx: Double, ty: Double) = delegate.translate(tx, ty)
@@ -412,7 +443,14 @@ private class ContrastAdjustingGraphics2D(
     override fun transform(Tx: AffineTransform) = delegate.transform(Tx)
     override fun setTransform(Tx: AffineTransform) { delegate.transform = Tx }
     override fun getTransform(): AffineTransform = delegate.transform
-    override fun getPaint(): Paint = delegate.paint
+    override fun getPaint(): Paint = currentColor
+    override fun setPaint(paint: Paint) {
+        if (paint is Color) {
+            currentColor = paint
+        }
+        delegate.paint = paint
+        activeBrushColor = null
+    }
     override fun getComposite(): Composite = delegate.composite
     override fun setBackground(color: Color) { delegate.background = color }
     override fun getBackground(): Color = delegate.background
@@ -431,25 +469,56 @@ private class ContrastAdjustingGraphics2D(
     override fun setClip(clip: Shape?) { delegate.clip = clip }
     override fun copyArea(x: Int, y: Int, width: Int, height: Int, dx: Int, dy: Int) =
         delegate.copyArea(x, y, width, height, dx, dy)
-    override fun clearRect(x: Int, y: Int, width: Int, height: Int) = delegate.clearRect(x, y, width, height)
-    override fun drawRoundRect(x: Int, y: Int, width: Int, height: Int, arcWidth: Int, arcHeight: Int) =
+    override fun clearRect(x: Int, y: Int, width: Int, height: Int) {
+        currentBg = background ?: settings.bg
+        delegate.clearRect(x, y, width, height)
+    }
+    override fun drawRoundRect(x: Int, y: Int, width: Int, height: Int, arcWidth: Int, arcHeight: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
         delegate.drawRoundRect(x, y, width, height, arcWidth, arcHeight)
-    override fun fillRoundRect(x: Int, y: Int, width: Int, height: Int, arcWidth: Int, arcHeight: Int) =
+    }
+    override fun fillRoundRect(x: Int, y: Int, width: Int, height: Int, arcWidth: Int, arcHeight: Int) {
+        ensureBrush(currentColor)
         delegate.fillRoundRect(x, y, width, height, arcWidth, arcHeight)
-    override fun drawOval(x: Int, y: Int, width: Int, height: Int) = delegate.drawOval(x, y, width, height)
-    override fun fillOval(x: Int, y: Int, width: Int, height: Int) = delegate.fillOval(x, y, width, height)
-    override fun drawArc(x: Int, y: Int, width: Int, height: Int, startAngle: Int, arcAngle: Int) =
+    }
+    override fun drawOval(x: Int, y: Int, width: Int, height: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
+        delegate.drawOval(x, y, width, height)
+    }
+    override fun fillOval(x: Int, y: Int, width: Int, height: Int) {
+        ensureBrush(currentColor)
+        delegate.fillOval(x, y, width, height)
+    }
+    override fun drawArc(x: Int, y: Int, width: Int, height: Int, startAngle: Int, arcAngle: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
         delegate.drawArc(x, y, width, height, startAngle, arcAngle)
-    override fun fillArc(x: Int, y: Int, width: Int, height: Int, startAngle: Int, arcAngle: Int) =
+    }
+    override fun fillArc(x: Int, y: Int, width: Int, height: Int, startAngle: Int, arcAngle: Int) {
+        ensureBrush(currentColor)
         delegate.fillArc(x, y, width, height, startAngle, arcAngle)
-    override fun drawPolyline(xPoints: IntArray, yPoints: IntArray, nPoints: Int) =
+    }
+    override fun drawPolyline(xPoints: IntArray, yPoints: IntArray, nPoints: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
         delegate.drawPolyline(xPoints, yPoints, nPoints)
-    override fun drawPolygon(xPoints: IntArray, yPoints: IntArray, nPoints: Int) =
+    }
+    override fun drawPolygon(xPoints: IntArray, yPoints: IntArray, nPoints: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
         delegate.drawPolygon(xPoints, yPoints, nPoints)
-    override fun fillPolygon(xPoints: IntArray, yPoints: IntArray, nPoints: Int) =
+    }
+    override fun fillPolygon(xPoints: IntArray, yPoints: IntArray, nPoints: Int) {
+        ensureBrush(currentColor)
         delegate.fillPolygon(xPoints, yPoints, nPoints)
-    override fun drawBytes(data: ByteArray, offset: Int, length: Int, x: Int, y: Int) =
+    }
+    override fun drawBytes(data: ByteArray, offset: Int, length: Int, x: Int, y: Int) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
         delegate.drawBytes(data, offset, length, x, y)
+    }
     override fun drawImage(img: Image, x: Int, y: Int, observer: ImageObserver?): Boolean =
         delegate.drawImage(img, x, y, observer)
     override fun drawImage(img: Image, x: Int, y: Int, width: Int, height: Int, observer: ImageObserver?): Boolean =
@@ -462,7 +531,11 @@ private class ContrastAdjustingGraphics2D(
         delegate.drawImage(img, dx1, dy1, dx2, dy2, sx1, sy1, sx2, sy2, observer)
     override fun drawImage(img: Image, dx1: Int, dy1: Int, dx2: Int, dy2: Int, sx1: Int, sy1: Int, sx2: Int, sy2: Int, bgcolor: Color?, observer: ImageObserver?): Boolean =
         delegate.drawImage(img, dx1, dy1, dx2, dy2, sx1, sy1, sx2, sy2, bgcolor, observer)
-    override fun draw(s: Shape) = delegate.draw(s)
+    override fun draw(s: Shape) {
+        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        ensureBrush(adjusted)
+        delegate.draw(s)
+    }
     override fun drawImage(img: Image, xform: AffineTransform, obs: ImageObserver?): Boolean =
         delegate.drawImage(img, xform, obs)
     override fun drawImage(img: BufferedImage, op: BufferedImageOp?, x: Int, y: Int) =
@@ -471,12 +544,14 @@ private class ContrastAdjustingGraphics2D(
         delegate.drawRenderedImage(img, xform)
     override fun drawRenderableImage(img: RenderableImage, xform: AffineTransform) =
         delegate.drawRenderableImage(img, xform)
-    override fun fill(s: Shape) = delegate.fill(s)
+    override fun fill(s: Shape) {
+        ensureBrush(currentColor)
+        delegate.fill(s)
+    }
     override fun hit(rect: Rectangle, s: Shape, onStroke: Boolean): Boolean =
         delegate.hit(rect, s, onStroke)
     override fun getDeviceConfiguration(): GraphicsConfiguration = delegate.deviceConfiguration
     override fun setComposite(comp: Composite) { delegate.composite = comp }
-    override fun setPaint(paint: Paint) { delegate.paint = paint }
     override fun setStroke(s: Stroke) { delegate.stroke = s }
     override fun setRenderingHint(hintKey: RenderingHints.Key, hintValue: Any?) =
         delegate.setRenderingHint(hintKey, hintValue)

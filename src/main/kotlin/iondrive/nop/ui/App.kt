@@ -1850,6 +1850,7 @@ fun App(
                                         returnedPaths = commitSelection.returned,
                                         arrivedPaths = commitSelection.arrived,
                                         onToggle = { path -> commitSelection = commitSelection.toggle(path) },
+                                        activePath = (tabsState.selectedTab as? Tab.Diff)?.change?.path,
                                         onChangeClick = { change ->
                                             if (repo != null) {
                                                 commitSelection = commitSelection.acknowledge(change.path)
