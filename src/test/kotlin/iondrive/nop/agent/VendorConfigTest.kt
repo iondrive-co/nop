@@ -142,4 +142,96 @@ class VendorConfigTest {
         )
         assertEquals("rw-------", mode)
     }
+
+    private fun openai(home: Path, signedIn: Boolean = true): Account {
+        Files.createDirectories(home.resolve(".codex"))
+        if (signedIn) Files.writeString(home.resolve(".codex/auth.json"), """{"tokens":{"access_token":"t"}}""")
+        return Account("c", Provider.OpenAI, home.toString())
+    }
+
+    @Test
+    fun `a signed-in codex account gets service_tier default and fast_default_opt_out`(@TempDir tmp: Path) {
+        val account = openai(tmp)
+
+        VendorConfig.prepareForInteractive(account)
+
+        val config = Files.readString(tmp.resolve(".codex/config.toml"))
+        assertTrue("service_tier = \"default\"" in config)
+        assertTrue("[notice]" in config)
+        assertTrue("fast_default_opt_out = true" in config)
+    }
+
+    @Test
+    fun `an un-signed-in codex account is left alone`(@TempDir tmp: Path) {
+        val account = openai(tmp, signedIn = false)
+
+        VendorConfig.prepareForInteractive(account)
+
+        assertFalse(Files.exists(tmp.resolve(".codex/config.toml")))
+    }
+
+    @Test
+    fun `a codex config with an existing service_tier keeps its tier`(@TempDir tmp: Path) {
+        val account = openai(tmp)
+        val file = tmp.resolve(".codex/config.toml")
+        Files.writeString(file, "model = \"gpt-6.1-sol\"\nservice_tier = \"priority\"\n")
+
+        VendorConfig.prepareForInteractive(account)
+
+        val config = Files.readString(file)
+        assertTrue("service_tier = \"priority\"" in config)
+        assertFalse("service_tier = \"default\"" in config)
+        assertTrue("fast_default_opt_out = true" in config)
+    }
+
+    @Test
+    fun `a codex config with existing tables inserts service_tier before the first table`(@TempDir tmp: Path) {
+        val account = openai(tmp)
+        val file = tmp.resolve(".codex/config.toml")
+        Files.writeString(
+            file,
+            """
+            model = "gpt-6.1-sol"
+            [projects."/home/miles/p"]
+            trust_level = "trusted"
+            """.trimIndent() + "\n",
+        )
+
+        VendorConfig.prepareForInteractive(account)
+
+        val lines = Files.readAllLines(file)
+        val serviceTierIdx = lines.indexOfFirst { "service_tier = \"default\"" in it }
+        val firstTableIdx = lines.indexOfFirst { it.startsWith("[") }
+        assertTrue(serviceTierIdx >= 0, "service_tier should be present")
+        assertTrue(serviceTierIdx < firstTableIdx, "service_tier should precede the first table header")
+    }
+
+    @Test
+    fun `a codex config that already has both is not rewritten`(@TempDir tmp: Path) {
+        val account = openai(tmp)
+        val file = tmp.resolve(".codex/config.toml")
+        val content = """
+            model = "gpt-6.1-sol"
+            service_tier = "default"
+            [notice]
+            fast_default_opt_out = true
+        """.trimIndent() + "\n"
+        Files.writeString(file, content)
+
+        VendorConfig.prepareForInteractive(account)
+
+        assertEquals(content, Files.readString(file), "an untouched codex config should stay byte-identical")
+    }
+
+    @Test
+    fun `the codex config it writes is readable only by its owner`(@TempDir tmp: Path) {
+        val account = openai(tmp)
+
+        VendorConfig.prepareForInteractive(account)
+
+        val mode = java.nio.file.attribute.PosixFilePermissions.toString(
+            Files.getPosixFilePermissions(tmp.resolve(".codex/config.toml")),
+        )
+        assertEquals("rw-------", mode)
+    }
 }

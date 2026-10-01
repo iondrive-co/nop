@@ -48,7 +48,9 @@ internal object TerminalContrast {
      */
     fun cachedEnsureContrast(fg: Color, bg: Color, minContrast: Double = MIN_CONTRAST): Color {
         val key = (fg.rgb.toLong() shl 32) or (bg.rgb.toLong() and 0xffffffffL)
-        return cache.computeIfAbsent(key) { ensureContrast(fg, bg, minContrast) }
+        cache[key]?.let { return it }
+        val computed = ensureContrast(fg, bg, minContrast)
+        return cache.putIfAbsent(key, computed) ?: computed
     }
 
     /**

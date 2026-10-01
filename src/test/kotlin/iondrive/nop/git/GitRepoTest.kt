@@ -190,7 +190,7 @@ class GitRepoTest {
         val mine = (tmp / "mine").also { it.createDirectories() }
         val reference = (tmp / "reference").also { it.createDirectories() }
         for (dir in listOf(mine, reference)) {
-            runShell(dir, "git init -q && git config user.email t@x && git config user.name T")
+            runShell(dir, "git init -q && git config user.email t@x && git config user.name T && git config core.autocrlf false")
             seedBulkTree(dir)
         }
 

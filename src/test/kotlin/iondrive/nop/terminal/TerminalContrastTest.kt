@@ -3,7 +3,10 @@ package iondrive.nop.terminal
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Assertions.assertSame
 import java.awt.Color
+import java.awt.Graphics2D
+import java.awt.image.BufferedImage
 
 class TerminalContrastTest {
 
@@ -118,5 +121,72 @@ class TerminalContrastTest {
         val uncached = TerminalContrast.ensureContrast(paleBlue, white)
         val cached = TerminalContrast.cachedEnsureContrast(paleBlue, white)
         assertEquals(uncached, cached)
+    }
+
+    @Test
+    fun `cachedEnsureContrast returns identical instance on cache hit`() {
+        val paleBlue = Color(135, 175, 255)
+        val white = Color.WHITE
+
+        val first = TerminalContrast.cachedEnsureContrast(paleBlue, white)
+        val second = TerminalContrast.cachedEnsureContrast(paleBlue, white)
+        assertSame(first, second)
+    }
+
+    @Test
+    fun `ContrastAdjustingGraphics2D computes adjusted color on setColor and fillRect`() {
+        val img = BufferedImage(100, 100, BufferedImage.TYPE_INT_ARGB)
+        val g2d = img.createGraphics()
+        val settings = NopTerminalSettings(
+            bg = Color.BLACK,
+            fg = Color.WHITE,
+            link = Color.BLUE,
+        )
+        val paleBlue = Color(135, 175, 255)
+        val white = Color.WHITE
+        val adjustedPaleBlueOnWhite = TerminalContrast.cachedEnsureContrast(paleBlue, white)
+
+        val wrapper = ContrastAdjustingGraphics2D(g2d, settings)
+
+        // Fill background with white
+        wrapper.color = white
+        wrapper.fillRect(0, 0, 100, 100)
+        assertEquals(white, g2d.color)
+
+        // Set text color to pale blue
+        wrapper.color = paleBlue
+
+        // Draw text: should apply adjustedPaleBlueOnWhite to delegate brush
+        wrapper.drawString("hello", 10, 10)
+        assertEquals(adjustedPaleBlueOnWhite, g2d.color)
+
+        // Draw more text: should keep the same brush without changing
+        wrapper.drawChars(charArrayOf('x'), 0, 1, 20, 20)
+        assertEquals(adjustedPaleBlueOnWhite, g2d.color)
+    }
+
+    @Test
+    fun `ContrastAdjustingGraphics2D create propagates background and adjusted color`() {
+        val img = BufferedImage(100, 100, BufferedImage.TYPE_INT_ARGB)
+        val g2d = img.createGraphics()
+        val settings = NopTerminalSettings(
+            bg = Color.BLACK,
+            fg = Color.WHITE,
+            link = Color.BLUE,
+        )
+        val paleBlue = Color(135, 175, 255)
+        val white = Color.WHITE
+        val adjustedPaleBlueOnWhite = TerminalContrast.cachedEnsureContrast(paleBlue, white)
+
+        val wrapper = ContrastAdjustingGraphics2D(g2d, settings)
+        wrapper.color = white
+        wrapper.fillRect(0, 0, 100, 100)
+        wrapper.color = paleBlue
+
+        val child = wrapper.create() as ContrastAdjustingGraphics2D
+        assertEquals(adjustedPaleBlueOnWhite, child.adjustedColor)
+        assertEquals(white, child.currentBg)
+        assertEquals(paleBlue, child.currentColor)
+        child.dispose()
     }
 }

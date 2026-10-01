@@ -352,8 +352,9 @@ internal class NopTerminalCopyPasteHandler : DefaultTerminalCopyPasteHandler() {
 internal open class ContrastAdjustingGraphics2D(
     private val delegate: Graphics2D,
     private val settings: NopTerminalSettings,
-    private var currentBg: Color = settings.bg,
-    private var currentColor: Color = delegate.color ?: settings.fg,
+    internal var currentBg: Color = settings.bg,
+    internal var currentColor: Color = delegate.color ?: settings.fg,
+    internal var adjustedColor: Color = TerminalContrast.cachedEnsureContrast(currentColor, currentBg),
 ) : Graphics2D() {
     private var activeBrushColor: Color? = null
 
@@ -364,75 +365,73 @@ internal open class ContrastAdjustingGraphics2D(
         }
     }
 
+    private fun updateAdjustedColor() {
+        adjustedColor = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+    }
+
     override fun setColor(c: Color?) {
-        if (c != null) {
+        if (c != null && c != currentColor) {
             currentColor = c
+            updateAdjustedColor()
         }
     }
 
     override fun getColor(): Color = currentColor
 
     override fun fillRect(x: Int, y: Int, width: Int, height: Int) {
-        if (width > 0 && height > 0) {
+        if (width > 0 && height > 0 && currentBg != currentColor) {
             currentBg = currentColor
+            updateAdjustedColor()
         }
         ensureBrush(currentColor)
         delegate.fillRect(x, y, width, height)
     }
 
     override fun drawChars(data: CharArray, offset: Int, length: Int, x: Int, y: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawChars(data, offset, length, x, y)
     }
 
     override fun drawString(str: String, x: Int, y: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawString(str, x, y)
     }
 
     override fun drawString(str: String, x: Float, y: Float) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawString(str, x, y)
     }
 
     override fun drawString(iterator: AttributedCharacterIterator, x: Int, y: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawString(iterator, x, y)
     }
 
     override fun drawString(iterator: AttributedCharacterIterator, x: Float, y: Float) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawString(iterator, x, y)
     }
 
     override fun drawGlyphVector(g: GlyphVector, x: Float, y: Float) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawGlyphVector(g, x, y)
     }
 
     override fun drawLine(x1: Int, y1: Int, x2: Int, y2: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawLine(x1, y1, x2, y2)
     }
 
     override fun drawRect(x: Int, y: Int, width: Int, height: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawRect(x, y, width, height)
     }
 
     override fun create(): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor)
+        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor, adjustedColor)
 
     override fun create(x: Int, y: Int, width: Int, height: Int): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create(x, y, width, height) as Graphics2D, settings, currentBg, currentColor)
+        ContrastAdjustingGraphics2D(delegate.create(x, y, width, height) as Graphics2D, settings, currentBg, currentColor, adjustedColor)
 
     override fun translate(x: Int, y: Int) = delegate.translate(x, y)
     override fun translate(tx: Double, ty: Double) = delegate.translate(tx, ty)
@@ -445,8 +444,9 @@ internal open class ContrastAdjustingGraphics2D(
     override fun getTransform(): AffineTransform = delegate.transform
     override fun getPaint(): Paint = currentColor
     override fun setPaint(paint: Paint) {
-        if (paint is Color) {
+        if (paint is Color && paint != currentColor) {
             currentColor = paint
+            updateAdjustedColor()
         }
         delegate.paint = paint
         activeBrushColor = null
@@ -470,12 +470,15 @@ internal open class ContrastAdjustingGraphics2D(
     override fun copyArea(x: Int, y: Int, width: Int, height: Int, dx: Int, dy: Int) =
         delegate.copyArea(x, y, width, height, dx, dy)
     override fun clearRect(x: Int, y: Int, width: Int, height: Int) {
-        currentBg = background ?: settings.bg
+        val bg = background ?: settings.bg
+        if (bg != currentBg) {
+            currentBg = bg
+            updateAdjustedColor()
+        }
         delegate.clearRect(x, y, width, height)
     }
     override fun drawRoundRect(x: Int, y: Int, width: Int, height: Int, arcWidth: Int, arcHeight: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawRoundRect(x, y, width, height, arcWidth, arcHeight)
     }
     override fun fillRoundRect(x: Int, y: Int, width: Int, height: Int, arcWidth: Int, arcHeight: Int) {
@@ -483,8 +486,7 @@ internal open class ContrastAdjustingGraphics2D(
         delegate.fillRoundRect(x, y, width, height, arcWidth, arcHeight)
     }
     override fun drawOval(x: Int, y: Int, width: Int, height: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawOval(x, y, width, height)
     }
     override fun fillOval(x: Int, y: Int, width: Int, height: Int) {
@@ -492,8 +494,7 @@ internal open class ContrastAdjustingGraphics2D(
         delegate.fillOval(x, y, width, height)
     }
     override fun drawArc(x: Int, y: Int, width: Int, height: Int, startAngle: Int, arcAngle: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawArc(x, y, width, height, startAngle, arcAngle)
     }
     override fun fillArc(x: Int, y: Int, width: Int, height: Int, startAngle: Int, arcAngle: Int) {
@@ -501,13 +502,11 @@ internal open class ContrastAdjustingGraphics2D(
         delegate.fillArc(x, y, width, height, startAngle, arcAngle)
     }
     override fun drawPolyline(xPoints: IntArray, yPoints: IntArray, nPoints: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawPolyline(xPoints, yPoints, nPoints)
     }
     override fun drawPolygon(xPoints: IntArray, yPoints: IntArray, nPoints: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawPolygon(xPoints, yPoints, nPoints)
     }
     override fun fillPolygon(xPoints: IntArray, yPoints: IntArray, nPoints: Int) {
@@ -515,8 +514,7 @@ internal open class ContrastAdjustingGraphics2D(
         delegate.fillPolygon(xPoints, yPoints, nPoints)
     }
     override fun drawBytes(data: ByteArray, offset: Int, length: Int, x: Int, y: Int) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.drawBytes(data, offset, length, x, y)
     }
     override fun drawImage(img: Image, x: Int, y: Int, observer: ImageObserver?): Boolean =
@@ -532,8 +530,7 @@ internal open class ContrastAdjustingGraphics2D(
     override fun drawImage(img: Image, dx1: Int, dy1: Int, dx2: Int, dy2: Int, sx1: Int, sy1: Int, sx2: Int, sy2: Int, bgcolor: Color?, observer: ImageObserver?): Boolean =
         delegate.drawImage(img, dx1, dy1, dx2, dy2, sx1, sy1, sx2, sy2, bgcolor, observer)
     override fun draw(s: Shape) {
-        val adjusted = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
-        ensureBrush(adjusted)
+        ensureBrush(adjustedColor)
         delegate.draw(s)
     }
     override fun drawImage(img: Image, xform: AffineTransform, obs: ImageObserver?): Boolean =

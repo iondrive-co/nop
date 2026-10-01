@@ -60,8 +60,12 @@ internal object VendorConfig {
                 Antigravity.prepareHome(account)
                 SharedMemory.installRule(account.homePath)
             }
-            // Codex asks for nothing: it reads its own auth.json and starts.
-            Provider.OpenAI -> Unit
+            // Codex defaults modern models to "priority" (Fast mode) when service_tier is unset in
+            // config.toml. Settle config.toml so it defaults to standard processing unless opted in.
+            Provider.OpenAI -> {
+                if (!Files.isRegularFile(account.credentialFile)) return
+                settleCodex(account.homePath.resolve(".codex").resolve("config.toml"))
+            }
         }
     }
 
@@ -97,6 +101,67 @@ internal object VendorConfig {
             val tmp = Files.createTempFile(file.parent, ".claude", ".json")
             Files.writeString(tmp, json.encodeToString(JsonObject.serializer(), next))
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        }.onFailure { Log.warn("could not update $file: $it") }
+    }
+
+    private val CODEX_SERVICE_TIER_REGEX = Regex("""(?m)^\s*service_tier\s*=""")
+    private val CODEX_FAST_OPT_OUT_REGEX = Regex("""(?m)^\s*fast_default_opt_out\s*=""")
+    private val TOML_TABLE_HEADER_REGEX = Regex("""^\s*\[""")
+    private val TOML_NOTICE_TABLE_REGEX = Regex("""^\s*\[notice\]\s*$""")
+
+    /**
+     * Ensures Codex defaults to standard speed rather than /fast mode, and suppresses the fast-mode
+     * onboarding prompt across CLI updates.
+     *
+     * Codex's model descriptors specify `default_service_tier = "priority"` (Fast mode) for modern
+     * models. When `service_tier` is unset in config.toml, sessions launch in /fast mode and burn
+     * quota faster. Setting `service_tier = "default"` when missing keeps launches on the standard
+     * tier, while `/fast` in the TUI still lets the user toggle it and persist their choice.
+     * Setting `fast_default_opt_out = true` under `[notice]` prevents Codex from prompting to opt
+     * into fast defaults when updated.
+     */
+    internal fun settleCodex(file: Path) {
+        val existing = if (Files.isRegularFile(file)) {
+            runCatching { Files.readString(file) }.getOrNull()
+                ?: return Log.warn("left $file alone: it could not be read")
+        } else {
+            ""
+        }
+
+        val hasServiceTier = CODEX_SERVICE_TIER_REGEX.containsMatchIn(existing)
+        val hasFastOptOut = CODEX_FAST_OPT_OUT_REGEX.containsMatchIn(existing)
+        if (hasServiceTier && hasFastOptOut) return
+
+        runCatching {
+            val lines = if (existing.isEmpty()) mutableListOf() else existing.lines().toMutableList()
+
+            if (!hasServiceTier) {
+                val firstTable = lines.indexOfFirst { TOML_TABLE_HEADER_REGEX.containsMatchIn(it) }
+                if (firstTable >= 0) {
+                    lines.add(firstTable, "service_tier = \"default\"")
+                } else {
+                    lines.add("service_tier = \"default\"")
+                }
+            }
+
+            if (!hasFastOptOut) {
+                val noticeIdx = lines.indexOfFirst { TOML_NOTICE_TABLE_REGEX.matches(it) }
+                if (noticeIdx >= 0) {
+                    lines.add(noticeIdx + 1, "fast_default_opt_out = true")
+                } else {
+                    if (lines.isNotEmpty() && lines.last().isNotBlank()) {
+                        lines.add("")
+                    }
+                    lines.add("[notice]")
+                    lines.add("fast_default_opt_out = true")
+                }
+            }
+
+            OwnerOnly.directory(file.parent)
+            val tmp = Files.createTempFile(file.parent, ".config", ".toml")
+            Files.writeString(tmp, lines.joinToString("\n", postfix = "\n"))
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            OwnerOnly.tighten(file)
         }.onFailure { Log.warn("could not update $file: $it") }
     }
 }
