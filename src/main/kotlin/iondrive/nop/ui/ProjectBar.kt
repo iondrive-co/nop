@@ -109,6 +109,8 @@ fun ProjectBar(
     onMoveToNewWindow: (Long, String) -> Unit,
     onToggleTheme: () -> Unit,
     isDark: Boolean,
+    /** Restarts nop in place (see [RestartButton]); null when this nop has no launcher to restart into. */
+    onRestart: (() -> Unit)? = null,
 ) {
     // The bar sits a shade darker than the workspace below it, so the two read as separate surfaces
     // without needing a heavy border between them.
@@ -172,6 +174,14 @@ fun ProjectBar(
         // The light/dark toggle. The window's bottom-right corner belongs to the agent usage
         // indicator, and the editor tab strip is per viewer panel where this bar is drawn once per
         // window — in a split view the toggle would render twice, one theme control too many.
+        if (onRestart != null) {
+            Box(
+                modifier = Modifier.height(BAR_HEIGHT),
+                contentAlignment = Alignment.Center,
+            ) {
+                RestartButton(onRestart = onRestart)
+            }
+        }
         Box(
             modifier = Modifier.height(BAR_HEIGHT),
             contentAlignment = Alignment.Center,

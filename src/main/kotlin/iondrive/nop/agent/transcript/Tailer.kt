@@ -50,6 +50,13 @@ data class RunContext(
      * from the picker that nop has never followed before.
      */
     val resumingLoggedWork: Boolean = false,
+    /**
+     * Where the last nop's follower of this same run stopped reading, when the run was handed over
+     * across a restart rather than started (see [iondrive.nop.ipc.Handover]). The transcript up to
+     * there is in the session's log already, and what the CLI wrote while the two nops changed places
+     * is not — so the follower picks up at exactly this offset rather than at either end.
+     */
+    val joinAt: Pair<Path, Long>? = null,
 )
 
 /**
@@ -152,6 +159,17 @@ class TranscriptFollower(
     }
 
     /**
+     * The transcript and the offset of the first byte not yet logged — the start of the line still
+     * being written, when there is one. Null before a transcript has been found. Read after [stop],
+     * it is where a follower of the same run in the next nop should join (see [RunContext.joinAt]).
+     */
+    @Synchronized
+    fun position(): Pair<Path, Long>? {
+        val f = file ?: return null
+        return f to (offset - partial.toByteArray(StandardCharsets.UTF_8).size).coerceAtLeast(0)
+    }
+
+    /**
      * Synchronised because [stop]'s final drain runs on whichever thread ended the run while the
      * polling thread may be part-way through a pass of its own. Two passes at once share `offset`,
      * so without this the last records are read twice and the log gains a duplicate of exactly the
@@ -166,11 +184,12 @@ class TranscriptFollower(
             // Everything already in a resumed conversation's transcript is already in the
             // session's own log, so the follower joins it at the end. Only what the CLI writes
             // from here is news. See [RunContext.resumingLoggedWork].
-            offset = if (run.resumingLoggedWork) {
-                runCatching { Files.size(found) }.getOrDefault(0L)
-            } else {
-                0L
-            }
+            offset = run.joinAt?.takeIf { it.first == found }?.second
+                ?: if (run.resumingLoggedWork) {
+                    runCatching { Files.size(found) }.getOrDefault(0L)
+                } else {
+                    0L
+                }
             onLocated(found, offset)
         } ?: return
 

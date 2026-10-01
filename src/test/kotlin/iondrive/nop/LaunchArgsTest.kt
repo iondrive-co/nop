@@ -56,4 +56,13 @@ class LaunchArgsTest {
         // After a double dash it is a directory's name, and there is no such directory.
         assertTrue(LaunchArgs.parse(arrayOf("--", "--restart")) is LaunchArgs.Invalid)
     }
+
+    @Test
+    fun `the start a restart execs names its handover and nothing else`(@TempDir tmp: Path) {
+        val manifest = tmp.resolve("manifest.json")
+        val flag = iondrive.nop.ipc.Handover.ADOPT_FLAG
+        assertEquals(LaunchArgs.Adopt(manifest), LaunchArgs.parse(arrayOf(flag, manifest.toString())))
+        assertTrue(LaunchArgs.parse(arrayOf(flag)) is LaunchArgs.Invalid)
+        assertTrue(LaunchArgs.parse(arrayOf(flag, manifest.toString(), tmp.toString())) is LaunchArgs.Invalid)
+    }
 }

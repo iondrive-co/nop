@@ -592,18 +592,9 @@ fun App(
     // as long as nop does, so a project switch leaves them running with their scrollback, and coming
     // back finds them where they were. See TerminalStore for what ends them.
     val projectTerminals = remember(projectPath, rootPath) {
-        TerminalStore.of(root = rootPath, project = projectPath) {
-            TerminalStore.Terminals(
-                // The first shell is opened up front so the tab is there from the start. It costs
-                // nothing until it is looked at, because a session spawns no PTY until the panel
-                // asks it for a widget.
-                shells = RunSessions().apply { openShell(rootPath.toFile()) },
-                // The run tabs the project had last time come back with it, not running — see
-                // RunSessions.restore. Done here rather than in an effect so the strip is right on
-                // its first frame instead of growing tabs a moment after the window opens.
-                runs = RunSessions().apply { restore(Settings.loadOpenRuns(rootPath), rootPath.toFile()) },
-            )
-        }
+        // Built here rather than in an effect so the strip is right on its first frame instead of
+        // growing tabs a moment after the window opens. See Terminals.forProject for what is in it.
+        TerminalStore.of(root = rootPath, project = projectPath) { TerminalStore.Terminals.forProject(rootPath) }
     }
     val runSessions = projectTerminals.runs
     // The tool region holds two selections, one per side — see [ToolTabs]. This is the right-hand

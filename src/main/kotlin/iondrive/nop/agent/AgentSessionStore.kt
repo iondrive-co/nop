@@ -82,6 +82,14 @@ object AgentSessionStore {
         return byRoot.values.firstOrNull { key in it.projects }?.sessions?.sessions.orEmpty()
     }
 
+    /**
+     * Each repo's sessions with the project paths that lead to them, for a restart to hand over (see
+     * [iondrive.nop.ipc.Handover]).
+     */
+    @Synchronized
+    fun byRoot(): List<Triple<Path, List<Path>, AgentSessions>> =
+        byRoot.map { (root, entry) -> Triple(root, entry.projects.toList(), entry.sessions) }
+
     /** Every agent session in every project, for the agents that message each other — see [AgentMessages]. */
     @Synchronized
     fun all(): List<AgentSession> = byRoot.values.flatMap { it.sessions.sessions }

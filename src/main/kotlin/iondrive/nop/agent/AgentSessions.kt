@@ -6,6 +6,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.ipc.Handover
+import iondrive.nop.terminal.Adopted
 import java.io.File
 
 /**
@@ -124,6 +126,9 @@ class AgentSessions {
         // identical on screen — a state file with no rows in it, and a restore that never ran — and
         // only one of them is a bug.
         Log.info("restoring ${rows.size} agent tab(s) in ${dir.name}")
+        // A tab carried across a restart is already here (see [adopt]). It keeps its place in the
+        // strip, which is the place its row has, so the strip is put in row order once all are in.
+        val carried = _sessions.toList()
         rows.forEach { row ->
             if (_sessions.any { it.sessionId == row.sessionId }) return@forEach
             val account = accounts.firstOrNull {
@@ -157,9 +162,48 @@ class AgentSessions {
                 ),
             )
         }
+        if (carried.isNotEmpty()) {
+            val order = rows.map { it.sessionId }
+            val sorted = _sessions.sortedBy { s -> order.indexOf(s.sessionId).let { if (it < 0) Int.MAX_VALUE else it } }
+            if (sorted != _sessions.toList()) {
+                _sessions.clear()
+                _sessions.addAll(sorted)
+            }
+        }
         if (_sessions.isNotEmpty()) {
             pickerTabVisible = false
         }
+    }
+
+    /**
+     * Puts back an agent tab whose CLI the last nop handed over across a restart, still running, and
+     * starts reading its terminal at once — a CLI writing to a terminal nobody reads stops when the
+     * PTY fills. See [Handover] and [AgentSession.handOff].
+     *
+     * Ahead of [restore], which then finds the tab already here and leaves it be. Shown again if it
+     * was the one on screen, which is the one thing a restart the user did not ask to lose their place
+     * in should not lose.
+     */
+    fun adopt(record: Handover.AgentRecord, adopted: Adopted, dir: File, account: Account): AgentSession {
+        val session = AgentSession(
+            projectDir = dir,
+            account = account,
+            sessionId = record.sessionId,
+            restoredTitle = record.title,
+            titleByUser = record.titleIsUsers,
+            baselineSha = record.baselineSha?.takeIf { it.isNotBlank() },
+            handoverTarget = { from -> handoverTarget(from) },
+            hasRunOut = { of -> hasRunOut(of) },
+            spentUntil = { of -> spentUntil(of) },
+            onExited = { ended -> close(ended.sessionId) },
+            adoption = record to adopted,
+        )
+        // What the run was doing comes back with it; read it now rather than at the next title.
+        session.refreshActivity(session.run.tracker)
+        _sessions.add(session)
+        if (record.selected) selectedId = session.sessionId
+        pickerTabVisible = false
+        return session
     }
 
     /**

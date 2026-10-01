@@ -6,6 +6,8 @@ import androidx.compose.runtime.setValue
 import com.jediterm.terminal.ui.JediTermWidget
 import com.pty4j.PtyProcess
 import com.pty4j.PtyProcessBuilder
+import com.pty4j.unix.Pty
+import com.pty4j.unix.UnixPtyProcess
 import iondrive.nop.Log
 import iondrive.nop.launchers.Launcher
 import java.awt.Color
@@ -55,6 +57,11 @@ class TerminalSession private constructor(
      */
     val launcher: Launcher? = null,
     deferred: Boolean = false,
+    /**
+     * The program the previous nop was running in this terminal, handed over across the restart —
+     * see [handOff]. Null for a terminal that starts its own.
+     */
+    private val adopted: Adopted? = null,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(false)
@@ -118,9 +125,31 @@ class TerminalSession private constructor(
     private var widget: JediTermWidget? = null
     private var settings: NopTerminalSettings? = null
     private var process: PtyProcess? = null
+    private var connector: PtyTtyConnector? = null
+
+    /**
+     * What the program has drawn lately, kept so a restart can hand it to the next nop (see
+     * [handOff]). Only for the terminals a restart hands over — agents and shells; a launcher run is
+     * put back waiting to be run again, as it always was.
+     */
+    private val recorder: PtyRecorder? = if (isLauncher) null else PtyRecorder().also { r -> adopted?.let { r.seed(it.replay) } }
+
+    /** Whether [adopted] has been attached yet. It is attached once; a later run spawns as usual. */
+    private var adoptionUsed = false
+
+    /**
+     * Set once [handOff] has given the program to the next nop: nothing here may signal it, close
+     * its PTY or read from it again.
+     */
+    @Volatile
+    var handedOver: Boolean = false
+        private set
 
     /** True once the widget has been created. */
     val isStarted: Boolean get() = widget != null
+
+    /** True for a terminal whose program the last nop handed over, rather than one this nop started. */
+    val isAdopted: Boolean get() = adopted != null
 
     /** Current terminal theme colors, or null if not yet created. */
     val themeColors: Triple<Color, Color, Color>?
@@ -140,7 +169,10 @@ class TerminalSession private constructor(
     ): JediTermWidget {
         widget?.let { return it }
         val s = NopTerminalSettings(bg, fg, link)
-        val w = NopTerminalWidget(INITIAL_COLUMNS, INITIAL_ROWS, s)
+        // An adopted program drew its screen at the size the last nop gave it, and the replay is
+        // that drawing: a terminal of any other size would wrap it into nonsense before the panel
+        // has even been laid out.
+        val w = NopTerminalWidget(adopted?.columns ?: INITIAL_COLUMNS, adopted?.rows ?: INITIAL_ROWS, s)
         // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
         // Must be installed before the process starts writing, or early output misses out: JediTerm
         // only runs the filters over a line as it is written.
@@ -374,6 +406,10 @@ class TerminalSession private constructor(
     }
 
     private fun startProcess(): PtyProcess {
+        if (adopted != null && !adoptionUsed) {
+            adoptionUsed = true
+            return watch(adopted.pty)
+        }
         val childEnv = InheritedEnvironment.of(System.getenv())
         // Advertise a colour terminal so tools enable ANSI output and full-screen rendering.
         childEnv["TERM"] = "xterm-256color"
@@ -417,6 +453,11 @@ class TerminalSession private constructor(
                 .setInitialRows(INITIAL_ROWS)
                 .start()
         }
+        return watch(proc)
+    }
+
+    /** Makes [proc] this session's process, and starts watching for it to exit. */
+    private fun watch(proc: PtyProcess): PtyProcess {
         process = proc
         running = true
         exitCode = null
@@ -435,8 +476,15 @@ class TerminalSession private constructor(
     }
 
     private fun attach(w: JediTermWidget, proc: PtyProcess) {
-        w.ttyConnector = PtyTtyConnector(
+        // The replay belongs to the adopted program alone, and is drawn once.
+        val replay = adopted?.takeIf { proc === it.pty }?.replay
+        val c = PtyTtyConnector(
             process = proc,
+            recorder = recorder,
+            replay = replay,
+            // The replay is history, so it skips [outputTap] — a quota wall in it is one the last nop
+            // has already dealt with — but the paste mode it leaves on is the program's mode now.
+            replayTap = { text -> noteBracketedPaste(text) },
             tap = { text ->
                 noteBracketedPaste(text)
                 outputTap?.invoke(text)
@@ -448,7 +496,32 @@ class TerminalSession private constructor(
                 }
             },
         )
+        connector = c
+        w.ttyConnector = c
         w.start()
+    }
+
+    /**
+     * Gives the program running here to the next nop, which is about to replace this one in the same
+     * process (see [iondrive.nop.ipc.Handover]). Null when there is nothing to give: no program has
+     * been started, it has exited, or this terminal does not keep what a handover needs.
+     *
+     * In this order, and each step is load-bearing. The connector is told first, because stopping the
+     * reads ends JediTerm's session, and JediTerm closes a connector whose session ends — which would
+     * SIGTERM the program and close its PTY. Then the reads stop, and only after that is the screen
+     * taken, so every byte this nop read is in the replay and every byte it did not is still waiting
+     * in the PTY for the next one. From here on [dispose] leaves the program alone.
+     */
+    fun handOff(): PtyHandoff? {
+        val proc = process ?: return null
+        val rec = recorder ?: return null
+        if (!proc.isAlive) return null
+        val fd = masterFd(proc) ?: return null
+        connector?.handedOver = true
+        handedOver = true
+        rec.freeze { wakeReader(proc) }
+        val (cols, rows) = Posix.windowSize(fd) ?: (INITIAL_COLUMNS to INITIAL_ROWS)
+        return PtyHandoff(fd = fd, pid = proc.pid(), columns = cols, rows = rows, replay = rec.replay(), process = proc)
     }
 
     /** Keeps [draftPending] up to date with [bytes] on their way to the program. */
@@ -464,7 +537,9 @@ class TerminalSession private constructor(
     }
 
     private fun killProcess() {
-        process?.let { killTree(it) }
+        // A program handed to the next nop is not this one's to kill: the exec that follows carries it
+        // across, still running.
+        if (!handedOver) process?.let { killTree(it) }
         process = null
         running = false
     }
@@ -589,12 +664,13 @@ class TerminalSession private constructor(
          * No keyboard glyph in the name, unlike the ▶ a launcher run carries: the tool strip draws
          * that itself, so it survives a rename rather than being the first thing a rename deletes.
          */
-        fun shell(dir: File): TerminalSession =
+        fun shell(dir: File, adopted: Adopted? = null): TerminalSession =
             TerminalSession(
                 title = "Term",
                 command = if (isWindows) listOf("cmd.exe") else listOf(loginShell()),
                 workingDir = dir,
                 isLauncher = false,
+                adopted = adopted,
             )
 
         /**
@@ -611,6 +687,8 @@ class TerminalSession private constructor(
             dir: File,
             title: String,
             outputTap: ((String) -> Unit)? = null,
+            /** The run the last nop handed over, when this one carries it on — see [handOff]. */
+            adopted: Adopted? = null,
         ): TerminalSession =
             TerminalSession(
                 title = title,
@@ -619,7 +697,29 @@ class TerminalSession private constructor(
                 isLauncher = false,
                 env = env,
                 outputTap = outputTap,
+                adopted = adopted,
             )
+
+        /** The PTY master behind [proc], for a process whose master this nop can name. */
+        private fun masterFd(proc: PtyProcess): Int? = when (proc) {
+            is UnixPtyProcess -> proc.pty.masterFD.takeIf { it >= 0 }
+            is AdoptedPty -> proc.fd
+            else -> null
+        }
+
+        /**
+         * Unblocks a read waiting on [proc]'s PTY without closing it. pty4j keeps the one call that
+         * does this, `Pty.breakRead`, package-private; it writes to the pipe its reads poll beside
+         * the master, which is exactly a wake-up and nothing more.
+         */
+        private fun wakeReader(proc: PtyProcess) {
+            when (proc) {
+                is AdoptedPty -> proc.interruptReads()
+                is UnixPtyProcess -> runCatching {
+                    Pty::class.java.getDeclaredMethod("breakRead").apply { isAccessible = true }.invoke(proc.pty)
+                }.onFailure { Log.warn("could not wake the reader of terminal ${proc.pid()}: $it") }
+            }
+        }
 
         private fun loginShell(): String =
             System.getenv("SHELL")?.takeIf { File(it).canExecute() }
@@ -627,3 +727,22 @@ class TerminalSession private constructor(
                 ?: "/bin/sh"
     }
 }
+
+/**
+ * A terminal's program as one nop gives it to the next: the PTY master, the child, the size it was
+ * drawn at, and what it was showing ([PtyRecorder.replay]).
+ *
+ * [process] is held only to keep this nop's own handle on the PTY alive until the exec: pty4j closes
+ * a master whose handle is garbage collected, and closing it would hang the program up.
+ */
+class PtyHandoff(
+    val fd: Int,
+    val pid: Long,
+    val columns: Int,
+    val rows: Int,
+    val replay: ByteArray,
+    val process: Process? = null,
+)
+
+/** A handed-over program as this nop takes it up. See [TerminalSession.handOff]. */
+class Adopted(val pty: AdoptedPty, val columns: Int, val rows: Int, val replay: ByteArray)

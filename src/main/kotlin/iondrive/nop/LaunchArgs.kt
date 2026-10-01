@@ -1,5 +1,6 @@
 package iondrive.nop
 
+import iondrive.nop.ipc.Handover
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -30,11 +31,19 @@ sealed interface LaunchArgs {
      */
     data object Restart : LaunchArgs
 
+    /**
+     * The start a restart makes in place of the nop before it, in the same process: take up the
+     * terminals that nop left at [manifest] (see [Handover]). Not in the usage, since only nop runs it,
+     * and nothing else may share its line.
+     */
+    data class Adopt(val manifest: Path) : LaunchArgs
+
     /** Not something nop can do; [why] is what to say before the usage. */
     data class Invalid(val why: String) : LaunchArgs
 
     companion object {
         fun parse(args: Array<String>, isDirectory: (Path) -> Boolean = Files::isDirectory, exists: (Path) -> Boolean = Files::exists): LaunchArgs {
+            if (args.size == 2 && args[0] == Handover.ADOPT_FLAG) return Adopt(Paths.get(args[1]))
             if (args.any { it == "-h" || it == "--help" }) return Help
             val projects = mutableListOf<Path>()
             var options = true
@@ -67,8 +76,9 @@ sealed interface LaunchArgs {
             |With no DIRECTORY, brings the running nop to the front.
             |
             |  -h, --help   print this and exit, without touching a running nop
-            |  --restart    ask the running nop to restart; it asks the user first, then starts the
-            |               build now on disk from its own environment and puts every tab back
+            |  --restart    ask the running nop to restart; it asks the user first, then restarts in
+            |               place into the build now on disk, every window back and the agents and
+            |               terminals in them still running
             |
             |There is one nop per config directory (${'$'}XDG_CONFIG_HOME/nop, else ~/.config/nop). Starting
             |a nop built from a different binary than the running one replaces it: the running one quits,

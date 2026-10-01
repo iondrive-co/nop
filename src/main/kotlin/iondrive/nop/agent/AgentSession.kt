@@ -12,12 +12,16 @@ import iondrive.nop.agent.transcript.LiveTranscripts
 import iondrive.nop.agent.transcript.RunContext
 import iondrive.nop.agent.transcript.Tailer
 import iondrive.nop.agent.transcript.TranscriptFollower
+import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.SingleInstance
+import iondrive.nop.terminal.Adopted
+import iondrive.nop.terminal.PtyHandoff
 import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalTab
 import java.awt.Color
 import java.awt.GraphicsEnvironment
 import java.io.File
+import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
@@ -60,6 +64,12 @@ class AgentRun(
      * offers to carry on from instead.
      */
     val conversationMissing: Boolean = false,
+    /**
+     * When nop started this run. What the CLI filed before it — the wall that ended the last run,
+     * replayed by a resume — is history rather than something the vendor is saying now; see
+     * [QuotaEcho.judge]. A run carried across a restart keeps the time the first nop started it.
+     */
+    val startedAt: Instant = Instant.now(),
 ) {
     /** True when this command resumes an existing session rather than starting a fresh one. */
     val isResume: Boolean get() = command.isResume
@@ -70,13 +80,6 @@ class AgentRun(
      */
     @Volatile
     var userPromptSubmitted: Boolean = !isResume
-
-    /**
-     * When nop started this run. What the CLI filed before it — the wall that ended the last run,
-     * replayed by a resume — is history rather than something the vendor is saying now; see
-     * [QuotaEcho.judge].
-     */
-    val startedAt: Instant = Instant.now()
 
     /**
      * The native session id, once it is known. Claude's is minted before the spawn; Codex's only
@@ -199,6 +202,11 @@ class AgentSession(
      * is not this.
      */
     private val onExited: (AgentSession) -> Unit = { },
+    /**
+     * The run the last nop handed over across a restart, still going, for this session to carry on
+     * rather than start — see [handOff]. Null for every other session.
+     */
+    adoption: Pair<Handover.AgentRecord, Adopted>? = null,
 ) : TerminalTab {
 
     /**
@@ -207,7 +215,7 @@ class AgentSession(
      * however many runs the tab goes through. Declared ahead of [run], whose first run is started
      * while the rest of this class is still being built.
      */
-    val agentTicket: String = AgentSocket.newTicket()
+    val agentTicket: String = adoption?.first?.ticket ?: AgentSocket.newTicket()
 
     /** The id other agents address this tab by: the start of [sessionId], which names its log files too. */
     val shortId: String get() = sessionId.take(8)
@@ -286,7 +294,9 @@ class AgentSession(
      */
     private var runIndex by mutableStateOf(0)
 
-    var run: AgentRun by mutableStateOf(start(account, seed, resumeId, seededFromHandoff = false))
+    var run: AgentRun by mutableStateOf(
+        start(account, seed, resumeId, seededFromHandoff = adoption?.first?.seededFromHandoff ?: false, adoption = adoption),
+    )
         private set
 
     override val id: String get() = "agent:$sessionId:$runIndex"
@@ -860,8 +870,62 @@ class AgentSession(
         }
     }
 
+    /** Set once [handOff] has given the run to the next nop. */
+    @Volatile
+    private var handedOver = false
+
+    /**
+     * Gives the running CLI to the next nop, which is about to take this process over (see
+     * [Handover]): its terminal, and everything this session knows about the run that the next one
+     * could not learn for itself. Null when there is no run going to give — the tab is asleep, or its
+     * CLI has exited — and such a tab comes back the ordinary way.
+     *
+     * The terminal goes first: once it has stopped reading, the transcript is read one last time, so
+     * the offset handed over is past everything the CLI wrote before its screen was taken. Nothing is
+     * logged as ending, because nothing has: the run goes on, in the next nop's hands.
+     */
+    fun handOff(root: Path, projects: List<Path>, selected: Boolean): Pair<Handover.AgentRecord, PtyHandoff>? {
+        val current = run
+        if (ended || current.endReason != null) return null
+        val pty = current.session.handOff() ?: return null
+        handedOver = true
+        current.follower?.stop()
+        val position = current.follower?.position()
+        current.follower = null
+        val record = Handover.AgentRecord(
+            sessionId = sessionId,
+            root = root.toString(),
+            projects = projects.map { it.toString() },
+            provider = current.account.provider.id,
+            account = current.account.name,
+            nativeSessionId = current.nativeSessionId,
+            argv = current.command.argv,
+            isResume = current.command.isResume,
+            seededFromHandoff = current.seededFromHandoff,
+            startedAt = current.startedAt.toEpochMilli(),
+            userPromptSubmitted = current.userPromptSubmitted,
+            waitedOutWallAt = current.waitedOutWallAt?.toEpochMilli(),
+            transcriptPath = position?.first?.toString(),
+            transcriptOffset = position?.second,
+            tracker = synchronized(current.tracker) { current.tracker.snapshot() },
+            title = title,
+            titleIsUsers = titleIsUsers,
+            baselineSha = baselineSha,
+            ticket = agentTicket,
+            selected = selected,
+        )
+        return record to pty
+    }
+
     /** Kills the PTY and everything under it. Idempotent; called when the tab or project closes. */
     fun dispose() {
+        if (handedOver) {
+            // The run is the next nop's: nothing to end, kill or drain. Only this nop's hold on it goes.
+            settleTimer?.stop()
+            run.session.dispose()
+            log.close()
+            return
+        }
         endRun(EndReason.Killed)
         settleTimer?.stop()
         run.session.dispose()
@@ -873,25 +937,38 @@ class AgentSession(
         seed: String?,
         resumeId: String?,
         seededFromHandoff: Boolean,
+        /** A run the last nop handed over, carried on instead of started. See [handOff]. */
+        adoption: Pair<Handover.AgentRecord, Adopted>? = null,
     ): AgentRun {
+        val carried = adoption?.first
         // A resume reads the CLI's own transcript and nothing of nop's. When the home has lost it the
         // backup may still have it, and it is put back before the CLI looks.
-        val conversationMissing = resumeId != null && Transcripts.missing(account, projectDir, resumeId) &&
+        val conversationMissing = carried == null && resumeId != null && Transcripts.missing(account, projectDir, resumeId) &&
             !Backup.restore(account, projectDir, resumeId)
         if (conversationMissing) Log.info("${account.name} has no transcript for conversation $resumeId")
-        // The MCP servers the user's own CLI would have, which the account's isolated home hides.
-        val mcp = McpServers.prepare(account, projectDir)
-        val command = Spawn.command(account, projectDir, seed, resumeId, mcp)
-        // The vendor's TUI decides whether to run its first-run flow from its own config, not from
-        // whether it has a token — so an account inherited with a perfectly good login would be
-        // asked to sign in again. See VendorConfig.
-        VendorConfig.prepareForInteractive(account)
-        // Every run is told to read the shared memory first, so it has to be there to read.
-        SharedMemory.ensure()
-        Log.info("agent run ${account.provider.id}/${account.name} in ${projectDir.name}")
+        val command = if (carried != null) {
+            // Already running: the argv is what it was started with, and its environment is its own.
+            AgentCommand(carried.argv, emptyMap(), carried.nativeSessionId, carried.isResume)
+        } else {
+            // The MCP servers the user's own CLI would have, which the account's isolated home hides.
+            val mcp = McpServers.prepare(account, projectDir)
+            Spawn.command(account, projectDir, seed, resumeId, mcp).also {
+                // The vendor's TUI decides whether to run its first-run flow from its own config, not
+                // from whether it has a token — so an account inherited with a perfectly good login
+                // would be asked to sign in again. See VendorConfig.
+                VendorConfig.prepareForInteractive(account)
+                // Every run is told to read the shared memory first, so it has to be there to read.
+                SharedMemory.ensure()
+            }
+        }
+        Log.info(
+            "agent run ${account.provider.id}/${account.name} in ${projectDir.name}" +
+                (adoption?.let { " carried over from the last nop (pid ${it.second.pty.pid()})" } ?: ""),
+        )
         quotaWatcher.reset()
         val newRun: AgentRun
         val tracker = ActivityTracker()
+        carried?.let { synchronized(tracker) { tracker.restore(it.tracker, System.currentTimeMillis()) } }
         // Only ever touched from the PTY's reader thread, which is the one thread the tap runs on.
         val titles = TitleReader()
         val terminal = TerminalSession.agent(
@@ -901,6 +978,7 @@ class AgentSession(
             env = command.env + (SingleInstance.INSIDE_AGENT_ENV to sessionId) + AgentSocket.runEnv(agentTicket),
             dir = projectDir,
             title = account.name,
+            adopted = adoption?.second,
             // Three jobs, one copy of the output, and none of them touches what is drawn. The
             // quota watcher is how nop learns the CLI has hit a wall — it announces that in its own
             // UI and nowhere else — and the screen tail is the fallback a handoff is built from
@@ -920,9 +998,16 @@ class AgentSession(
                 }
             },
         )
-        newRun = AgentRun(account, command, terminal, seededFromHandoff, tracker, conversationMissing)
+        newRun = AgentRun(
+            account, command, terminal, seededFromHandoff, tracker, conversationMissing,
+            startedAt = carried?.let { Instant.ofEpochMilli(it.startedAt) } ?: Instant.now(),
+        )
         if (!seed.isNullOrBlank()) {
             newRun.userPromptSubmitted = true
+        }
+        if (carried != null) {
+            newRun.userPromptSubmitted = carried.userPromptSubmitted
+            newRun.waitedOutWallAt = carried.waitedOutWallAt?.let(Instant::ofEpochMilli)
         }
         terminal.onUserInput = {
             newRun.userPromptSubmitted = true
@@ -965,7 +1050,8 @@ class AgentSession(
             // it as though it were would rename the tab back to whatever the CLI last called it. A
             // resume into a log with nothing in it — a vendor session nop has never followed — still
             // replays, because there the history is the whole point.
-            resumingLoggedWork = resumeId != null && log.hadHistory,
+            resumingLoggedWork = (resumeId != null || carried != null) && log.hadHistory,
+            joinAt = carried?.transcriptPath?.let { Path.of(it) to (carried.transcriptOffset ?: 0L) },
         )
         val tailer = tailerFor(account)
         newRun.follower = TranscriptFollower(

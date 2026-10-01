@@ -249,6 +249,23 @@ class ActivityTracker {
         }
     }
 
+    /**
+     * What a nop taking this run over needs to read it the same way: the tool calls still open in the
+     * turn and the title last shown. The transcript before the handover is not read again, so a
+     * question asked before it would otherwise never be seen as one.
+     */
+    fun snapshot(): Snapshot = Snapshot(LinkedHashMap(open), title)
+
+    /** Takes up where [snapshot] left off, in another nop. */
+    fun restore(from: Snapshot, now: Long) {
+        open.clear()
+        open.putAll(from.openCalls)
+        from.title?.let { onTitle(it, now) }
+    }
+
+    @kotlinx.serialization.Serializable
+    data class Snapshot(val openCalls: Map<String, String> = emptyMap(), val title: String? = null)
+
     /** What the tab is doing at [now], for a run that is alive. */
     fun activity(now: Long): Activity {
         if (hasQueuedQuestion || open.values.any { it in QUESTION_TOOLS }) return Activity.Asking

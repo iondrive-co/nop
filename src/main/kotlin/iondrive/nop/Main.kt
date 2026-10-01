@@ -34,11 +34,13 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.Backup
 import iondrive.nop.git.ProjectGitPoller
 import iondrive.nop.git.RepoWatcher
+import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.spell.Dictionary
@@ -88,8 +90,13 @@ private const val PROJECT_GIT_POLL_MS = 3000L
 fun main(args: Array<String>) {
     // Before anything that can reach a running nop, or even write to its log: a launch that was
     // only asking what nop takes must not be one that restarts it. See [LaunchArgs].
+    var adoptFrom: Path? = null
     val argPaths = when (val launch = LaunchArgs.parse(args)) {
         is LaunchArgs.Open -> launch.projects
+        is LaunchArgs.Adopt -> {
+            adoptFrom = launch.manifest
+            emptyList()
+        }
         LaunchArgs.Help -> {
             println(LaunchArgs.USAGE)
             exitProcess(0)
@@ -120,10 +127,16 @@ fun main(args: Array<String>) {
     // a crash on the AWT thread takes the window down and leaves no trace anywhere findable.
     Log.install(args)
 
-    // If another nop is already running, hand the requested paths off to it (or just ask it
-    // to come to the foreground when no paths were supplied) and exit. The primary owns every
+    // A restart in place: this process was the nop before, and the exec that made it this one kept
+    // its pid, its children and the terminals it handed over (see [Handover]). It is the primary
+    // already — there is nobody to forward to — so it takes those up and carries on starting. A
+    // handover that turns out not to be this process's is any other launch.
+    //
+    // Otherwise, if another nop is already running, hand the requested paths off to it (or just ask
+    // it to come to the foreground when no paths were supplied) and exit. The primary owns every
     // window, so it can raise the one that already holds the project rather than opening a second.
-    if (SingleInstance.tryForward(argPaths, Settings.configRoot)) {
+    val restartedInPlace = adoptFrom != null && Handover.adopt(adoptFrom)
+    if (!restartedInPlace && SingleInstance.tryForward(argPaths, Settings.configRoot)) {
         exitProcess(0)
     }
 
@@ -133,12 +146,22 @@ fun main(args: Array<String>) {
     val startup = resolveStartup(argPaths.firstOrNull())
     if (startup.workspaces.isEmpty()) exitProcess(0)
 
+    // The tabs the last nop handed over go back into their projects before any window opens, and
+    // their terminals are read from now on: a program writing to a PTY nobody reads stops when it
+    // fills, and the project it is in may not be on screen for hours.
+    Handover.incoming?.let { incoming ->
+        RestartInPlace.reapStrays(incoming.strays)
+        val accounts = Accounts.load().accounts
+        SwingUtilities.invokeAndWait { RestartInPlace.place(incoming, accounts) }
+    }
+
     // Read the spellchecker's word lists while the window is still being built. They're wanted the
     // moment a file or diff is on screen, and a diff checks its lines during composition — so
     // without this the ~90k-word load would be the first thing the UI thread does after opening one.
     Thread { Dictionary.warmUp() }.apply { isDaemon = true; name = "dictionary-warmup" }.start()
 
-    application {
+    // Not exiting the process when the last window closes, so a restart can replace it instead.
+    application(exitProcessOnExit = false) {
         // Every window the user has: a name, its own bar of project tabs, and whether it is showing.
         // Restored from disk (upgrading an older single-window layout on the way in — see
         // [Settings.loadWorkspaces]) and saved back on every change. A window the user closes stays
@@ -163,6 +186,8 @@ fun main(args: Array<String>) {
         // A `nop --restart` waiting on the user's answer: the session id of the agent tab that asked,
         // or "" when it came from outside one. Shown over the window in front — see [RestartDialog].
         var restartAsker by remember { mutableStateOf<String?>(null) }
+        // The same question, asked by the user from the bar's restart button: see [requestRestart].
+        var restartByUser by remember { mutableStateOf(false) }
 
         fun bumpRecent(path: Path) {
             val norm = path.toAbsolutePath().normalize()
@@ -286,18 +311,27 @@ fun main(args: Array<String>) {
         }
 
         /**
-         * The user agreed to a `nop --restart`: start the successor, and quit only once it is on its
-         * way, so a successor that cannot start leaves this nop running rather than none at all.
+         * The user agreed to a restart: hand every running agent and terminal over, close the windows,
+         * and let `main` replace this process with the build on disk — see [RestartInPlace]. The
+         * windows are written down first, as [closeWindow] does before quitting: the save that follows
+         * every change runs on the composition, which exiting takes down.
          */
         fun restartNow() {
             restartAsker = null
+            restartByUser = false
             val launcher = Restart.launcher() ?: return
-            runCatching { Restart.startSuccessor(launcher) }
-                .onSuccess {
-                    Log.info("restarting: $launcher starts once this nop has exited")
-                    exitApplication()
-                }
-                .onFailure { Log.error("restart: could not start $launcher", it) }
+            Settings.saveWorkspaces(workspaces.toList())
+            RestartInPlace.prepare(launcher)
+            exitApplication()
+        }
+
+        /**
+         * The bar's restart button. Straight to the restart when nothing would be lost by it; when
+         * something would — a launcher run that stops, or agents on a system nop cannot hand them
+         * over on — the user is asked first.
+         */
+        fun requestRestart() {
+            if (Handover.supported && RestartInPlace.runsThatStop().isEmpty()) restartNow() else restartByUser = true
         }
 
         /** Throws a parked window away, tabs and all — the picker's discard, once confirmed. */
@@ -510,12 +544,20 @@ fun main(args: Array<String>) {
                     onRegister = { w -> windowRefs[workspace.id] = w },
                     onUnregister = { windowRefs.remove(workspace.id) },
                     restartAsker = restartAsker.takeIf { workspace.id == restartWindow },
+                    restartByUser = restartByUser && workspace.id == restartWindow,
                     onRestart = ::restartNow,
-                    onNotRestarting = { restartAsker = null },
+                    onRestartRequested = if (Restart.launcher() != null) ::requestRestart else null,
+                    onNotRestarting = {
+                        restartAsker = null
+                        restartByUser = false
+                    },
                 )
             }
         }
     }
+    // The windows are down. A restart replaces the process here; anything else is nop quitting.
+    if (RestartInPlace.pending != null) RestartInPlace.carryOut()
+    exitProcess(0)
 }
 
 @OptIn(FlowPreview::class, ExperimentalFoundationApi::class)
@@ -549,7 +591,10 @@ private fun ApplicationScope.WorkspaceWindow(
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
     onUnregister: () -> Unit = {},
     restartAsker: String? = null,
+    restartByUser: Boolean = false,
     onRestart: () -> Unit = {},
+    /** The bar's restart button, or null to show none (a nop with no launcher to start again). */
+    onRestartRequested: (() -> Unit)? = null,
     onNotRestarting: () -> Unit = {},
 ) {
     val activeTab = workspace.activeTab
@@ -790,6 +835,7 @@ private fun ApplicationScope.WorkspaceWindow(
                     onMoveToWindow = onMoveToWindow,
                     onMoveToNewWindow = onMoveToNewWindow,
                     onToggleTheme = onToggleTheme,
+                    onRestart = onRestartRequested,
                     isDark = darkMode,
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -834,10 +880,13 @@ private fun ApplicationScope.WorkspaceWindow(
                     }
                 }
             }
-            if (restartAsker != null) {
+            if (restartAsker != null || restartByUser) {
                 val others = AgentSessionStore.all().filter { it.sessionId != restartAsker && !it.ended }
                 RestartDialog(
                     asker = AgentSessionStore.all().firstOrNull { it.sessionId == restartAsker }?.title,
+                    byUser = restartByUser,
+                    carriesOver = Handover.supported,
+                    stopping = RestartInPlace.runsThatStop(),
                     working = others.filter { it.activity == Activity.Working }.map { it.title },
                     asking = others.filter { it.activity == Activity.Asking }.map { it.title },
                     onRestart = onRestart,

@@ -15,38 +15,56 @@ import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 
 /**
- * The question `nop --restart` puts to the user: an agent wants nop restarted, usually to load a
- * build it has just made. Nothing restarts until they say so, because a restart stops every tab, and
- * what a tab is in the middle of doing is theirs to lose or keep.
+ * The question a restart puts to the user: an agent wants nop restarted (`nop --restart`), usually to
+ * load a build it has just made, or the user pressed the bar's restart button while something would
+ * be lost by it. Nothing restarts until they say so.
  *
- * [asker] is the title of the agent tab that asked, when it was one of nop's. [working] and [asking]
- * are the other tabs a restart would cut off: mid-turn, or holding a question that is not in the
- * transcript until it is answered, so a restart loses it.
+ * [asker] is the title of the agent tab that asked, when it was one of nop's; [byUser] says the user
+ * asked instead. [carriesOver] is whether this system can hand the agents and terminals over to the
+ * next nop still running (see [iondrive.nop.ipc.Handover]). When it can, the only thing a restart
+ * costs is [stopping], the launcher runs, which come back waiting to be run again. When it cannot,
+ * every tab stops, and [working] and [asking] are the agents that would be cut off: mid-turn, or
+ * holding a question that is not in the transcript until it is answered, so a restart loses it.
  *
  * Escape is "not now", and Enter does nothing: a restart is not something to agree to by accident.
  */
 @Composable
 fun RestartDialog(
     asker: String?,
+    byUser: Boolean,
+    carriesOver: Boolean,
+    stopping: List<String>,
     working: List<String>,
     asking: List<String>,
     onRestart: () -> Unit,
     onCancel: () -> Unit,
 ) {
     DialogFrame(title = "Restart nop?", onClose = onCancel, size = DpSize(460.dp, Dp.Unspecified)) {
-        Text(
-            (asker?.let { "The agent in “$it”" } ?: "An agent") + " asks to restart nop.",
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            "Every agent tab and terminal stops, and nop starts again from the build now on disk. " +
-                "It puts every tab back, and each agent carries on from its own transcript.",
-        )
-        if (working.isNotEmpty()) {
-            Text("Cut off mid-turn: ${quoted(working)}.", color = ChangeColors.MODIFIED)
+        if (!byUser) {
+            Text(
+                (asker?.let { "The agent in “$it”" } ?: "An agent") + " asks to restart nop.",
+                fontWeight = FontWeight.SemiBold,
+            )
         }
-        if (asking.isNotEmpty()) {
-            Text("Waiting on a question, which is lost: ${quoted(asking)}.", color = ChangeColors.REMOVED)
+        if (carriesOver) {
+            Text(
+                "nop starts again from the build now on disk and puts every window back. The agents " +
+                    "and terminals in them keep running through it, mid-turn or not.",
+            )
+        } else {
+            Text(
+                "Every agent tab and terminal stops, and nop starts again from the build now on disk. " +
+                    "It puts every tab back, and each agent carries on from its own transcript.",
+            )
+            if (working.isNotEmpty()) {
+                Text("Cut off mid-turn: ${quoted(working)}.", color = ChangeColors.MODIFIED)
+            }
+            if (asking.isNotEmpty()) {
+                Text("Waiting on a question, which is lost: ${quoted(asking)}.", color = ChangeColors.REMOVED)
+            }
+        }
+        if (stopping.isNotEmpty()) {
+            Text("Stopped, and put back ready to run again: ${quoted(stopping)}.", color = ChangeColors.MODIFIED)
         }
         Row(
             modifier = Modifier.fillMaxWidth(),

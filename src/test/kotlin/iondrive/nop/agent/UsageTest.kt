@@ -220,12 +220,12 @@ class UsageTest {
                         "primary_window": {
                             "used_percent": 15.0,
                             "limit_window_seconds": 18000,
-                            "reset_at": 1790757173
+                            "reset_at": ${Instant.now().epochSecond + 3_600}
                         },
                         "secondary_window": {
                             "used_percent": 60.0,
                             "limit_window_seconds": 604800,
-                            "reset_at": 1791200000
+                            "reset_at": ${Instant.now().epochSecond + 3 * 86_400}
                         }
                     }
                 }
@@ -262,7 +262,7 @@ class UsageTest {
                         "primary_window": {
                             "used_percent": 0.0,
                             "limit_window_seconds": 604800,
-                            "reset_at": 1790757173
+                            "reset_at": ${Instant.now().epochSecond + 3_600}
                         },
                         "secondary_window": null
                     }

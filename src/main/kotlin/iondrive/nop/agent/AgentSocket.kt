@@ -204,7 +204,7 @@ object AgentSocket {
      * `$XDG_RUNTIME_DIR/nop` when the runtime directory is the user's own and private, else a
      * directory under nop's data root. Null when neither turns out private — see [isPrivate].
      */
-    private fun socketDir(): Path? {
+    internal fun socketDir(): Path? {
         val runtime = System.getenv("XDG_RUNTIME_DIR")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
             ?.takeIf { it.isAbsolute && isPrivate(it) }
         val dir = runtime?.resolve("nop") ?: Accounts.dataRoot().resolve("run")

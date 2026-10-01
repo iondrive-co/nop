@@ -102,6 +102,18 @@ class RunSessions {
     fun openShell(dir: File): RunSession = open(TerminalSession.shell(dir))
 
     /**
+     * Puts back a Term tab whose shell the last nop handed over across a restart, under the name it
+     * had, and shows it if it was the one on screen. See [iondrive.nop.ipc.Handover].
+     */
+    fun adoptShell(record: iondrive.nop.ipc.Handover.ShellRecord, adopted: iondrive.nop.terminal.Adopted, dir: File): RunSession {
+        val run = RunSession(TerminalSession.shell(dir, adopted = adopted))
+        run.title = record.title
+        _sessions.add(run)
+        if (record.selected || selectedId == null) selectedId = run.id
+        return run
+    }
+
+    /**
      * Puts back the run tabs [runs] recorded, in order, without running any of them.
      *
      * Nothing is selected afterwards. Restoring tabs is about not losing the strip; deciding that

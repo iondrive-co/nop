@@ -1,6 +1,8 @@
 package iondrive.nop.ui
 
 import iondrive.nop.Log
+import iondrive.nop.Settings
+import iondrive.nop.ipc.Handover
 import java.nio.file.Path
 
 /**
@@ -36,6 +38,24 @@ object TerminalStore {
             shells.disposeAll()
             runs.disposeAll()
         }
+
+        companion object {
+            /**
+             * A repo's terminals as they come up when nop starts: the Term tabs the last nop handed
+             * over across a restart, still running (see [Handover]) — or, when there were none, one
+             * fresh shell, which costs nothing until it is looked at, because a session spawns no PTY
+             * until the panel asks it for a widget — and the run tabs it had last time, not running
+             * (see [RunSessions.restore]).
+             */
+            fun forProject(root: Path): Terminals {
+                val dir = root.toFile()
+                val carried = Handover.claimShells(root)
+                val shells = RunSessions().apply {
+                    if (carried.isEmpty()) openShell(dir) else carried.forEach { (record, adopted) -> adoptShell(record, adopted, dir) }
+                }
+                return Terminals(shells = shells, runs = RunSessions().apply { restore(Settings.loadOpenRuns(root), dir) })
+            }
+        }
     }
 
     private class Entry(val terminals: Terminals) {
@@ -56,6 +76,11 @@ object TerminalStore {
         entry.projects.add(norm(project))
         return entry.terminals
     }
+
+    /** Each repo's terminals with the project paths that lead to them, for a restart to hand over. */
+    @Synchronized
+    fun byRoot(): List<Triple<Path, List<Path>, Terminals>> =
+        byRoot.map { (root, entry) -> Triple(root, entry.projects.toList(), entry.terminals) }
 
     /** Kills the terminals of every project no window has a tab on any more. */
     @Synchronized
