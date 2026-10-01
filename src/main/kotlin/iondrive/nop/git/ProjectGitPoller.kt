@@ -14,7 +14,8 @@ import java.nio.file.Path
  * pack directory on top of that.
  *
  * So none of those three things happen per tick. Each project's [GitRepo] is opened once
- * and kept (see [retain]); a [RepoWatcher] reports which trees have moved, so an unchanged project
+ * and kept (see [retain]) — sharing its repository with the window showing it, if one is — with
+ * only its pack indexes let go between walks; a [RepoWatcher] reports which trees have moved, so an unchanged project
  * costs a counter comparison; and a project nobody is looking at re-walks at most once per
  * [backgroundIntervalMs] however busy it gets — which matters on a machine where agents write to
  * several checkouts at once. An idle bar costs a map lookup per project per tick.
@@ -100,6 +101,11 @@ class ProjectGitPoller(
             dirty[project.path] = runCatching { !repo.loadStatus().isClean }
                 .onFailure { Log.error("project git poll: status for ${project.path} failed", it) }
                 .getOrDefault(false)
+            // The walk loaded the pack indexes to compare against HEAD, and nothing will look an
+            // object up here again for at least [backgroundIntervalMs]. Holding them across that gap
+            // for every project in the bar was most of nop's heap: three large checkouts alone kept
+            // ~60 MB resident between walks they make perhaps once a minute.
+            repo.releaseObjectCaches()
         }
         return dirty
     }

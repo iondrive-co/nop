@@ -52,7 +52,14 @@ data class IndexEntry(
  * file that is perfectly up to date.
  */
 class SymbolIndex(private val entries: List<IndexEntry> = emptyList()) {
-    private val byName: Map<String, List<IndexEntry>> = entries.groupBy { it.name }
+    // Sized exactly rather than left as groupBy builds it: most names are defined once, and
+    // groupBy gives each its own ten-slot ArrayList — ~6 MB of empty slots on a large Java project,
+    // held for as long as the project is open.
+    private val byName: Map<String, List<IndexEntry>> = HashMap<String, List<IndexEntry>>().also { map ->
+        for ((name, group) in entries.groupBy { it.name }) {
+            map[name] = if (group.size == 1) listOf(group[0]) else ArrayList(group)
+        }
+    }
 
     val size: Int get() = entries.size
 

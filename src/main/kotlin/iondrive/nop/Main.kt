@@ -34,16 +34,19 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.Backup
 import iondrive.nop.git.ProjectGitPoller
 import iondrive.nop.git.RepoWatcher
+import iondrive.nop.ipc.Restart
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.spell.Dictionary
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
 import iondrive.nop.ui.NopTextContextMenu
 import iondrive.nop.ui.ProjectBar
+import iondrive.nop.ui.RestartDialog
 import iondrive.nop.ui.TerminalStore
 import iondrive.nop.ui.projectAgentNews
 import iondrive.nop.ui.WindowPickerPanel
@@ -67,6 +70,7 @@ import org.jetbrains.jewel.ui.component.styling.LocalMenuStyle
 import java.awt.Frame
 import java.io.File
 import java.nio.file.Path
+import java.nio.file.Paths
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 import kotlin.system.exitProcess
@@ -90,21 +94,25 @@ fun main(args: Array<String>) {
             println(LaunchArgs.USAGE)
             exitProcess(0)
         }
+        // Allowed from inside an agent's session, since it is what an agent should do instead of
+        // starting a nop itself. It asks, and starts nothing.
+        LaunchArgs.Restart -> exitProcess(requestRestart())
         is LaunchArgs.Invalid -> {
             System.err.println("nop: ${launch.why}\n\n${LaunchArgs.USAGE}")
             exitProcess(2)
         }
     }
 
-    // An agent in one of nop's own tabs has no business driving the nop it runs in: forwarding
-    // raises the user's windows, and a launch from a fresh build quits it, killing that agent and
-    // every other. A nop of its own, with its own XDG_CONFIG_HOME, has no sidecar here to find.
-    if (System.getenv(SingleInstance.INSIDE_AGENT_ENV) != null && SingleInstance.isRunning(Settings.configRoot)) {
-        System.err.println(
-            "nop: refusing to start from inside one of nop's agent tabs while nop is running with this " +
-                "config (${Settings.configRoot.resolve("nop")}): it would take over the running nop, or " +
-                "restart it and end every agent tab. Give this one its own XDG_CONFIG_HOME and XDG_DATA_HOME.",
-        )
+    // An agent has no business starting the user's nop: forwarding raises the user's windows, a
+    // launch from a fresh build quits the running nop and ends every agent tab, and a nop started
+    // from an agent's shell carries that session into every tab it runs. See [AgentLaunchGuard].
+    AgentLaunchGuard.refusal(
+        env = System.getenv(),
+        configRoot = Settings.configRoot,
+        usersConfigRoot = Paths.get(System.getProperty("user.home"), ".config"),
+        running = { SingleInstance.isRunning(Settings.configRoot) },
+    )?.let { refusal ->
+        System.err.println(refusal)
         exitProcess(2)
     }
 
@@ -152,6 +160,9 @@ fun main(args: Array<String>) {
         // The window that last had the pointer or the keyboard in it, which is where a project
         // arriving from the command line lands when no window already holds it.
         var focusedId by remember { mutableStateOf(startup.focused) }
+        // A `nop --restart` waiting on the user's answer: the session id of the agent tab that asked,
+        // or "" when it came from outside one. Shown over the window in front — see [RestartDialog].
+        var restartAsker by remember { mutableStateOf<String?>(null) }
 
         fun bumpRecent(path: Path) {
             val norm = path.toAbsolutePath().normalize()
@@ -274,6 +285,21 @@ fun main(args: Array<String>) {
             mutate(id) { it.copy(name = Workspaces.uniqueName(name, taken)) }
         }
 
+        /**
+         * The user agreed to a `nop --restart`: start the successor, and quit only once it is on its
+         * way, so a successor that cannot start leaves this nop running rather than none at all.
+         */
+        fun restartNow() {
+            restartAsker = null
+            val launcher = Restart.launcher() ?: return
+            runCatching { Restart.startSuccessor(launcher) }
+                .onSuccess {
+                    Log.info("restarting: $launcher starts once this nop has exited")
+                    exitApplication()
+                }
+                .onFailure { Log.error("restart: could not start $launcher", it) }
+        }
+
         /** Throws a parked window away, tabs and all — the picker's discard, once confirmed. */
         fun discardWindow(id: Long) {
             val idx = workspaces.indexOfFirst { it.id == id }
@@ -342,6 +368,18 @@ fun main(args: Array<String>) {
                     // A newer build is taking over the single-instance slot — step aside so the
                     // fresh code runs instead of this stale process lingering in the background.
                     SwingUtilities.invokeLater { exitApplication() }
+                },
+                onRestart = { asker ->
+                    if (Restart.launcher() == null) {
+                        "this nop was not started from its launcher, so it has nothing to start again"
+                    } else {
+                        Log.info("restart asked${asker?.let { " by agent session $it" } ?: ""}")
+                        SwingUtilities.invokeLater {
+                            restartAsker = asker.orEmpty()
+                            raiseWindow(focusedId)
+                        }
+                        null
+                    }
                 },
             )
             onDispose { handle?.close() }
@@ -432,6 +470,9 @@ fun main(args: Array<String>) {
         }
 
         val allWindows = workspaces.toList()
+        // The window a restart question is asked over: the one in front, else any that is showing.
+        val restartWindow = focusedId.takeIf { id -> allWindows.any { it.id == id && it.open } }
+            ?: allWindows.firstOrNull { it.open }?.id
         for (workspace in allWindows) {
             if (!workspace.open) continue
             // Keyed on the window's identity so its state — geometry, key triggers, the App under it
@@ -468,6 +509,9 @@ fun main(args: Array<String>) {
                     onCloseWindow = { closeWindow(workspace.id) },
                     onRegister = { w -> windowRefs[workspace.id] = w },
                     onUnregister = { windowRefs.remove(workspace.id) },
+                    restartAsker = restartAsker.takeIf { workspace.id == restartWindow },
+                    onRestart = ::restartNow,
+                    onNotRestarting = { restartAsker = null },
                 )
             }
         }
@@ -504,6 +548,9 @@ private fun ApplicationScope.WorkspaceWindow(
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
     onUnregister: () -> Unit = {},
+    restartAsker: String? = null,
+    onRestart: () -> Unit = {},
+    onNotRestarting: () -> Unit = {},
 ) {
     val activeTab = workspace.activeTab
     val activeProject = activeTab?.path
@@ -787,10 +834,46 @@ private fun ApplicationScope.WorkspaceWindow(
                     }
                 }
             }
+            if (restartAsker != null) {
+                val others = AgentSessionStore.all().filter { it.sessionId != restartAsker && !it.ended }
+                RestartDialog(
+                    asker = AgentSessionStore.all().firstOrNull { it.sessionId == restartAsker }?.title,
+                    working = others.filter { it.activity == Activity.Working }.map { it.title },
+                    asking = others.filter { it.activity == Activity.Asking }.map { it.title },
+                    onRestart = onRestart,
+                    onCancel = onNotRestarting,
+                )
+            }
             }
         }
     }
 }
+
+/**
+ * `nop --restart`: ask the running nop to restart, and say what came of asking. Starts nothing, and
+ * writes nothing to nop's log, whatever the answer. Returns the exit status.
+ */
+private fun requestRestart(): Int =
+    when (val reply = SingleInstance.requestRestart(Settings.configRoot, System.getenv(SingleInstance.INSIDE_AGENT_ENV))) {
+        SingleInstance.RestartReply.Asked -> {
+            println(
+                "nop: asked the running nop to restart. It asks the user first and restarts only if " +
+                    "they agree, starting the build now on disk; until then nothing changes.",
+            )
+            0
+        }
+        SingleInstance.RestartReply.NotRunning -> {
+            System.err.println(
+                "nop: no nop is running with this config (${Settings.configRoot.resolve("nop")}), so there " +
+                    "is nothing to restart. Starting one is the user's to do.",
+            )
+            1
+        }
+        is SingleInstance.RestartReply.Refused -> {
+            System.err.println("nop: the running nop will not restart: ${reply.why}.")
+            1
+        }
+    }
 
 /** The window list nop starts with, and which of those windows the user is taken to. */
 private data class Startup(val workspaces: List<Workspace>, val focused: Long)

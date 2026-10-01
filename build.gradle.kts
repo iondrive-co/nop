@@ -69,10 +69,15 @@ compose.desktop {
         }.get().metadata.installationPath.asFile.absolutePath
 
         // A desktop editor never needs the JVM default max heap (¼ of RAM — ~15 GB on a 62 GB
-        // box). The live heap sits around 60 MB even with several windows open, so cap it as a
-        // runaway guard. String dedup reclaims the many identical strings the index produces
-        // (repeated file paths, symbol names); it requires G1, which is already the default GC.
-        jvmArgs += listOf("-Xmx512m", "-XX:+UseStringDeduplication")
+        // box), so the cap stays as a runaway guard. It was 512 MB, which is not enough: with a few
+        // windows and dozens of projects open the live heap reaches ~200 MB, and one JGit status of
+        // a large checkout (220k files) allocates ~470 MB of short-lived garbage. Squeezed into
+        // what was left, that garbage outlived the young generation and was promoted, and nop spent
+        // its days in back-to-back full collections (2,300 of them, 207 s, in one session). 2 GB
+        // gives it room to die young; G1 commits only what it uses, so a quiet nop stays small.
+        // String dedup reclaims the many identical strings the index produces (repeated file
+        // paths, symbol names); it requires G1, which is already the default GC.
+        jvmArgs += listOf("-Xmx2g", "-XX:+UseStringDeduplication")
 
         nativeDistributions {
             targetFormats(TargetFormat.AppImage, TargetFormat.Deb, TargetFormat.Dmg, TargetFormat.Msi)

@@ -24,6 +24,8 @@ import java.security.SecureRandom
  *   `<token> OPEN <abs-path>`   primary opens (or focuses) the project at `<abs-path>`
  *   `<token> FOCUS`             primary just brings a window to the foreground
  *   `<token> QUIT`              primary shuts down (used when a newer build is taking over)
+ *   `<token> RESTART [<asker>]` primary asks the user, and if they agree starts its successor and
+ *                               quits; `<asker>` is the agent tab that asked (`nop --restart`)
  *
  * Server replies `OK\n` for handled lines, `ERR <reason>\n` otherwise, then closes the socket.
  * The token guards against random localhost processes triggering arbitrary file opens.
@@ -36,8 +38,8 @@ import java.security.SecureRandom
 object SingleInstance {
     /**
      * Set in the environment of every agent CLI nop runs, to that tab's session id. A nop started
-     * with it set was started by an agent — see `main`, which will not let one reach the nop it is
-     * running inside.
+     * with it set was started by an agent, which [iondrive.nop.AgentLaunchGuard] refuses along with
+     * every other agent's marker; `nop --restart` sends it along to say which tab asked.
      */
     const val INSIDE_AGENT_ENV = "NOP_AGENT_SESSION"
 
@@ -119,6 +121,46 @@ object SingleInstance {
         return runCatching { ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }.getOrDefault(true)
     }
 
+    /** What became of a `nop --restart`. */
+    sealed interface RestartReply {
+        /** The running nop has put the question to the user. Whether it restarts is up to them. */
+        data object Asked : RestartReply
+
+        /** No nop is running with this config, so there is nothing to restart. */
+        data object NotRunning : RestartReply
+
+        /** The running nop would not ask: [why] says why, for the command line. */
+        data class Refused(val why: String) : RestartReply
+    }
+
+    /**
+     * Asks the primary for [configRoot] to restart, on behalf of the agent tab [asker] when it is one.
+     * Never takes over or starts anything itself, whatever build either side is: the restart, if the
+     * user agrees to one, is the primary's to do.
+     */
+    fun requestRestart(configRoot: Path, asker: String?): RestartReply {
+        if (!isRunning(configRoot)) return RestartReply.NotRunning
+        val info = readSidecar(configRoot.resolve(SIDECAR_RELATIVE)) ?: return RestartReply.NotRunning
+        val reply = try {
+            Socket().use { sock ->
+                sock.connect(java.net.InetSocketAddress(InetAddress.getByName(LOOPBACK), info.port), CONNECT_TIMEOUT_MS)
+                sock.soTimeout = READ_TIMEOUT_MS
+                val out = PrintWriter(sock.getOutputStream().writer(StandardCharsets.UTF_8), true)
+                val `in` = BufferedReader(InputStreamReader(sock.getInputStream(), StandardCharsets.UTF_8))
+                out.println(listOfNotNull(info.token, "RESTART", asker?.takeIf { it.isNotBlank() && ' ' !in it }).joinToString(" "))
+                `in`.readLine().orEmpty()
+            }
+        } catch (_: IOException) {
+            return RestartReply.NotRunning
+        }
+        return when {
+            reply.startsWith("OK") -> RestartReply.Asked
+            // What a nop built before this verb existed answers.
+            reply == "ERR bad verb" -> RestartReply.Refused("the running nop is older than `nop --restart`; ask the user to restart it")
+            else -> RestartReply.Refused(reply.removePrefix("ERR").trim().ifEmpty { "no answer from the running nop" })
+        }
+    }
+
     /**
      * Ask a running primary built from a different binary to quit, then wait for it to actually
      * exit so its socket is released and its sidecar removed before our caller binds a fresh one.
@@ -177,6 +219,7 @@ object SingleInstance {
         onOpen: (Path) -> Unit,
         onFocus: () -> Unit,
         onQuit: () -> Unit = {},
+        onRestart: (asker: String?) -> String? = { "this nop cannot restart itself" },
     ): Handle? {
         val server = try {
             ServerSocket(0, 50, InetAddress.getByName(LOOPBACK))
@@ -203,7 +246,7 @@ object SingleInstance {
                 } catch (_: IOException) {
                     return@Thread
                 }
-                handleConnection(client, token, onOpen, onFocus, onQuit)
+                handleConnection(client, token, onOpen, onFocus, onQuit, onRestart)
             }
         }, "nop-single-instance").apply {
             isDaemon = true
@@ -219,7 +262,8 @@ object SingleInstance {
         onOpen: (Path) -> Unit,
         onFocus: () -> Unit,
         onQuit: () -> Unit = {},
-    ) = handleConnection(client, token, onOpen, onFocus, onQuit)
+        onRestart: (asker: String?) -> String? = { "this nop cannot restart itself" },
+    ) = handleConnection(client, token, onOpen, onFocus, onQuit, onRestart)
 
     private fun handleConnection(
         client: Socket,
@@ -227,6 +271,7 @@ object SingleInstance {
         onOpen: (Path) -> Unit,
         onFocus: () -> Unit,
         onQuit: () -> Unit,
+        onRestart: (asker: String?) -> String?,
     ) {
         client.use { sock ->
             sock.soTimeout = READ_TIMEOUT_MS
@@ -259,6 +304,11 @@ object SingleInstance {
                             // hand off to the app's shutdown.
                             writer.println("OK")
                             onQuit()
+                        }
+                        "RESTART" -> {
+                            // Null is "the user is being asked"; anything else is why they won't be.
+                            val refused = onRestart(parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() })
+                            writer.println(if (refused == null) "OK" else "ERR $refused")
                         }
                         else -> writer.println("ERR bad verb")
                     }

@@ -164,4 +164,68 @@ class SingleInstanceTest {
         Files.writeString(tmp.resolve("nop/instance"), "port=1\ntoken=abc\npid=2147483000\n")
         assertFalse(SingleInstance.isRunning(tmp))
     }
+
+    @Test
+    fun `a restart request reaches the primary with the tab that asked, and starts nothing`(@TempDir tmp: Path) {
+        val askers = LinkedBlockingQueue<String>()
+        val quit = CountDownLatch(1)
+        val handle = SingleInstance.bind(
+            configRoot = tmp,
+            onOpen = {},
+            onFocus = {},
+            onQuit = { quit.countDown() },
+            onRestart = { asker -> askers.add(asker ?: "(none)"); null },
+        ) ?: error("bind failed")
+        try {
+            assertEquals(SingleInstance.RestartReply.Asked, SingleInstance.requestRestart(tmp, "tab-1"))
+            assertEquals(SingleInstance.RestartReply.Asked, SingleInstance.requestRestart(tmp, null))
+            assertEquals("tab-1", askers.poll(2, TimeUnit.SECONDS))
+            assertEquals("(none)", askers.poll(2, TimeUnit.SECONDS))
+            assertFalse(quit.await(200, TimeUnit.MILLISECONDS), "asking is not quitting: the user decides")
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun `a primary that cannot restart says why`(@TempDir tmp: Path) {
+        val handle = SingleInstance.bind(tmp, onOpen = {}, onFocus = {}, onRestart = { "not from its launcher" })
+            ?: error("bind failed")
+        try {
+            assertEquals(SingleInstance.RestartReply.Refused("not from its launcher"), SingleInstance.requestRestart(tmp, null))
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun `a restart with no nop running is nothing to do`(@TempDir tmp: Path) {
+        assertEquals(SingleInstance.RestartReply.NotRunning, SingleInstance.requestRestart(tmp, "tab-1"))
+    }
+
+    @Test
+    fun `a primary from before restart existed is told apart from one that refused`(@TempDir tmp: Path) {
+        // What an older nop answers any verb it does not know.
+        val server = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+        val thread = Thread {
+            runCatching {
+                server.accept().use { sock ->
+                    sock.getInputStream().bufferedReader().readLine()
+                    sock.getOutputStream().write("ERR bad verb\n".toByteArray())
+                }
+            }
+        }.apply { isDaemon = true; start() }
+        try {
+            val sidecar = tmp.resolve("nop/instance")
+            Files.createDirectories(sidecar.parent)
+            Files.writeString(sidecar, "port=${server.localPort}\ntoken=t\npid=${ProcessHandle.current().pid()}\n")
+
+            val reply = SingleInstance.requestRestart(tmp, null)
+
+            assertTrue(reply is SingleInstance.RestartReply.Refused && "older" in reply.why, reply.toString())
+        } finally {
+            server.close()
+            thread.join(2000)
+        }
+    }
 }

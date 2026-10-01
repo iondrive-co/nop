@@ -55,7 +55,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-class GitRepo(val rootDir: Path, private val repository: Repository) : AutoCloseable {
+/**
+ * One working tree's git operations, on a JGit [Repository] that every [GitRepo] for the same git
+ * directory shares (see [discover]).
+ *
+ * The sharing is about memory. A JGit repository keeps each pack's index resident once it has
+ * looked an object up — about 19 MB for a checkout with a million objects — and the window
+ * showing a project and the poller keeping its tab's dot current used to open the same repository
+ * twice over, holding that index twice.
+ */
+class GitRepo private constructor(
+    val rootDir: Path,
+    private val repository: Repository,
+    private val shared: SharedRepository,
+) : AutoCloseable {
     private val git: Git = Git.wrap(repository)
 
     /**
@@ -1204,8 +1217,51 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         return dirs
     }
 
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Lets go of the pack indexes and object caches this repository has loaded, unless another
+     * [GitRepo] is using the same repository too. They are reloaded on the next object lookup, so
+     * this is for a holder that looks rarely: a background project re-walks at most every half
+     * minute, and keeping a large checkout's pack index resident between walks costs more memory
+     * than re-reading it costs time.
+     *
+     * Skipped when the repository is shared because the other holder is the window that project is
+     * on screen in, which looks objects up constantly.
+     */
+    fun releaseObjectCaches() {
+        if (!closed.get()) shared.releaseObjectCachesIfSole()
+    }
+
+    /** Whether this and [other] are working on one JGit repository, for tests. */
+    internal fun sharesRepositoryWith(other: GitRepo): Boolean = repository === other.repository
+
+    /** Idempotent. The repository itself closes once the last [GitRepo] on it is closed. */
     override fun close() {
-        repository.close()
+        if (closed.compareAndSet(false, true)) shared.release()
+    }
+
+    /**
+     * A JGit repository and how many open [GitRepo]s use it. [holders] is guarded by [OPEN], the
+     * registry it lives in.
+     */
+    private class SharedRepository(val key: File, val repository: Repository) {
+        var holders = 0
+
+        fun releaseObjectCachesIfSole() = synchronized(OPEN) {
+            // ObjectDirectory.close() drops the pack list and each pack's index; the next lookup
+            // rescans the pack directory. The repository stays open.
+            if (holders == 1) runCatching { repository.objectDatabase.close() }
+        }
+
+        fun release() {
+            val last = synchronized(OPEN) {
+                holders -= 1
+                if (holders == 0) OPEN.remove(key)
+                holders == 0
+            }
+            if (last) repository.close()
+        }
     }
 
     companion object {
@@ -1216,14 +1272,30 @@ class GitRepo(val rootDir: Path, private val repository: Repository) : AutoClose
         /** ...or large in count, where per-file overhead dominates however small the files are. */
         private const val PARALLEL_STAGE_ALWAYS_FILES = 64
 
+        /** Open repositories by canonical git directory. See [GitRepo] for why they are shared. */
+        private val OPEN = HashMap<File, SharedRepository>()
+
+        /**
+         * The repository holding [path], or null when there isn't one. Every call returns its own
+         * [GitRepo], to be closed by the caller, but calls that land on the same git directory share
+         * one JGit repository underneath.
+         */
         fun discover(path: Path, ceiling: Path? = null): GitRepo? {
             val gitDir = findGitDir(path.toFile(), ceiling?.toFile()) ?: return null
-            val repository = FileRepositoryBuilder()
-                .setGitDir(gitDir)
-                .readEnvironment()
-                .findGitDir()
-                .build()
-            return GitRepo(rootDir = gitDir.parentFile.toPath(), repository = repository)
+            val key = runCatching { gitDir.canonicalFile }.getOrDefault(gitDir.absoluteFile)
+            val shared = synchronized(OPEN) {
+                OPEN.getOrPut(key) {
+                    SharedRepository(
+                        key,
+                        FileRepositoryBuilder()
+                            .setGitDir(gitDir)
+                            .readEnvironment()
+                            .findGitDir()
+                            .build(),
+                    )
+                }.also { it.holders += 1 }
+            }
+            return GitRepo(rootDir = gitDir.parentFile.toPath(), repository = shared.repository, shared = shared)
         }
 
         // Nearest `.git` at or above [start]. The search climbs parent directories

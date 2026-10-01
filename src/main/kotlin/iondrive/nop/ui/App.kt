@@ -51,6 +51,7 @@ import iondrive.nop.git.GitStatus
 import iondrive.nop.git.IdentityChoice
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.git.StashEntry
+import iondrive.nop.git.WalkPacer
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.AccessFrequency
 import iondrive.nop.index.FileIndex
@@ -171,6 +172,7 @@ fun App(
     // The watcher generation the last status walk covered, so a poll can tell a quiet tree from one
     // it simply hasn't looked at yet. UNKNOWN until the first walk, and never equal to a real count.
     var polledGeneration by remember(projectPath) { mutableStateOf(RepoWatcher.UNKNOWN) }
+    val statusPacer = remember(projectPath) { WalkPacer() }
     // Whether [status] has been loaded yet, as opposed to still being the empty placeholder. Only
     // reported dirtiness depends on this: switching to a project starts a fresh composition, and
     // announcing the placeholder's "clean" upward would blink the tab's dot off and back on
@@ -420,7 +422,12 @@ fun App(
         // covered. UNKNOWN means the watcher cannot vouch for the tree, so we walk.
         val generation = repoWatcher?.generation(repo.rootDir) ?: RepoWatcher.UNKNOWN
         if (generation != RepoWatcher.UNKNOWN && generation == polledGeneration) return
-        val fresh = withContext(Dispatchers.IO) { runCatching { repo.loadStatus() }.getOrNull() } ?: return
+        // A tree that is costly to walk waits longer between walks (see [WalkPacer]). Leaving
+        // polledGeneration alone means the change is still pending, so a later tick picks it up.
+        if (!statusPacer.due()) return
+        val fresh = withContext(Dispatchers.IO) {
+            statusPacer.walk { runCatching { repo.loadStatus() }.getOrNull() }
+        } ?: return
         val freshStashes = withContext(Dispatchers.IO) { runCatching { repo.stashList() }.getOrDefault(stashes) }
         // Read HEAD too: a merge or pull that leaves the same files dirty shows up nowhere in the
         // status, and the open diffs are comparing against the commit it used to be.

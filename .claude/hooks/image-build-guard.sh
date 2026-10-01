@@ -88,8 +88,10 @@ stop)
         echo "them until that is rebuilt. From $root run ./gradlew test (without"
         echo "-x installDesktopEntry): installDesktopEntry finalizes it, and rebuilds the image even"
         echo "when a test fails. Check it built, then tell the user to restart nop, because a running"
-        echo "JVM keeps its old classes. If the build can't succeed, or you are stopping mid-task on"
-        echo "purpose (asking a question, work unfinished), say that plainly to the user and stop."
+        echo "JVM keeps its old classes. If they asked you to restart it, run"
+        echo "build/compose/binaries/main/app/nop/bin/nop --restart, which asks them in nop first; never"
+        echo "start, restart or relaunch nop yourself. If the build can't succeed, or you are stopping"
+        echo "mid-task on purpose (asking a question, work unfinished), say that plainly to the user and stop."
     } >&2
     exit 2
     ;;

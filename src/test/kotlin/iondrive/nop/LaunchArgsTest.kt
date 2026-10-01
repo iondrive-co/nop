@@ -48,4 +48,12 @@ class LaunchArgsTest {
         val dir = Files.createDirectories(tmp.resolve("-odd"))
         assertEquals(LaunchArgs.Open(listOf(dir)), LaunchArgs.parse(arrayOf("--", dir.toString())))
     }
+
+    @Test
+    fun `restart is a request of its own, with nothing else on the line`(@TempDir tmp: Path) {
+        assertEquals(LaunchArgs.Restart, LaunchArgs.parse(arrayOf("--restart")))
+        assertTrue(LaunchArgs.parse(arrayOf("--restart", tmp.toString())) is LaunchArgs.Invalid)
+        // After a double dash it is a directory's name, and there is no such directory.
+        assertTrue(LaunchArgs.parse(arrayOf("--", "--restart")) is LaunchArgs.Invalid)
+    }
 }

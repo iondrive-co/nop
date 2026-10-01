@@ -66,7 +66,11 @@ object Spawn {
         // Positional, not piped: with a TTY on stdin the CLI reads the terminal, so anything
         // written to the PTY before the UI is up is lost. Long text goes in a file the seed points
         // at (see Handoff) — Linux caps one argv element at 128 KiB.
-        seed?.takeIf { it.isNotBlank() }?.let { argv += it }
+        //
+        // After `--`, because `--mcp-config` takes a list and goes on taking arguments up to the next
+        // flag: without the separator the prompt is read as one more config file to load, and the
+        // CLI exits on "MCP config file not found" before the session starts.
+        seed?.takeIf { it.isNotBlank() }?.let { argv += listOf("--", it) }
 
         val env = mutableMapOf("CLAUDE_CONFIG_DIR" to account.home)
         CLAUDE_THINKING_BUDGETS[account.reasoning]?.let { env["MAX_THINKING_TOKENS"] = it.toString() }

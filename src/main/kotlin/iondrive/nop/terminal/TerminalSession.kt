@@ -374,7 +374,7 @@ class TerminalSession private constructor(
     }
 
     private fun startProcess(): PtyProcess {
-        val childEnv = HashMap(System.getenv())
+        val childEnv = InheritedEnvironment.of(System.getenv())
         // Advertise a colour terminal so tools enable ANSI output and full-screen rendering.
         childEnv["TERM"] = "xterm-256color"
         // And a *24-bit* one, which TERM alone cannot say: there is no termcap entry for truecolor,

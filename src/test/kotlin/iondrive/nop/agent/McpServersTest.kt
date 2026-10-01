@@ -74,6 +74,21 @@ class McpServersTest {
     }
 
     @Test
+    fun `a seed prompt is not read as one more config file`(@TempDir tmp: Path) {
+        val servers = mapOf("tracker" to obj("""{"type":"stdio","command":"/opt/tracker-mcp"}"""))
+        val file = McpServers.writeClaudeConfig(project, servers, tmp)!!
+        val account = Account("c", Provider.Anthropic, "/home/dev/.claude-c")
+        val seed = "Continue the task handed over from Codex."
+
+        val argv = Spawn.command(account, project, seed = seed, mcp = McpServers.Launch(servers, file)).argv
+
+        // `--mcp-config` takes a list and keeps taking arguments up to the next flag.
+        val separator = argv.indexOf("--")
+        assertTrue(separator > argv.indexOf("--mcp-config"), "the seed needs a `--` after the config: $argv")
+        assertEquals(listOf(seed), argv.drop(separator + 1))
+    }
+
+    @Test
     fun `codex gets one override per server, and none it cannot speak`() {
         val servers = mapOf(
             "tracker" to obj("""{"type":"stdio","command":"/opt/x","args":["-v"],"env":{"K":"v\"q"}}"""),
