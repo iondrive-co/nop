@@ -223,6 +223,34 @@ class EventLogTest {
         assertEquals(justNow, listed.first().lastActiveAt, "the picker says how long ago that was")
     }
 
+    /**
+     * The picker re-reads every log nop has ever written each time it is drawn, so the summaries
+     * are cached per file and only re-read when the file changes. These two cover the ways that
+     * cache could lie: a live session that goes on writing, and a log that is deleted.
+     */
+    @Test
+    fun `a session that is still being written to is re-read, not served from the last listing`(@TempDir tmp: Path) {
+        val live = session("ours-live", tmp.toString(), null, "Working on it")
+
+        assertEquals("Working on it", EventLog.sessions(tmp).single { it.sessionId == "ours-live" }.title)
+
+        // What a session acquiring a name mid-conversation looks like on disk.
+        live.append(AgentEvent.SessionTitled("Named later", now()))
+
+        assertEquals("Named later", EventLog.sessions(tmp).single { it.sessionId == "ours-live" }.title)
+    }
+
+    @Test
+    fun `a log that has been deleted stops being listed`(@TempDir tmp: Path) {
+        val gone = session("ours-deleted", tmp.toString(), "Here for now", null)
+        assertEquals(1, EventLog.sessions(tmp).count { it.sessionId == "ours-deleted" })
+
+        gone.close()
+        Files.delete(gone.file)
+
+        assertTrue(EventLog.sessions(tmp).none { it.sessionId == "ours-deleted" })
+    }
+
     @Test
     fun `a session with no title of its own is labelled by the first thing the user typed`(@TempDir tmp: Path) {
         session("by-prompt", tmp.toString(), null, "Make the provisioning script work for AWS\nand test it")

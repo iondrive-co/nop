@@ -112,14 +112,31 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
         val currentStamp = modified(current)
         val candidate = runCatching {
             Files.list(dir).use { stream ->
-                stream.filter { it.fileName.toString().endsWith(".jsonl") && it != current }
-                    .filter { modified(it) > currentStamp && modified(it) >= run.startedAt }
-                    .filter { it.sessionId() !in already && it.sessionId() !in left }
-                    .filter { !run.foreign(it.sessionId()) }
+                stream.toList().asSequence()
+                    // Name first, and the name read once. Every rule that can be settled without
+                    // touching the filesystem is settled before anything is stat'ed: on a project
+                    // with any history behind it nearly every transcript in the directory was
+                    // already there when this run started, and this runs on every pass of the
+                    // tailer for every live session. Read the other way round — as it was — each
+                    // pass stat'ed every file in the directory two or three times over and rebuilt
+                    // its session id as many times again, which made this the single largest source
+                    // of allocation events in the process while accounting for almost none of its
+                    // bytes.
+                    .mapNotNull { path ->
+                        val name = path.fileName.toString()
+                        if (!name.endsWith(".jsonl")) return@mapNotNull null
+                        val id = name.removeSuffix(".jsonl")
+                        val mine = path != current && id !in already && id !in left && !run.foreign(id)
+                        if (mine) path else null
+                    }
+                    // One stat each, carried through to the comparison: `modified` was called twice
+                    // in the filter and once more for every comparison `max` made.
+                    .map { path -> path to modified(path) }
+                    .filter { (_, stamp) -> stamp > currentStamp && stamp >= run.startedAt }
                     // Last, because it is the one rule that opens the file.
-                    .filter { entrypoint(it) == INTERACTIVE }
-                    .max(compareBy { modified(it) })
-                    .orElse(null)
+                    .filter { (path, _) -> entrypoint(path) == INTERACTIVE }
+                    .maxByOrNull { (_, stamp) -> stamp }
+                    ?.first
             }
         }.getOrNull() ?: return null
         left += current.sessionId()
@@ -279,10 +296,19 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
 
     private fun newestSince(dir: Path, since: Long, foreign: (String) -> Boolean): Path? = runCatching {
         Files.list(dir).use { stream ->
-            stream.filter { it.fileName.toString().endsWith(".jsonl") && modified(it) >= since }
-                .filter { !foreign(it.sessionId()) }
-                .max(compareBy { modified(it) })
-                .orElse(null)
+            // Same shape as [switched]: the name settles what it can before anything is stat'ed,
+            // and the one stat that survives is carried into the comparison rather than redone for
+            // every pair `max` looks at.
+            stream.toList().asSequence()
+                .mapNotNull { path ->
+                    val name = path.fileName.toString()
+                    if (!name.endsWith(".jsonl")) return@mapNotNull null
+                    if (foreign(name.removeSuffix(".jsonl"))) null else path
+                }
+                .map { path -> path to modified(path) }
+                .filter { (_, stamp) -> stamp >= since }
+                .maxByOrNull { (_, stamp) -> stamp }
+                ?.first
         }
     }.getOrNull()
 

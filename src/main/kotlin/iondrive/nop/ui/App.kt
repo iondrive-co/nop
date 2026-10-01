@@ -13,6 +13,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -773,9 +774,24 @@ fun App(
     // one it left is exactly what the picker is for. Keyed on the count alone, the list would go on
     // hiding the conversation a handover had just left, as though it were still running in its tab.
     // And re-read each time the picker comes up, which also finds what a shell has filed since.
-    val runningConversations = agentSessions.sessions.map { it.sessionId to it.run.nativeSessionId }
+    //
+    // Derived rather than computed inline, because reading `run` at all subscribes this composable
+    // to every change an AgentRun makes — status, token counts, the transcript path — and with
+    // several agents working that is a recomposition every few hundred milliseconds for a value
+    // that almost never differs. derivedStateOf re-runs the map and notifies nobody unless the
+    // pairs themselves changed, which is the only thing that can change a past row.
+    val runningConversations by remember(agentSessions) {
+        derivedStateOf { agentSessions.sessions.map { it.sessionId to it.run.nativeSessionId } }
+    }
     val pickerShowing = agentSessions.selected == null
     LaunchedEffect(projectPath, runningConversations, pickerShowing, agentAccounts) {
+        // Only while the picker is on screen. pastAgentSessions has exactly one reader — the picker
+        // itself — and reading it costs a pass over every event log nop has ever written plus the
+        // head and tail of every transcript in the project: 1,104 logs and 253 MiB on the machine
+        // this was measured on, which was 55% of nop's CPU and ~120 MiB/s of its allocation while
+        // the picker was not even being drawn. Keyed on the conversations rather than gated on them
+        // alone so that a tab which switches conversation while the picker *is* up still refreshes.
+        if (!pickerShowing) return@LaunchedEffect
         pastAgentSessions = withContext(Dispatchers.IO) {
             val own = EventLog.sessions(rootPath)
             // Only a row that can actually be reopened is allowed to stand in for the vendor's own

@@ -9,6 +9,8 @@ import java.io.BufferedWriter
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.concurrent.ConcurrentHashMap
 
 /** One piece of an assistant turn, in the vocabulary every provider is mapped into. */
 @Serializable
@@ -316,8 +318,55 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             }.getOrDefault(emptyList())
             val wanted = projectPath.toAbsolutePath().normalize().toString()
 
-            return files.mapNotNull { file -> summarise(file, wanted) }
+            val present = HashSet<String>(files.size)
+            val rows = files.mapNotNull { file ->
+                val id = file.fileName.toString().removeSuffix(".jsonl")
+                present += id
+                summarise(file, id)
+            }
+            // A log that is no longer on disk keeps nothing here: the picker is drawn against what
+            // the directory holds now, and a summary nothing can ask for again is just a leak.
+            summaries.keys.retainAll(present)
+            // Filtered here rather than inside the read, so one log read serves every project. The
+            // check was always after the read anyway — a log does not say whose it is until its
+            // first record has been decoded — so this costs nothing and lets the summary be cached
+            // once for a directory that holds every project's sessions together.
+            return rows.filter { it.projectPath == wanted }
                 .sortedByDescending { it.lastActiveAt }
+        }
+
+        /**
+         * Summaries already read, by session id, with the file state each was read from.
+         *
+         * A log that has not been appended to since cannot summarise differently, and almost none
+         * of them ever are again: all but the handful belonging to live sessions are finished files.
+         * Without this, drawing the picker costs a pass over every line of every log nop has ever
+         * written — 985,398 lines across 1,104 files and 253 MiB on the machine this was measured
+         * on, which was 55% of what nop's CPU was doing and ~98 MiB/s of its allocation.
+         *
+         * Size and mtime together, not mtime alone: a log appended to twice inside one filesystem
+         * timestamp tick still changes length when the clock has not moved.
+         *
+         * A row that could not be read caches too, as a null. An unparseable log is unparseable
+         * every time, and re-reading it on every pass is the same cost as re-reading a good one.
+         */
+        private val summaries = ConcurrentHashMap<String, CachedSummary>()
+
+        private class CachedSummary(val size: Long, val modifiedAt: Long, val session: PastSession?)
+
+        /** One log's row, from [summaries] when the file has not changed since it was last read. */
+        private fun summarise(file: Path, sessionId: String): PastSession? {
+            val stat = runCatching {
+                Files.readAttributes(file, BasicFileAttributes::class.java)
+            }.getOrNull() ?: return null
+            val size = stat.size()
+            val modifiedAt = stat.lastModifiedTime().toMillis()
+            summaries[sessionId]?.let {
+                if (it.size == size && it.modifiedAt == modifiedAt) return it.session
+            }
+            val session = summarise(file, sessionId, modifiedAt)
+            summaries[sessionId] = CachedSummary(size, modifiedAt, session)
+            return session
         }
 
         /**
@@ -330,7 +379,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 .filterIsInstance<AgentEvent.RunStarted>()
                 .lastOrNull()
 
-        private fun summarise(file: Path, projectPath: String): PastSession? {
+        private fun summarise(file: Path, sessionId: String, modifiedAt: Long): PastSession? {
             var started: AgentEvent.SessionStarted? = null
             var lastRun: AgentEvent.RunStarted? = null
             // The spawn record of the last run, which is the one with no transcript yet: it is
@@ -370,7 +419,6 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             if (read.isFailure) return null
 
             val session = started ?: return null
-            if (session.projectPath != projectPath) return null
 
             val resolvedTitle = titled
                 ?: (if (lastRun?.provider == Provider.Antigravity.id && lastRun.nativeSessionId != null && (lastRun.home ?: storeOf(lastRun)) != null) {
@@ -380,7 +428,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 ?: "Untitled session"
 
             return PastSession(
-                sessionId = file.fileName.toString().removeSuffix(".jsonl"),
+                sessionId = sessionId,
                 projectPath = session.projectPath,
                 startedAt = session.at,
                 title = resolvedTitle,
@@ -391,8 +439,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 // The log's own time rather than the transcript's: the tailer appends to it for
                 // everything the conversation does, whichever provider, and one Antigravity keeps
                 // its prompts in a single file for every conversation, whose time says nothing.
-                lastActiveAt = runCatching { Files.getLastModifiedTime(file).toMillis() }.getOrNull()
-                    ?: session.at,
+                lastActiveAt = modifiedAt,
             )
         }
 

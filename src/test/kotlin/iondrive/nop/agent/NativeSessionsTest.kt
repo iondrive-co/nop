@@ -28,6 +28,42 @@ class NativeSessionsTest {
         """{"type":"ai-title","timestamp":"$at","aiTitle":"$text"}"""
 
     /**
+     * The picker summarises every transcript in the project each time it is drawn — the head of
+     * each file and then a seek into its end — so the summaries are cached per file and re-read
+     * only when the file changes. A conversation that is still being typed into has to come back
+     * changed, or the picker goes on showing the name it had an hour ago.
+     */
+    @Test
+    fun `a conversation that is still being written to is re-read, not served from the last listing`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val store = tmp.resolve("home").resolve(".claude")
+        val dir = slugDir(store, project)
+        val stores = listOf(NativeSessions.Store("outside nop", store))
+
+        val live = dir.resolve("cccc-live.jsonl")
+        Files.writeString(live, prompt("start on the parser", "2026-09-21T10:00:00.000Z") + "\n")
+
+        assertEquals(
+            listOf("start on the parser"),
+            NativeSessions.claude(project, stores).map { it.title },
+        )
+
+        // The CLI naming the conversation a turn or two in, which is the ordinary case.
+        Files.writeString(
+            live,
+            title("Parser work", "2026-09-21T10:02:00.000Z") + "\n",
+            java.nio.file.StandardOpenOption.APPEND,
+        )
+
+        val rows = NativeSessions.claude(project, stores)
+        assertEquals(listOf("Parser work"), rows.map { it.title })
+        assertTrue(
+            rows.single().lastActiveAt > 0,
+            "and the time it was last active comes back with it",
+        )
+    }
+
+    /**
      * A CLI left open at its prompt goes on touching its transcript — housekeeping records, file
      * history — long after the conversation stopped. Dating the row by the file's mtime would put a
      * `claude` somebody started in a terminal two days ago and never closed at the top of the

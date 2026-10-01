@@ -92,7 +92,14 @@ compose.desktop {
             // which the dev build never shows because a full JDK has the module anyway.
             // jdk.net is the same story for the peer-credential check on the socket the agents
             // message each other through (agent/AgentSocket.kt); without it every message is refused.
-            modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net")
+            // jdk.jfr makes Flight Recorder available in the packaged app. Without it
+            // `jcmd <pid> JFR.start` answers "Module jdk.jfr not found. Flight Recorder can not be
+            // enabled", which leaves no allocation profiler at all on a running nop — only
+            // GC.class_histogram and jstat, i.e. what is on the heap rather than what is creating
+            // it. That gap cost real time on 2026-10-02: a ~265 MiB/s allocation rate had to be
+            // chased by reading histograms and guessing at call sites, and the first two guesses
+            // were wrong. Costs ~2 MB in the jlinked image.
+            modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
             packageName = "nop"
             packageVersion = "0.95.0"
             description = "Desktop editor and change reviewer"
@@ -122,6 +129,34 @@ compose.desktop {
             }
         }
     }
+}
+
+// Refuse a build that excludes the task which rebuilds the app image.
+//
+// The user runs build/compose/binaries/main/app/nop/, not src/. installDesktopEntry finalizes
+// `test` and pulls in createDistributable, so it is what gets a change in front of them — and it
+// runs even when a test fails, on purpose. `./gradlew test -x installDesktopEntry` therefore ends
+// green while shipping nothing, which is not a hypothetical: c0d0ea8 ("moving contrast lookup off
+// the draw path") passed its tests that way on 2026-10-02 and sat unbuilt for half an hour while
+// the operator measured the old code still running and read it as the fix having failed.
+//
+// Agents are the ones who reach for -x, and only some of them read the repo's instructions, so the
+// gate lives here where every build goes through it regardless of who or what started it.
+// AGENTS.md explains the rule; this makes skipping it an error rather than a silent no-op.
+val excludedImageTasks = gradle.startParameter.excludedTaskNames
+    .filter { it.substringAfterLast(':') in setOf("installDesktopEntry", "createDistributable") }
+if (excludedImageTasks.isNotEmpty()) {
+    throw GradleException(
+        """
+        Refusing to build with ${excludedImageTasks.joinToString(", ") { "-x $it" }}.
+
+        That skips rebuilding build/compose/binaries/main/app/nop/, which is what the user actually
+        runs, so the build would pass while your change reached nobody. installDesktopEntry rebuilds
+        the image even when a test fails, which is why it must not be excluded.
+
+        Run ./gradlew test with no -x, then tell the user to restart nop. See AGENTS.md.
+        """.trimIndent(),
+    )
 }
 
 // Installs a .desktop entry into ~/.local/share/applications pointing at the createDistributable

@@ -7,6 +7,8 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The sessions a vendor CLI has on this project, read out of the vendor's own store.
@@ -69,15 +71,56 @@ object NativeSessions {
     fun claude(project: Path, stores: List<Store>): List<PastSession> {
         val slug = ClaudeTailer.slug(project)
         val projectPath = project.toAbsolutePath().normalize().toString()
-        return stores.flatMap { store ->
+        val present = HashSet<String>()
+        val rows = stores.flatMap { store ->
             val dir = store.dir.resolve("projects").resolve(slug)
             val files = runCatching {
                 Files.list(dir).use { stream ->
                     stream.filter { it.fileName.toString().endsWith(".jsonl") }.toList()
                 }
             }.getOrElse { emptyList() }
-            files.mapNotNull { file -> summarise(file, store, projectPath) }
-        }.sortedByDescending { it.lastActiveAt }
+            files.mapNotNull { file ->
+                val key = cacheKey(file, store)
+                present += key
+                cached(file, key) { modifiedAt -> summarise(file, store, projectPath, modifiedAt) }
+            }
+        }
+        // Only what this pass saw. A transcript that has been deleted, or a store that is no longer
+        // configured, should not go on holding a row's worth of memory for a picker that will never
+        // ask for it again.
+        summaries.keys.retainAll(present)
+        return rows.sortedByDescending { it.lastActiveAt }
+    }
+
+    /**
+     * Summaries already read, by store and file, with the file state each was read from.
+     *
+     * The picker summarises every transcript in the project each time it is drawn, and each
+     * summary reads the head of the file and then seeks [TAIL_BYTES] into its end. A transcript
+     * that has not been written to since cannot answer either question differently, and on a
+     * project with any history behind it almost none of them ever are again.
+     *
+     * Size and mtime together, not mtime alone: a transcript appended to twice inside one
+     * filesystem timestamp tick still changes length when the clock has not moved. The store's
+     * label is in the key because it is what the row is captioned with, so renaming an account has
+     * to re-caption its sessions rather than serve the old name out of here.
+     */
+    private val summaries = ConcurrentHashMap<String, CachedSummary>()
+
+    private class CachedSummary(val size: Long, val modifiedAt: Long, val session: PastSession?)
+
+    private fun cacheKey(file: Path, store: Store): String = store.label + "\u0000" + file
+
+    private fun cached(file: Path, key: String, read: (Long) -> PastSession?): PastSession? {
+        val stat = runCatching {
+            Files.readAttributes(file, BasicFileAttributes::class.java)
+        }.getOrNull() ?: return null
+        val size = stat.size()
+        val modifiedAt = stat.lastModifiedTime().toMillis()
+        summaries[key]?.let { if (it.size == size && it.modifiedAt == modifiedAt) return it.session }
+        val session = read(modifiedAt)
+        summaries[key] = CachedSummary(size, modifiedAt, session)
+        return session
     }
 
     /**
@@ -125,7 +168,7 @@ object NativeSessions {
 
     private val TIMESTAMP = Regex("\"timestamp\"\\s*:\\s*\"([^\"]+)\"")
 
-    private fun summarise(file: Path, store: Store, projectPath: String): PastSession? {
+    private fun summarise(file: Path, store: Store, projectPath: String, modifiedAt: Long): PastSession? {
         var startedAt: Long? = null
         var titled: String? = null
         var firstPrompt: String? = null
@@ -184,9 +227,9 @@ object NativeSessions {
         // they were actually in an hour ago, wearing a timestamp that says it is the newest thing
         // here. The last timestamped record is what the conversation itself last did, which is the
         // question the picker is asking.
-        val touched = lastRecordAt(file) ?: modified(file)
+        val touched = lastRecordAt(file) ?: modifiedAt
         // A transcript with nothing in it yet is a session that has not started, not one to offer.
-        val at = startedAt ?: touched ?: return null
+        val at = startedAt ?: touched
         if (titled == null && firstPrompt == null) return null
 
         return PastSession(
@@ -198,12 +241,9 @@ object NativeSessions {
             lastAccount = store.label,
             lastNativeSessionId = id,
             home = store.dir.toString(),
-            lastActiveAt = touched ?: at,
+            lastActiveAt = touched,
         )
     }
-
-    private fun modified(file: Path): Long? =
-        runCatching { Files.getLastModifiedTime(file).toMillis() }.getOrNull()
 
     /**
      * The newest `timestamp` in the last [TAIL_BYTES] of a transcript, or null when it carries none.
