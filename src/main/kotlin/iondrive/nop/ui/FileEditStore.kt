@@ -290,8 +290,8 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
 class FileEditStore(private val history: LocalHistory? = null) {
     private val edits = mutableStateMapOf<String, FileEdit>()
 
-    fun edit(tab: Tab.FileView): FileEdit = edits.getOrPut(tab.id) {
-        val text = runCatching { tab.file.readText() }.getOrDefault("")
+    fun edit(tab: Tab.FileView, fallbackText: (() -> String)? = null): FileEdit = edits.getOrPut(tab.id) {
+        val text = runCatching { tab.file.readText() }.getOrNull() ?: fallbackText?.invoke() ?: ""
         FileEdit(text, tab.file, history)
     }
 

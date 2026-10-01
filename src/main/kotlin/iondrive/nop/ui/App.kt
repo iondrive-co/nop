@@ -41,6 +41,7 @@ import iondrive.nop.agent.Provider
 import iondrive.nop.agent.Usage
 import iondrive.nop.agent.UsageReading
 import iondrive.nop.agent.handoverTarget
+import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.CommitIdentity
 import iondrive.nop.git.CommitInfo
 import iondrive.nop.git.CommitProgress
@@ -1628,6 +1629,11 @@ fun App(
                                 onJump = { file, line ->
                                     tabsState.openAt(Tab.FileView(file), line)
                                 },
+                                onSubtypes = { fqn ->
+                                    symbolIndex.subtypesOf(fqn).map {
+                                        SubtypeTarget(it.name, it.fqn, File(rootPath.toFile(), it.file), it.line)
+                                    }
+                                },
                                 onDiffTopLine = { diffTopLine = it },
                                 findInFileTrigger = findInFileTrigger,
                                 replaceInFileTrigger = replaceInFileTrigger,
@@ -1850,11 +1856,20 @@ fun App(
                                         returnedPaths = commitSelection.returned,
                                         arrivedPaths = commitSelection.arrived,
                                         onToggle = { path -> commitSelection = commitSelection.toggle(path) },
-                                        activePath = (tabsState.selectedTab as? Tab.Diff)?.change?.path,
+                                        activePath = when (val t = tabsState.selectedTab) {
+                                            is Tab.Diff -> t.change.path
+                                            is Tab.FileView -> repo?.let { repoRelativePath(it, t.file) }
+                                            else -> null
+                                        },
                                         onChangeClick = { change ->
                                             if (repo != null) {
                                                 commitSelection = commitSelection.acknowledge(change.path)
-                                                tabsState.open(Tab.Diff(change, repo.rootDir.toFile()))
+                                                val file = File(repo.rootDir.toFile(), change.path)
+                                                if (change.kind != ChangeKind.MODIFIED) {
+                                                    tabsState.open(Tab.FileView(file))
+                                                } else {
+                                                    tabsState.open(Tab.Diff(change, repo.rootDir.toFile()))
+                                                }
                                             }
                                         },
                                         onRevert = { change -> pendingRevert = change },

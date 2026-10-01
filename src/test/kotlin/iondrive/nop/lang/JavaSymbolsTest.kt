@@ -169,4 +169,18 @@ class JavaSymbolsTest {
         val found = decls("class C { void ok() {} void broken( { }")
         assertTrue(found.any { it.name == "ok" }, "the good method should survive its broken sibling")
     }
+
+    @Test
+    fun `a type records what it extends and implements as written`() {
+        val src = """
+            package a;
+            class Sub extends b.Base<String> implements Runnable, java.io.@Ann Closeable {}
+            interface Both extends Left, Right<Integer> {}
+            class Plain {}
+        """.trimIndent()
+        val types = decls(src, "Sub.java").filter { it.kind == JavaDeclKind.TYPE }.associateBy { it.name }
+        assertEquals(listOf("b.Base", "Runnable", "java.io.Closeable"), types.getValue("Sub").supertypes)
+        assertEquals(listOf("Left", "Right"), types.getValue("Both").supertypes)
+        assertEquals(emptyList(), types.getValue("Plain").supertypes)
+    }
 }

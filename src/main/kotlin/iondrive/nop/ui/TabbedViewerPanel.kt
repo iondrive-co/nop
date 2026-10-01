@@ -60,7 +60,10 @@ import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
+import iondrive.nop.lang.JavaDecl
+import iondrive.nop.lang.JavaDeclKind
 import iondrive.nop.lang.JavaParse
+import iondrive.nop.lang.JavaSymbols
 import iondrive.nop.lang.JavaProblem
 import iondrive.nop.spell.Typo
 import iondrive.nop.spell.findTypos
@@ -117,6 +120,8 @@ fun TabbedViewerPanel(
     onFileSaved: () -> Unit = {},
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget? = { _, _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
+    // The types that extend or implement the Java type with this fully-qualified name.
+    onSubtypes: (fqn: String) -> List<SubtypeTarget> = { emptyList() },
     onDiffTopLine: (Int) -> Unit = {},
     findInFileTrigger: Int = 0,
     replaceInFileTrigger: Int = 0,
@@ -163,6 +168,7 @@ fun TabbedViewerPanel(
                         onSaved = onFileSaved,
                         onResolveAt = { text, offset -> onResolveAt(current.file, text, offset) },
                         onJump = onJump,
+                        onSubtypes = onSubtypes,
                         pendingLine = pendingLine,
                         onPendingLineConsumed = { tabsState.clearJumpLine(current.id) },
                         pendingSearchQuery = pendingSearch,
@@ -298,6 +304,7 @@ private fun FileEditView(
     onSaved: () -> Unit,
     onResolveAt: (text: String, offset: Int) -> JumpTarget? = { _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
+    onSubtypes: (fqn: String) -> List<SubtypeTarget> = { emptyList() },
     pendingLine: Int? = null,
     onPendingLineConsumed: () -> Unit = {},
     pendingSearchQuery: String? = null,
@@ -316,7 +323,11 @@ private fun FileEditView(
     gitTracked: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val edit = remember(tab.id) { store.edit(tab) }
+    val edit = remember(tab.id) {
+        store.edit(tab) {
+            repo?.let { r -> repoRelativePath(r, tab.file)?.let { r.readHeadContent(it) } } ?: ""
+        }
+    }
     val focusRequester = remember(tab.id) { FocusRequester() }
     // Viewport and find/replace text come from the per-file FileEdit rather than a remember here, so
     // each tab keeps its own across switches instead of inheriting the last file's — see FileEdit.
@@ -524,10 +535,13 @@ private fun FileEditView(
     // project's dependencies it has no way to know, and a file underlined end to end because its
     // imports weren't on a classpath is worse than no analysis at all.
     var javaProblems by remember(tab.id) { mutableStateOf<List<JavaProblem>>(emptyList()) }
+    // The same parse names the file's types, which the subtype gutter marks.
+    var javaTypes by remember(tab.id) { mutableStateOf<List<JavaDecl>>(emptyList()) }
     val isJava = remember(tab.id) { tab.file.extension.equals("java", ignoreCase = true) }
     LaunchedEffect(tab.id, isJava) {
         if (!isJava) {
             javaProblems = emptyList()
+            javaTypes = emptyList()
             return@LaunchedEffect
         }
         // Opening a file checks straight away; only edits made afterwards wait for typing to settle.
@@ -536,10 +550,27 @@ private fun FileEditView(
             .debounce { if (immediate) 0L.also { immediate = false } else JAVA_PARSE_DEBOUNCE_MS }
             .distinctUntilChanged()
             .collect { text ->
-                javaProblems = withContext(Dispatchers.Default) {
-                    JavaParse.parse(text, tab.file.name)?.problems ?: emptyList()
+                val parsed = withContext(Dispatchers.Default) {
+                    JavaParse.parse(text, tab.file.name)?.let { parsed ->
+                        parsed.problems to JavaSymbols.declarations(parsed).filter { it.kind == JavaDeclKind.TYPE }
+                    }
                 }
+                javaProblems = parsed?.first ?: emptyList()
+                // A parse that failed outright keeps the last types, so the arrows don't blink off
+                // while a half-typed edit is in the buffer.
+                if (parsed != null) javaTypes = parsed.second
             }
+    }
+    // Derived rather than remembered so that a rebuilt index, which [onSubtypes] reads as state,
+    // moves the arrows even when the lambda itself is the same instance.
+    val subtypesCallback by rememberUpdatedState(onSubtypes)
+    val subtypeMarkers by remember(tab.id) {
+        derivedStateOf {
+            javaTypes.mapNotNull { type ->
+                subtypesCallback(type.fqn).takeIf { it.isNotEmpty() }
+                    ?.let { SubtypeMarker(type.nameStart, type.name, it) }
+            }
+        }
     }
 
     // Range of the word currently under the mouse pointer while Ctrl is held *and* the symbol
@@ -797,11 +828,23 @@ private fun FileEditView(
                 modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
             )
         }
+        // Java files keep the column whether or not any type has subtypes yet, so the text doesn't
+        // shift sideways when the index arrives. It takes the place of most of the text's own
+        // left margin.
+        if (isJava) {
+            SubtypeGutter(
+                markers = subtypeMarkers,
+                layout = layout,
+                scrollState = scrollState,
+                onJump = { file, line -> jumpCallback(file, line) },
+                modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
+            )
+        }
     Box(
         modifier = Modifier
             .weight(1f)
             .fillMaxSize()
-            .padding(12.dp),
+            .padding(start = if (isJava) 2.dp else 12.dp, top = 12.dp, end = 12.dp, bottom = 12.dp),
     ) {
     // Everything that has to line up with the text — the field and the error squiggles over it —
     // sits inside one box that is the width of the *content*, so the whole thing slides together

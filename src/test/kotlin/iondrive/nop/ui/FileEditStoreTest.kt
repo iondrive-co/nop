@@ -716,4 +716,12 @@ class FileEditStoreTest {
         assertTrue(edit.save() is SaveResult.Failed)
         assertEquals(listOf("original\n"), history.revisions(dir).map { history.read(it) })
     }
+
+    @Test
+    fun `edit falls back to fallbackText when file is missing from disk`(@TempDir tmp: Path) {
+        val f = tmp.resolve("deleted.txt").toFile()
+        val store = FileEditStore()
+        val edit = store.edit(Tab.FileView(f)) { "content from HEAD\n" }
+        assertEquals("content from HEAD\n", edit.state.text.toString())
+    }
 }

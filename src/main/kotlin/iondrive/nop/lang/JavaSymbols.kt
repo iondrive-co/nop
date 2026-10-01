@@ -1,7 +1,11 @@
 package iondrive.nop.lang
 
+import com.sun.source.tree.AnnotatedTypeTree
 import com.sun.source.tree.ClassTree
+import com.sun.source.tree.IdentifierTree
+import com.sun.source.tree.MemberSelectTree
 import com.sun.source.tree.MethodTree
+import com.sun.source.tree.ParameterizedTypeTree
 import com.sun.source.tree.Tree
 import com.sun.source.tree.VariableTree
 import javax.lang.model.element.Modifier
@@ -28,6 +32,12 @@ data class JavaDecl(
     val isPrivate: Boolean,
     /** Parameter count for a [JavaDeclKind.METHOD]; -1 for anything else. */
     val arity: Int = -1,
+    /**
+     * For a [JavaDeclKind.TYPE], the types it `extends` and `implements` as the source names them —
+     * `Base`, `Outer.Inner` or `com.example.Base`, with type arguments and annotations dropped.
+     * Unresolved, because a parse has no classpath: matching them to a declaration is the index's job.
+     */
+    val supertypes: List<String> = emptyList(),
 ) {
     /** Dotted name: the type's FQN, or the owner-qualified name of a member. */
     val fqn: String get() = if (owner.isEmpty()) name else "$owner.$name"
@@ -86,6 +96,9 @@ object JavaSymbols {
                 nameStart = range.first,
                 nameEnd = range.last + 1,
                 isPrivate = tree.modifiers.flags.contains(Modifier.PRIVATE),
+                // An interface's `extends` list is javac's implements clause, so both are read.
+                supertypes = (listOfNotNull(tree.extendsClause) + tree.implementsClause)
+                    .mapNotNull { typeName(it) },
             )
         }
         // Members are visited whether or not the type's own name was locatable: a type nop couldn't
@@ -155,6 +168,15 @@ object JavaSymbols {
             nameEnd = range.last + 1,
             isPrivate = tree.modifiers.flags.contains(Modifier.PRIVATE),
         )
+    }
+
+    /** The dotted name a supertype clause refers to, or null for a shape that names no class. */
+    private fun typeName(tree: Tree): String? = when (tree) {
+        is ParameterizedTypeTree -> typeName(tree.type)
+        is AnnotatedTypeTree -> typeName(tree.underlyingType)
+        is IdentifierTree -> tree.name.toString()
+        is MemberSelectTree -> typeName(tree.expression)?.let { "$it.${tree.identifier}" }
+        else -> null
     }
 
     /**

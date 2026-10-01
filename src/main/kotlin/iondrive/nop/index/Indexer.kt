@@ -76,6 +76,7 @@ object Indexer {
                     JavaDeclKind.FIELD -> SymbolKind.JAVA_FIELD
                 },
                 owner = decl.owner,
+                supertypes = decl.supertypes,
             )
         }
     }
