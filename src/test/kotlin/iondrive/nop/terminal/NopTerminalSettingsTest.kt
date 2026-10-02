@@ -20,7 +20,11 @@ import javax.swing.KeyStroke
  */
 class NopTerminalSettingsTest {
 
-    private fun settings() = NopTerminalSettings(Color.BLACK, Color.WHITE, Color.BLUE)
+    private fun settings(
+        bg: Color = Color.BLACK,
+        fg: Color = Color.WHITE,
+        link: Color = Color.BLUE,
+    ) = NopTerminalSettings(bg, fg, link)
 
     @DisabledOnOs(OS.MAC)
     @Test
@@ -326,5 +330,62 @@ class NopTerminalSettingsTest {
 
         panel.setBlinkingPeriod(NopTerminalSettings.IDLE_BLINKING_PERIOD_MS)
         panel.setBlinkingPeriod(NopTerminalSettings.BLINK_PERIOD_MS)
+    }
+
+    @Test
+    fun `selection uses explicit uniform selection colors rather than inverse`() {
+        val dark = settings(bg = Color(0x2B, 0x2B, 0x2B))
+        assertFalse(dark.useInverseSelectionColor())
+        val darkSel = dark.selectionColor
+        assertEquals(Color(0x26, 0x75, 0xBF).rgb, darkSel.background!!.toColor().rgb)
+        assertEquals(Color(0xDF, 0xE1, 0xE5).rgb, darkSel.foreground!!.toColor().rgb)
+
+        val light = settings(bg = Color.WHITE)
+        assertFalse(light.useInverseSelectionColor())
+        val lightSel = light.selectionColor
+        assertEquals(Color(0xA6, 0xD2, 0xFF).rgb, lightSel.background!!.toColor().rgb)
+        assertEquals(Color.BLACK.rgb, lightSel.foreground!!.toColor().rgb)
+    }
+
+    @Test
+    fun `hyperlinks receive the same selection background as surrounding text`() {
+        val s = settings(bg = Color(0x2B, 0x2B, 0x2B))
+        val widget = NopTerminalWidget(80, 24, s)
+        widget.addHyperlinkFilter(UrlHyperlinkFilter())
+        val buffer = widget.terminalTextBuffer
+        val line = "See https://example.com/docs here"
+        buffer.writeString(0, 1, com.jediterm.terminal.model.CharBuffer(line))
+
+        val panel = widget.terminalPanel
+        panel.setSize(800, 400)
+        val selField = com.jediterm.terminal.ui.TerminalPanel::class.java.getDeclaredField("mySelection")
+        selField.isAccessible = true
+        selField.set(
+            panel,
+            com.jediterm.terminal.model.TerminalSelection(
+                com.jediterm.core.compatibility.Point(0, 0),
+                com.jediterm.core.compatibility.Point(25, 0),
+            ),
+        )
+
+        val fills = mutableListOf<Triple<Int, Int, Color>>()
+        val img = java.awt.image.BufferedImage(800, 400, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val g2d = img.createGraphics()
+        val recording = object : ContrastAdjustingGraphics2D(g2d, s) {
+            override fun fillRect(x: Int, y: Int, width: Int, height: Int) {
+                fills.add(Triple(x, width, color))
+                super.fillRect(x, y, width, height)
+            }
+        }
+
+        panel.paintComponent(recording)
+
+        val expectedBg = Color(0x26, 0x75, 0xBF)
+        val selectionFills = fills.filter { it.third == expectedBg }
+        assertTrue(selectionFills.isNotEmpty(), "Selection background color should be filled")
+        val totalSelectedWidth = selectionFills.sumOf { it.second }
+        assertTrue(totalSelectedWidth > 150, "Selection fill should span plain text and the hyperlink")
+        val linkColor = s.hyperlinkColor.foreground!!.toColor()
+        assertFalse(fills.any { it.third == linkColor }, "Hyperlink should not use its link foreground as background")
     }
 }

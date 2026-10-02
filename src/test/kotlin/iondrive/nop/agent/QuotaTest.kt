@@ -84,6 +84,11 @@ class QuotaTest {
             "$ grep -rn 'rate limit' src/\n",
             "src/Limits.kt:12: // TODO: handle the usage limit properly\n",
             "Read 200 lines from /project/src/Quota.kt\n",
+            // The one that made the cheap pre-filter nearly useless on a real project: "too" is a
+            // prefix of "tool", and a transcript is full of this. The pre-filter pairs "requests"
+            // with a "too" that is followed by whitespace, exactly as `too\\s+many` does.
+            """{"type":"tool_use":{"web_search_requests":3,"account":"main"}}""",
+            "fetching 40 requests for account 12 — rate limiting to 5/s\n",
         )
 
         ordinary.forEach { assertNull(fire(it), "fired on ordinary output: $it") }
@@ -186,6 +191,7 @@ class QuotaTest {
             "billing limit reached",
             "payment required",
             "account has been suspended",
+            "account disabled",
             "too many requests",
             "resource exhausted",
             "429 Too Many Requests",

@@ -22,6 +22,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
@@ -197,14 +198,11 @@ internal fun UsageBar(label: String, window: UsageWindow?) {
             drawTrack(track)
             val width = (size.width * (window.percent / 100.0)).toFloat().coerceIn(0f, size.width)
             if (width > 0f) {
-                drawRoundRect(
-                    color = fill,
-                    topLeft = Offset.Zero,
-                    // A sliver narrower than the bar is tall has no rounded end to draw and comes
-                    // out as nothing at all, so the smallest fill is a dot rather than an empty bar.
-                    size = Size(width.coerceAtLeast(size.height), size.height),
-                    cornerRadius = CornerRadius(size.height / 2, size.height / 2),
-                )
+                // Clipped rather than drawn as a separate rounded rectangle so the leading edge
+                // reflects the exact fraction of the bar without prematurely rounding inward.
+                clipRect(right = width.coerceAtLeast(1.dp.toPx())) {
+                    drawTrack(fill)
+                }
             }
             if (elapsed != null) {
                 // Kept a half-stroke inside each end: at the start and the end of a window the line
@@ -261,8 +259,8 @@ internal fun tooltipLine(label: String, window: UsageWindow): String {
 }
 
 /** Small enough that two per account and the name still fit a line, big enough to read a fill. */
-private val BAR_WIDTH = 30.dp
-private val BAR_HEIGHT = 7.dp
+private val BAR_WIDTH = 38.dp
+private val BAR_HEIGHT = 9.dp
 
 private val NAME_MAX_WIDTH = 160.dp
 

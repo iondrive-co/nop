@@ -106,6 +106,30 @@ class NopTerminalSettings(
     private val hyperlinkStyle = TextStyle(TerminalColor { link.toJediColor() }, null)
 
     /**
+     * Use explicit selection colors rather than video inverse.
+     *
+     * Inverting text colors swaps foreground and background. For normal text (fg on bg) this yields
+     * a clean highlight (bg on fg), but for styled runs with a custom foreground and null background
+     * — notably [hyperlinkStyle] — inverting turns the link foreground into the cell background
+     * instead of applying a selection highlight.
+     *
+     * With [useInverseSelectionColor] = false, JediTerm applies [getSelectionColor] across every
+     * cell in the selection, so plain text, ANSI colored runs, and hyperlinks all receive a uniform
+     * selection background.
+     */
+    override fun useInverseSelectionColor(): Boolean = false
+
+    override fun getSelectionColor(): TextStyle = selectionStyle
+
+    private val isDark: Boolean
+        get() = TerminalContrast.relativeLuminance(bg) < 0.5
+
+    private val selectionStyle = TextStyle(
+        TerminalColor { (if (isDark) Color(0xDFE1E5) else Color.BLACK).toJediColor() },
+        TerminalColor { (if (isDark) Color(0x2675BF) else Color(0xA6D2FF)).toJediColor() },
+    )
+
+    /**
      * Underline links whenever they're on screen, not just under the pointer (JediTerm's default),
      * so output that contains a URL advertises it as clickable without a hunt.
      */

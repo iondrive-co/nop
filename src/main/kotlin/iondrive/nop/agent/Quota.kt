@@ -120,18 +120,48 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
     private fun StringBuilder.holdsAnAnchor(): Boolean {
         for (i in 0 until length) {
             val c = this[i]
-            // One array lookup per character, and nothing else: [ANCHOR_STARTS] holds both cases of
-            // every anchor's first letter so that the scan never has to case-fold. Folding here
+            // One array lookup per character, and nothing else: [BY_FIRST] is indexed by the raw
+            // character and holds both cases, so the scan never has to case-fold. Folding here
             // instead — Char.lowercaseChar() on all 4,096 — costs more than the regexes this is
             // meant to replace, which is a mistake worth leaving a note about.
-            if (c.code >= ANCHOR_STARTS.size || !ANCHOR_STARTS[c.code]) continue
-            val lower = c.lowercaseChar()
-            for (anchor in ANCHORS) {
-                if (anchor[0] != lower || i + anchor.length > length) continue
-                var j = 1
-                while (j < anchor.length && this[i + j].lowercaseChar() == anchor[j]) j++
-                if (j == anchor.length) return true
+            if (c.code >= BY_FIRST.size) continue
+            val bucket = BY_FIRST[c.code] ?: continue
+            for (anchor in bucket) {
+                if (!matchesAt(i, anchor.word)) continue
+                val near = anchor.near ?: return true
+                if (hasWordBefore(near, i)) return true
             }
+        }
+        return false
+    }
+
+    /** Whether [word] sits at [at], given that its first character already matched. */
+    private fun StringBuilder.matchesAt(at: Int, word: String): Boolean {
+        if (at + word.length > length) return false
+        for (j in 1 until word.length) {
+            if (this[at + j].lowercaseChar() != word[j]) return false
+        }
+        return true
+    }
+
+    /**
+     * Whether [word] begins within [NEAR] characters before [before] and is followed by whitespace,
+     * which is what [Anchor.near] means.
+     *
+     * The whitespace is not fussiness: without it "too" matches inside "tool", and
+     * `"tool_use":{"web_search_requests` — which an agent's own output is full of — would make
+     * every window look like a rate-limit notice. Measured against real output it was the
+     * difference between 68% and 4.7% of windows paying for the full match. The patterns this
+     * mirrors all say `too\s+many`, so requiring the space is reading them exactly.
+     */
+    private fun StringBuilder.hasWordBefore(word: String, before: Int): Boolean {
+        var i = (before - NEAR).coerceAtLeast(0)
+        while (i < before) {
+            if (this[i].lowercaseChar() == word[0] && matchesAt(i, word)) {
+                val after = i + word.length
+                if (after < length && this[after].isWhitespace()) return true
+            }
+            i++
         }
         return false
     }
@@ -144,27 +174,43 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
          * One word from every branch of [OVERLOAD] and [QUOTA], lower-cased.
          *
          * A word rather than a phrase because the patterns join their words with `\s+`, so no
-         * two-word literal survives a message that happens to be spaced differently. "requests"
-         * rather than "many", and "capacity"/"overload" rather than "model", so that ordinary
-         * output does not keep paying for the full match: a word here that turns up in an agent's
-         * own text costs nothing but the old behaviour on those reads.
+         * two-word literal survives a message that happens to be spaced differently.
          *
-         * Adding a pattern means adding its word here. The test named in [holdsAnAnchor] is what
-         * catches forgetting to.
+         * Chosen to be *rare*, not merely sufficient, because a word that turns up in an agent's
+         * ordinary output puts every window back on the slow path. The first version used
+         * "account" and "requests", which read as specific enough and are in fact the working
+         * vocabulary of the project this was measured on: 68% of its windows carried one. Naming
+         * the two words the account branch actually needs, and pairing "requests" with the "too"
+         * its own patterns demand, took that to 4.7%.
+         *
+         * Adding a pattern means adding its word here. The tests named in [holdsAnAnchor]'s
+         * neighbours are what catch forgetting to.
          */
         private val ANCHORS = arrayOf(
-            "limit", "quota", "credit", "exhaust", "payment", "account", "requests",
-            "capacity", "overload",
+            Anchor("limit"), Anchor("quota"), Anchor("credit"), Anchor("exhaust"),
+            Anchor("payment"), Anchor("capacity"), Anchor("overload"),
+            // `account (has been )?(suspended|disabled)` — the two endings, rather than the common
+            // noun in front of them.
+            Anchor("suspended"), Anchor("disabled"),
+            // `too\s+many\s+requests`, both branches of it. "requests" alone is ordinary output.
+            Anchor("requests", near = "too"),
         )
 
+        /** A word a pattern needs, and optionally another that must sit just before it. */
+        private class Anchor(val word: String, val near: String? = null)
+
+        /** How far back [hasWordBefore] looks. "too many requests" spans nine. */
+        private const val NEAR = 32
+
         /**
-         * Which characters can begin an anchor, so [holdsAnAnchor] rejects most in one lookup.
-         * Both cases, because the alternative is case-folding every character of the window.
+         * The anchors that can begin at a given character, indexed by the raw character so the
+         * scan never case-folds. Both cases point at the same bucket.
          */
-        private val ANCHOR_STARTS = BooleanArray(128).also { starts ->
-            ANCHORS.forEach {
-                starts[it[0].code] = true
-                starts[it[0].uppercaseChar().code] = true
+        private val BY_FIRST: Array<Array<Anchor>?> = arrayOfNulls<Array<Anchor>>(128).also { table ->
+            ANCHORS.groupBy { it.word[0] }.forEach { (first, group) ->
+                val bucket = group.toTypedArray()
+                table[first.code] = bucket
+                table[first.uppercaseChar().code] = bucket
             }
         }
 
