@@ -52,6 +52,15 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         tail.append(stripAnsi(text))
         if (tail.length > WINDOW) tail.delete(0, tail.length - WINDOW)
 
+        // Nothing below can match a window that does not hold one of [ANCHORS], and this is the
+        // path every chunk of output from every agent takes. Without it each read copies the whole
+        // window out of the builder and runs two thirty-branch alternations over all of it, so the
+        // cost is set by the window size and the read rate rather than by how much text arrived:
+        // profiled with nine agents running it was a third of nop's CPU, almost all of it spent
+        // deciding that ordinary output is ordinary. Scanning for plain words touches each
+        // character once and allocates nothing.
+        if (!tail.holdsAnAnchor()) return
+
         val window = tail.toString()
         // Overload first, and deliberately. "The model is at capacity" matches several of the quota
         // patterns below but means the opposite thing: it is transient, the CLI retries by itself,
@@ -96,9 +105,68 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         return text.substring(start, end).trim().take(200)
     }
 
+    /**
+     * Whether the window holds any word that [OVERLOAD] or [QUOTA] would need in order to match.
+     *
+     * Every branch of both patterns contains at least one of [ANCHORS], so a window with none of
+     * them cannot match either — which is the overwhelming majority of terminal output. Kept
+     * honest by `every phrase the watcher fires on carries an anchor`, which feeds one line per
+     * branch through [feed] and would fail the moment a pattern gained a word this does not know.
+     *
+     * Compares lower-cased needles against lower-cased haystack characters rather than lower-casing
+     * the window, because allocating a copy of the window per read is among the costs this exists
+     * to remove. [ANCHOR_STARTS] makes the common character a single array lookup.
+     */
+    private fun StringBuilder.holdsAnAnchor(): Boolean {
+        for (i in 0 until length) {
+            val c = this[i]
+            // One array lookup per character, and nothing else: [ANCHOR_STARTS] holds both cases of
+            // every anchor's first letter so that the scan never has to case-fold. Folding here
+            // instead — Char.lowercaseChar() on all 4,096 — costs more than the regexes this is
+            // meant to replace, which is a mistake worth leaving a note about.
+            if (c.code >= ANCHOR_STARTS.size || !ANCHOR_STARTS[c.code]) continue
+            val lower = c.lowercaseChar()
+            for (anchor in ANCHORS) {
+                if (anchor[0] != lower || i + anchor.length > length) continue
+                var j = 1
+                while (j < anchor.length && this[i + j].lowercaseChar() == anchor[j]) j++
+                if (j == anchor.length) return true
+            }
+        }
+        return false
+    }
+
     companion object {
         /** How much recent output is kept. A limit message and its context fit in far less. */
         private const val WINDOW = 4096
+
+        /**
+         * One word from every branch of [OVERLOAD] and [QUOTA], lower-cased.
+         *
+         * A word rather than a phrase because the patterns join their words with `\s+`, so no
+         * two-word literal survives a message that happens to be spaced differently. "requests"
+         * rather than "many", and "capacity"/"overload" rather than "model", so that ordinary
+         * output does not keep paying for the full match: a word here that turns up in an agent's
+         * own text costs nothing but the old behaviour on those reads.
+         *
+         * Adding a pattern means adding its word here. The test named in [holdsAnAnchor] is what
+         * catches forgetting to.
+         */
+        private val ANCHORS = arrayOf(
+            "limit", "quota", "credit", "exhaust", "payment", "account", "requests",
+            "capacity", "overload",
+        )
+
+        /**
+         * Which characters can begin an anchor, so [holdsAnAnchor] rejects most in one lookup.
+         * Both cases, because the alternative is case-folding every character of the window.
+         */
+        private val ANCHOR_STARTS = BooleanArray(128).also { starts ->
+            ANCHORS.forEach {
+                starts[it[0].code] = true
+                starts[it[0].uppercaseChar().code] = true
+            }
+        }
 
         /**
          * Escape sequences, so a limit message split by a colour change still reads as one phrase.

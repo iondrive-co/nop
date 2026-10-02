@@ -14,6 +14,7 @@ import javax.tools.JavaCompiler
 import javax.tools.JavaFileObject
 import javax.tools.SimpleJavaFileObject
 import javax.tools.StandardJavaFileManager
+import javax.tools.StandardLocation
 import javax.tools.ToolProvider
 
 /**
@@ -144,7 +145,21 @@ object JavaParse {
     private fun fileManager(compiler: JavaCompiler): StandardJavaFileManager? {
         fileManagers.get()?.let { return it }
         val made = runCatching { compiler.getStandardFileManager(null, null, Charsets.UTF_8) }.getOrNull()
-        if (made != null) fileManagers.set(made)
+        if (made != null) {
+            // Every getTask() below runs BasicJavacTask.initPlugins, which asks a ServiceLoader for
+            // com.sun.source.util.Plugin providers on this manager's annotation-processor path.
+            // Left unset, that path resolves to the system class loader over nop's entire
+            // classpath, and the lookup then reads the manifest of every jar in the application
+            // looking for a Class-Path attribute — about two hundred of them, on every single
+            // parse. Profiled against a real project it was 23.7% of nop's CPU, twice what javac
+            // spent actually parsing, and none of it work anyone asked for.
+            //
+            // `-proc:none` does not prevent it: that turns off annotation *processors*, and this is
+            // the separate plugin lookup, which runs either way. An empty path gives the lookup
+            // nothing to walk. nop neither has nor wants javac plugins — this is parse-only.
+            runCatching { made.setLocation(StandardLocation.ANNOTATION_PROCESSOR_PATH, emptyList()) }
+            fileManagers.set(made)
+        }
         return made
     }
 

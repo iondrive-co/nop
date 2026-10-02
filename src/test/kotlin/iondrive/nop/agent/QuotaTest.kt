@@ -151,6 +151,79 @@ class QuotaTest {
         assertEquals("out of credits", fire("insufficient credits")!!.kind)
     }
 
+    /**
+     * The cheap pre-filter in [QuotaWatcher.feed] skips both patterns unless the window holds one
+     * of a handful of plain words. That is only safe while every branch of both patterns contains
+     * one, so this feeds a line per branch and would fail the moment a pattern gained a word the
+     * anchor list does not know — which is exactly the mistake that would make a real quota wall
+     * silently stop being noticed.
+     */
+    @Test
+    fun `every phrase the watcher fires on carries an anchor`() {
+        val perBranch = listOf(
+            "You've hit your usage limit",
+            "You have reached your limit",
+            "approaching your usage limit · resets at 5pm",
+            "5-hour limit reached",
+            "Weekly limit reached",
+            "insufficientquota",
+            "insufficient_quota",
+            "rate_limit_exceeded",
+            "ratelimitexceeded",
+            "billing_hard_limit_reached",
+            "You exceeded your current quota",
+            "You have exceeded your rate limit",
+            "credit_balance is insufficient",
+            "rate limit exceeded",
+            "Individual quota reached.",
+            "quota exceeded",
+            "quota has been exceeded",
+            "insufficient credits",
+            "insufficient quota",
+            "out of credits",
+            "credits exhausted",
+            "usage limit exceeded",
+            "billing limit reached",
+            "payment required",
+            "account has been suspended",
+            "too many requests",
+            "resource exhausted",
+            "429 Too Many Requests",
+        )
+
+        perBranch.forEach { assertNotNull(fire(it), "the pre-filter swallowed a real wall: $it") }
+    }
+
+    /**
+     * The same invariant for the overload patterns, which cannot be checked by asserting no hit:
+     * a branch the pre-filter skipped would produce no hit either, and pass for the wrong reason.
+     * Matching [QuotaWatcher.OVERLOAD] clears the window, so an empty window afterwards is proof
+     * the text actually reached the pattern.
+     */
+    @Test
+    fun `every phrase the watcher stands down on carries an anchor`() {
+        val perBranch = listOf(
+            "The selected model is at capacity",
+            "The model is at capacity",
+            "the API is overloaded",
+            "overloaded_error",
+            "temporarily overloaded",
+            "model capacity exhausted",
+            "image generation quota exceeded",
+        )
+
+        perBranch.forEach { text ->
+            val (watcher, hits) = watch()
+            watcher.feed(text)
+            assertTrue(hits.isEmpty(), "fired on a transient overload: $text")
+            assertEquals(
+                "",
+                watcher.recentText(),
+                "the pre-filter skipped an overload branch, so it never stood down: $text",
+            )
+        }
+    }
+
     @Test
     fun `stripping escapes leaves the text readable`() {
         assertEquals(
