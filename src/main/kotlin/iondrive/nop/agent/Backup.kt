@@ -25,7 +25,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * A copy of every agent session in a folder the user chose, kept current while nop runs.
+ * A copy of every agent session in a folder the user chose, kept current while nop runs. The folder
+ * may be on an SMB share, named `smb://host/share/folder`; [NetworkShare] finds or makes its mount.
  *
  * What it copies is the work, not the logins: nop's own session logs, handoff summaries and shared
  * memory; `agent.json`; and from each account's home the vendor's transcripts — what a resume reads
@@ -114,7 +115,9 @@ object Backup {
         started.get() && restore(Accounts.load(), account, projectDir, id)
 
     internal fun restore(config: AgentConfig, account: Account, projectDir: File, id: String): Boolean {
-        val dest = destination(config) ?: return false
+        // A share that is not mounted is not mounted here: this runs as a session starts.
+        val named = config.backupDir?.takeIf { it.isNotBlank() } ?: return false
+        val dest = runCatching { NetworkShare.resolve(named, mount = false) }.getOrNull() ?: return false
         val saved = dest.resolve("homes").resolve(account.name)
         val found = Transcripts.find(account.provider, saved, projectDir, id) ?: return false
         val target = account.homePath.resolve(saved.relativize(found).toString())
@@ -144,21 +147,18 @@ object Backup {
         return null
     }
 
-    private fun destination(config: AgentConfig): Path? =
-        config.backupDir?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
-
     private fun runConfigured() {
         val config = Accounts.load()
-        val dest = destination(config) ?: return
+        val named = config.backupDir?.takeIf { it.isNotBlank() } ?: return
         status = status.copy(running = true)
-        val result = runCatching { run(config, dest, Accounts.dataRoot(), Accounts.configFile) }
+        val result = runCatching { run(config, NetworkShare.resolve(named), Accounts.dataRoot(), Accounts.configFile) }
         result.onSuccess { copied ->
             status = Status(lastSuccessAt = System.currentTimeMillis(), copiedFiles = copied.files, copiedBytes = copied.bytes)
-            if (copied.files > 0) Log.info("backup: ${copied.files} file(s), ${copied.bytes} bytes to $dest")
+            if (copied.files > 0) Log.info("backup: ${copied.files} file(s), ${copied.bytes} bytes to $named")
         }
         result.onFailure { e ->
             status = status.copy(running = false, lastError = e.message ?: e.toString())
-            Log.warn("backup to $dest failed: $e")
+            Log.warn("backup to $named failed: $e")
         }
     }
 

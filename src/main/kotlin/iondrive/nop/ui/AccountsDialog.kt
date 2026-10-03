@@ -54,6 +54,7 @@ import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.Backup
 import iondrive.nop.agent.DEFAULT_CHOICE
 import iondrive.nop.agent.Login
+import iondrive.nop.agent.NetworkShare
 import iondrive.nop.agent.Provider
 import iondrive.nop.agent.UsageReading
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -326,8 +327,21 @@ private fun AccountEditor(
 @Composable
 private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
     var refused by remember { mutableStateOf<String?>(null) }
+    var typingShare by remember { mutableStateOf(false) }
+    val share = rememberTextFieldState("smb://")
     val status = Backup.status
     val dir = config.backupDir?.takeIf { it.isNotBlank() }
+
+    // A share is checked when the backup runs, which is where mounting it happens — never on this thread.
+    fun useShare() {
+        val typed = share.text.toString().trim()
+        refused = if (NetworkShare.isShare(typed)) null else "Not a share: write it as smb://server/share/folder."
+        if (refused == null) {
+            typingShare = false
+            onChange(config.copy(backupDir = typed))
+            Backup.runNow()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Session backup", fontWeight = FontWeight.SemiBold)
@@ -340,18 +354,39 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Link(if (dir == null) "Choose a folder" else "Choose another folder", onClick = {
                 val picked = chooseBackupFolder(dir) ?: return@Link
-                refused = Backup.refusal(picked, config)
+                refused = Backup.refusal(picked, config)?.let { "Not that folder: $it" }
                 if (refused == null) {
+                    typingShare = false
                     onChange(config.copy(backupDir = picked.toString()))
                     Backup.runNow()
                 }
+            })
+            Link("Use a network share", onClick = {
+                typingShare = !typingShare
+                refused = null
             })
             if (dir != null) {
                 Link("Back up now", onClick = { Backup.runNow() })
                 Link("Stop backing up", onClick = { onChange(config.copy(backupDir = null)) })
             }
         }
-        refused?.let { Text("Not that folder: $it", color = ChangeColors.REMOVED) }
+        if (typingShare) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextField(
+                    state = share,
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("smb://server/share/folder") },
+                    onKeyboardAction = { useShare() },
+                )
+                Link("Use", onClick = ::useShare)
+            }
+            Text(
+                "Uses the share's existing mount, or mounts it the way your file manager does. A share that needs " +
+                    "a password must have it remembered there first.",
+                color = AgentMuted,
+            )
+        }
+        refused?.let { Text(it, color = ChangeColors.REMOVED) }
         if (dir != null) {
             val line = when {
                 status.running -> "Backing up…"
