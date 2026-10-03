@@ -418,6 +418,25 @@ object Settings {
     }
 
     /**
+     * Whether this project's agent tabs may message each other without the user delivering each
+     * message (see [iondrive.nop.agent.AgentMessages]). Off unless the user has turned it on.
+     */
+    fun loadAgentAutoDeliver(projectPath: Path): Boolean =
+        runCatching { Files.readString(projectDataDir(projectPath).resolve("agent-auto-deliver")).trim() == "1" }.getOrDefault(false)
+
+    fun saveAgentAutoDeliver(projectPath: Path, on: Boolean) {
+        val f = projectDataDir(projectPath).resolve("agent-auto-deliver")
+        runCatching {
+            if (on) {
+                Files.createDirectories(f.parent)
+                Files.writeString(f, "1")
+            } else {
+                Files.deleteIfExists(f)
+            }
+        }
+    }
+
+    /**
      * Recently used commit messages for this project, newest first, for the reuse dropdown.
      * Persisted NUL-separated rather than line-delimited so multi-line messages survive a
      * round-trip intact.

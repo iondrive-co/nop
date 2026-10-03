@@ -169,6 +169,9 @@ object NativeSessions {
     private val TIMESTAMP = Regex("\"timestamp\"\\s*:\\s*\"([^\"]+)\"")
 
     private fun summarise(file: Path, store: Store, projectPath: String, modifiedAt: Long): PastSession? {
+        // A `claude -p` worker a manager agent delegated to is nobody's conversation to resume, and
+        // a project that delegates in bulk writes dozens an hour — enough to bury every real one.
+        if (ClaudeTailer.writtenOutsideTui(file)) return null
         var startedAt: Long? = null
         var titled: String? = null
         var firstPrompt: String? = null

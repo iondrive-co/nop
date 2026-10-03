@@ -28,6 +28,25 @@ class NativeSessionsTest {
         """{"type":"ai-title","timestamp":"$at","aiTitle":"$text"}"""
 
     /**
+     * A project whose agents delegate to `claude -p` workers writes a transcript per worker into
+     * the same directory as its real conversations, dozens an hour, each named by its first prompt.
+     * Offered, they bury the conversation the user came to resume.
+     */
+    @Test
+    fun `a headless worker's transcript is not offered to resume`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val store = tmp.resolve("home").resolve(".claude")
+        val dir = slugDir(store, project)
+        fun record(text: String, entrypoint: String) =
+            """{"type":"user","entrypoint":"$entrypoint","timestamp":"2026-10-03T01:00:00.000Z","message":{"role":"user","content":"$text"}}"""
+        Files.writeString(dir.resolve("aaaa-tui.jsonl"), record("Ideation", "cli") + "\n")
+        Files.writeString(dir.resolve("bbbb-worker.jsonl"), record("=====Run id: explore6-b91s", "sdk-cli") + "\n")
+
+        val rows = NativeSessions.claude(project, listOf(NativeSessions.Store("outside nop", store)))
+        assertEquals(listOf("Ideation"), rows.map { it.title })
+    }
+
+    /**
      * The picker summarises every transcript in the project each time it is drawn — the head of
      * each file and then a seek into its end — so the summaries are cached per file and re-read
      * only when the file changes. A conversation that is still being typed into has to come back

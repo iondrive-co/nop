@@ -49,6 +49,7 @@ import iondrive.nop.Ago
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AccountHomes
 import iondrive.nop.agent.AgentConfig
+import iondrive.nop.agent.AgentMessages
 import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.Backup
 import iondrive.nop.agent.DEFAULT_CHOICE
@@ -57,6 +58,7 @@ import iondrive.nop.agent.Provider
 import iondrive.nop.agent.UsageReading
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.Orientation
+import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.Divider
 import org.jetbrains.jewel.ui.component.Link
@@ -87,6 +89,8 @@ fun AccountsDialog(
     onLogIn: (Account) -> Unit,
     onLogOut: (Account) -> Unit = { Login.logOut(it) },
     onClose: () -> Unit,
+    /** The project the dialog was opened from, whose tab-messaging switch it shows. */
+    project: File? = null,
 ) {
     DialogFrame(title = "Agent accounts", onClose = onClose, size = DpSize(640.dp, 660.dp)) {
         var draft by remember(config) { mutableStateOf(config) }
@@ -165,6 +169,10 @@ fun AccountsDialog(
 
         Divider(orientation = Orientation.Horizontal)
         BackupSection(config = draft, onChange = { update(it) })
+        project?.let {
+            Divider(orientation = Orientation.Horizontal)
+            TabMessagesSection(it)
+        }
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { adding = true }) { Text("Add account") }
@@ -341,6 +349,32 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
             }
             Text(line, color = if (status.lastError != null && !status.running) ChangeColors.REMOVED else AgentMuted)
         }
+    }
+}
+
+/**
+ * Whether [project]'s agent tabs may message each other without the user delivering each message.
+ * Per project, since what makes it safe is that sender and recipient share one: see
+ * [AgentMessages.setAutoDeliver].
+ */
+@Composable
+private fun TabMessagesSection(project: File) {
+    val on = AgentMessages.autoDelivers(project)
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Messages between agent tabs", fontWeight = FontWeight.SemiBold)
+        CheckboxRow(
+            text = "Deliver messages between ${project.name}'s tabs without asking",
+            checked = on,
+            onCheckedChange = { AgentMessages.setAutoDeliver(project, it) },
+        )
+        Text(
+            if (on) {
+                "Typed straight into the recipient's prompt. Messages from other projects' tabs still wait for you."
+            } else {
+                "Each message waits in the recipient tab until you press Deliver."
+            },
+            color = AgentMuted,
+        )
     }
 }
 

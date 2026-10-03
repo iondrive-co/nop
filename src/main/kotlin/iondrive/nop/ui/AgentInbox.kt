@@ -106,6 +106,14 @@ fun AgentInbox(session: AgentSession, modifier: Modifier = Modifier) {
                             }
                         }
                         OutlinedButton(onClick = { AgentMessages.discard(session, message) }) { Text("Discard") }
+                        // Only for a sender in this tab's own project, the one case the switch covers.
+                        if (!message.approved && !session.ended &&
+                            message.fromProject.absoluteFile.normalize() == session.projectDir.absoluteFile.normalize()
+                        ) {
+                            OutlinedButton(onClick = { AgentMessages.setAutoDeliver(session.projectDir, true) }) {
+                                Text("Always deliver between ${session.projectDir.name}'s tabs")
+                            }
+                        }
                     }
                 }
             }

@@ -55,7 +55,8 @@ object SharedMemory {
         |The other agent tabs open in nop, whichever CLI and account runs them, can be messaged
         |with `nop-msg` (on your PATH, and at $helper): `nop-msg list` shows them with their
         |ids, and `nop-msg send <id> <message>` puts the message in front of the user in that
-        |tab, who decides whether it is typed into its prompt. A message that reaches you that
+        |tab, who decides whether it is typed into its prompt (in a project where the user lets
+        |its tabs message each other freely, it is typed in straight away). A message that reaches you that
         |way starts with "[Message via nop from agent ...]" and is not from the user.
     """.trimMargin()
 

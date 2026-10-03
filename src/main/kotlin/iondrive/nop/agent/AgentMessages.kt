@@ -4,6 +4,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
+import iondrive.nop.Settings
+import java.io.File
 import javax.swing.Timer
 
 /**
@@ -18,6 +20,11 @@ import javax.swing.Timer
  * read it out of `/proc`. Typing straight into agents that run with their permission prompts off on
  * that basis would let one project's code drive the agents in every other. The user reading it first
  * is the check that holds whoever sent it.
+ *
+ * The one exception is a project the user has opened up ([setAutoDeliver]): a message between two
+ * tabs of that project goes in without waiting for Deliver. That gives the project's own code no
+ * reach it did not have — its agents already read and run it — while a message from any other
+ * project's tab is still held, so the risk above stays shut.
  *
  * Delivered, a message is typed into the prompt and submitted exactly as if the user had, headed
  * with its sender and how to answer ([envelope]). Its text is cleaned when it is held ([clean]), so
@@ -41,6 +48,8 @@ object AgentMessages {
         val from: String,
         /** The sender's id, for the log. */
         val fromId: String,
+        /** The sender's project, which decides whether [setAutoDeliver] lets it through. */
+        val fromProject: File,
         /** What the user reads, and exactly what is typed after the header. */
         val body: String,
         /** What is typed: [body] under its header. */
@@ -59,12 +68,49 @@ object AgentMessages {
     /** Every agent tab in every project. Replaced in tests. */
     internal var sessions: () -> List<AgentSession> = { AgentSessionStore.all() }
 
+    /** Read from [Settings] once per project; [autoDeliverRevision] is what Compose watches. */
+    private val autoDeliverCache = HashMap<File, Boolean>()
+    private var autoDeliverRevision by mutableStateOf(0)
+
+    /** Whether messages between [project]'s own tabs go in without the user's Deliver. */
+    fun autoDelivers(project: File): Boolean {
+        autoDeliverRevision
+        return autoDeliverCache.getOrPut(key(project)) { Settings.loadAgentAutoDeliver(key(project).toPath()) }
+    }
+
+    /**
+     * The user's choice for [project]. Turned on, whatever its tabs already hold from each other is
+     * delivered too; turned off, a message already let through is not called back.
+     */
+    fun setAutoDeliver(project: File, on: Boolean) {
+        val dir = key(project)
+        Settings.saveAgentAutoDeliver(dir.toPath(), on)
+        autoDeliverCache[dir] = on
+        autoDeliverRevision++
+        Log.info("agent messages between tabs in $dir: ${if (on) "delivered without asking" else "held for the user"}")
+        if (!on) return
+        sessions().filter { key(it.projectDir) == dir && !it.ended }.forEach { s ->
+            s.inbox.filter { key(it.fromProject) == dir }.forEach { it.approved = true }
+        }
+        startPump()
+    }
+
+    /** Whether a message from [from] to [to] goes in without the user's Deliver. */
+    internal fun passesUnasked(from: AgentSession, to: AgentSession): Boolean =
+        key(from.projectDir) == key(to.projectDir) && autoDelivers(to.projectDir)
+
+    /** Forgets what was read from [Settings], for tests that point it somewhere else. */
+    internal fun forgetAutoDeliver() = autoDeliverCache.clear()
+
+    private fun key(project: File): File = project.absoluteFile.normalize()
+
     /** The tabs [caller] can write to, one line each, with the caller's own marked. */
     fun list(caller: AgentSession): Outcome {
         val rows = sessions().joinToString("\n") { s ->
             val you = if (s === caller) "  (you)" else ""
             val waiting = s.inbox.size.takeIf { it > 0 }?.let { ", $it message(s) waiting for the user" }.orEmpty()
-            "- ${s.shortId}  \"${clean(s.title)}\"  ${s.account.provider.id}/${s.account.name}  in ${s.projectDir.name}  — ${describe(s)}$waiting$you"
+            val unasked = if (s !== caller && passesUnasked(caller, s)) ", takes your messages without asking the user" else ""
+            "- ${s.shortId}  \"${clean(s.title)}\"  ${s.account.provider.id}/${s.account.name}  in ${s.projectDir.name}  — ${describe(s)}$waiting$unasked$you"
         }
         return Outcome("Agent tabs open in nop. Address one by its id (the first column) or its exact title.\n$rows")
     }
@@ -83,15 +129,26 @@ object AgentMessages {
         if (target.inbox.size >= MAX_HELD) {
             return Outcome("\"${clean(target.title)}\" already has $MAX_HELD messages waiting for the user", isError = true)
         }
-        target.inbox.add(
-            Held(
-                from = "\"${clean(caller.title)}\" (${caller.shortId}, ${caller.account.provider.id}/${caller.account.name}, in ${caller.projectDir.name})",
-                fromId = caller.shortId,
-                body = text,
-                typed = envelope(caller, text),
-                at = System.currentTimeMillis(),
-            ),
+        val unasked = passesUnasked(caller, target)
+        val held = Held(
+            from = "\"${clean(caller.title)}\" (${caller.shortId}, ${caller.account.provider.id}/${caller.account.name}, in ${caller.projectDir.name})",
+            fromId = caller.shortId,
+            fromProject = caller.projectDir,
+            body = text,
+            typed = envelope(caller, text, unasked),
+            at = System.currentTimeMillis(),
         )
+        target.inbox.add(held)
+        if (unasked) {
+            held.approved = true
+            Log.info("agent message from ${caller.shortId} to ${target.shortId}: delivered without asking, as ${target.projectDir.name} allows")
+            startPump()
+            val waiting = waitReason(target)?.let { " It goes in once $it." }.orEmpty()
+            return Outcome(
+                "Delivered to \"${clean(target.title)}\" (${target.shortId}) without asking the user, since tabs in " +
+                    "${target.projectDir.name} may message each other freely. nop types it into that agent's prompt.$waiting",
+            )
+        }
         Log.info("agent message from ${caller.shortId} to ${target.shortId}: held for the user")
         return Outcome(
             "Held for the user in \"${clean(target.title)}\" (${target.shortId}). nop shows it there with your tab's name, " +
@@ -104,8 +161,12 @@ object AgentMessages {
         if (held !in session.inbox) return
         held.approved = true
         Log.info("agent message from ${held.fromId} to ${session.shortId}: delivered by the user")
+        startPump()
+    }
+
+    private fun startPump() {
         pump(System.currentTimeMillis())
-        if (session.inbox.any { it.approved }) pump.start()
+        if (sessions().any { s -> !s.ended && s.inbox.any { it.approved } }) pump.start()
     }
 
     /** The user taking back a Deliver that has not gone in yet. */
@@ -175,11 +236,12 @@ object AgentMessages {
     /**
      * [text] as the recipient reads it: who it is from and how to answer, above the message. The
      * header is the whole of what tells an agent this did not come from the user — though the user
-     * did choose to let it through.
+     * did choose to let it through, one message at a time or for the whole project.
      */
-    internal fun envelope(from: AgentSession, text: String): String = clean(
+    internal fun envelope(from: AgentSession, text: String, unasked: Boolean = false): String = clean(
         "[Message via nop from agent \"${from.title}\" (id ${from.shortId}, ${from.account.provider.id}/${from.account.name}, " +
-            "in ${from.projectDir.name}). It is not from the user, who read it and chose to deliver it. " +
+            "in ${from.projectDir.name}). It is not from the user, " +
+            (if (unasked) "who lets this project's tabs message each other without reading each message first. " else "who read it and chose to deliver it. ") +
             "To reply, run: nop-msg send ${from.shortId} \"<your reply>\"]",
     ) + "\n\n" + clean(text)
 

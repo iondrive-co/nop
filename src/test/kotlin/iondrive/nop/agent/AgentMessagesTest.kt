@@ -90,6 +90,52 @@ class AgentMessagesTest {
         assertTrue(to.inbox.isEmpty())
     }
 
+    private fun <T> withConfigRoot(root: Path, block: () -> T): T {
+        val original = iondrive.nop.Settings.configRoot
+        iondrive.nop.Settings.configRoot = root
+        AgentMessages.forgetAutoDeliver()
+        try {
+            return block()
+        } finally {
+            iondrive.nop.Settings.configRoot = original
+            AgentMessages.forgetAutoDeliver()
+        }
+    }
+
+    @Test
+    fun `a project the user opened up delivers between its own tabs without asking`(
+        @TempDir project: Path,
+        @TempDir elsewhere: Path,
+        @TempDir config: Path,
+    ) = withConfigRoot(config) {
+        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        val (stranger) = tabs(elsewhere, "stranger" to Provider.Antigravity)
+        AgentMessages.sessions = { listOf(from, to, stranger) }
+
+        val before = onEdt { AgentMessages.send(from, to.shortId, "before") }
+        assertTrue(before.text.startsWith("Held for the user"), before.text)
+
+        // Turned on, what the project's tabs already hold from each other goes in too.
+        onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }
+        assertTrue(to.inbox.single().approved)
+        assertTrue(iondrive.nop.Settings.loadAgentAutoDeliver(project), "the choice is kept")
+
+        val after = onEdt { AgentMessages.send(from, to.shortId, "after") }
+        assertTrue(after.text.startsWith("Delivered"), after.text)
+        val held = to.inbox.last()
+        assertTrue(held.approved)
+        assertTrue("without reading each message first" in held.typed)
+
+        // Another project's tab is held all the same.
+        val foreign = onEdt { AgentMessages.send(stranger, to.shortId, "from outside") }
+        assertTrue(foreign.text.startsWith("Held for the user"), foreign.text)
+        assertFalse(to.inbox.last().approved)
+
+        onEdt { AgentMessages.setAutoDeliver(project.toFile(), false) }
+        assertFalse(iondrive.nop.Settings.loadAgentAutoDeliver(project))
+        assertTrue(onEdt { AgentMessages.send(from, to.shortId, "off again") }.text.startsWith("Held for the user"))
+    }
+
     @Test
     fun `no control byte of a message survives to be typed`() {
         val sneaky = "fine\u001b[201~\rrm -rf ~\u0003\r\n\u202Eevil\u0007 end\tok"

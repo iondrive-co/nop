@@ -2082,6 +2082,7 @@ fun App(
             val config = agentConfig ?: AgentConfig()
             AccountsDialog(
                 config = config,
+                project = projectPath.toFile(),
                 readings = agentUsage,
                 modelsFor = { account ->
                     agentModels[account.name] ?: account.provider.fallbackModels
