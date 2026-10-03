@@ -60,6 +60,9 @@ class AgentSessions {
     /** When an account can be served again, by the same readings. See [AgentSession.spentUntil]. */
     var spentUntil: (Account) -> java.time.Instant? = { _ -> null }
 
+    /** Whether an account waits out its wall and is told to resume. See [Account.resumeAfterReset]. */
+    var resumesAfterReset: (Account) -> Boolean = { _ -> false }
+
     /**
      * Launches [account] at [dir] as a new session and shows it, in the tab the picker was in.
      *
@@ -85,6 +88,7 @@ class AgentSessions {
             handoverTarget = { from -> handoverTarget(from) },
             hasRunOut = { of -> hasRunOut(of) },
             spentUntil = { of -> spentUntil(of) },
+            resumesAfterReset = { of -> resumesAfterReset(of) },
             onExited = { ended -> close(ended.sessionId) },
         )
         _sessions.add(session)
@@ -158,6 +162,7 @@ class AgentSessions {
                     handoverTarget = { from -> handoverTarget(from) },
                     hasRunOut = { of -> hasRunOut(of) },
                     spentUntil = { of -> spentUntil(of) },
+                    resumesAfterReset = { of -> resumesAfterReset(of) },
                     onExited = { ended -> close(ended.sessionId) },
                 ),
             )
@@ -195,6 +200,7 @@ class AgentSessions {
             handoverTarget = { from -> handoverTarget(from) },
             hasRunOut = { of -> hasRunOut(of) },
             spentUntil = { of -> spentUntil(of) },
+            resumesAfterReset = { of -> resumesAfterReset(of) },
             onExited = { ended -> close(ended.sessionId) },
             adoption = record to adopted,
         )

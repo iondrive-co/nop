@@ -38,6 +38,13 @@ data class Account(
      * [handoverTarget], which is also where a name that no longer matches anything goes quiet.
      */
     val handoverTo: String? = null,
+    /**
+     * Whether to keep this account's work where it is when it runs out: leave the CLI at its wall,
+     * and once the window has reset, type a message into it telling it to carry on. Takes the place
+     * of [handoverTo], which [handoverTarget] ignores while this is set — the conversation stays
+     * whole, at the cost of the wait. See [AgentSession.onQuotaWall].
+     */
+    val resumeAfterReset: Boolean = false,
 ) {
     val homePath: Path get() = Path.of(home)
 
@@ -74,9 +81,17 @@ data class Account(
  */
 fun List<Account>.handoverTarget(from: Account): Account? {
     val currentFrom = firstOrNull { it.name == from.name } ?: from
+    if (currentFrom.resumeAfterReset) return null
     val nominated = currentFrom.handoverTo?.takeIf { it != currentFrom.name } ?: return null
     return firstOrNull { it.name == nominated }
 }
+
+/**
+ * Whether [from] waits out its wall and is told to resume, rather than handing over or asking. Read
+ * from [this] list for the same reason as [handoverTarget]: a change made mid-session applies.
+ */
+fun List<Account>.resumesAfterReset(from: Account): Boolean =
+    (firstOrNull { it.name == from.name } ?: from).resumeAfterReset
 
 /**
  * Every account nop knows about.

@@ -176,6 +176,31 @@ fun AgentSessionBar(
             }
         }
 
+        // A tab sitting at its wall on purpose looks exactly like one that died there; this says
+        // which, and when it will be told to carry on.
+        session.resumeWait?.let { wait ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val at = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+                    .format(wait.resumeAt.atZone(java.time.ZoneId.systemDefault()))
+                Text(
+                    "${wait.account} hit its ${wait.kind} — " +
+                        (if (wait.resetKnown) "it resets at $at, and nop will tell it to resume then."
+                        else "nothing says when it resets; nop checks again at $at and tells it to resume."),
+                    color = ChangeColors.MODIFIED,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "Don't resume",
+                    color = AgentMuted,
+                    modifier = Modifier.clickable { session.cancelResume() },
+                )
+            }
+        }
+
         if (expanded && others.isNotEmpty()) {
             Text(
                 "Ends this run, writes a summary of it, and opens the chosen account on that summary.",

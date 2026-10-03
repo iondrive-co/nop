@@ -42,6 +42,7 @@ import iondrive.nop.agent.Provider
 import iondrive.nop.agent.Usage
 import iondrive.nop.agent.UsageReading
 import iondrive.nop.agent.handoverTarget
+import iondrive.nop.agent.resumesAfterReset
 import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.CommitIdentity
 import iondrive.nop.git.CommitInfo
@@ -758,6 +759,7 @@ fun App(
     // settings change, so a nomination made mid-session is the one that session uses.
     LaunchedEffect(agentSessions, agentAccounts) {
         agentSessions.handoverTarget = { from -> agentAccounts.handoverTarget(from) }
+        agentSessions.resumesAfterReset = { from -> agentAccounts.resumesAfterReset(from) }
     }
     // Two sources, because "the sessions on this project" is not the same set as "the sessions nop
     // ran on this project". nop's own event logs know the account and carry the name the user gave

@@ -66,6 +66,8 @@ object Handover {
         val startedAt: Long,
         val userPromptSubmitted: Boolean,
         val waitedOutWallAt: Long? = null,
+        /** Epoch millis nop meant to tell the run to resume at, while it was waiting out a wall. */
+        val resumeAt: Long? = null,
         val transcriptPath: String? = null,
         val transcriptOffset: Long? = null,
         val tracker: ActivityTracker.Snapshot = ActivityTracker.Snapshot(),

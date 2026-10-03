@@ -3,6 +3,7 @@ package iondrive.nop
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.handoverTarget
+import iondrive.nop.agent.resumesAfterReset
 import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.terminal.Posix
@@ -124,6 +125,7 @@ object RestartInPlace {
             val sessions = projects.map { AgentSessionStore.of(root, it) }.last()
             // Until the project's own window is up to push the live settings in, the ones on disk.
             sessions.handoverTarget = { from -> accounts.handoverTarget(from) }
+            sessions.resumesAfterReset = { from -> accounts.resumesAfterReset(from) }
             val session = sessions.adopt(record, adopted, root.toFile(), account)
             runCatching { session.session.getOrCreateWidget() }
                 .onFailure { Log.error("restart: could not attach agent tab ${record.title}", it) }

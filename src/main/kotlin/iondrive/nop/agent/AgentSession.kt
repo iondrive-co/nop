@@ -38,6 +38,12 @@ enum class EndReason { Exited, Quota, Switched, Killed }
 data class AutoHandover(val from: String, val to: String, val kind: String)
 
 /**
+ * A wall this session is waiting out so it can tell the CLI to carry on, for the session bar to say
+ * so. [resumeAt] is when nop next checks, which is the reset when anything said when that is.
+ */
+data class ResumeWait(val account: String, val kind: String, val resumeAt: Instant, val resetKnown: Boolean)
+
+/**
  * One run of one account's CLI inside a session: the argv and environment it was started with, the
  * PTY behind it, and the native session id its transcript is filed under.
  *
@@ -190,6 +196,11 @@ class AgentSession(
      * changes.
      */
     private val spentUntil: (Account) -> Instant? = { _ -> null },
+    /**
+     * Whether [account] waits out its wall and is then told to resume, rather than handing over or
+     * ending the run. Asked at the wall for the same reason as [handoverTarget].
+     */
+    private val resumesAfterReset: (Account) -> Boolean = { _ -> false },
     /**
      * What to do when the CLI in this tab quits of its own accord and cleanly — `/exit`, `quit`,
      * Ctrl-D at its prompt. Wired by [AgentSessions] to closing the tab.
@@ -451,7 +462,12 @@ class AgentSession(
         if (next != was) {
             live = next
             activitySince = now
-            if (next == Activity.Working) hasWorked = true
+            if (next == Activity.Working) {
+                hasWorked = true
+                // The CLI went back to work by itself — Claude Code does once its window resets —
+                // so the message nop was going to type would only queue a second turn.
+                if (resumeWait != null) carriedOnDuringWait = true
+            }
             noteChange(was, next)
         }
         if (settles != null && settles > now) {
@@ -501,6 +517,95 @@ class AgentSession(
     }
 
     /**
+     * The wall this session is waiting out before it tells the CLI to resume, or null when it is not
+     * waiting. See [Account.resumeAfterReset] and [resumeIfDue].
+     */
+    var resumeWait: ResumeWait? by mutableStateOf(null)
+        private set
+
+    /** Whether the CLI started a turn of its own while [resumeWait] was pending. */
+    private var carriedOnDuringWait = false
+
+    private var resumeTimer: javax.swing.Timer? = null
+
+    init {
+        // A wait the last nop was in the middle of, handed across a restart with the run itself.
+        adoption?.first?.resumeAt?.let { at ->
+            scheduleResume(run, ResumeWait(run.account.name, "usage limit", Instant.ofEpochMilli(at), true), Instant.now())
+        }
+    }
+
+    /** The user calling the wait off: nothing is typed, and the CLI is left as it stands. */
+    fun cancelResume() {
+        if (resumeWait == null) return
+        Log.info("resume of ${run.account.name} after its wall called off by the user")
+        stopResumeWait()
+    }
+
+    private fun stopResumeWait() {
+        resumeTimer?.stop()
+        resumeTimer = null
+        resumeWait = null
+    }
+
+    /** Waits until [at] (plus a little, so a CLI that resumes by itself has done so) then checks. */
+    private fun scheduleResume(forRun: AgentRun, wait: ResumeWait, now: Instant) {
+        resumeWait = wait
+        resumeTimer?.stop()
+        if (GraphicsEnvironment.isHeadless()) return
+        val delay = Duration.between(now, wait.resumeAt).plus(RESUME_SLACK).toMillis()
+            .coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+        resumeTimer = javax.swing.Timer(delay) { if (run === forRun) resumeIfDue() }
+            .apply { isRepeats = false }
+            .also { it.start() }
+    }
+
+    /**
+     * The moment a waited-out wall should have lifted: tells the CLI to carry on, unless it already
+     * has, or the account still reads spent, or the tab cannot take a message yet — each of which
+     * waits again rather than giving up.
+     *
+     * Internal, with [now], so a test can drive it; the timer that calls it for real is
+     * [scheduleResume].
+     */
+    internal fun resumeIfDue(now: Instant = Instant.now()) {
+        val wait = resumeWait ?: return
+        val current = run
+        if (current.endReason != null || current.account.name != wait.account) {
+            stopResumeWait()
+            return
+        }
+        if (carriedOnDuringWait || live == Activity.Working) {
+            Log.info("${current.account.name} carried on by itself after its wall; nothing to type")
+            stopResumeWait()
+            current.waitedOutWallAt = now
+            quotaWatcher.reset()
+            return
+        }
+        if (hasRunOut(current.account) == true) {
+            val next = spentUntil(current.account)?.takeIf { it.isAfter(now) }
+            Log.info(
+                "${current.account.name} still reads spent; resuming it at " +
+                    (next?.toString() ?: "the next check, in ${RESUME_RECHECK.toMinutes()} min"),
+            )
+            scheduleResume(current, wait.copy(resumeAt = next ?: now.plus(RESUME_RECHECK), resetKnown = next != null), now)
+            return
+        }
+        val notYet = AgentMessages.waitReason(this, now.toEpochMilli())
+        if (notYet != null) {
+            Log.info("${current.account.name} is due to resume, but not until $notYet")
+            scheduleResume(current, wait.copy(resumeAt = now.plus(RESUME_RETRY)), now)
+            return
+        }
+        Log.info("${current.account.name}'s wall has lifted; telling it to resume")
+        stopResumeWait()
+        // Anything redrawn from the old wall after this is that wall; a new one files a new refusal.
+        current.waitedOutWallAt = now
+        quotaWatcher.reset()
+        current.session.submit(RESUME_PROMPT)
+    }
+
+    /**
      * Kills the current run and starts [account]'s CLI in its place, optionally seeded with a
      * prompt or resuming a native session. The session id, tab and history entry all stay put.
      */
@@ -515,6 +620,7 @@ class AgentSession(
         val wasStarted = run.session.isStarted
         val prevColors = run.session.themeColors
         val from = run.account.provider.id
+        stopResumeWait()
         endRun(reason)
         run.session.dispose()
         log.append(
@@ -743,6 +849,27 @@ class AgentSession(
             return
         }
 
+        // Asked to stay put: the CLI is left at its wall with its conversation whole, and told to
+        // carry on once the window has reset. Ahead of the short wait above being needed, since this
+        // covers it — a CLI that resumes by itself is noticed and not typed at.
+        if (resumesAfterReset(current.account)) {
+            val resetAt = hit.resetsIn?.let { now.plus(it) } ?: spentUntil(current.account)?.takeIf { it.isAfter(now) }
+            Log.info(
+                "agent quota wall on ${current.account.name} ($why); waiting " +
+                    (resetAt?.let { "for its reset at $it" } ?: "${RESUME_RECHECK.toMinutes()} min, as nothing says when it resets") +
+                    ", then telling it to resume: ${hit.line}",
+            )
+            // Redraws of this wall while the CLI sits at it are this wall, not a new one.
+            current.waitedOutWallAt = now
+            carriedOnDuringWait = false
+            scheduleResume(
+                current,
+                ResumeWait(current.account.name, hit.kind, resetAt ?: now.plus(RESUME_RECHECK), resetAt != null),
+                now,
+            )
+            return
+        }
+
         Log.info("agent quota wall on ${current.account.name} ($why): ${hit.line}")
         current.quota = hit
         spent[current.account.name] = now
@@ -905,6 +1032,7 @@ class AgentSession(
             startedAt = current.startedAt.toEpochMilli(),
             userPromptSubmitted = current.userPromptSubmitted,
             waitedOutWallAt = current.waitedOutWallAt?.toEpochMilli(),
+            resumeAt = resumeWait?.resumeAt?.toEpochMilli(),
             transcriptPath = position?.first?.toString(),
             transcriptOffset = position?.second,
             tracker = synchronized(current.tracker) { current.tracker.snapshot() },
@@ -922,12 +1050,14 @@ class AgentSession(
         if (handedOver) {
             // The run is the next nop's: nothing to end, kill or drain. Only this nop's hold on it goes.
             settleTimer?.stop()
+            resumeTimer?.stop()
             run.session.dispose()
             log.close()
             return
         }
         endRun(EndReason.Killed)
         settleTimer?.stop()
+        stopResumeWait()
         run.session.dispose()
         log.close()
     }
@@ -1153,5 +1283,21 @@ class AgentSession(
 
         /** Past the reset before the watcher listens again, so the poller has had a chance to see it. */
         private const val REARM_SLACK_MS = 5_000
+
+        /**
+         * Past the reset before nop types anything: long enough for a CLI that resumes by itself to
+         * have started, and for the poller to have read the window as rolled over.
+         */
+        private val RESUME_SLACK: Duration = Duration.ofSeconds(60)
+
+        /** How long to wait again when nothing says when a spent account resets. */
+        internal val RESUME_RECHECK: Duration = Duration.ofMinutes(15)
+
+        /** How long to wait again when the tab cannot take a message yet — asking a question, say. */
+        private val RESUME_RETRY: Duration = Duration.ofMinutes(1)
+
+        /** What nop types into a CLI whose wall has lifted. */
+        internal const val RESUME_PROMPT: String =
+            "Your usage limit has reset. Carry on with what you were doing."
     }
 }

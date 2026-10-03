@@ -201,6 +201,9 @@ fun AccountsDialog(
  */
 internal const val HANDOVER_ASK: String = "ask me"
 
+/** The handover picker's choice for staying on the account and resuming it once its window resets. */
+internal const val HANDOVER_RESUME: String = "wait, then resume"
+
 /** One account's row: what it runs as, whether it is signed in, and the two things you can do to it. */
 @Composable
 private fun AccountEditor(
@@ -281,9 +284,19 @@ private fun AccountEditor(
         ) {
             ChoicePicker(
                 label = "When it runs out switch to:",
-                options = listOf(HANDOVER_ASK) + others,
-                selected = account.handoverTo?.takeIf { it in others } ?: HANDOVER_ASK,
-                onSelect = { onChange(account.copy(handoverTo = it.takeIf { v -> v != HANDOVER_ASK })) },
+                options = listOf(HANDOVER_ASK, HANDOVER_RESUME) + others,
+                selected = when {
+                    account.resumeAfterReset -> HANDOVER_RESUME
+                    else -> account.handoverTo?.takeIf { it in others } ?: HANDOVER_ASK
+                },
+                onSelect = {
+                    onChange(
+                        account.copy(
+                            handoverTo = it.takeIf { v -> v != HANDOVER_ASK && v != HANDOVER_RESUME },
+                            resumeAfterReset = it == HANDOVER_RESUME,
+                        ),
+                    )
+                },
             )
         }
         Row(

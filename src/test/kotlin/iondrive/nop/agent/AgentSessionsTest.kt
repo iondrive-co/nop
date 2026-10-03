@@ -263,6 +263,57 @@ class AgentSessionsTest {
         assertTrue(session.ended, "with everybody spent, the run ends and the user is asked")
     }
 
+    /**
+     * The alternative to handing over: the CLI stays at its wall with its conversation whole, and
+     * once the window has reset nop tells it to carry on.
+     */
+    @Test
+    fun `an account set to wait keeps its run and is told to resume after the reset`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", handoverTo = "codex", resumeAfterReset = true)
+        val codex = Account("codex", Provider.OpenAI, "/homes/codex")
+        val accounts = listOf(claude, codex)
+        val state = sessions()
+        state.handoverTarget = { from -> accounts.handoverTarget(from) }
+        state.resumesAfterReset = { from -> accounts.resumesAfterReset(from) }
+        var spent = true
+        state.hasRunOut = { spent }
+        val now = java.time.Instant.parse("2026-10-03T12:00:00Z")
+        val reset = now.plus(Duration.ofHours(2))
+        state.spentUntil = { reset }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "you have hit your usage limit"), now)
+
+        assertEquals("claude-main", session.account.name, "waiting means not handing over")
+        assertFalse(session.ended, "the CLI is left at its wall, not killed")
+        assertEquals(reset, session.resumeWait?.resumeAt)
+
+        // Still spent when the timer fires: wait again rather than type into a wall.
+        session.resumeIfDue(reset)
+        assertNotNull(session.resumeWait, "a reading that still says spent puts the resume off")
+
+        spent = false
+        session.resumeIfDue(reset.plus(Duration.ofMinutes(16)))
+        // The PTY was never started here, so the message waits for a CLI that can take it.
+        assertNotNull(session.resumeWait)
+        assertFalse(session.ended)
+    }
+
+    @Test
+    fun `calling off a resume leaves the run as it stands`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", resumeAfterReset = true)
+        val state = sessions()
+        state.resumesAfterReset = { from -> listOf(claude).resumesAfterReset(from) }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "you have hit your usage limit"))
+        assertNotNull(session.resumeWait)
+        session.cancelResume()
+
+        assertNull(session.resumeWait)
+        assertFalse(session.ended)
+    }
+
     /** A wall reported for a run that is already over is news about nothing. */
     @Test
     fun `a wall hit after the run has ended changes nothing`(@TempDir tmp: Path) {
