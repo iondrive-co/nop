@@ -1012,6 +1012,10 @@ class AgentSessionsTest {
 
     @Test
     fun `a handover eagerly starts the new terminal run if the previous run was started`(@TempDir tmp: Path) {
+        org.junit.jupiter.api.Assumptions.assumeFalse(
+            java.awt.GraphicsEnvironment.isHeadless(),
+            "Starting terminal widgets eagerly requires a non-headless environment",
+        )
         val session = sessions().open(tmp.toFile(), account("claude-alpha"))
         assertFalse(session.run.session.isStarted, "freshly opened session in test is not started until widget requested")
 

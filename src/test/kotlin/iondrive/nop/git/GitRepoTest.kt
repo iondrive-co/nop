@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.util.concurrent.CancellationException
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 
@@ -429,6 +430,60 @@ class GitRepoTest {
             locked.setReadable(true)
             repo.close()
         }
+    }
+
+    @Test
+    fun `cancellation during sequential stageAndCommit rolls back staged files and leaves repo clean`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "base.txt").writeText("base\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+
+        (tmp / "change1.txt").writeText("c1\n")
+        (tmp / "change2.txt").writeText("c2\n")
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val headBefore = repo.headSha()
+        val changes = repo.loadStatus().changes
+
+        var checkCount = 0
+        assertThrows(CancellationException::class.java) {
+            repo.stageAndCommit("cancelled", changes, isCancelled = {
+                checkCount++ >= 2
+            })
+        }
+
+        assertEquals(headBefore, repo.headSha(), "HEAD must not move after cancellation")
+        assertTrue(
+            gitOutput(tmp, "git diff --cached --name-only").isEmpty(),
+            "no path may be left staged after cancellation",
+        )
+        assertTrue((tmp / "change1.txt").toFile().exists())
+        assertTrue((tmp / "change2.txt").toFile().exists())
+        assertEquals(2, repo.loadStatus().changes.size)
+        repo.close()
+    }
+
+    @Test
+    fun `cancellation during parallel staging leaves index untouched and preserves working tree`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / "seed.txt").writeText("seed\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        seedBulkTree(tmp)
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val headBefore = repo.headSha()
+        val changes = repo.loadStatus().changes
+
+        assertThrows(CancellationException::class.java) {
+            repo.stageAndCommit("cancelled bulk", changes, isCancelled = { true })
+        }
+
+        assertEquals(headBefore, repo.headSha(), "HEAD must not move after cancellation")
+        assertTrue(
+            gitOutput(tmp, "git diff --cached --name-only").isEmpty(),
+            "no path may be left staged after cancelling parallel staging",
+        )
+        repo.close()
     }
 
     @Test

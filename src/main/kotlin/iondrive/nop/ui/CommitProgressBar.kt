@@ -1,9 +1,17 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -18,6 +26,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
@@ -27,19 +37,26 @@ import iondrive.nop.git.CommitProgress
 import kotlinx.coroutines.delay
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.Tooltip
+import java.awt.Cursor
 import java.util.Locale
 import kotlin.math.roundToLong
 
 /**
  * The commit button's face while a commit runs: a progress bar with the percentage and an ETA
- * written inside it. Sized to its widest possible label so the readout doesn't shuffle the button's
- * width as the numbers change.
+ * written inside it, and an 'x' to cancel the staging/commit if [onCancel] is provided.
+ * Sized to its widest possible label so the readout doesn't shuffle the button's width as the numbers change.
  *
  * Falls back to a bar with no fill and a phase-plus-elapsed label whenever the work isn't
  * measurable — see [CommitProgress.bytesTotal].
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-internal fun CommitProgressBar(progress: CommitProgress?, nowMillis: Long) {
+internal fun CommitProgressBar(
+    progress: CommitProgress?,
+    nowMillis: Long,
+    onCancel: (() -> Unit)? = null,
+) {
     val fraction = progress?.fraction ?: 0f
     val dark = JewelTheme.isDark
     // The bar sits inside a disabled button, so both halves of the track have to carry legible
@@ -52,9 +69,9 @@ internal fun CommitProgressBar(progress: CommitProgress?, nowMillis: Long) {
 
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val barWidth = remember(style, density) {
+    val barWidth = remember(style, density, onCancel != null) {
         val widest = WIDEST_LABELS.maxOf { measurer.measure(it, style).size.width }
-        with(density) { widest.toDp() } + PROGRESS_LABEL_PADDING * 2
+        with(density) { widest.toDp() } + PROGRESS_LABEL_PADDING * 2 + (if (onCancel != null) CANCEL_BUTTON_WIDTH + 4.dp else 0.dp)
     }
 
     Box(
@@ -66,21 +83,88 @@ internal fun CommitProgressBar(progress: CommitProgress?, nowMillis: Long) {
             // Drawn rather than laid out as a child Box: a fraction of 0 has to leave no trace,
             // and a rectangle of zero width is simpler to guarantee than a zero-weight layout.
             .drawBehind { drawRect(fill, size = Size(size.width * fraction, size.height)) }
-            .padding(horizontal = PROGRESS_LABEL_PADDING),
+            .padding(
+                start = PROGRESS_LABEL_PADDING,
+                end = if (onCancel != null) 2.dp else PROGRESS_LABEL_PADDING,
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            commitProgressLabel(progress, nowMillis),
-            style = style,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Tooltip(
+                tooltip = { Text(commitProgressDetail(progress, nowMillis)) },
+                modifier = Modifier.weight(1f),
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        commitProgressLabel(progress, nowMillis),
+                        style = style,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (onCancel != null) {
+                Tooltip(tooltip = { Text("Cancel commit") }) {
+                    CancelProgressButton(
+                        isDark = dark,
+                        labelColor = labelColor,
+                        onCancel = onCancel,
+                    )
+                }
+            }
+        }
     }
 }
 
 private val PROGRESS_BAR_HEIGHT = 16.dp
 private val PROGRESS_LABEL_PADDING = 5.dp
 private val PROGRESS_FONT_SIZE = 11.sp
+private val CANCEL_BUTTON_WIDTH = 14.dp
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun CancelProgressButton(
+    isDark: Boolean,
+    labelColor: Color,
+    onCancel: () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    val tint = if (hovered) {
+        if (isDark) Color(0xFFFFFFFF) else Color(0xFF000000)
+    } else {
+        labelColor.copy(alpha = 0.7f)
+    }
+    val bg = if (hovered) {
+        if (isDark) Color(0x33FFFFFF) else Color(0x22000000)
+    } else {
+        Color.Transparent
+    }
+    Box(
+        modifier = Modifier
+            .size(CANCEL_BUTTON_WIDTH)
+            .clip(RoundedCornerShape(2.dp))
+            .background(bg)
+            .hoverable(interaction)
+            .pointerHoverIcon(PointerIcon(Cursor(Cursor.HAND_CURSOR)))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onCancel,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(7.dp)) {
+            drawCloseIcon(tint)
+        }
+    }
+}
 
 /**
  * The longest labels [commitProgressLabel] can produce, which is what the bar is sized from. An

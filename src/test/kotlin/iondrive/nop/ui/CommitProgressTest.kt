@@ -121,4 +121,11 @@ class CommitProgressTest {
         assertEquals("512 MB", formatBytes(512L * 1024 * 1024))
         assertEquals("1.0 TB", formatBytes(1024L * 1024 * 1024 * 1024))
     }
+
+    @Test
+    fun `refreshing phase shows reloading detail`() {
+        val refreshing = CommitProgress(Phase.REFRESHING, startedAtMillis = start)
+        assertEquals("Refreshing… 2s", commitProgressLabel(refreshing, start + 2_000))
+        assertEquals("Reloading the file list\n2s elapsed", commitProgressDetail(refreshing, start + 2_000))
+    }
 }

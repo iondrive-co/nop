@@ -3,7 +3,10 @@ package iondrive.nop.terminal
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeFalse
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.awt.GraphicsEnvironment
 import java.awt.Image
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
@@ -18,6 +21,11 @@ import java.nio.file.Path
 class NopTerminalCopyPasteHandlerTest {
 
     private val handler = NopTerminalCopyPasteHandler()
+
+    @BeforeEach
+    fun checkNotHeadless() {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "Clipboard tests require a non-headless environment")
+    }
 
     @Test
     fun `pasting text returns the text`() {

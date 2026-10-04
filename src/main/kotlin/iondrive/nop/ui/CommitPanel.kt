@@ -93,6 +93,7 @@ fun CommitPanel(
     // How far the running commit has got, or null when nothing is known yet — the commit button's
     // readout. See [CommitProgressBar].
     commitProgress: CommitProgress? = null,
+    onCancelCommit: (() -> Unit)? = null,
     // Bumped by the caller each time a commit or stash lands, which empties the message field.
     messageClearTrigger: Int = 0,
     // Hoisted, like [SearchPanel]'s query: the tool panel composes one tab at a time, so a message
@@ -198,29 +199,38 @@ fun CommitPanel(
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     val commitButton: @Composable () -> Unit = {
-                        DefaultButton(
-                            onClick = {
-                                val msg = messageState.text.toString().trim()
-                                if (msg.isNotEmpty()) {
-                                    val included = status.changes.filter { it.path in selectedPaths }
-                                    if (included.isNotEmpty()) {
-                                        onCommit(msg, included)
+                        if (commitInFlight) {
+                            val dark = JewelTheme.isDark
+                            val borderColor = if (dark) Color(0xFF43454A) else Color(0xFFDFE1E5)
+                            Box(
+                                modifier = Modifier
+                                    .heightIn(min = 28.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .border(1.dp, borderColor, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CommitProgressBar(commitProgress, now, onCancel = onCancelCommit)
+                            }
+                        } else {
+                            DefaultButton(
+                                onClick = {
+                                    val msg = messageState.text.toString().trim()
+                                    if (msg.isNotEmpty()) {
+                                        val included = status.changes.filter { it.path in selectedPaths }
+                                        if (included.isNotEmpty()) {
+                                            onCommit(msg, included)
+                                        }
                                     }
-                                }
-                            },
-                            enabled = !commitInFlight && !stashInFlight && !revertInFlight &&
-                                messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
-                        ) {
-                            // A commit of a large change set can run for minutes, so while one runs
-                            // the label becomes a progress bar with the percentage and an ETA in it.
-                            if (commitInFlight) CommitProgressBar(commitProgress, now) else Text("Commit")
+                                },
+                                enabled = !stashInFlight && !revertInFlight &&
+                                    messageState.text.toString().isNotBlank() && selectedPaths.isNotEmpty(),
+                            ) {
+                                Text("Commit")
+                            }
                         }
                     }
-                    if (commitInFlight) {
-                        Tooltip(tooltip = { Text(commitProgressDetail(commitProgress, now)) }) { commitButton() }
-                    } else {
-                        commitButton()
-                    }
+                    commitButton()
                     // Takes the same tick marks as Commit — the shelf is where a change goes
                     // when it isn't ready to be committed, so choosing what goes on it is the same
                     // choice. The tooltip says so, since the label no longer can.

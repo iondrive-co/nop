@@ -49,6 +49,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.time.Instant
 import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
@@ -110,40 +111,75 @@ class GitRepo private constructor(
         partial: Boolean = false,
         startedAtMillis: Long = System.currentTimeMillis(),
         identity: CommitIdentity? = null,
+        isCancelled: () -> Boolean = { false },
         onProgress: (CommitProgress) -> Unit = {},
     ): String {
+        if (isCancelled()) throw CancellationException("Commit cancelled")
         val (removed, staged) = changes.partition {
             it.kind == ChangeKind.REMOVED || it.kind == ChangeKind.MISSING
         }
         val progress = ProgressEmitter(onProgress, startedAtMillis, filesTotal = staged.size)
         progress.enter(CommitProgress.Phase.STAGING)
-        if (staged.isNotEmpty() && !stageBlobsInParallel(staged, progress)) {
-            // AddCommand reports nothing as it walks, so this path stays on elapsed time only:
-            // the emitter's byte total is still 0 and the button shows "Staging… 1m 20s".
-            val add = git.add()
-            staged.forEach { add.addFilepattern(it.path) }
-            add.call()
-        }
-        if (removed.isNotEmpty()) {
-            val rm = git.rm().setCached(true)
-            removed.forEach { rm.addFilepattern(it.path) }
-            rm.call()
-        }
-        progress.enter(CommitProgress.Phase.COMMITTING)
-        val commit = git.commit().setMessage(message).apply {
-            if (identity != null) {
-                setAuthor(identity.name, identity.email)
-                setCommitter(identity.name, identity.email)
+        val stagedPaths = mutableListOf<String>()
+        var parallelCommitted = false
+        try {
+            if (staged.isNotEmpty()) {
+                if (!stageBlobsInParallel(staged, progress, isCancelled)) {
+                    if (isCancelled()) throw CancellationException("Commit cancelled")
+                    for (change in staged) {
+                        if (isCancelled()) throw CancellationException("Commit cancelled")
+                        val add = git.add()
+                        add.addFilepattern(change.path)
+                        add.call()
+                        stagedPaths.add(change.path)
+                    }
+                } else {
+                    parallelCommitted = true
+                }
             }
-            if (partial) {
-                changes.forEach { setOnly(it.path) }
-                // JGit refuses an empty commit once a pathspec is set, where a commit of the whole
-                // index allows one. Keep the looser rule: a change set that races to a no-op is not
-                // worth an error dialog, and never was on the other path.
-                setAllowEmpty(true)
+            if (removed.isNotEmpty()) {
+                if (isCancelled()) throw CancellationException("Commit cancelled")
+                for (change in removed) {
+                    if (isCancelled()) throw CancellationException("Commit cancelled")
+                    val rm = git.rm().setCached(true)
+                    rm.addFilepattern(change.path)
+                    rm.call()
+                    stagedPaths.add(change.path)
+                }
             }
-        }.call()
-        return commit.name
+            if (isCancelled()) throw CancellationException("Commit cancelled")
+            progress.enter(CommitProgress.Phase.COMMITTING)
+            val commit = git.commit().setMessage(message).apply {
+                if (identity != null) {
+                    setAuthor(identity.name, identity.email)
+                    setCommitter(identity.name, identity.email)
+                }
+                if (partial) {
+                    changes.forEach { setOnly(it.path) }
+                    // JGit refuses an empty commit once a pathspec is set, where a commit of the whole
+                    // index allows one. Keep the looser rule: a change set that races to a no-op is not
+                    // worth an error dialog, and never was on the other path.
+                    setAllowEmpty(true)
+                }
+            }.call()
+            return commit.name
+        } catch (t: Throwable) {
+            if (parallelCommitted) {
+                try {
+                    val reset = git.reset()
+                    staged.forEach { reset.addPath(it.path) }
+                    reset.call()
+                } catch (_: Throwable) {}
+            }
+            if (stagedPaths.isNotEmpty()) {
+                try {
+                    val reset = git.reset()
+                    stagedPaths.forEach { reset.addPath(it) }
+                    reset.call()
+                } catch (_: Throwable) {}
+            }
+            throw t
+        }
     }
 
     /** Who this repository can commit as, the one it commits as by default first. See [identityChoices]. */
@@ -256,12 +292,18 @@ class GitRepo private constructor(
      * among them), any .gitattributes that could turn one into play, and symlinks all go back to
      * AddCommand, as does a change set too small for the threads to pay for themselves.
      */
-    private fun stageBlobsInParallel(staged: List<FileChange>, progress: ProgressEmitter): Boolean {
+    private fun stageBlobsInParallel(
+        staged: List<FileChange>,
+        progress: ProgressEmitter,
+        isCancelled: () -> Boolean = { false },
+    ): Boolean {
         if (staged.size < PARALLEL_STAGE_MIN_FILES) return false
         val plan = planStaging(staged)
         if (plan.fast.size < PARALLEL_STAGE_MIN_FILES) return false
         val fastBytes = plan.fast.sumOf { it.file.length() }
         if (fastBytes < PARALLEL_STAGE_MIN_BYTES && plan.fast.size < PARALLEL_STAGE_ALWAYS_FILES) return false
+
+        if (isCancelled()) throw CancellationException("Commit cancelled")
 
         // The plan is what makes progress measurable, and this is the earliest point it exists: now
         // the total is known, the button can switch from an elapsed clock to a percentage and ETA.
@@ -271,13 +313,39 @@ class GitRepo private constructor(
         val slowBytes = plan.slow.sumOf { File(rootDir.toFile(), it.path).length() }
         progress.expect(fastBytes + slowBytes)
 
+        val stagedSlow = mutableListOf<String>()
         // Anything needing conversion goes through AddCommand first. It takes and releases the
         // index lock itself, so it has to finish before the fast half locks the index in turn.
         if (plan.slow.isNotEmpty()) {
-            val add = git.add()
-            plan.slow.forEach { add.addFilepattern(it.path) }
-            add.call()
-            progress.advance(slowBytes, plan.slow.size)
+            try {
+                for (entry in plan.slow) {
+                    if (isCancelled()) throw CancellationException("Commit cancelled")
+                    val add = git.add()
+                    add.addFilepattern(entry.path)
+                    add.call()
+                    stagedSlow.add(entry.path)
+                    progress.advance(File(rootDir.toFile(), entry.path).length(), 1)
+                }
+            } catch (t: Throwable) {
+                if (stagedSlow.isNotEmpty()) {
+                    try {
+                        val reset = git.reset()
+                        stagedSlow.forEach { reset.addPath(it) }
+                        reset.call()
+                    } catch (_: Throwable) {}
+                }
+                throw t
+            }
+        }
+        if (isCancelled()) {
+            if (stagedSlow.isNotEmpty()) {
+                try {
+                    val reset = git.reset()
+                    stagedSlow.forEach { reset.addPath(it) }
+                    reset.call()
+                } catch (_: Throwable) {}
+            }
+            throw CancellationException("Commit cancelled")
         }
         progress.enter(CommitProgress.Phase.WRITING)
 
@@ -293,6 +361,9 @@ class GitRepo private constructor(
                 Callable {
                     repository.newObjectInserter().use { inserter ->
                         while (true) {
+                            if (isCancelled() || Thread.currentThread().isInterrupted) {
+                                throw CancellationException("Commit cancelled")
+                            }
                             val entry = queue.poll() ?: break
                             // If the file is being rewritten underneath us the stream runs short and
                             // insert throws — better a failed commit than one recording a length
@@ -317,7 +388,13 @@ class GitRepo private constructor(
                 }
             }
             // invokeAll waits for every worker, so no insert is still running when we unwind.
-            pool.invokeAll(tasks).forEach { it.get() }
+            val futures = pool.invokeAll(tasks)
+            for (f in futures) {
+                if (isCancelled()) throw CancellationException("Commit cancelled")
+                f.get()
+            }
+
+            if (isCancelled()) throw CancellationException("Commit cancelled")
 
             progress.enter(CommitProgress.Phase.COMMITTING)
             val editor = dirCache.editor()
@@ -335,7 +412,15 @@ class GitRepo private constructor(
             return true
         } catch (t: Throwable) {
             dirCache.unlock()
-            throw (t as? ExecutionException)?.cause ?: t
+            if (stagedSlow.isNotEmpty()) {
+                try {
+                    val reset = git.reset()
+                    stagedSlow.forEach { reset.addPath(it) }
+                    reset.call()
+                } catch (_: Throwable) {}
+            }
+            val cause = (t as? ExecutionException)?.cause ?: t
+            throw cause
         } finally {
             pool.shutdownNow()
         }

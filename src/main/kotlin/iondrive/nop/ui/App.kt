@@ -72,12 +72,15 @@ import iondrive.nop.terminal.TerminalSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -189,6 +192,7 @@ fun App(
     // A commit waiting on the "ticked for you" confirmation, or null when no dialog is open.
     var pendingCommit by remember(projectPath) { mutableStateOf<PendingCommit?>(null) }
     var commitInFlight by remember(projectPath) { mutableStateOf(false) }
+    var commitJob by remember(projectPath) { mutableStateOf<Job?>(null) }
     // Who the commit panel commits as: the identities on offer (the repository's default first),
     // the one picked, or null to go with that default, and the "Save for this repo" tick. The pick
     // lasts while the project is open and no longer, so a restart always shows the config's own.
@@ -1075,7 +1079,7 @@ fun App(
     // nop ticked some of those files by itself.
     fun performCommit(message: String, included: List<FileChange>, commitAs: CommitAs) {
         if (repo == null || commitInFlight) return
-        scope.launch {
+        commitJob = scope.launch {
             commitInFlight = true
             val startedAt = System.currentTimeMillis()
             commitProgressFlow.value = CommitProgress(CommitProgress.Phase.STAGING, startedAtMillis = startedAt)
@@ -1093,6 +1097,7 @@ fun App(
                             startedAtMillis = startedAt,
                             identity = commitAs.identity,
                             onProgress = { commitProgressFlow.value = it },
+                            isCancelled = { !coroutineContext.isActive },
                         )
                     }
                     if (commitAs.save) {
@@ -1108,9 +1113,15 @@ fun App(
                     commitProgressFlow.value = CommitProgress(CommitProgress.Phase.REFRESHING, startedAtMillis = startedAt)
                     reloadStatus()
                 }
+            } catch (c: CancellationException) {
+                withContext(NonCancellable) {
+                    commitProgressFlow.value = CommitProgress(CommitProgress.Phase.REFRESHING, startedAtMillis = startedAt)
+                    reloadStatus()
+                }
             } finally {
                 commitInFlight = false
                 commitProgressFlow.value = null
+                commitJob = null
             }
         }
     }
@@ -1919,6 +1930,11 @@ fun App(
                                         },
                                         commitInFlight = commitInFlight,
                                         commitProgress = commitProgress,
+                                        onCancelCommit = {
+                                            if (commitProgress?.phase != CommitProgress.Phase.REFRESHING) {
+                                                commitJob?.cancel()
+                                            }
+                                        },
                                         messageClearTrigger = messageClearTrigger,
                                         messageState = commitMessageState,
                                         identityChoices = identityChoices,
