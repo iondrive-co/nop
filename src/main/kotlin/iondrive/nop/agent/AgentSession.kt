@@ -75,7 +75,7 @@ class AgentRun(
      * replayed by a resume — is history rather than something the vendor is saying now; see
      * [QuotaEcho.judge]. A run carried across a restart keeps the time the first nop started it.
      */
-    val startedAt: Instant = Instant.now(),
+    var startedAt: Instant = Instant.now(),
 ) {
     /** True when this command resumes an existing session rather than starting a fresh one. */
     val isResume: Boolean get() = command.isResume

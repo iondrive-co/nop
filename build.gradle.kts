@@ -101,7 +101,7 @@ compose.desktop {
             // were wrong. Costs ~2 MB in the jlinked image.
             modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
             packageName = "nop"
-            packageVersion = "0.99.0"
+            packageVersion = "1.0.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
@@ -111,15 +111,7 @@ compose.desktop {
                 appCategory = "Development"
                 shortcut = true
             }
-            // jpackage's macOS/Windows installers reject MAJOR=0, so use 1.0.0 there until
-            // we bump packageVersion past 0.x. The Linux .deb keeps the project-level value.
-            macOS {
-                packageVersion = "1.0.0"
-                dmgPackageVersion = "1.0.0"
-            }
             windows {
-                packageVersion = "1.0.0"
-                msiPackageVersion = "1.0.0"
                 menuGroup = "nop"
                 shortcut = true
                 // Stable UUID lets future MSIs upgrade this install in place instead of

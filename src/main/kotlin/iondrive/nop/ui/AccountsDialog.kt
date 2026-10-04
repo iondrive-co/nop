@@ -93,9 +93,10 @@ fun AccountsDialog(
     /** The project the dialog was opened from, whose tab-messaging switch it shows. */
     project: File? = null,
 ) {
-    DialogFrame(title = "Agent accounts", onClose = onClose, size = DpSize(640.dp, 660.dp)) {
+    DialogFrame(title = "Agent accounts", onClose = onClose, size = DpSize(640.dp, 710.dp)) {
         var draft by remember(config) { mutableStateOf(config) }
         var adding by remember { mutableStateOf(false) }
+        var showingUsage by remember { mutableStateOf(false) }
         // What the last move of a home said, and about which account.
         var moveNote by remember { mutableStateOf<Pair<String, String>?>(null) }
 
@@ -168,16 +169,37 @@ fun AccountsDialog(
             }
         }
 
-        Divider(orientation = Orientation.Horizontal)
-        BackupSection(config = draft, onChange = { update(it) })
-        project?.let {
-            Divider(orientation = Orientation.Horizontal)
-            TabMessagesSection(it)
+        // Account panel actions at the bottom of the accounts list
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(onClick = { adding = true }) { Text("Add account") }
+            OutlinedButton(onClick = { showingUsage = true }) { Text("Show usage") }
         }
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { adding = true }) { Text("Add account") }
-            Box(modifier = Modifier.weight(1f))
+        // Clearly delineated bottom panel for session backup and project tab messaging
+        val panelBorder = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
+        val panelBackground = if (JewelTheme.isDark) Color(0xFF26282E) else Color(0xFFF2F4F7)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(panelBackground)
+                .border(1.dp, panelBorder, RoundedCornerShape(8.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            BackupSection(config = draft, onChange = { update(it) })
+            project?.let {
+                Divider(orientation = Orientation.Horizontal)
+                TabMessagesSection(it)
+            }
+        }
+
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
             DefaultButton(onClick = onClose) { Text("Done") }
         }
 
@@ -190,6 +212,14 @@ fun AccountsDialog(
                     onLogIn(account)
                 },
                 onCancel = { adding = false },
+            )
+        }
+
+        if (showingUsage) {
+            AgentUsageDialog(
+                accounts = draft.accounts,
+                readings = readings,
+                onClose = { showingUsage = false },
             )
         }
 

@@ -56,8 +56,7 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
 fi
 
 echo "Bumping packageVersion: $CURRENT -> $VERSION"
-# Only rewrite the top-level packageVersion. The macOS/Windows blocks pin "1.0.0"
-# because jpackage rejects MAJOR=0 — leave those alone until the project crosses 1.x.
+# Only rewrite the top-level packageVersion; OS targets inherit it.
 python3 - "$GRADLE_FILE" "$CURRENT" "$VERSION" <<'PY'
 import sys, re, pathlib
 path, current, new = sys.argv[1], sys.argv[2], sys.argv[3]

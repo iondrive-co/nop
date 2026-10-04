@@ -9,21 +9,31 @@ Download the latest installer for your platform from the
 
 ### Run coding agents beside your code
 
-Claude Code, Codex and Antigravity with session handover between them. The strip along the bottom shows every account's session and weekly
-usage. Every agent shares one memory file, `~/.local/share/nop/agent/memory/memory.md`, so what one session learns reaches the
-next, whichever account or tool it runs on.
+Claude Code, Codex and Antigravity sessions from any of your accounts can run in tabs next to the editor. 
+Agents can message each other (by default with you approving each but this can be made automatic per project)
+and can share memory.
 
 ![A Claude Code session, with every account's usage along the bottom](docs/screenshots/latest-agents.png)
 
-![The agent accounts settings](docs/screenshots/latest-accounts.png)
-
-### Visual review built on Jetbrains Compose framework
+### Review what changed
 
 ![A side-by-side diff](docs/screenshots/latest-diff.png)
 
-### Multiple project tabs per window
+### Manage all your accounts in one place
 
-Multiple tabs for different views / agents on the same project, or different projects. Multiple windows for different project groups.
+Set each account's model and thinking level and resume it or hand it over to another provider when it hits a quota.
+
+![The agent accounts settings](docs/screenshots/latest-accounts.png)
+
+### Track where your usage goes
+
+See what percentage of your quota goes to different models and tasks.
+
+![Agent usage breakdown by model and task](docs/screenshots/latest-usage.png)
+
+### Keep projects in tabs
+
+Open several projects in one window, each with its own file tree and editor tabs.
 
 ![Several projects open as tabs](docs/screenshots/latest-preview.png)
 

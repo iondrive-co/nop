@@ -36,4 +36,14 @@ class DraftTrackingTest {
         assertTrue(after(false, "\u001b[A"), "up recalls the last prompt into this one")
         assertTrue(after(false, "\u001bb"), "Alt+b is a key")
     }
+
+    @Test
+    fun `cancelling or clearing the line clears the draft`() {
+        assertFalse(after(true, "\u0003"), "Ctrl-C cancels the draft")
+        assertFalse(after(true, "\u0015"), "Ctrl-U clears the line")
+        assertFalse(after(false, "started typing\u0003"), "Ctrl-C at the end leaves no draft")
+        assertFalse(after(false, "started typing\u0015"), "Ctrl-U at the end leaves no draft")
+        assertTrue(after(false, "started\u0003new draft"), "typing after Ctrl-C starts a new draft")
+        assertTrue(after(false, "started\u0015new draft"), "typing after Ctrl-U starts a new draft")
+    }
 }

@@ -65,7 +65,7 @@ class TerminalSession private constructor(
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(false)
-        private set
+        internal set
 
     /**
      * True for a run tab restored from the last time nop was open: the tab is back, the command has
@@ -76,7 +76,7 @@ class TerminalSession private constructor(
      * is the useful half of remembering it; pressing Run is the user's half.
      */
     var deferred: Boolean by mutableStateOf(deferred)
-        private set
+        internal set
 
     /**
      * What the last child exited with, or null while one is still running (or before any has run).
@@ -107,13 +107,17 @@ class TerminalSession private constructor(
      * with Enter, which would send such a draft along with it as though it were one instruction, so
      * the inbox warns while this holds.
      *
-     * It errs towards yes. A prompt cleared with Ctrl+U or Esc still reads as holding a draft until
+     * It errs towards yes. A prompt cleared with Esc still reads as holding a draft until
      * the next Enter, because nop cannot see the prompt, and a warning nobody needed costs less than
      * a half-written instruction going out under another agent's message. Compose state, so the
      * warning comes and goes as the user types.
      */
     var draftPending: Boolean by mutableStateOf(false)
-        private set
+        internal set
+
+    /** When a prompt was last submitted (by the user or via [submit]) in this terminal. */
+    var lastSubmitAt: Long = 0L
+        internal set
 
     /**
      * Whether the program in the terminal has asked for bracketed paste (`ESC [ ? 2004 h`) and not
@@ -146,7 +150,8 @@ class TerminalSession private constructor(
         private set
 
     /** True once the widget has been created. */
-    val isStarted: Boolean get() = widget != null
+    val isStarted: Boolean get() = widget != null || testStarted
+    internal var testStarted: Boolean = false
 
     /** True for a terminal whose program the last nop handed over, rather than one this nop started. */
     val isAdopted: Boolean get() = adopted != null
@@ -294,6 +299,7 @@ class TerminalSession private constructor(
             out.write(CTRL_C)
             out.flush()
         }
+        draftPending = false
     }
 
     /**
@@ -347,6 +353,7 @@ class TerminalSession private constructor(
         write(body)
         javax.swing.Timer(SUBMIT_DELAY_MS) {
             write("\r")
+            lastSubmitAt = System.currentTimeMillis()
             // Enter sends the whole prompt, so whatever was in it has gone too.
             draftPending = false
         }.apply {
@@ -491,6 +498,9 @@ class TerminalSession private constructor(
             },
             inputTap = { bytes ->
                 noteDraft(bytes)
+                if (bytes.any { it == '\r'.code.toByte() }) {
+                    lastSubmitAt = System.currentTimeMillis()
+                }
                 if (bytes.any { it == '\r'.code.toByte() || it == '\n'.code.toByte() }) {
                     onUserInput?.invoke()
                 }
@@ -573,15 +583,15 @@ class TerminalSession private constructor(
 
         /**
          * Whether the prompt may hold a draft after [bytes] reach the program, given whether it did
-         * before. An Enter sends what was there; anything after the last Enter is new draft, unless
-         * all of it is the terminal answering the program rather than the user — see
-         * [isTerminalReport].
+         * before. An Enter sends what was there; Ctrl-C or Ctrl-U cancels/clears it; anything after the
+         * last Enter/Ctrl-C/Ctrl-U is new draft, unless all of it is the terminal answering the program
+         * rather than the user — see [isTerminalReport].
          */
         internal fun draftAfter(before: Boolean, bytes: ByteArray): Boolean {
             if (bytes.isEmpty() || isTerminalReport(bytes)) return before
-            val enter = bytes.lastIndexOf('\r'.code.toByte())
-            if (enter < 0) return true
-            return enter < bytes.size - 1 && !isTerminalReport(bytes.copyOfRange(enter + 1, bytes.size))
+            val clear = bytes.indexOfLast { it == '\r'.code.toByte() || it == CTRL_C.toByte() || it == CTRL_U.toByte() }
+            if (clear < 0) return true
+            return clear < bytes.size - 1 && !isTerminalReport(bytes.copyOfRange(clear + 1, bytes.size))
         }
 
         /**
@@ -628,6 +638,9 @@ class TerminalSession private constructor(
 
         /** The TTY interrupt character (ETX) — what a terminal sends on Ctrl-C. See [stop]. */
         private const val CTRL_C = 3
+
+        /** The line kill character (NAK) — what a terminal sends on Ctrl-U to clear the line. */
+        private const val CTRL_U = 21
 
         private val isWindows: Boolean =
             System.getProperty("os.name").orEmpty().lowercase().startsWith("windows")

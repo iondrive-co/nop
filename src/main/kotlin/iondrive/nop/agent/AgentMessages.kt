@@ -203,6 +203,8 @@ object AgentMessages {
             !terminal.running -> "its CLI is running again"
             now - s.run.startedAt.toEpochMilli() < BOOT_MS -> "its CLI has finished starting"
             s.activity == Activity.Asking -> "the question it is asking has been answered"
+            terminal.draftPending -> "the draft in its prompt is sent or cleared"
+            terminal.lastSubmitAt > 0L && now - terminal.lastSubmitAt < BETWEEN_SUBMITS_MS -> "the prompt has finished sending"
             else -> null
         }
     }
@@ -275,7 +277,7 @@ object AgentMessages {
     }
 
     private const val PUMP_MS = 500
-    private const val BETWEEN_SUBMITS_MS = 1500L
+    internal const val BETWEEN_SUBMITS_MS = 1500L
     private const val BOOT_MS = 5000L
     private const val MAX_CHARS = 32_000
     private const val MAX_HELD = 20

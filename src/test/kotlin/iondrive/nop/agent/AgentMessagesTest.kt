@@ -159,4 +159,48 @@ class AgentMessagesTest {
         assertTrue("nop-msg list" in text && "nop-msg send" in text)
         assertTrue(AgentSocket.helperPath().toString() in text)
     }
+
+    @Test
+    fun `a message waits while the recipient has an unsent draft in its prompt`(
+        @TempDir project: Path,
+        @TempDir config: Path,
+    ) = withConfigRoot(config) {
+        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        AgentMessages.sessions = { listOf(from, to) }
+        onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }
+
+        val term = to.run.session
+        term.testStarted = true
+        term.running = true
+        term.deferred = false
+
+        to.run.startedAt = java.time.Instant.now().minusSeconds(10)
+
+        // User is typing in the recipient tab
+        term.draftPending = true
+        val now = System.currentTimeMillis()
+        assertEquals("the draft in its prompt is sent or cleared", AgentMessages.waitReason(to, now))
+
+        val sent = onEdt { AgentMessages.send(from, to.shortId, "auto message") }
+        assertTrue(sent.text.startsWith("Delivered"), sent.text)
+        assertTrue("It goes in once the draft in its prompt is sent or cleared." in sent.text)
+        assertEquals(1, to.inbox.size)
+
+        // Pump does not submit while draft is pending
+        onEdt { AgentMessages.pump(now) }
+        assertEquals(1, to.inbox.size, "message remains held in inbox while user is typing")
+
+        // User finishes typing and submits; now within BETWEEN_SUBMITS_MS it waits for prompt to finish sending
+        term.draftPending = false
+        term.lastSubmitAt = now
+        assertEquals("the prompt has finished sending", AgentMessages.waitReason(to, now + 500))
+        onEdt { AgentMessages.pump(now + 500) }
+        assertEquals(1, to.inbox.size, "message still held while prompt is landing")
+
+        // After BETWEEN_SUBMITS_MS passes, waitReason is clear and pump delivers it
+        val later = now + AgentMessages.BETWEEN_SUBMITS_MS + 100
+        assertEquals(null, AgentMessages.waitReason(to, later))
+        onEdt { AgentMessages.pump(later) }
+        assertEquals(0, to.inbox.size, "message delivered once user draft and submit have cleared")
+    }
 }

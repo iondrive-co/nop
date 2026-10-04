@@ -56,7 +56,7 @@ mkdir -p "$SHOT_DIR"
 # leftovers so the directory doesn't accumulate (the `[0-9]*` prefix matches the YYYYMMDD-HHMMSS
 # names without touching `latest-*`).
 find "$SHOT_DIR" -maxdepth 1 -type f \
-    \( -name '[0-9]*-diff.png' -o -name '[0-9]*-preview.png' \) -delete 2>/dev/null || true
+    \( -name '[0-9]*-diff.png' -o -name '[0-9]*-preview.png' -o -name '[0-9]*-usage.png' \) -delete 2>/dev/null || true
 
 for cmd in wmctrl xdotool xwininfo xprop import convert awk git mktemp sha1sum; do
     if ! command -v "$cmd" >/dev/null; then
@@ -234,6 +234,7 @@ launch_isolated() {
         CLAUDE_CONFIG_DIR="$cfg/claude"
         PATH="$STUB_BIN:$PATH"
         NOP_USAGE_FIXTURE="$cfg/usage.json"
+        ${SKIKO_RENDER_API+SKIKO_RENDER_API="$SKIKO_RENDER_API"}
     )
     # Strip _JPACKAGE_LAUNCHER so the fresh jpackage launcher treats this as a first-time start
     # (see the long-form note in install.sh) rather than forwarding raw args to JLI.
@@ -966,6 +967,42 @@ mkdir -p "$AGENT_DATA"
     printf 'file\t%s\t0\n' "$AGENT_PROJECT/src/Checkout.kt"
 } > "$AGENT_DATA/tabs.tsv"
 
+# Synthetic session logs for the usage breakdown window, showing model and task shares
+# across realistic project tasks (matching acme-store) with zero real user data.
+SESSIONS_DIR="$AGENT_CFG/data/nop/agent/sessions"
+mkdir -p "$SESSIONS_DIR"
+now_ms=$(date +%s000)
+
+cat > "$SESSIONS_DIR/acme-session-1.jsonl" <<SESS_EOF
+{"type":"session_started","projectPath":"$AGENT_PROJECT"}
+{"type":"run_started","account":"claude-work","provider":"anthropic"}
+{"type":"session_titled","title":"Discount code expiration logic"}
+{"type":"assistant_message","model":"claude-opus-5-5","at":$(( now_ms - 7200000 )),"usage":{"inputTokens":120000,"outputTokens":15000,"cacheReadTokens":500000,"cacheCreationTokens":20000}}
+SESS_EOF
+
+cat > "$SESSIONS_DIR/acme-session-2.jsonl" <<SESS_EOF
+{"type":"session_started","projectPath":"$AGENT_PROJECT"}
+{"type":"run_started","account":"claude-work","provider":"anthropic"}
+{"type":"session_titled","title":"Cart subtotal precision and currency rounding"}
+{"type":"assistant_message","model":"claude-sonnet-4-6","at":$(( now_ms - 86400000 )),"usage":{"inputTokens":80000,"outputTokens":10000,"cacheReadTokens":350000,"cacheCreationTokens":10000}}
+SESS_EOF
+
+cat > "$SESSIONS_DIR/acme-session-3.jsonl" <<SESS_EOF
+{"type":"session_started","projectPath":"$AGENT_PROJECT"}
+{"type":"run_started","account":"claude-work","provider":"anthropic"}
+{"type":"session_titled","title":"Integration tests for checkout flow"}
+{"type":"assistant_message","model":"claude-haiku-4-5","at":$(( now_ms - 172800000 )),"usage":{"inputTokens":50000,"outputTokens":8000,"cacheReadTokens":200000,"cacheCreationTokens":5000}}
+SESS_EOF
+
+cat > "$SESSIONS_DIR/acme-session-4.jsonl" <<SESS_EOF
+{"type":"session_started","projectPath":"$AGENT_PROJECT"}
+{"type":"run_started","account":"claude-work","provider":"anthropic"}
+{"type":"session_titled","title":"Initial store setup and checkout pipeline"}
+{"type":"assistant_message","model":"claude-opus-5-5","at":$(( now_ms - 432000000 )),"usage":{"inputTokens":200000,"outputTokens":30000,"cacheReadTokens":900000,"cacheCreationTokens":50000}}
+SESS_EOF
+
+touch "$SESSIONS_DIR"/*.jsonl
+
 # Five made-up accounts across the three providers. The dialog has room for four rows, so the order
 # puts one of each provider in the first three. The homes are where nop would create them for a
 # user called "dev"; nothing reads them, because every reading comes from the fixture below.
@@ -974,13 +1011,13 @@ cat > "$AGENT_CFG/nop/agent.json" <<EOF
 {
   "accounts": [
     { "name": "claude-work", "provider": "anthropic", "home": "$AGENT_HOMES/claude-work",
-      "model": "claude-opus-5", "reasoning": "high", "handoverTo": "codex-work" },
+      "model": "claude-opus-5-5", "reasoning": "high", "handoverTo": "codex-work" },
     { "name": "codex-work", "provider": "openai", "home": "$AGENT_HOMES/codex-work",
       "model": "gpt-5.5-codex", "reasoning": "medium", "handoverTo": "antigravity" },
     { "name": "antigravity", "provider": "antigravity", "home": "$AGENT_HOMES/antigravity",
       "reasoning": "high" },
     { "name": "claude-side", "provider": "anthropic", "home": "$AGENT_HOMES/claude-side",
-      "model": "claude-sonnet-5", "handoverTo": "claude-work" },
+      "model": "claude-sonnet-4-6", "handoverTo": "claude-work" },
     { "name": "codex-lab", "provider": "openai", "home": "$AGENT_HOMES/codex-lab",
       "reasoning": "high" }
   ]
@@ -994,7 +1031,7 @@ cat > "$AGENT_CFG/usage.json" <<'EOF'
   "claude-work": {
     "session": { "percent": 72, "resetsInMinutes": 108, "windowMinutes": 300 },
     "weekly": { "percent": 41, "resetsInMinutes": 4380, "windowMinutes": 10080 },
-    "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+    "models": ["claude-opus-5-5", "claude-sonnet-4-6", "claude-haiku-4-5"]
   },
   "codex-work": {
     "session": { "percent": 35, "resetsInMinutes": 191, "windowMinutes": 300 },
@@ -1007,7 +1044,7 @@ cat > "$AGENT_CFG/usage.json" <<'EOF'
   "claude-side": {
     "session": { "percent": 14, "resetsInMinutes": 262, "windowMinutes": 300 },
     "weekly": { "percent": 88, "resetsInMinutes": 1500, "windowMinutes": 10080 },
-    "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+    "models": ["claude-opus-5-5", "claude-sonnet-4-6", "claude-haiku-4-5"]
   },
   "codex-lab": {
     "session": { "percent": 93, "resetsInMinutes": 26, "windowMinutes": 300 },
@@ -1126,11 +1163,44 @@ sleep 1.0
 accounts_out="$SHOT_DIR/latest-accounts.png"
 capture_to "$accounts_out" "$dialog_wid"
 
+# Open the "Agent usage" breakdown window by clicking "Show usage" in the accounts dialog.
+# The button sits beside "Add account" above the session backup panel.
+usage_wid=""
+for off in 275 270 280 265 285; do
+    DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$dialog_wid" 2>/dev/null || true
+    DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( GX + $(scaled 180) )) $(( GY + GH - $(scaled "$off") ))
+    sleep 0.15
+    DISPLAY="$DISPLAY_SPEC" xdotool click 1
+    for _ in $(seq 10); do
+        usage_wid=$(DISPLAY="$DISPLAY_SPEC" wmctrl -l 2>/dev/null | awk '/ Agent usage$/ {print $1; exit}')
+        [ -n "$usage_wid" ] && break
+        sleep 0.3
+    done
+    [ -n "$usage_wid" ] && break
+done
+
+usage_out=""
+if [ -z "$usage_wid" ]; then
+    echo "warning: the Agent usage dialog never opened; log at $AGENT_CFG/nop.log" >&2
+else
+    DISPLAY="$DISPLAY_SPEC" wmctrl -i -r "$usage_wid" -b add,above 2>/dev/null || true
+    DISPLAY="$DISPLAY_SPEC" xdotool windowraise "$usage_wid" 2>/dev/null || true
+    DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$usage_wid" 2>/dev/null || true
+    # Wait for the breakdown to finish reading synthetic session logs
+    sleep 2.0
+    read UX UY UW UH < <(geometry_of "$usage_wid")
+    if [ "$UX" -gt 40 ]; then park_ux=$(( UX - 20 )); else park_ux=$(( UX + UW + 20 )); fi
+    DISPLAY="$DISPLAY_SPEC" xdotool mousemove "$park_ux" $(( UY + UH / 2 ))
+    sleep 0.5
+    usage_out="$SHOT_DIR/latest-usage.png"
+    capture_to "$usage_out" "$usage_wid"
+fi
+
 cleanup
 DEMO_PIDS=()
 trap 'rm -rf "$TMP_PARENT"' EXIT INT TERM
 
-for out in "$agents_out" "$diff_out" "$accounts_out" "$preview_out"; do
+for out in "$agents_out" "$diff_out" "$accounts_out" ${usage_out:+"$usage_out"} "$preview_out"; do
     echo "wrote $out ($(stat -c %s "$out") bytes)"
 done
 
@@ -1163,6 +1233,13 @@ Set each account's model and thinking level, sign it in or out, and choose which
 over its work when it runs out.
 
 ![The agent accounts settings](docs/screenshots/latest-accounts.png)
+
+### Track where your usage goes
+
+See what percentage of your quota goes to different models and tasks, separated between the active
+quota window and historical activity prior to the reset.
+
+![Agent usage breakdown by model and task](docs/screenshots/latest-usage.png)
 
 ### Keep projects in tabs
 
