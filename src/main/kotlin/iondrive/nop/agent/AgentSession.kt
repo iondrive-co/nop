@@ -464,9 +464,15 @@ class AgentSession(
             activitySince = now
             if (next == Activity.Working) {
                 hasWorked = true
-                // The CLI went back to work by itself — Claude Code does once its window resets —
-                // so the message nop was going to type would only queue a second turn.
-                if (resumeWait != null) carriedOnDuringWait = true
+                // The CLI went back to work by itself — Claude Code does once its window resets,
+                // or when a prompt is submitted — so clear any pending wait and let it work.
+                if (resumeWait != null) {
+                    carriedOnDuringWait = true
+                    Log.info("${run.account.name} carried on by itself; clearing waited-out wall")
+                    stopResumeWait()
+                    run.waitedOutWallAt = Instant.ofEpochMilli(now)
+                    quotaWatcher.reset()
+                }
             }
             noteChange(was, next)
         }

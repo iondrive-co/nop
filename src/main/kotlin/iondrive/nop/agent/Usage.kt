@@ -146,14 +146,12 @@ data class UsageReading(
         fun unavailable(why: String) = UsageReading(null, null, null, why)
 
         /**
-         * How much of a window has to be gone before the vendor refusing is believable.
+         * How much of a window has to be gone before an account is considered spent.
          *
-         * Not 100. The percentage and the refusal come from different places — the usage endpoint
-         * and the model's own gate — and they round and lag differently, so an account genuinely out
-         * of quota can read 97%. The number only has to be high enough that an agent quoting a limit
-         * message while it still has most of a window left is not mistaken for one that has none.
+         * Kept at 99% so accounts with usage remaining (such as 96% or 98% on a weekly allowance)
+         * are not incorrectly treated as out of quota while they still have usage left.
          */
-        const val SPENT_PERCENT: Double = 95.0
+        const val SPENT_PERCENT: Double = 99.0
 
         /**
          * How old a reading may be and still be worth contradicting the screen with. Longer than the

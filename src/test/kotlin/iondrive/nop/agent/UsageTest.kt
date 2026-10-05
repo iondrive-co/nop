@@ -483,12 +483,24 @@ class UsageTest {
     @Test
     fun `a window at the wall says it has`() {
         val reading = UsageReading(
-            session = UsageWindow(99.0, Instant.now().plus(Duration.ofMinutes(20))),
+            session = UsageWindow(100.0, Instant.now().plus(Duration.ofMinutes(20))),
             weekly = UsageWindow(40.0, null),
             asOf = Instant.now(),
         )
 
         assertEquals(true, reading.looksSpent())
+    }
+
+    @Test
+    fun `a window with quota remaining does not look spent even near limit`() {
+        val reading = UsageReading(
+            session = UsageWindow(33.0, Instant.now().plus(Duration.ofHours(3))),
+            weekly = UsageWindow(98.0, Instant.now().plus(Duration.ofDays(1))),
+            asOf = Instant.now(),
+        )
+
+        assertEquals(false, reading.looksSpent())
+        assertNull(reading.spentUntil())
     }
 
     /** Either window being gone is enough — a spent week refuses just as firmly as a spent hour. */
@@ -548,7 +560,7 @@ class UsageTest {
     fun `a spent account says when it can be served again`() {
         val reset = Instant.now().plusSeconds(30)
         val reading = UsageReading(
-            session = UsageWindow(99.0, reset),
+            session = UsageWindow(100.0, reset),
             weekly = UsageWindow(40.0, Instant.now().plus(Duration.ofDays(3))),
             asOf = Instant.now(),
         )

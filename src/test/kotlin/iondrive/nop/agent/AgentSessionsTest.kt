@@ -314,6 +314,23 @@ class AgentSessionsTest {
         assertFalse(session.ended)
     }
 
+    @Test
+    fun `a session waiting to resume clears its wait when the CLI starts working`(@TempDir tmp: Path) {
+        val claude = Account("claude-main", Provider.Anthropic, "/homes/claude-main", resumeAfterReset = true)
+        val state = sessions()
+        state.resumesAfterReset = { from -> listOf(claude).resumesAfterReset(from) }
+        val session = state.open(tmp.toFile(), claude)
+
+        session.onQuotaWall(QuotaHit("usage limit", "you have hit your usage limit"))
+        assertNotNull(session.resumeWait)
+
+        session.run.tracker.onTitle("◐ Working", 1000)
+        session.refreshActivity(session.run.tracker, now = 1000)
+
+        assertNull(session.resumeWait, "the CLI working by itself or on user prompt clears the wait banner")
+        assertFalse(session.ended)
+    }
+
     /** A wall reported for a run that is already over is news about nothing. */
     @Test
     fun `a wall hit after the run has ended changes nothing`(@TempDir tmp: Path) {
