@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Cut a release. No arguments: reads the current packageVersion from build.gradle.kts,
-# bumps the minor by 1 (0.1.0 -> 0.2.0, 0.7.0 -> 0.8.0), commits, tags v<version>, and
+# bumps the patch by 1 (1.0.0 -> 1.0.1, 1.1.0 -> 1.1.1), commits, tags v<version>, and
 # pushes. The tag push triggers .github/workflows/release.yml, which builds .deb/.msi/.dmg
 # on Linux/Windows/macOS runners and attaches them to a fresh GitHub release.
 #
 # Pass an explicit version to override the auto-bump:
-#     scripts/release.sh           # auto-bump minor
-#     scripts/release.sh 1.0.0     # force a specific version
+#     scripts/release.sh           # auto-bump patch (e.g. 1.1.0 -> 1.1.1)
+#     scripts/release.sh 1.2.0     # force a specific version
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,13 +22,13 @@ fi
 if [[ $# -ge 1 ]]; then
     VERSION="$1"
 else
-    # Auto-bump: increment minor, reset patch.
+    # Auto-bump: increment patch.
     IFS=. read -r MAJ MIN PATCH <<<"$CURRENT"
     if ! [[ "$MAJ" =~ ^[0-9]+$ && "$MIN" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]]; then
         echo "Current version '$CURRENT' is not MAJOR.MINOR.PATCH; pass an explicit version." >&2
         exit 1
     fi
-    VERSION="${MAJ}.$((MIN + 1)).0"
+    VERSION="${MAJ}.${MIN}.$((PATCH + 1))"
 fi
 
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -69,7 +69,9 @@ pathlib.Path(path).write_text(new_text)
 PY
 
 git add "$GRADLE_FILE"
-git commit -m "Release $TAG"
+if ! git diff --cached --quiet; then
+    git commit -m "Release $TAG"
+fi
 git tag -a "$TAG" -m "Release $TAG"
 git push origin "$BRANCH"
 git push origin "$TAG"

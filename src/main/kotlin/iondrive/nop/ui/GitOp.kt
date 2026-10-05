@@ -15,7 +15,7 @@ internal data class GitOpError(val title: String, val detail: String)
  * dialog rather than escaping the launched coroutine and taking down the whole window.
  *
  * Returns null on success. [CancellationException] is deliberately *not* mapped — it's rethrown so
- * structured-concurrency cancellation (e.g. switching projects mid-commit) still tears the coroutine
+ * structured-concurrency cancellation (a stash abandoned by a project switch, a cancelled commit) still tears the coroutine
  * down normally instead of being reported as a failure.
  */
 internal suspend fun runGitOp(title: String, block: suspend () -> Unit): GitOpError? =

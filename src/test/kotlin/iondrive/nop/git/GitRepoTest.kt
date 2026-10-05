@@ -486,6 +486,86 @@ class GitRepoTest {
         repo.close()
     }
 
+    // CRLF text under `text=auto` needs conversion, so it goes down the AddCommand half of parallel
+    // staging; 600 files is more than two of its batches.
+    private fun seedConvertedTree(tmp: Path, count: Int = 600) {
+        (tmp / "conv").createDirectories()
+        repeat(count) { i -> (tmp / "conv" / "c$i.txt").writeText("line $i\r\nmore\r\n") }
+    }
+
+    @Test
+    fun `batched staging of converted files commits every file`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / ".gitattributes").writeText("*.txt text=auto\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        seedBulkTree(tmp)
+        seedConvertedTree(tmp)
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        repo.stageAndCommit("bulk", repo.loadStatus().changes)
+
+        assertTrue(gitOutput(tmp, "git status --porcelain").isEmpty(), "every change must be committed")
+        assertEquals("line 0\nmore", gitOutput(tmp, "git show HEAD:conv/c0.txt"), "CRLF must be converted on the way in")
+        repo.close()
+    }
+
+    @Test
+    fun `clean-filtered files are staged through git with their filter applied`(@TempDir tmp: Path) {
+        // A stand-in for Git LFS: any clean filter sends a file to `git add`, and what lands must
+        // be what the filter made of it, alongside a fast half staged in parallel.
+        runShell(
+            tmp,
+            "git init -q && git config user.email t@x && git config user.name T && " +
+                "git config filter.up.clean 'tr a-z A-Z' && git config filter.up.smudge cat",
+        )
+        (tmp / ".gitattributes").writeText("*.up filter=up\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        seedBulkTree(tmp)
+        (tmp / "up").createDirectories()
+        repeat(20) { i -> (tmp / "up" / "u$i.up").writeText("lower $i\n") }
+        // Only real git runs post-index-change; JGit never does, so the marker proves who staged.
+        val hook = (tmp / ".git" / "hooks" / "post-index-change").toFile()
+        hook.writeText("#!/bin/sh\ntouch \"$tmp/.git/git-staged\"\n")
+        hook.setExecutable(true)
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        repo.stageAndCommit("filtered", repo.loadStatus().changes)
+
+        assertTrue((tmp / ".git" / "git-staged").toFile().exists(), "the filtered files must go through git add")
+
+        assertTrue(gitOutput(tmp, "git status --porcelain").isEmpty(), "every change must be committed")
+        assertEquals("LOWER 7", gitOutput(tmp, "git show HEAD:up/u7.up"))
+        assertEquals("plain line 0", gitOutput(tmp, "git show HEAD:data/f0.dat"))
+        repo.close()
+    }
+
+    @Test
+    fun `cancellation between staging batches rolls back the batches already staged`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / ".gitattributes").writeText("*.txt text=auto\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        seedBulkTree(tmp)
+        seedConvertedTree(tmp)
+
+        val repo = GitRepo.discover(tmp, ceiling = tmp)!!
+        val headBefore = repo.headSha()
+        val changes = repo.loadStatus().changes
+        // Progress emits are throttled, so the index file itself says when a batch has landed.
+        val index = (tmp / ".git" / "index").toFile()
+        val indexBefore = index.length()
+        assertThrows(CancellationException::class.java) {
+            repo.stageAndCommit("cancelled", changes, isCancelled = { index.length() != indexBefore })
+        }
+
+        assertEquals(headBefore, repo.headSha(), "HEAD must not move after cancellation")
+        assertTrue(
+            gitOutput(tmp, "git diff --cached --name-only").isEmpty(),
+            "a staged batch must be unstaged again on cancellation",
+        )
+        assertEquals(changes.size, repo.loadStatus().changes.size)
+        repo.close()
+    }
+
     @Test
     fun `readHeadContent returns null for path not in HEAD`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")

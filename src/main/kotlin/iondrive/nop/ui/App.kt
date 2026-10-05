@@ -12,11 +12,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -72,15 +72,13 @@ import iondrive.nop.terminal.TerminalSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -97,7 +95,7 @@ import javax.swing.JPanel
 private const val GIT_POLL_INTERVAL_MS = 3_000L
 
 // How many recent commit messages to remember per project for the reuse dropdown.
-private const val COMMIT_MESSAGE_HISTORY_CAP = 20
+internal const val COMMIT_MESSAGE_HISTORY_CAP = 20
 
 /**
  * How often each agent account's quota is re-read. Five minutes, because the thing it feeds is a
@@ -191,8 +189,12 @@ fun App(
     var commitMessageWriting by remember(projectPath) { mutableStateOf(false) }
     // A commit waiting on the "ticked for you" confirmation, or null when no dialog is open.
     var pendingCommit by remember(projectPath) { mutableStateOf<PendingCommit?>(null) }
-    var commitInFlight by remember(projectPath) { mutableStateOf(false) }
-    var commitJob by remember(projectPath) { mutableStateOf<Job?>(null) }
+    // The commit running for this repository, if any. It lives in [BackgroundCommits], not here:
+    // this composition goes the moment another tab is brought to the front, and the commit must not.
+    val commitRun by remember(projectPath) {
+        derivedStateOf { repo?.let { BackgroundCommits.runFor(it.rootDir) } }
+    }
+    val commitInFlight by remember(projectPath) { derivedStateOf { commitRun != null } }
     // Who the commit panel commits as: the identities on offer (the repository's default first),
     // the one picked, or null to go with that default, and the "Save for this repo" tick. The pick
     // lasts while the project is open and no longer, so a restart always shows the config's own.
@@ -202,8 +204,10 @@ fun App(
     // How far the running commit has got, for the commit button's progress bar. A StateFlow and
     // not snapshot state because GitRepo reports it from its staging worker threads, which have no
     // business touching composition state; collecting it hands the updates back on this thread.
-    val commitProgressFlow = remember(projectPath) { MutableStateFlow<CommitProgress?>(null) }
-    val commitProgress by commitProgressFlow.collectAsState()
+    val commitProgress by produceState<CommitProgress?>(null, commitRun) {
+        val run = commitRun
+        if (run == null) value = null else run.progress.collect { value = it }
+    }
     // Bumped when a commit or stash lands, which is the commit panel's cue to empty the message
     // field. See CommitPanel: it must not clear on the click, because the click does not always
     // end in a commit.
@@ -1079,51 +1083,38 @@ fun App(
     // nop ticked some of those files by itself.
     fun performCommit(message: String, included: List<FileChange>, commitAs: CommitAs) {
         if (repo == null || commitInFlight) return
-        commitJob = scope.launch {
-            commitInFlight = true
-            val startedAt = System.currentTimeMillis()
-            commitProgressFlow.value = CommitProgress(CommitProgress.Phase.STAGING, startedAtMillis = startedAt)
-            try {
-                gitOpError = runGitOp("Commit failed") {
-                    withContext(Dispatchers.IO) {
-                        // Saved first, so that a config nop cannot write stops the commit rather
-                        // than letting it land as the user asked while the saving silently fails.
-                        if (commitAs.save && commitAs.identity != null) repo.saveIdentity(commitAs.identity)
-                        repo.stageAndCommit(
-                            message,
-                            included,
-                            // Unticked paths are held out of the commit, not merely left unstaged.
-                            partial = included.size != status.changes.size,
-                            startedAtMillis = startedAt,
-                            identity = commitAs.identity,
-                            onProgress = { commitProgressFlow.value = it },
-                            isCancelled = { !coroutineContext.isActive },
-                        )
-                    }
-                    if (commitAs.save) {
-                        // Now the repository's default, which the panel shows once the reload
-                        // below has re-read the config.
-                        if (commitAsPick == commitAs.identity) commitAsPick = null
-                        saveCommitAs = false
-                    }
-                    rememberMessage(message)
-                    messageClearTrigger += 1
-                    // The button stays disabled through the reload, so it keeps reporting: on a big
-                    // repo this walk is seconds of its own.
-                    commitProgressFlow.value = CommitProgress(CommitProgress.Phase.REFRESHING, startedAtMillis = startedAt)
-                    reloadStatus()
+        BackgroundCommits.start(
+            repo.rootDir,
+            message,
+            included,
+            // Unticked paths are held out of the commit, not merely left unstaged.
+            partial = included.size != status.changes.size,
+            commitAs = commitAs,
+        )
+    }
+    // Finishes a commit once it ends: right away when this view is up, or when it next comes up if
+    // the commit ended behind another tab. The run has already recorded the message and dropped the
+    // draft; what is left is this view's own state.
+    LaunchedEffect(commitRun) {
+        val run = commitRun ?: return@LaunchedEffect
+        when (val outcome = run.outcome.filterNotNull().first()) {
+            is BackgroundCommits.Outcome.Committed -> {
+                if (outcome.commitAs.save) {
+                    // Now the repository's default, which the panel shows once the reload
+                    // below has re-read the config.
+                    if (commitAsPick == outcome.commitAs.identity) commitAsPick = null
+                    saveCommitAs = false
                 }
-            } catch (c: CancellationException) {
-                withContext(NonCancellable) {
-                    commitProgressFlow.value = CommitProgress(CommitProgress.Phase.REFRESHING, startedAtMillis = startedAt)
-                    reloadStatus()
-                }
-            } finally {
-                commitInFlight = false
-                commitProgressFlow.value = null
-                commitJob = null
+                recentMessages = Settings.loadRecentCommitMessages(rootPath)
+                if (commitMessageState.text.toString().trim() == run.message) messageClearTrigger += 1
             }
+            is BackgroundCommits.Outcome.Failed -> gitOpError = outcome.error
+            BackgroundCommits.Outcome.Cancelled -> {}
         }
+        // The button stays disabled through the reload, so it keeps reporting: on a big repo this
+        // walk is seconds of its own.
+        reloadStatus()
+        BackgroundCommits.finish(run)
     }
 
     // Discard a single file's local changes, restoring it to its last committed state (or deleting
@@ -1930,11 +1921,7 @@ fun App(
                                         },
                                         commitInFlight = commitInFlight,
                                         commitProgress = commitProgress,
-                                        onCancelCommit = {
-                                            if (commitProgress?.phase != CommitProgress.Phase.REFRESHING) {
-                                                commitJob?.cancel()
-                                            }
-                                        },
+                                        onCancelCommit = { commitRun?.cancel() },
                                         messageClearTrigger = messageClearTrigger,
                                         messageState = commitMessageState,
                                         identityChoices = identityChoices,

@@ -1,6 +1,13 @@
 package iondrive.nop.terminal
 
+import com.jediterm.terminal.HyperlinkStyle
+import com.jediterm.terminal.TextStyle
+import com.jediterm.terminal.model.CharBuffer
+import com.jediterm.terminal.model.TerminalLine
+import com.jediterm.terminal.model.TerminalTextBuffer
+import com.jediterm.terminal.model.hyperlinks.AsyncHyperlinkFilter
 import com.jediterm.terminal.model.hyperlinks.HyperlinkFilter
+import com.jediterm.terminal.model.hyperlinks.LinkInfo
 import com.jediterm.terminal.model.hyperlinks.LinkResult
 import com.jediterm.terminal.model.hyperlinks.LinkResultItem
 import com.jediterm.terminal.ui.TerminalAction
@@ -9,7 +16,9 @@ import com.jediterm.terminal.ui.hyperlinks.LinkInfoEx
 import java.awt.Desktop
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
+import java.lang.reflect.Field
 import java.net.URI
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 /**
@@ -90,6 +99,114 @@ class UrlHyperlinkFilter(private val openUrl: (String) -> Unit = ::openUrlInBrow
         }
 
         private fun String.countIn(end: Int, c: Char): Int = (0 until end).count { this[it] == c }
+    }
+}
+
+/**
+ * Puts [links]'s hyperlinks into the buffer without wiping out what the cells they cover looked like.
+ *
+ * JediTerm's own path (`TextProcessing.applyLinkResults`) rewrites every cell of a link with one
+ * fixed style — [linkColor]'s foreground, *its* background, no attributes — so whatever the program
+ * had painted there is gone. That is why a URL never showed as selected in an agent tab: Claude Code
+ * draws its own drag-selection as an SGR background on the cells (the `#264f78` band), and the link
+ * pass, which runs on every write to a line, put the URL's cells straight back to the plain link
+ * style. Code-block and diff backgrounds behind a URL went the same way, as did bold.
+ *
+ * So this writes the links itself, run by run of the cells' existing styles: link foreground, but
+ * the cell's own background and attributes. A cell already holding a link (the line was written
+ * again) keeps the background it carries, so re-applying is idempotent. Every run of one URL shares
+ * one `LinkInfo`, which is what JediTerm's hover and click go by.
+ *
+ * It needs the lines behind the text, which the public [AsyncHyperlinkFilter.LineInfo] does not
+ * expose; [linesOf] reads them off JediTerm's `LineInfoImpl`. Should a JediTerm upgrade move that
+ * field, links fall back to JediTerm's own writing — still links, just flat again — and
+ * `TerminalHyperlinksTest` fails.
+ */
+internal class CellStylePreservingLinks(
+    private val buffer: TerminalTextBuffer,
+    private val links: HyperlinkFilter,
+    private val linkColor: TextStyle,
+    private val mode: HyperlinkStyle.HighlightMode,
+) : AsyncHyperlinkFilter {
+
+    override fun apply(lineInfo: AsyncHyperlinkFilter.LineInfo): CompletableFuture<LinkResult?> {
+        val text = lineInfo.line ?: return CompletableFuture.completedFuture(null)
+        val result = links.apply(text) ?: return CompletableFuture.completedFuture(null)
+        val lines = linesOf(lineInfo) ?: return CompletableFuture.completedFuture(result)
+        buffer.lock()
+        try {
+            val width = buffer.width
+            // Same staleness check JediTerm makes before it writes: the lines must still spell [text].
+            if (joined(lines, width) != text) return CompletableFuture.completedFuture(null)
+            for (item in result.items) {
+                lines.forEachIndexed { i, line ->
+                    val from = maxOf(item.startOffset, i * width) - i * width
+                    val to = minOf(item.endOffset, (i + 1) * width) - i * width
+                    if (from < to) writeLink(line, from, to, item.linkInfo)
+                }
+            }
+        } finally {
+            buffer.unlock()
+        }
+        // Null: the links are in place, and a result would have JediTerm flatten them again.
+        return CompletableFuture.completedFuture(null)
+    }
+
+    private fun writeLink(line: TerminalLine, from: Int, to: Int, info: LinkInfo) {
+        val chars = line.text
+        val styles = arrayOfNulls<TextStyle>(to)
+        var x = 0
+        for (entry in line.entries) {
+            val len = entry.text.length
+            for (c in x until minOf(x + len, to)) styles[c] = entry.style
+            x += len
+            if (x >= to) break
+        }
+        var start = from
+        while (start < to) {
+            val cell = styles[start] ?: TextStyle.EMPTY
+            var end = start + 1
+            while (end < to && styles[end] == cell) end++
+            line.writeString(start, CharBuffer(chars.substring(start, end)), linkStyle(cell, info))
+            start = end
+        }
+    }
+
+    private fun linkStyle(cell: TextStyle, info: LinkInfo): HyperlinkStyle {
+        // Reverse video swaps the pair, so a link foreground would become the cell's fill: keep both.
+        val inverse = cell.hasOption(TextStyle.Option.INVERSE)
+        val builder = HyperlinkStyle(
+            if (inverse) cell.foreground else linkColor.foreground,
+            cell.background ?: linkColor.background,
+            info,
+            mode,
+        ).toBuilder()
+        for (option in TextStyle.Option.entries) if (cell.hasOption(option)) builder.setOption(option, true)
+        return builder.build() as HyperlinkStyle
+    }
+
+    private fun joined(lines: List<TerminalLine>, width: Int): String = buildString {
+        lines.forEachIndexed { i, line ->
+            val t = line.text
+            append(t)
+            if (i < lines.size - 1 && t.length < width) append(" ".repeat(width - t.length))
+        }
+    }
+
+    companion object {
+        private val linesField: Field? = runCatching {
+            Class.forName("com.jediterm.terminal.model.hyperlinks.TextProcessing\$LineInfoImpl")
+                .getDeclaredField("myLinesToProcess")
+                .apply { isAccessible = true }
+        }.getOrNull()
+
+        /** The buffer lines JediTerm joined into [lineInfo]'s text, or null if it can't be read. */
+        @Suppress("UNCHECKED_CAST")
+        internal fun linesOf(lineInfo: AsyncHyperlinkFilter.LineInfo): List<TerminalLine>? {
+            val field = linesField ?: return null
+            if (!field.declaringClass.isInstance(lineInfo)) return null
+            return runCatching { field.get(lineInfo) as List<TerminalLine> }.getOrNull()
+        }
     }
 }
 

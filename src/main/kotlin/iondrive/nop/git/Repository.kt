@@ -53,6 +53,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -126,12 +127,12 @@ class GitRepo private constructor(
             if (staged.isNotEmpty()) {
                 if (!stageBlobsInParallel(staged, progress, isCancelled)) {
                     if (isCancelled()) throw CancellationException("Commit cancelled")
-                    for (change in staged) {
+                    for (batch in staged.chunked(STAGE_BATCH_FILES)) {
                         if (isCancelled()) throw CancellationException("Commit cancelled")
                         val add = git.add()
-                        add.addFilepattern(change.path)
+                        batch.forEach { add.addFilepattern(it.path) }
                         add.call()
-                        stagedPaths.add(change.path)
+                        batch.mapTo(stagedPaths) { it.path }
                     }
                 } else {
                     parallelCommitted = true
@@ -139,12 +140,12 @@ class GitRepo private constructor(
             }
             if (removed.isNotEmpty()) {
                 if (isCancelled()) throw CancellationException("Commit cancelled")
-                for (change in removed) {
+                for (batch in removed.chunked(STAGE_BATCH_FILES)) {
                     if (isCancelled()) throw CancellationException("Commit cancelled")
                     val rm = git.rm().setCached(true)
-                    rm.addFilepattern(change.path)
+                    batch.forEach { rm.addFilepattern(it.path) }
                     rm.call()
-                    stagedPaths.add(change.path)
+                    batch.mapTo(stagedPaths) { it.path }
                 }
             }
             if (isCancelled()) throw CancellationException("Commit cancelled")
@@ -299,9 +300,12 @@ class GitRepo private constructor(
     ): Boolean {
         if (staged.size < PARALLEL_STAGE_MIN_FILES) return false
         val plan = planStaging(staged)
-        if (plan.fast.size < PARALLEL_STAGE_MIN_FILES) return false
+        // Filtered files keep this path however few the fast ones are: it is the one that hands them
+        // to `git add`, and AddCommand's process per file is what costs, not the threads.
+        val keep = plan.filtered.size >= PARALLEL_STAGE_MIN_FILES
+        if (plan.fast.size < PARALLEL_STAGE_MIN_FILES && !keep) return false
         val fastBytes = plan.fast.sumOf { it.file.length() }
-        if (fastBytes < PARALLEL_STAGE_MIN_BYTES && plan.fast.size < PARALLEL_STAGE_ALWAYS_FILES) return false
+        if (fastBytes < PARALLEL_STAGE_MIN_BYTES && plan.fast.size < PARALLEL_STAGE_ALWAYS_FILES && !keep) return false
 
         if (isCancelled()) throw CancellationException("Commit cancelled")
 
@@ -310,21 +314,35 @@ class GitRepo private constructor(
         // The filtered half counts towards the total even though AddCommand won't report as it
         // goes — it lands as one step below — so the percentage covers the whole change set rather
         // than jumping backwards when the parallel half starts.
-        val slowBytes = plan.slow.sumOf { File(rootDir.toFile(), it.path).length() }
+        val slowBytes = (plan.slow + plan.filtered).sumOf { File(rootDir.toFile(), it.path).length() }
         progress.expect(fastBytes + slowBytes)
 
         val stagedSlow = mutableListOf<String>()
         // Anything needing conversion goes through AddCommand first. It takes and releases the
         // index lock itself, so it has to finish before the fast half locks the index in turn.
-        if (plan.slow.isNotEmpty()) {
+        if (plan.slow.isNotEmpty() || plan.filtered.isNotEmpty()) {
             try {
-                for (entry in plan.slow) {
+                // Filtered files go to the git binary first: JGit runs a clean filter as one process
+                // per file, ~40 ms each for git-lfs, where git keeps a single `git-lfs filter-process`
+                // up for the lot. Measured on hermes, 4,399 LFS files: over three minutes through
+                // AddCommand, 10 s through `git add`. With no usable git they join the AddCommand half.
+                var viaAddCommand = plan.slow
+                if (plan.filtered.isNotEmpty()) {
+                    val paths = plan.filtered.map { it.path }
+                    if (addWithGitCli(paths, isCancelled)) {
+                        stagedSlow.addAll(paths)
+                        progress.advance(plan.filtered.sumOf { File(rootDir.toFile(), it.path).length() }, paths.size)
+                    } else {
+                        viaAddCommand = plan.slow + plan.filtered
+                    }
+                }
+                for (batch in viaAddCommand.chunked(STAGE_BATCH_FILES)) {
                     if (isCancelled()) throw CancellationException("Commit cancelled")
                     val add = git.add()
-                    add.addFilepattern(entry.path)
+                    batch.forEach { add.addFilepattern(it.path) }
                     add.call()
-                    stagedSlow.add(entry.path)
-                    progress.advance(File(rootDir.toFile(), entry.path).length(), 1)
+                    batch.mapTo(stagedSlow) { it.path }
+                    progress.advance(batch.sumOf { File(rootDir.toFile(), it.path).length() }, batch.size)
                 }
             } catch (t: Throwable) {
                 if (stagedSlow.isNotEmpty()) {
@@ -438,8 +456,15 @@ class GitRepo private constructor(
     /** A file whose bytes on disk are exactly the bytes git should record. */
     private class FastEntry(val path: String, val file: File, val executable: Boolean)
 
-    /** [fast] can be read straight off disk in parallel; [slow] must go through AddCommand. */
-    private class StagePlan(val fast: List<FastEntry>, val slow: List<FileChange>)
+    /**
+     * [fast] can be read straight off disk in parallel; [filtered] needs a clean filter (Git LFS) and
+     * goes to the git binary, see [addWithGitCli]; [slow] must go through AddCommand.
+     */
+    private class StagePlan(
+        val fast: List<FastEntry>,
+        val slow: List<FileChange>,
+        val filtered: List<FileChange> = emptyList(),
+    )
 
     /**
      * Sorts [staged] into the paths that can be read raw and the paths that cannot.
@@ -463,6 +488,7 @@ class GitRepo private constructor(
         val wanted = staged.associateBy { it.path }
         val fast = ArrayList<FastEntry>()
         val slow = ArrayList<FileChange>()
+        val filtered = ArrayList<FileChange>()
         val seen = HashSet<String>()
         runCatching {
             TreeWalk(repository).use { walk ->
@@ -491,7 +517,9 @@ class GitRepo private constructor(
                     val f = walk.getTree(treeIdx, WorkingTreeIterator::class.java)
                     val mode = f?.entryFileMode
                     val plain = mode == FileMode.REGULAR_FILE || mode == FileMode.EXECUTABLE_FILE
-                    if (f == null || !plain || f.cleanFilterCommand != null || !passesThrough(f, change)) {
+                    if (f != null && plain && f.cleanFilterCommand != null) {
+                        filtered.add(change)
+                    } else if (f == null || !plain || !passesThrough(f, change)) {
                         slow.add(change)
                     } else {
                         fast.add(
@@ -511,7 +539,57 @@ class GitRepo private constructor(
         // Paths the walk never yielded are gone from disk (or ignored); AddCommand knows what to
         // do with those, and it is the same thing it does today.
         staged.filterTo(slow) { it.path !in seen }
-        return StagePlan(fast, slow)
+        return StagePlan(fast, slow, filtered)
+    }
+
+    /**
+     * Stages [paths] with `git add`, so that their clean filters run the way git runs them: one
+     * long-running filter process for the whole set rather than a process per file. Returns false,
+     * having changed nothing, when there is no git binary new enough to take a pathspec file (2.25);
+     * a git that runs and fails throws with its output. A cancel kills git, which drops its
+     * index.lock on the way out and leaves the index as it was.
+     */
+    private fun addWithGitCli(paths: List<String>, isCancelled: () -> Boolean): Boolean {
+        val proc = try {
+            ProcessBuilder("git", "--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul")
+                .directory(rootDir.toFile())
+                .redirectErrorStream(true)
+                .apply {
+                    // An inherited GIT_DIR or GIT_INDEX_FILE would point this add at another repository.
+                    environment().keys.removeAll(
+                        listOf("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+                    )
+                }
+                .start()
+        } catch (_: IOException) {
+            return false
+        }
+        val output = StringBuilder()
+        val reader = Thread({ output.append(proc.inputStream.bufferedReader().readText()) }, "nop-git-add")
+            .apply { isDaemon = true; start() }
+        try {
+            proc.outputStream.use { out ->
+                for (path in paths) {
+                    out.write(path.toByteArray(Charsets.UTF_8))
+                    out.write(0)
+                }
+            }
+        } catch (_: IOException) {
+            // git stopped reading, which it only does on its way to failing; its output says why.
+        }
+        while (!proc.waitFor(100, TimeUnit.MILLISECONDS)) {
+            if (isCancelled()) {
+                proc.destroy()
+                if (!proc.waitFor(5, TimeUnit.SECONDS)) proc.destroyForcibly().waitFor()
+                throw CancellationException("Commit cancelled")
+            }
+        }
+        reader.join(5_000)
+        val exit = proc.exitValue()
+        // 129 is git's usage error: a git older than --pathspec-from-file, which AddCommand covers.
+        if (exit == 129) return false
+        check(exit == 0) { "git add failed (exit $exit): ${output.toString().trim()}" }
+        return true
     }
 
     /** True when check-in would copy this file's bytes through unchanged. */
@@ -1356,6 +1434,13 @@ class GitRepo private constructor(
         private const val PARALLEL_STAGE_MIN_BYTES = 8L * 1024 * 1024
         /** ...or large in count, where per-file overhead dominates however small the files are. */
         private const val PARALLEL_STAGE_ALWAYS_FILES = 64
+        /**
+         * Paths per AddCommand/RmCommand on the staging paths that check for a cancel. Each call reads
+         * and rewrites the whole index, so one call per file made a 4,399-file LFS change set in a
+         * 256k-entry repo (a 33 MB index) take over ten minutes; a batch keeps that to a handful of
+         * rewrites while the Cancel ✕ still lands within one batch.
+         */
+        private const val STAGE_BATCH_FILES = 256
 
         /** Open repositories by canonical git directory. See [GitRepo] for why they are shared. */
         private val OPEN = HashMap<File, SharedRepository>()

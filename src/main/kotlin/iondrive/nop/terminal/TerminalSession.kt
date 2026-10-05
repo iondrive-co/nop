@@ -180,8 +180,11 @@ class TerminalSession private constructor(
         val w = NopTerminalWidget(adopted?.columns ?: INITIAL_COLUMNS, adopted?.rows ?: INITIAL_ROWS, s)
         // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
         // Must be installed before the process starts writing, or early output misses out: JediTerm
-        // only runs the filters over a line as it is written.
-        w.addHyperlinkFilter(UrlHyperlinkFilter())
+        // only runs the filters over a line as it is written. Through CellStylePreservingLinks so a
+        // link keeps the background drawn behind it — an agent's own selection highlight included.
+        w.addAsyncHyperlinkFilter(
+            CellStylePreservingLinks(w.terminalTextBuffer, UrlHyperlinkFilter(), s.hyperlinkColor, s.hyperlinkHighlightingMode),
+        )
         // Dropped files are typed in as paths — see TerminalFileDrop. On the terminal panel rather
         // than on the widget: the panel is what fills the widget, so it is what the pointer is over.
         if (!GraphicsEnvironment.isHeadless()) {
