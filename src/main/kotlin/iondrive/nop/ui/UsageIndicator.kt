@@ -161,9 +161,9 @@ private fun UsageChip(account: Account, reading: UsageReading?) {
                 overflow = TextOverflow.Ellipsis,
             )
             else -> {
-                // Session first, week second, and both places drawn even when the account answered
-                // about only one of them: with no labels, position is the only thing that says
-                // which window a bar is, so the pair cannot close up around a missing one.
+                // Session first, week second. A window the account does not have — a weekly-only
+                // plan such as Codex's Business Pro Lite has no session one — takes no space; the
+                // tooltip says which window a lone bar is.
                 UsageBar("session", reading.session)
                 UsageBar("week", reading.weekly)
                 if (reading.note != null) StaleMark(reading)
@@ -186,10 +186,9 @@ private fun UsageChip(account: Account, reading: UsageReading?) {
 @Composable
 internal fun UsageBar(label: String, window: UsageWindow?) {
     val track = if (JewelTheme.isDark) Color(0xFF3C3F41) else Color(0xFFE3E5E9)
-    if (window == null) {
-        Canvas(modifier = Modifier.size(BAR_WIDTH, BAR_HEIGHT)) { drawTrack(track) }
-        return
-    }
+    // Nothing, not an empty track: an empty track is what 0% looks like, and a plan with no such
+    // window has not used none of it.
+    if (window == null) return
     val fill = usageColor(window.percent)
     val elapsed = window.elapsed()
     val marker = with(LocalDensity.current) { MARKER_WIDTH.toPx() }
