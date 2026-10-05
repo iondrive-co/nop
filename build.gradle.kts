@@ -61,6 +61,25 @@ tasks.test {
     finalizedBy("installDesktopEntry")
 }
 
+// The version nop reports about itself, read at runtime by iondrive.nop.update.BuildInfo. Taken from
+// packageVersion below (which scripts/release.sh bumps) so there is one place the version lives; the
+// self-updater compares it with the latest release, and a build that cannot say what it is would be
+// offered every release as an upgrade.
+val buildInfoDir = layout.buildDirectory.dir("generated/buildinfo")
+val generateBuildInfo = tasks.register("generateBuildInfo") {
+    group = "build"
+    description = "Write nop-build.properties with the version this build packages as"
+    val version = provider { compose.desktop.application.nativeDistributions.packageVersion ?: "0.0.0" }
+    inputs.property("version", version)
+    outputs.dir(buildInfoDir)
+    doLast {
+        val file = buildInfoDir.get().asFile.resolve("iondrive/nop/update/nop-build.properties")
+        file.parentFile.mkdirs()
+        file.writeText("version=${version.get()}\n")
+    }
+}
+sourceSets.main { resources.srcDir(generateBuildInfo) }
+
 compose.desktop {
     application {
         mainClass = "iondrive.nop.MainKt"

@@ -72,6 +72,42 @@ jobs:
           ls release/* >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+      # What nop's self-updater installs from (src/main/kotlin/iondrive/nop/update): the app image as a
+      # tarball, update.json listing every file in it by sha256, and update.json.sig, an Ed25519
+      # signature over update.json made with NOP_UPDATE_SIGNING_KEY (scripts/update-signing-key.sh).
+      # A release without the signature is still published, but no nop will update itself to it.
+      - name: Self-update bundle (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.NOP_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          version="$(grep -E '^[[:space:]]*packageVersion[[:space:]]*=' build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match packageVersion $version" >&2
+            exit 1
+          fi
+          ./gradlew createDistributable --no-daemon
+          image=build/compose/binaries/main/app/nop
+          archive="release/nop-$version-linux-x64.tar.gz"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --format=%ct)" \
+              -C "$(dirname "$image")" -czf "$archive" nop
+          python3 scripts/update-manifest.py "$image" "$archive" "$version" linux-x64 > release/update.json
+          if [[ -n "$SIGNING_KEY" ]]; then
+            key="$RUNNER_TEMP/update-signing.key"
+            (umask 077; printf '%s\n' "$SIGNING_KEY" > "$key")
+            openssl pkeyutl -sign -inkey "$key" -rawin -in release/update.json -out release/update.json.sig
+            openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-signing.pub"
+            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/update-signing.pub" -rawin \
+                -in release/update.json -sigfile release/update.json.sig
+            rm -f "$key"
+          else
+            echo "::warning::NOP_UPDATE_SIGNING_KEY is not set: update.json is unsigned, and no nop will update itself to this release."
+          fi
+          ls -l release/
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
