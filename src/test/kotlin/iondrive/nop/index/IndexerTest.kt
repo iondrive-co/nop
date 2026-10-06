@@ -267,4 +267,65 @@ class IndexerTest {
         live.parent.toFile().setLastModified(future)
         assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
     }
+
+    @Test fun `an incremental build keeps an unchanged java file's entries without parsing it`(@TempDir tmp: Path) {
+        val a = tmp.resolve("A.java"); a.writeText("class A { void before() {} }")
+        a.toFile().setLastModified(past)
+        val previous = Indexer.build(tmp)
+        // New text under the old mtime: only a reparse could see `after`, so finding `before` still
+        // there shows the file was taken from [previous] rather than read again.
+        a.writeText("class A { void after() {} }")
+        a.toFile().setLastModified(past)
+        val index = Indexer.build(tmp, previous, since = cacheStamp)
+        assertEquals(1, index.lookup("before").size)
+        assertTrue(index.lookup("after").isEmpty())
+    }
+
+    @Test fun `an incremental build reparses a java file edited since the cache`(@TempDir tmp: Path) {
+        val a = tmp.resolve("A.java"); a.writeText("class A { void before() {} }")
+        val b = tmp.resolve("B.java"); b.writeText("class B { void kept() {} }")
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        val previous = Indexer.build(tmp)
+        a.writeText("class A { void after() {} }")
+        a.toFile().setLastModified(future)
+        val index = Indexer.build(tmp, previous, since = cacheStamp)
+        assertTrue(index.lookup("before").isEmpty())
+        assertEquals(1, index.lookup("after").size)
+        assertEquals(1, index.lookup("kept").size)
+    }
+
+    @Test fun `an incremental build parses a renamed java file at its new path`(@TempDir tmp: Path) {
+        val a = tmp.resolve("A.java"); a.writeText("class A { void m() {} }")
+        a.toFile().setLastModified(past)
+        val previous = Indexer.build(tmp)
+        // A rename keeps the mtime, so only the path says the file is new.
+        val moved = tmp.resolve("sub/A.java"); moved.parent.createDirectories()
+        a.toFile().renameTo(moved.toFile())
+        moved.toFile().setLastModified(past)
+        val index = Indexer.build(tmp, previous, since = cacheStamp)
+        assertEquals("sub/A.java", index.lookup("m").single().file)
+    }
+
+    @Test fun `an incremental build drops a deleted java file`(@TempDir tmp: Path) {
+        val a = tmp.resolve("A.java"); a.writeText("class A { void gone() {} }")
+        val b = tmp.resolve("B.java"); b.writeText("class B { void stays() {} }")
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        val previous = Indexer.build(tmp)
+        a.toFile().delete()
+        val index = Indexer.build(tmp, previous, since = cacheStamp)
+        assertTrue(index.lookup("gone").isEmpty())
+        assertEquals(1, index.lookup("stays").size)
+    }
+
+    @Test fun `an incremental build matches a full one`(@TempDir tmp: Path) {
+        tmp.resolve("A.java").writeText("package p; class A { int f; void m() {} }")
+        val c = tmp.resolve("src/C.java"); c.parent.createDirectories()
+        c.writeText("package q; class C extends p.A { void n() {} }")
+        tmp.resolve("x.kt").writeText("fun x() = 1\n")
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        val previous = Indexer.build(tmp)
+        c.writeText("package q; class C extends p.A { void n2() {} }")
+        c.toFile().setLastModified(future)
+        assertEquals(Indexer.build(tmp).all(), Indexer.build(tmp, previous, since = cacheStamp).all())
+    }
 }

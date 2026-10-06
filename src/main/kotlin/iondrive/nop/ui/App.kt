@@ -89,6 +89,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import javax.swing.JPanel
 
 // How often the commit panel re-checks git state on its own, so changes from editing, branch
@@ -543,13 +544,22 @@ fun App(
         }
         if (cacheFresh) return@LaunchedEffect
 
-        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath) }
+        // Java files unchanged since the cache keep their entries rather than being parsed again
+        // (see Indexer.build) — the in-memory index is the cache's contents or a later build's, so
+        // it is current as of cacheStamp. An unusable cache gives nothing to reuse.
+        val buildStarted = System.currentTimeMillis()
+        val previousSymbols = symbolIndex.takeIf { symbolCacheUsable }
+        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath, previousSymbols, cacheStamp) }
         symbolIndex = freshSymbols
         val freshFiles = withContext(Dispatchers.IO) { FileIndex.build(rootPath) }
         fileIndex = freshFiles
         withContext(Dispatchers.IO) {
             SymbolIndex.save(indexFile, freshSymbols)
             FileIndex.save(filesIndexFile, freshFiles)
+            // Stamp the cache with when the build *started*: a file saved while it ran may have been
+            // read before the save, and must look newer than the cache to the probe and to the next
+            // incremental build, which both take this mtime as "current as of".
+            runCatching { Files.setLastModifiedTime(filesIndexFile, FileTime.fromMillis(buildStarted)) }
         }
         // What we just wrote is by definition current, so later refreshes can trust the probe again.
         symbolCacheUsable = true

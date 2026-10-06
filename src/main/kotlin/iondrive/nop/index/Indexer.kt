@@ -23,15 +23,48 @@ object Indexer {
     private val TS_EXT = setOf("ts", "tsx", "js", "jsx", "mjs", "cjs")
     private val KOTLIN_EXT = setOf("kt", "kts")
 
-    fun build(projectRoot: Path): SymbolIndex {
+    /**
+     * Indexes the project at [projectRoot].
+     *
+     * With a [previous] index that was current as of [since] (epoch millis), a Java file not
+     * modified since then keeps the entries [previous] holds for it instead of being parsed again.
+     * Everything else is rebuilt as before: the regex rules are cheap, and the Java parse is the
+     * whole cost — on a project of seven thousand Java files a full parse ran for over thirty seconds
+     * on every core and threw away gigabytes, and it ran again on every save, because any change to
+     * the working tree makes the index stale. A save now costs one file's parse.
+     *
+     * A file is reused only when [previous] has entries under its path, so a rename (which keeps the
+     * mtime) is parsed at its new path, and a deleted file drops out because the walk never reaches
+     * it. A file declaring nothing is parsed every time, which for a `package-info.java` is nothing.
+     * What this cannot see is a file replaced in place by one with an older mtime (`cp -p` over it);
+     * that keeps its old entries until it is next touched.
+     */
+    fun build(projectRoot: Path, previous: SymbolIndex? = null, since: Long = 0L): SymbolIndex {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return SymbolIndex()
         val out = mutableListOf<IndexEntry>()
         val javaFiles = mutableListOf<File>()
         walk(rootFile, rootFile, out, javaFiles)
-        out += indexJavaFiles(rootFile, javaFiles)
+        val known = if (previous != null && since > 0L) javaEntriesByFile(previous) else emptyMap()
+        val reused = mutableListOf<IndexEntry>()
+        val toParse = javaFiles.filter { file ->
+            val kept = known[relPath(rootFile, file)]?.takeIf { file.lastModified() < since }
+            if (kept != null) reused += kept
+            kept == null
+        }
+        out += (reused + indexJavaFiles(rootFile, toParse))
+            // The walk visits directories in whatever order the filesystem hands them over, and the
+            // parallel batch adds a second source of nondeterminism on top. Sorting makes a rebuild
+            // produce a byte-identical cache file for an unchanged project, which is worth having
+            // when the cache is something a person may end up diffing.
+            .sortedWith(compareBy({ it.file }, { it.line }, { it.name }))
         return SymbolIndex(out)
     }
+
+    private val JAVA_KINDS = setOf(SymbolKind.JAVA_TYPE, SymbolKind.JAVA_METHOD, SymbolKind.JAVA_FIELD)
+
+    private fun javaEntriesByFile(index: SymbolIndex): Map<String, List<IndexEntry>> =
+        index.all().asSequence().filter { it.kind in JAVA_KINDS }.groupBy { it.file }
 
     /**
      * Parses the project's Java files and turns each one's declarations into index entries.
@@ -54,11 +87,6 @@ object Indexer {
             .map { file -> javaEntries(root, file) }
             .collect(java.util.stream.Collectors.toList())
             .flatten()
-            // The walk visits directories in whatever order the filesystem hands them over, and the
-            // parallel batch adds a second source of nondeterminism on top. Sorting makes a rebuild
-            // produce a byte-identical cache file for an unchanged project, which is worth having
-            // when the cache is something a person may end up diffing.
-            .sortedWith(compareBy({ it.file }, { it.line }, { it.name }))
     }
 
     private fun javaEntries(root: File, file: File): List<IndexEntry> {
