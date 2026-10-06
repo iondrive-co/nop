@@ -105,6 +105,9 @@ internal const val COMMIT_MESSAGE_HISTORY_CAP = 20
  */
 private const val USAGE_POLL_INTERVAL_MS = 5 * 60 * 1000L
 
+/** How often to re-estimate the weekly pace from transcripts. See iondrive.nop.agent.WeeklyPace. */
+private const val PACE_ESTIMATE_INTERVAL_MS = 30 * 60 * 1000L
+
 /** How often to poll while some account's reading is stale. See iondrive.nop.agent.UsageGate. */
 private const val USAGE_RETRY_INTERVAL_MS = 60 * 1000L
 
@@ -898,6 +901,7 @@ fun App(
     val agentUsage = remember { mutableStateMapOf<String, UsageReading>() }
     LaunchedEffect(agentAccounts) {
         if (agentAccounts.isEmpty()) return@LaunchedEffect
+        var paceEstimatedAt = 0L
         while (true) {
             for (account in agentAccounts) {
                 // Contained per account. A poller is background convenience; nothing it can hit —
@@ -915,6 +919,22 @@ fun App(
                 }.onFailure { failure ->
                     if (failure is CancellationException) throw failure
                     Log.warn("could not read usage for ${account.name}: $failure")
+                }
+            }
+            // Until an account has a weekly pace ratio of its own, one estimated from its transcripts
+            // stands in. Reading a month of transcripts is not free, so not every poll.
+            if (System.currentTimeMillis() - paceEstimatedAt >= PACE_ESTIMATE_INTERVAL_MS) {
+                paceEstimatedAt = System.currentTimeMillis()
+                runCatching {
+                    val readings = agentUsage.toMap()
+                    if (withContext(Dispatchers.IO) { Usage.estimatePace(agentAccounts, readings) }) {
+                        for (account in agentAccounts) {
+                            agentUsage[account.name]?.let { agentUsage[account.name] = Usage.withPace(account, it) }
+                        }
+                    }
+                }.onFailure { failure ->
+                    if (failure is CancellationException) throw failure
+                    Log.warn("could not estimate the weekly pace: $failure")
                 }
             }
             // Sooner while a reading is stale or spent, so a rate-limited or reset account recovers

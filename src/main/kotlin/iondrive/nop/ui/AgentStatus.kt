@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -26,6 +27,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -84,6 +86,37 @@ internal fun rememberPulsing(unseen: Boolean, since: Long): Boolean {
     return pulsing
 }
 
+/** How many positions the working arc turns through: one every 36°. */
+private const val SPIN_STEPS = 10
+
+/** How long the arc holds each position in a focused window: a turn in a second. */
+private const val SPIN_STEP_MS = 100L
+
+/** The same in a window without focus, which the user is not looking at: a turn in five seconds. */
+private const val SPIN_STEP_UNFOCUSED_MS = 500L
+
+/**
+ * The angle of the working arc, stepped rather than animated.
+ *
+ * A smooth spin redraws the whole window on every vsync for as long as any agent works, which is
+ * most of the day; on the one old GPU that drives every monitor that kept nop's UI thread waiting
+ * in swapBuffers and slowed it, and whatever else was drawing, down. Every arc steps on the same
+ * wall-clock tick, so a window with ten working tabs still draws one frame per step.
+ */
+@Composable
+private fun rememberSpinTurn(): Float {
+    val period = if (LocalWindowInfo.current.isWindowFocused) SPIN_STEP_MS else SPIN_STEP_UNFOCUSED_MS
+    var step by remember { mutableIntStateOf(0) }
+    LaunchedEffect(period) {
+        while (true) {
+            val now = System.currentTimeMillis()
+            step = ((now / period) % SPIN_STEPS).toInt()
+            delay(period - now % period)
+        }
+    }
+    return step * 360f / SPIN_STEPS
+}
+
 /**
  * The mark an agent tab carries in front of its name, saying what the session is doing.
  *
@@ -125,13 +158,7 @@ internal fun AgentStatusMark(
     ) {
         when (activity) {
             Activity.Working -> {
-                val transition = rememberInfiniteTransition(label = "agent-spin")
-                val turn by transition.animateFloat(
-                    initialValue = 0f,
-                    targetValue = 360f,
-                    animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
-                    label = "agent-spin-angle",
-                )
+                val turn = rememberSpinTurn()
                 Canvas(Modifier.size(size * 0.8f)) {
                     val stroke = 1.8.dp.toPx()
                     val inset = stroke / 2

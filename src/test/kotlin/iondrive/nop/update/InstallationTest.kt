@@ -26,10 +26,16 @@ class InstallationTest {
 
     @Test
     fun `a launcher built inside a checkout is not updated from releases`() {
-        tmp.resolve("nop/.git").createDirectories()
+        tmp.resolve("nop/.git").createDirectories().resolve("HEAD").writeText("ref: refs/heads/main\n")
         val launcher = tmp.resolve("nop/build/compose/binaries/main/app/nop/bin/nop")
         val result = assertIs<Installation.NotUpdatable>(Installation.of(launcher, v))
         assertTrue("rebuild" in result.reason, result.reason)
+    }
+
+    @Test
+    fun `an empty git directory is not a checkout`() {
+        tmp.resolve("shared/.git").createDirectories()
+        assertNull(Installation.checkoutAbove(tmp.resolve("shared/opt/nop/bin/nop"))?.takeIf { it.startsWith(tmp) })
     }
 
     @Test

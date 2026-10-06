@@ -289,6 +289,28 @@ class ActivityTest {
         assertEquals(Activity.Asking, tracker.activity(now = 0))
     }
 
+    /** An agent describing a permission prompt in its reply is not showing one. */
+    @Test
+    fun `a reply that quotes a permission prompt is not a question`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("✳ Claude Code", at = 0)
+
+        val changed = tracker.onOutput("It turns orange on text like \"Do you want to proceed? ❯ 1. Yes\".")
+
+        assertFalse(changed)
+        assertEquals(Activity.Idle, tracker.activity(now = 10_000))
+    }
+
+    @Test
+    fun `tool output that only mentions confirmation is not a question`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Claude Code", at = 0)
+        tracker.onEvent(started("toolu_789", "Bash"))
+
+        assertFalse(tracker.onOutput("deploy.sh requires confirmation; Do you want to proceed? (y/n) is printed by it"))
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+    }
+
     /**
      * Codex's stopped title carries no glyph, so it means nothing until it has stood still — and
      * until then the tab is still what it was, not "running", which would be a change from working

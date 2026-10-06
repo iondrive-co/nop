@@ -90,7 +90,42 @@ data class UsageReading(
      * not [unavailable], which the accounts dialog shows as signed out.
      */
     val note: String? = null,
+    /**
+     * Weekly percent spent per session percent, as [WeeklyPace] has learnt it for this account; null
+     * until it has seen enough of a session window to say.
+     */
+    val weeklyPerSession: Double? = null,
+    /** Where [weeklyPerSession] came from; null when it is unknown. */
+    val paceSource: PaceSource? = null,
 ) {
+    /**
+     * The session percent to aim for by the end of this window, in session percent, for the weekly
+     * window to run out exactly at its reset; null when a window, its timing or [weeklyPerSession]
+     * is unknown. Without [weeklyPerSession] it is 100: the end of the bar, which promises nothing
+     * the black line does not already.
+     *
+     * The weekly quota that was left when this window opened, split evenly between this window and
+     * every one still to come before the weekly reset. It holds still for the whole window — this
+     * window's own spend is added back, so using it does not move its own target — and moves at the
+     * next one: spend past it and the next window's target is lower, fall short and it is higher.
+     * Below the black line it says not to spend the whole window; above it, past even 100%, it says
+     * the week is going unspent.
+     */
+    fun weeklyPace(now: Instant = Instant.now()): Double? {
+        val session = session ?: return null
+        val weekly = weekly ?: return null
+        val ratio = weeklyPerSession?.takeIf { it > 0 } ?: return 100.0
+        val elapsed = session.elapsed(now) ?: return null
+        val length = session.length?.seconds?.takeIf { it > 0 } ?: return null
+        val weekLeft = Duration.between(now, weekly.resetsAt ?: return null).seconds.coerceAtLeast(0)
+        val sinceOpen = elapsed * length
+        val weeklyAtOpen = (weekly.percent - ratio * session.percent).coerceAtLeast(0.0)
+        val budget = (100.0 - weeklyAtOpen).coerceAtLeast(0.0)
+        // How many windows' worth of time the week had left when this one opened, at least this one.
+        val windows = ((weekLeft + sinceOpen) / length).coerceAtLeast(1.0)
+        return budget / windows / ratio
+    }
+
     /**
      * Whether this reading is consistent with the vendor refusing to serve the account: true when a
      * window is at or past [SPENT_PERCENT], false when every window it knows about has room, and
@@ -233,10 +268,47 @@ object Usage {
      */
     private val gate = UsageGate()
 
+    /** Learns each account's session-to-weekly rate from the readings; see [WeeklyPace]. */
+    private val pace = WeeklyPace { iondrive.nop.Settings.configRoot.resolve("nop").resolve("usage-pace") }
+
+    /** [reading] with the latest weekly pace ratio, without learning from it. */
+    fun withPace(account: Account, reading: UsageReading): UsageReading =
+        if (UsageFixture.file != null) reading else pace.annotate(account.name, reading, learn = false)
+
+    /**
+     * Estimates each account's weekly pace ratio from its transcripts, for the accounts that have
+     * not been watched long enough to have one of their own (see [WeeklyPace.estimateOf]). Blocking,
+     * and it reads every transcript of the last month, so it is for a background thread every so
+     * often. Returns whether any account wanted one.
+     */
+    fun estimatePace(accounts: List<Account>, readings: Map<String, UsageReading>): Boolean {
+        val wanting = accounts.filter { pace.wantsEstimate(it.name) }
+        if (wanting.isEmpty() || UsageFixture.file != null) return false
+        val started = System.nanoTime()
+        val session = UsageBreakdown.compute(wanting, readings, UsageScope.Session5h)
+        val week = UsageBreakdown.compute(wanting, readings, UsageScope.Weekly7d)
+        for (account in wanting) {
+            val reading = readings[account.name]
+            val ratio = WeeklyPace.estimateOf(
+                sessionTokens = session[account.name]?.totalTokens ?: 0,
+                session = reading?.session?.percent ?: 0.0,
+                weekTokens = week[account.name]?.totalTokens ?: 0,
+                weekly = reading?.weekly?.percent ?: 0.0,
+            )
+            pace.estimate(account.name, ratio)
+        }
+        Log.info("weekly pace estimated from transcripts in ${(System.nanoTime() - started) / 1_000_000} ms")
+        return true
+    }
+
     /** Blocking; call it off the UI thread. */
     fun read(account: Account): UsageReading {
         // The screenshot's canned numbers, when it has set some — see UsageFixture.
         UsageFixture.file?.let { return UsageFixture.read(it, account) }
+        return pace.annotate(account.name, readProvider(account))
+    }
+
+    private fun readProvider(account: Account): UsageReading {
         return when (account.provider) {
             Provider.Anthropic -> readClaude(account)
             Provider.OpenAI -> readCodex(account)

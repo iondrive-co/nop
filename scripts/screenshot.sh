@@ -1025,17 +1025,20 @@ cat > "$AGENT_CFG/nop/agent.json" <<EOF
 EOF
 
 # The usage every account reports (see UsageFixture.kt). Spread across the strip's green / amber /
-# red bands, with resets at different points in their windows so the "now" markers differ too.
+# red bands, with resets at different points in their windows so the "now" markers differ too, and
+# a weekly pace below the "now" marker on one session bar and above it on another.
 cat > "$AGENT_CFG/usage.json" <<'EOF'
 {
   "claude-work": {
     "session": { "percent": 72, "resetsInMinutes": 108, "windowMinutes": 300 },
     "weekly": { "percent": 41, "resetsInMinutes": 4380, "windowMinutes": 10080 },
+    "weeklyPerSession": 0.12,
     "models": ["claude-opus-5-5", "claude-sonnet-4-6", "claude-haiku-4-5"]
   },
   "codex-work": {
     "session": { "percent": 35, "resetsInMinutes": 191, "windowMinutes": 300 },
-    "weekly": { "percent": 57, "resetsInMinutes": 7300, "windowMinutes": 10080 }
+    "weekly": { "percent": 57, "resetsInMinutes": 7300, "windowMinutes": 10080 },
+    "weeklyPerSession": 0.01
   },
   "antigravity": {
     "session": { "percent": 8, "resetsInMinutes": 290, "windowMinutes": 300 },

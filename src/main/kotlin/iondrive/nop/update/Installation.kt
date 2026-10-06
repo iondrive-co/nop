@@ -36,12 +36,15 @@ sealed interface Installation {
 
         /**
          * The git checkout [path] lies inside, or null. A `.git` directory marks a checkout and a
-         * `.git` file a linked worktree; either means the build is someone's own.
+         * `.git` file a linked worktree; either means the build is someone's own. A directory counts
+         * only when it holds `HEAD`, as it must for git itself to see a repository there — an empty
+         * `.git` left in a shared directory such as `/tmp` is not one.
          */
         internal fun checkoutAbove(path: Path): Path? {
             var dir: Path? = path.toAbsolutePath().normalize().parent
             while (dir != null) {
-                if (Files.exists(dir.resolve(".git"), LinkOption.NOFOLLOW_LINKS)) return dir
+                val git = dir.resolve(".git")
+                if (Files.isRegularFile(git, LinkOption.NOFOLLOW_LINKS) || Files.exists(git.resolve("HEAD"))) return dir
                 dir = dir.parent
             }
             return null

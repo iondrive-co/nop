@@ -26,6 +26,7 @@ import java.time.Instant
  *   "claude-main": {
  *     "session": { "percent": 72, "resetsInMinutes": 108, "windowMinutes": 300 },
  *     "weekly": { "percent": 41, "resetsInMinutes": 4380, "windowMinutes": 10080 },
+ *     "weeklyPerSession": 0.12,
  *     "models": ["claude-opus-5", "claude-sonnet-5"]
  *   },
  *   "codex-lab": { "unavailable": "not signed in" }
@@ -50,6 +51,8 @@ internal object UsageFixture {
             session = window(entry["session"].obj(), now),
             weekly = window(entry["weekly"].obj(), now),
             asOf = now,
+            weeklyPerSession = entry["weeklyPerSession"].double(),
+            paceSource = entry["weeklyPerSession"].double()?.let { PaceSource.Observed },
         )
     }
 

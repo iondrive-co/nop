@@ -336,7 +336,7 @@ private fun AccountEditor(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (signedIn && reading != null && (reading.session != null || reading.weekly != null)) {
-                UsageBar("session", reading.session)
+                UsageBar("session", reading.session, reading.weeklyPace(), reading.paceSource)
                 UsageBar("week", reading.weekly)
             }
             Text(

@@ -174,7 +174,7 @@ object TitleSignal {
  * call the CLI has made and not got an answer to. So a stopped title with a call still open in the
  * turn is [Activity.Asking], and one with every call answered is [Activity.Idle]. PreToolUse hooks
  * and confirmation dialogs can also hold open tool calls waiting on user approval; these are detected
- * from the terminal output ([QUEUED_QUESTION]) even while the title still reads as working.
+ * from the terminal output ([PERMISSION_PROMPT]) even while the title still reads as working.
  *
  * A question tool is [Activity.Asking] whatever the title says, and before it has said anything:
  * the call being open is the question, and it is in the transcript from the moment it is asked.
@@ -218,7 +218,12 @@ class ActivityTracker {
         if (recentOutput.length > RECENT_OUTPUT_WINDOW) {
             recentOutput.delete(0, recentOutput.length - RECENT_OUTPUT_WINDOW)
         }
-        if (!hasQueuedQuestion && QUEUED_QUESTION.containsMatchIn(recentOutput)) {
+        if (hasQueuedQuestion) return false
+        // A permission prompt only ever holds a tool call, so outside one the same words are the
+        // agent talking about a prompt, not showing one.
+        if (QUEUED_QUESTION.containsMatchIn(recentOutput) ||
+            (open.isNotEmpty() && PERMISSION_PROMPT.containsMatchIn(recentOutput))
+        ) {
             hasQueuedQuestion = true
             return true
         }
@@ -301,12 +306,20 @@ class ActivityTracker {
 
         /**
          * A background task multiplexed with a queued question / survey (e.g. in Codex:
-         * "• Queued follow-up inputs \n ? 1 question \n alt + ↑ to answer"), or a permissions /
-         * confirmation prompt awaiting user approval (e.g. in Claude Code: "Do you want to proceed?",
-         * "requires confirmation", "needs your permission", or "Allow once").
+         * "• Queued follow-up inputs \n ? 1 question \n alt + ↑ to answer").
          */
         val QUEUED_QUESTION: Regex = Regex(
-            """(?:queued\s*follow-up\s*inputs?|alt\s*\+\s*(?:↑|\^|up)\s*to\s*answer|do\s*you\s*want\s*to\s*(?:proceed|run)\??|requires\s*confirmation|needs\s*your\s*permission|allow\s*once|❯\s*1\.\s*yes|1\.\s*yes\s*2\.\s*no)""",
+            """(?:queued\s*follow-up\s*inputs?|alt\s*\+\s*(?:↑|\^|up)\s*to\s*answer)""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /**
+         * A confirmation dialog holding a tool call — a PreToolUse hook asking, in Claude Code:
+         * "Do you want to proceed?" with the numbered "1. Yes" under it. The question and the
+         * answers together, because either alone turns up in ordinary prose and tool output.
+         */
+        val PERMISSION_PROMPT: Regex = Regex(
+            """do\s*you\s*want\s*to\s*\w+[^?\n]{0,120}\?\s*(?:❯\s*)?1\.\s*yes""",
             RegexOption.IGNORE_CASE,
         )
 

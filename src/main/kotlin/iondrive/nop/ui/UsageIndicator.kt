@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import iondrive.nop.agent.Account
+import iondrive.nop.agent.PaceSource
 import iondrive.nop.agent.UsageReading
 import iondrive.nop.agent.UsageWindow
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
@@ -164,7 +165,7 @@ private fun UsageChip(account: Account, reading: UsageReading?) {
                 // Session first, week second. A window the account does not have — a weekly-only
                 // plan such as Codex's Business Pro Lite has no session one — takes no space; the
                 // tooltip says which window a lone bar is.
-                UsageBar("session", reading.session)
+                UsageBar("session", reading.session, reading.weeklyPace(), reading.paceSource)
                 UsageBar("week", reading.weekly)
                 if (reading.note != null) StaleMark(reading)
             }
@@ -180,11 +181,22 @@ private fun UsageChip(account: Account, reading: UsageReading?) {
  * percentage cannot — 60% spent is comfortable an hour before the reset and a wall four hours
  * before it — and neither of them needs a word to say so.
  *
+ * [weeklyPace], on the session bar, is where to aim the fill by the end of this window — and every
+ * window after it — for the weekly window to last exactly to its reset (see
+ * [UsageReading.weeklyPace]), drawn as a grey line, which holds still for the whole window. Short
+ * of the bar's end it says the week cannot afford the whole session; past it, the week is going
+ * unspent, and it sits at the end — as it does while the pace is not known at all.
+ *
  * Drawn rather than composed so a strip of five accounts costs ten nodes and not fifty.
  */
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-internal fun UsageBar(label: String, window: UsageWindow?) {
+internal fun UsageBar(
+    label: String,
+    window: UsageWindow?,
+    weeklyPace: Double? = null,
+    paceSource: PaceSource? = null,
+) {
     val track = if (JewelTheme.isDark) Color(0xFF3C3F41) else Color(0xFFE3E5E9)
     // Nothing, not an empty track: an empty track is what 0% looks like, and a plan with no such
     // window has not used none of it.
@@ -192,7 +204,9 @@ internal fun UsageBar(label: String, window: UsageWindow?) {
     val fill = usageColor(window.percent)
     val elapsed = window.elapsed()
     val marker = with(LocalDensity.current) { MARKER_WIDTH.toPx() }
-    Tooltip(tooltip = { Text(tooltipLine(label, window)) }) {
+    val paceColor = if (JewelTheme.isDark) PACE_MARKER_DARK else PACE_MARKER_LIGHT
+    val paceWidth = with(LocalDensity.current) { PACE_MARKER_WIDTH.toPx() }
+    Tooltip(tooltip = { Text(tooltipLine(label, window, weeklyPace, paceSource)) }) {
         Canvas(modifier = Modifier.size(BAR_WIDTH, BAR_HEIGHT)) {
             drawTrack(track)
             val width = (size.width * (window.percent / 100.0)).toFloat().coerceIn(0f, size.width)
@@ -202,6 +216,20 @@ internal fun UsageBar(label: String, window: UsageWindow?) {
                 clipRect(right = width.coerceAtLeast(1.dp.toPx())) {
                     drawTrack(fill)
                 }
+            }
+            if (weeklyPace != null) {
+                // Under the black line, so the clock still reads where the two meet. Kept clear of the
+                // rounded caps: at either end the cap narrows to nothing, and a line drawn there — where
+                // it sits at the end of the bar whenever the pace is unknown or past 100% — is lost.
+                val inset = size.height / 2
+                val x = (size.width * (weeklyPace / 100.0)).toFloat()
+                    .coerceIn(inset, size.width - inset)
+                drawLine(
+                    color = paceColor,
+                    start = Offset(x, 0f),
+                    end = Offset(x, size.height),
+                    strokeWidth = paceWidth,
+                )
             }
             if (elapsed != null) {
                 // Kept a half-stroke inside each end: at the start and the end of a window the line
@@ -252,13 +280,28 @@ internal fun staleLine(reading: UsageReading): String? {
 private val CLOCK = DateTimeFormatter.ofPattern("HH:mm")
 
 /** One bar's numbers, for the hover that asks what it is actually showing. */
-internal fun tooltipLine(label: String, window: UsageWindow): String {
+internal fun tooltipLine(
+    label: String,
+    window: UsageWindow,
+    weeklyPace: Double? = null,
+    paceSource: PaceSource? = null,
+): String {
     val eta = window.eta()?.let { ", resets in $it" } ?: ""
-    return "${window.percent.toInt()}% of the $label window$eta"
+    val pace = when {
+        weeklyPace == null -> ""
+        paceSource == null -> ", weekly pace not known yet"
+        paceSource == PaceSource.Transcripts ->
+            ", aim for ~${Math.round(weeklyPace)}% for the week (estimated from transcripts)"
+        else -> ", aim for ${Math.round(weeklyPace)}% for the week"
+    }
+    return "${window.percent.toInt()}% of the $label window$eta$pace"
 }
 
-/** Small enough that two per account and the name still fit a line, big enough to read a fill. */
-private val BAR_WIDTH = 38.dp
+/**
+ * Small enough that two per account and the name still fit a line, big enough to read a fill and
+ * to tell the weekly pace line from the clock beside it.
+ */
+private val BAR_WIDTH = 52.dp
 private val BAR_HEIGHT = 9.dp
 
 private val NAME_MAX_WIDTH = 160.dp
@@ -268,6 +311,13 @@ private val MARKER_WIDTH = 1.5.dp
 
 /** Black in both themes: it is the one mark on the bar that is not about how full it is. */
 private val NOW_MARKER = Color.Black
+
+/** Grey: lighter than the black line, and dark enough in the light theme to stand off its track. */
+private val PACE_MARKER_LIGHT = Color(0xFF6B7079)
+private val PACE_MARKER_DARK = Color(0xFFC9CCD1)
+
+/** A touch heavier than the black line, since its grey is the fainter of the two. */
+private val PACE_MARKER_WIDTH = 2.dp
 
 /**
  * The way into the accounts dialog.
