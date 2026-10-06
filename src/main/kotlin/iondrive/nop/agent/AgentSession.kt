@@ -1188,6 +1188,7 @@ class AgentSession(
             // replays, because there the history is the whole point.
             resumingLoggedWork = (resumeId != null || carried != null) && log.hadHistory,
             joinAt = carried?.transcriptPath?.let { Path.of(it) to (carried.transcriptOffset ?: 0L) },
+            pid = { terminal.pid() },
         )
         val tailer = tailerFor(account)
         newRun.follower = TranscriptFollower(

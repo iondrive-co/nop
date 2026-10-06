@@ -33,8 +33,6 @@ data class Workspace(
     val open: Boolean = true,
     /** When this window was parked, in epoch millis; null while it is open, or was never closed. */
     val closedAt: Long? = null,
-    val splitRatios: SplitRatios? = null,
-    val toolsCollapsed: Boolean? = null,
 ) {
     /** The projects this window's tabs are on, in bar order — with repeats, where a tab is a second
      * look at a project one of the others already shows. */

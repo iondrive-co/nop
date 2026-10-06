@@ -301,8 +301,6 @@ fun main(args: Array<String>) {
                     name = Workspaces.uniqueName(name, taken),
                     tabs = emptyList(),
                     geometry = Workspaces.cascade(fromWs?.geometry, 1),
-                    splitRatios = fromWs?.splitRatios,
-                    toolsCollapsed = fromWs?.toolsCollapsed,
                 ),
             )
             focusedId = id
@@ -544,8 +542,6 @@ fun main(args: Array<String>) {
                     onMoveToWindow = ::moveTab,
                     onMoveToNewWindow = { tab, name -> moveTab(tab, newWindow(name, workspace.id)) },
                     onGeometry = { geometry -> mutate(workspace.id) { it.copy(geometry = geometry) } },
-                    onSplitRatios = { ratios -> mutate(workspace.id) { it.copy(splitRatios = ratios) } },
-                    onToolsCollapsed = { collapsed -> mutate(workspace.id) { it.copy(toolsCollapsed = collapsed) } },
                     onToggleTheme = { darkMode = !darkMode },
                     onCloseWindow = { closeWindow(workspace.id) },
                     onRegister = { w -> windowRefs[workspace.id] = w },
@@ -594,8 +590,6 @@ private fun ApplicationScope.WorkspaceWindow(
     onMoveToWindow: (Long, Long) -> Unit,
     onMoveToNewWindow: (Long, String) -> Unit,
     onGeometry: (WindowGeometry) -> Unit,
-    onSplitRatios: (SplitRatios) -> Unit = {},
-    onToolsCollapsed: (Boolean) -> Unit = {},
     onToggleTheme: () -> Unit,
     onCloseWindow: () -> Unit,
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
@@ -631,28 +625,6 @@ private fun ApplicationScope.WorkspaceWindow(
             WindowPosition.PlatformDefault
         },
     )
-
-    // Panel divider ratios and tool collapse are per-window: resizing in one window does not affect
-    // any other window, and survives project tab switches within this window. Falls back to the global
-    // defaults loaded from Settings for fresh windows or configs without per-window ratios.
-    val initialRatios = remember { workspace.splitRatios ?: Settings.loadSplitRatios() }
-    var hRatio by remember { mutableStateOf(initialRatios.horizontal ?: 0.22f) }
-    var toolsRatio by remember { mutableStateOf(initialRatios.tools ?: 0.68f) }
-    var diffRatio by remember { mutableStateOf(initialRatios.diff ?: 0.5f) }
-    var sessionRatio by remember { mutableStateOf(initialRatios.session ?: 0.58f) }
-    var toolsCollapsed by remember {
-        mutableStateOf(workspace.toolsCollapsed ?: Settings.loadToolsCollapsed())
-    }
-
-    LaunchedEffect(Unit) {
-        snapshotFlow { SplitRatios(hRatio, toolsRatio, diffRatio, sessionRatio) }
-            .debounce(500)
-            .distinctUntilChanged()
-            .collectLatest { onSplitRatios(it) }
-    }
-    LaunchedEffect(toolsCollapsed) {
-        onToolsCollapsed(toolsCollapsed)
-    }
 
     LaunchedEffect(windowState) {
         // What the window over-reports its own size by, measured off its first settled reading and
@@ -902,16 +874,6 @@ private fun ApplicationScope.WorkspaceWindow(
                                 renameSymbolTrigger = renameSymbolTrigger,
                                 navigateBackTrigger = navigateBackTrigger,
                                 navigateForwardTrigger = navigateForwardTrigger,
-                                hRatio = hRatio,
-                                onHRatioChange = { hRatio = it },
-                                toolsRatio = toolsRatio,
-                                onToolsRatioChange = { toolsRatio = it },
-                                diffRatio = diffRatio,
-                                onDiffRatioChange = { diffRatio = it },
-                                sessionRatio = sessionRatio,
-                                onSessionRatioChange = { sessionRatio = it },
-                                toolsCollapsed = toolsCollapsed,
-                                onToolsCollapsedChange = { toolsCollapsed = it },
                             )
                         }
                     } else {

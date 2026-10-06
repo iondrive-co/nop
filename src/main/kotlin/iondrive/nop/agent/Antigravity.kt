@@ -34,9 +34,10 @@ import kotlin.concurrent.thread
  * the account rather than by asking about it. It answers in *remaining* percent across two model
  * families, where nop shows spent for the one family the account actually runs.
  *
- * **What it writes about a session.** Nothing nop can read as a transcript: conversations are
- * SQLite databases of protobuf blobs. See [iondrive.nop.agent.transcript.AntigravityTailer] for
- * what is left, which is the prompt history and the conversation id.
+ * **What it writes about a session.** A JSON transcript per conversation, beside the SQLite
+ * database of protobuf blobs it actually runs from, and one prompt history shared by every run of
+ * the account. See [iondrive.nop.agent.transcript.AntigravityTailer] for how a run is matched to
+ * its conversation.
  */
 internal object Antigravity {
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
@@ -49,6 +50,17 @@ internal object Antigravity {
 
     /** The CLI's prompt history — the only line-oriented record of a session it writes. */
     fun historyFile(home: Path): Path = cliDir(home).resolve("history.jsonl")
+
+    /**
+     * One conversation's own record: every prompt, model turn, tool call and tool result in it, a
+     * JSON row per step.
+     */
+    fun conversationTranscript(home: Path, conversationId: String): Path =
+        cliDir(home).resolve("brain").resolve(conversationId).resolve(".system_generated").resolve("logs")
+            .resolve("transcript.jsonl")
+
+    /** Where a running CLI holds `<conversation id>.lock` open for the conversation it is in. */
+    fun presenceDir(home: Path): Path = cliDir(home).resolve("presence")
 
     /** Workspace path to the conversation last opened there, written by the CLI as it opens one. */
     fun lastConversationsFile(home: Path): Path = cliDir(home).resolve("cache").resolve("last_conversations.json")

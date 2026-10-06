@@ -152,8 +152,6 @@ object Settings {
                 // Absent means open: only a window the user actually closed writes `open=false`.
                 open = map[prefix + "open"] != "false",
                 closedAt = map[prefix + "closed"]?.toLongOrNull(),
-                splitRatios = decodeSplitRatios(map[prefix + "split"]),
-                toolsCollapsed = map[prefix + "collapsed"]?.toBooleanStrictOrNull(),
             )
         }
     }
@@ -193,8 +191,6 @@ object Settings {
                 ?.let { map[prefix + "active"] = it.toString() }
             ws.closedAt?.let { map[prefix + "closed"] = it.toString() }
             ws.geometry?.let { map[prefix + "geom"] = encodeGeometry(it) }
-            ws.splitRatios?.let { map[prefix + "split"] = encodeSplitRatios(it) }
-            ws.toolsCollapsed?.let { map[prefix + "collapsed"] = it.toString() }
             ws.tabs.forEachIndexed { j, tab ->
                 map["${prefix}project.$j"] = tab.path.toAbsolutePath().normalize().toString()
                 // Only a renamed tab writes a name; the rest are named by their directory, and a row
@@ -264,21 +260,6 @@ object Settings {
         return WindowGeometry(w, h, parts.getOrNull(2)?.toIntOrNull(), parts.getOrNull(3)?.toIntOrNull())
     }
 
-    private fun encodeSplitRatios(r: SplitRatios): String =
-        listOf(r.horizontal, r.tools, r.diff, r.session)
-            .joinToString(",") { it?.toString().orEmpty() }
-
-    private fun decodeSplitRatios(value: String?): SplitRatios? {
-        val parts = value?.split(',')?.map { it.trim() } ?: return null
-        if (parts.size < 4) return null
-        val h = parts[0].toFloatOrNull()?.takeIf { it in 0f..1f }
-        val t = parts[1].toFloatOrNull()?.takeIf { it in 0f..1f }
-        val d = parts[2].toFloatOrNull()?.takeIf { it in 0f..1f }
-        val s = parts[3].toFloatOrNull()?.takeIf { it in 0f..1f }
-        if (h == null && t == null && d == null && s == null) return null
-        return SplitRatios(horizontal = h, tools = t, diff = d, session = s)
-    }
-
     /** Most-recently-opened first. */
     fun loadRecentProjects(): List<Path> {
         val map = load()
@@ -345,9 +326,9 @@ object Settings {
     }
 
     /**
-     * Loads the persisted divider ratios for the app's two splits and the one between a diff's two
-     * halves. Null entries mean the user hasn't dragged that divider yet, so callers should fall
-     * back to a sensible default.
+     * The divider ratios last saved in any project, for the app's splits and the one between a
+     * diff's two halves. Null entries mean the user hasn't dragged that divider yet, so callers
+     * should fall back to a sensible default.
      */
     fun loadSplitRatios(): SplitRatios {
         val map = load()
@@ -373,10 +354,59 @@ object Settings {
     }
 
     /**
-     * Whether the tool half of the region was folded away when nop last exited.
-     *
-     * Global rather than per project, like the split ratios beside it: it says how wide the user
-     * wants their agent, which does not change with the repository they point it at.
+     * The divider ratios [projectPath] was last left with. A divider never dragged in that project
+     * takes the ratio last saved for any project ([loadSplitRatios] with no project), so a project
+     * opened for the first time starts in the shape the user most recently chose.
+     */
+    fun loadSplitRatios(projectPath: Path): SplitRatios {
+        val global = loadSplitRatios()
+        val f = projectDataDir(projectPath).resolve("split")
+        val parts = runCatching { Files.readString(f).trim().split(',') }.getOrNull()
+            ?: return global
+        fun at(i: Int) = parts.getOrNull(i)?.trim()?.toFloatOrNull()?.takeIf { it in 0f..1f }
+        return SplitRatios(
+            horizontal = at(0) ?: global.horizontal,
+            tools = at(1) ?: global.tools,
+            diff = at(2) ?: global.diff,
+            session = at(3) ?: global.session,
+        )
+    }
+
+    /** Saves [r] as [projectPath]'s own ratios, and as the ratios a project with none starts from. */
+    fun saveSplitRatios(projectPath: Path, r: SplitRatios) {
+        val f = projectDataDir(projectPath).resolve("split")
+        runCatching {
+            Files.createDirectories(f.parent)
+            Files.writeString(
+                f,
+                listOf(r.horizontal, r.tools, r.diff, r.session).joinToString(",") { it?.toString().orEmpty() },
+            )
+        }
+        if (r.horizontal != null && r.tools != null && r.diff != null && r.session != null) {
+            saveSplitRatios(r.horizontal, r.tools, r.diff, r.session)
+        }
+    }
+
+    /** Whether [projectPath]'s tool panel is folded away; a project with nothing saved follows [loadToolsCollapsed]. */
+    fun loadToolsCollapsed(projectPath: Path): Boolean =
+        when (runCatching { Files.readString(projectDataDir(projectPath).resolve("tools-collapsed")).trim() }.getOrNull()) {
+            "1" -> true
+            "0" -> false
+            else -> loadToolsCollapsed()
+        }
+
+    fun saveToolsCollapsed(projectPath: Path, collapsed: Boolean) {
+        val f = projectDataDir(projectPath).resolve("tools-collapsed")
+        runCatching {
+            Files.createDirectories(f.parent)
+            Files.writeString(f, if (collapsed) "1" else "0")
+        }
+        saveToolsCollapsed(collapsed)
+    }
+
+    /**
+     * Whether the tool half of the region was last folded away in any project: what a project
+     * with no fold of its own saved opens in ([loadToolsCollapsed] with a project).
      *
      * Folded away with nothing saved, which is the state a first run opens in: the tool panels are
      * all *about* something the user has done — a commit to make, a diff to read, a search they

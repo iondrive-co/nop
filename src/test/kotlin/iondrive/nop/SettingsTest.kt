@@ -379,6 +379,43 @@ class SettingsTest {
     }
 
     @Test
+    fun `each project keeps its own split ratios`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        val ofA = SplitRatios(horizontal = 0.3f, tools = 0.6f, diff = 0.5f, session = 0.4f)
+        val ofB = SplitRatios(horizontal = 0.15f, tools = 0.8f, diff = 0.45f, session = 0.7f)
+        Settings.saveSplitRatios(a, ofA)
+        Settings.saveSplitRatios(b, ofB)
+
+        assertEquals(ofA, Settings.loadSplitRatios(a))
+        assertEquals(ofB, Settings.loadSplitRatios(b))
+    }
+
+    @Test
+    fun `a project with no split of its own starts from the last one saved`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val fresh = tmp.resolve("fresh").also { Files.createDirectories(it) }
+        val ofA = SplitRatios(horizontal = 0.3f, tools = 0.6f, diff = 0.5f, session = 0.4f)
+        Settings.saveSplitRatios(a, ofA)
+
+        assertEquals(ofA, Settings.loadSplitRatios(fresh))
+    }
+
+    @Test
+    fun `each project keeps its own tool panel fold`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        Settings.saveToolsCollapsed(a, false)
+        Settings.saveToolsCollapsed(b, true)
+
+        assertEquals(false, Settings.loadToolsCollapsed(a))
+        assertEquals(true, Settings.loadToolsCollapsed(b))
+    }
+
+    @Test
     fun `loadSplitRatios rejects out-of-range values`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val state = tmp.resolve("nop/state").also {

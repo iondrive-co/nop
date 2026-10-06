@@ -128,6 +128,7 @@ class TerminalSession private constructor(
 
     private var widget: JediTermWidget? = null
     private var settings: NopTerminalSettings? = null
+    @Volatile
     private var process: PtyProcess? = null
     private var connector: PtyTtyConnector? = null
 
@@ -235,6 +236,9 @@ class TerminalSession private constructor(
      * terminal while [deferred] holds, so dropping it is what makes the host ask for a widget, and
      * asking for a widget is what spawns the process.
      */
+    /** The program's pid, once it has been started. */
+    fun pid(): Long? = process?.pid()
+
     fun start() {
         deferred = false
     }

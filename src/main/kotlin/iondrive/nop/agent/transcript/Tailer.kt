@@ -57,6 +57,12 @@ data class RunContext(
      * is not — so the follower picks up at exactly this offset rather than at either end.
      */
     val joinAt: Pair<Path, Long>? = null,
+    /**
+     * The pid of the CLI's process once it is running, for a tailer that can only tell its run
+     * apart from a sibling's by asking the process (see [AntigravityTailer]). Null means there is
+     * no process to ask, which is what a test wants; a supplier returning null means not yet.
+     */
+    val pid: (() -> Long?)? = null,
 )
 
 /**
@@ -68,10 +74,8 @@ data class RunContext(
  * place, and so a format that changes (Codex is already migrating to sqlite) can be replaced
  * without touching anything that consumes the events.
  *
- * Not every provider has one to read. Antigravity writes its conversations as protobuf inside
- * SQLite, so its tailer produces the prompts and nothing else, and the rest of that session is only
- * ever on the screen — which is what the second channel, and the screen tail a handoff falls back
- * to, are for.
+ * Not every run has one to read — a CLI can fall over before writing anything — which is what the
+ * second channel, and the screen tail a handoff falls back to, are for.
  */
 interface Tailer {
     /** The file to follow, or null until the CLI has created it. Called repeatedly until it isn't. */

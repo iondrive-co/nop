@@ -2,41 +2,58 @@ package iondrive.nop.agent.transcript
 
 import iondrive.nop.agent.AgentEvent
 import iondrive.nop.agent.Antigravity
+import iondrive.nop.agent.Block
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.FileTime
 
 /**
- * The Antigravity reader, which reads the only thing `agy` writes in a form anything else can read.
+ * The Antigravity reader: which conversation is this run's, and what is in it.
  *
- * Its whole difficulty is that `history.jsonl` is *shared*: one file per home, appended to by every
- * run in every project that account has ever opened. Claude and Codex each write a file per
- * session, so for them "this file is this run's" is a given; here it has to be established a line
- * at a time, and getting it wrong means one tab logging another tab's prompts — or replaying a
- * conversation from last week into a session that just started.
+ * The account's prompt history is shared by every tab the account runs, and a conversation's first
+ * prompt there names no conversation, so two tabs on one project cannot be told apart by it. The
+ * tests that matter most here are the ones where a sibling tab's conversation is the newest thing
+ * on disk and must still not be taken.
  */
 class AntigravityTailerTest {
 
     private val project = Path.of("/home/dev/nop")
     private val startedAt = 1_700_000_000_000L
+    private val agyPid = 4242L
 
     private fun run(
         home: Path,
-        projectDir: Path = project,
+        pid: (() -> Long?)? = { agyPid },
+        resumeId: String? = null,
         foreign: (String) -> Boolean = { false },
     ) = RunContext(
-        projectDir = projectDir,
+        projectDir = project,
         home = home,
-        nativeSessionId = null,
+        nativeSessionId = resumeId,
         startedAt = startedAt,
         foreign = foreign,
+        pid = pid,
     )
+
+    /** A tailer whose process holds whatever [locks] says at the moment it is asked. */
+    private fun tailer(home: Path, locks: () -> List<String>?) =
+        AntigravityTailer(home) { _, pid -> if (pid == agyPid) locks() else null }
+
+    private fun transcript(home: Path, id: String, vararg rows: String, modifiedAt: Long = startedAt): Path {
+        val file = Antigravity.conversationTranscript(home, id)
+        Files.createDirectories(file.parent)
+        Files.writeString(file, rows.joinToString("") { "$it\n" })
+        Files.setLastModifiedTime(file, FileTime.fromMillis(modifiedAt))
+        return file
+    }
 
     private fun history(home: Path, vararg lines: String) {
         val file = Antigravity.historyFile(home)
@@ -44,247 +61,255 @@ class AntigravityTailerTest {
         Files.writeString(file, lines.joinToString("\n") + "\n")
     }
 
-    private fun prompt(
-        text: String,
-        at: Long = startedAt + 1_000,
-        workspace: String = project.toString(),
-        conversation: String? = "conv-1",
-        type: String? = null,
-    ): String = buildString {
-        append("""{"display":"$text","timestamp":$at,"workspace":"$workspace"""")
-        conversation?.let { append(""","conversationId":"$it"""") }
-        type?.let { append(""","type":"$it"""") }
-        append("}")
-    }
+    private fun prompt(text: String, at: Long = startedAt + 1_000, workspace: String = project.toString(), conversation: String? = null) =
+        buildString {
+            append("""{"display":"$text","timestamp":$at,"workspace":"$workspace"""")
+            conversation?.let { append(""","conversationId":"$it"""") }
+            append("}")
+        }
 
-    private fun lastConversations(home: Path, body: String, at: Long) {
-        val file = Antigravity.lastConversationsFile(home)
-        Files.createDirectories(file.parent)
-        Files.writeString(file, body)
-        Files.setLastModifiedTime(file, FileTime.fromMillis(at))
-    }
+    private fun userInput(text: String) =
+        """{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2023-11-14T22:13:21Z",""" +
+            """"content":"<USER_REQUEST>\n$text\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: now.\n</ADDITIONAL_METADATA>"}"""
 
-    // ── which lines are this run's ──
-
-    @Test
-    fun `a prompt typed in this project during this run comes through`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("fix the failing test"))
-        tailer.locate(run(tmp))
-
-        val events = tailer.parse(prompt("fix the failing test"))
-
-        assertEquals(listOf("fix the failing test"), events.filterIsInstance<AgentEvent.UserMessage>().map { it.text })
-    }
+    // ── which conversation is this run's ──
 
     /**
-     * The same file holds every project's prompts. Without this a session in one checkout logs
-     * what was typed in another, and a handoff summary describes work that happened somewhere else.
+     * Two tabs on one project, one account. The sibling's conversation is the newest one on disk
+     * and the last one the shared history mentions; this run's process holds the lock for its own.
      */
     @Test
-    fun `a prompt typed in another project is not this run's`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("hello"))
-        tailer.locate(run(tmp))
+    fun `the conversation is the one this run's process holds, not the newest in the project`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-mine", userInput("why is the tab not orange"), modifiedAt = startedAt + 1_000)
+        transcript(tmp, "conv-sibling", userInput("resize the panels"), modifiedAt = startedAt + 9_000)
+        history(tmp, prompt("why is the tab not orange"), prompt("resize the panels", at = startedAt + 9_000, conversation = "conv-sibling"))
+        val tailer = tailer(tmp) { listOf("conv-mine") }
 
-        assertTrue(tailer.parse(prompt("something else", workspace = "/home/dev/other")).isEmpty())
-    }
-
-    /**
-     * And every *previous* session's. A file located mid-run is read from the top, so the history
-     * of the account arrives at the parser before anything this run did.
-     */
-    @Test
-    fun `a prompt from before this run started is not replayed into it`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("current"))
-        tailer.locate(run(tmp))
-
-        assertTrue(tailer.parse(prompt("last week", at = startedAt - 86_400_000)).isEmpty())
-        assertEquals(1, tailer.parse(prompt("current")).size)
+        assertEquals(Antigravity.conversationTranscript(tmp, "conv-mine"), tailer.locate(run(tmp)))
+        assertEquals("conv-mine", tailer.nativeSessionId())
     }
 
     @Test
-    fun `a slash command is not logged as something the user asked the model`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("real prompt"))
-        tailer.locate(run(tmp))
-
-        assertTrue(tailer.parse(prompt("/exit", type = "slash_command")).isEmpty())
-    }
-
-    @Test
-    fun `a line that is not JSON is skipped rather than throwing at the tailer thread`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("real prompt"))
-        tailer.locate(run(tmp))
-
-        assertTrue(tailer.parse("{ not json").isEmpty())
-        assertTrue(tailer.parse("").isEmpty())
-    }
-
-    // ── the conversation id, which is what --conversation resumes ──
-
-    @Test
-    fun `nothing is located until this run has a conversation of its own`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        // The account has a history, all of it from before this run.
-        history(tmp, prompt("yesterday", at = startedAt - 86_400_000, conversation = "conv-old"))
+    fun `nothing is located while the process is in no conversation, whatever the history says`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-sibling", userInput("theirs"))
+        history(tmp, prompt("theirs", conversation = "conv-sibling"))
+        val tailer = tailer(tmp) { emptyList() }
 
         assertNull(tailer.locate(run(tmp)))
         assertNull(tailer.nativeSessionId())
     }
 
     @Test
-    fun `the id comes from the prompt this run typed`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(
-            tmp,
-            prompt("yesterday", at = startedAt - 86_400_000, conversation = "conv-old"),
-            prompt("today", conversation = "conv-new"),
-        )
+    fun `nothing is located before the process has started`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-sibling", userInput("theirs"))
+        history(tmp, prompt("theirs", conversation = "conv-sibling"))
+        val tailer = tailer(tmp) { listOf("conv-sibling") }
 
-        assertEquals(Antigravity.historyFile(tmp), tailer.locate(run(tmp)))
-        assertEquals("conv-new", tailer.nativeSessionId())
+        assertNull(tailer.locate(run(tmp, pid = { null })))
     }
 
-    /**
-     * A session resumed and closed without a word typed appears in no history line at all, and is
-     * exactly the session a restored tab has to come back into. The CLI writes this file when it
-     * opens a conversation rather than when the user types.
-     */
     @Test
-    fun `a run that opened a conversation without typing is still found`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        lastConversations(tmp, """{"$project":"conv-reopened"}""", at = startedAt + 2_000)
-
-        assertEquals(Antigravity.historyFile(tmp), tailer.locate(run(tmp)))
-        assertEquals("conv-reopened", tailer.nativeSessionId())
-    }
-
-    /**
-     * The entry outlives the session that made it. Adopting a stale one would have every run come
-     * back into the conversation before it — and two tabs claim one conversation between them.
-     */
-    @Test
-    fun `the conversation this project was last in is not adopted unless this run opened it`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        lastConversations(tmp, """{"$project":"conv-from-last-time"}""", at = startedAt - 60_000)
-
+    fun `a conversation whose transcript is not written yet is waited for`(@TempDir tmp: Path) {
+        val tailer = tailer(tmp) { listOf("conv-mine") }
         assertNull(tailer.locate(run(tmp)))
     }
 
     @Test
-    fun `another project's conversation is not this run's however recent it is`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        lastConversations(tmp, """{"/home/dev/other":"conv-elsewhere"}""", at = startedAt + 2_000)
-
-        assertNull(tailer.locate(run(tmp)))
-    }
-
-    /**
-     * Two nop tabs on one project both match everything above; [RunContext.foreign] is the only
-     * thing that separates them, and the one that lost the race must not take the other's session.
-     */
-    @Test
-    fun `a conversation another tab is already following is left to it`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("theirs", conversation = "conv-theirs"))
-        lastConversations(tmp, """{"$project":"conv-theirs"}""", at = startedAt + 2_000)
+    fun `a lock another tab is following is left to it`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-theirs", userInput("theirs"))
+        val tailer = tailer(tmp) { listOf("conv-theirs") }
 
         assertNull(tailer.locate(run(tmp, foreign = { it == "conv-theirs" })))
     }
 
-    /**
-     * The CLI moves the run to a new conversation on `/clear`, and the id nop hands out has to move
-     * with it or a restored tab reopens the conversation the user just abandoned.
-     */
+    /** A `/clear` inside the TUI moves the CLI to a new conversation, and its lock with it. */
     @Test
-    fun `an id the CLI moves to mid-run replaces the one the run started in`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("first", conversation = "conv-1"))
-        tailer.locate(run(tmp))
-        assertEquals("conv-1", tailer.nativeSessionId())
+    fun `a conversation the CLI moves to is followed`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-1", userInput("first"))
+        var locks = listOf("conv-1")
+        val tailer = tailer(tmp) { locks }
+        val context = run(tmp)
+        val first = tailer.locate(context)!!
 
-        tailer.parse(prompt("after a clear", at = startedAt + 5_000, conversation = "conv-2"))
+        locks = listOf("conv-2")
+        transcript(tmp, "conv-2", userInput("after a clear"))
+        Thread.sleep(1_100)
 
+        assertEquals(Antigravity.conversationTranscript(tmp, "conv-2"), tailer.switched(context, first))
         assertEquals("conv-2", tailer.nativeSessionId())
     }
 
     @Test
-    fun `a history file that appears only after the run started is picked up`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
+    fun `the conversation being followed is kept while its lock is still held`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-1", userInput("first"), modifiedAt = startedAt)
+        transcript(tmp, "conv-2", userInput("other"), modifiedAt = startedAt + 5_000)
+        var locks = listOf("conv-1")
+        val tailer = tailer(tmp) { locks }
         val context = run(tmp)
+        val first = tailer.locate(context)!!
 
-        // Nothing there at all: a home whose CLI has never been run interactively.
-        assertNull(tailer.locate(context))
+        locks = listOf("conv-1", "conv-2")
+        Thread.sleep(1_100)
 
-        history(tmp, prompt("the first thing ever typed"))
-        assertEquals(Antigravity.historyFile(tmp), tailer.locate(context))
+        assertNull(tailer.switched(context, first))
+        assertEquals("conv-1", tailer.nativeSessionId())
     }
 
-    /**
-     * The scan is skipped while the file has not grown, so that a poll four times a second does not
-     * re-read a prompt history that has not changed. It must not skip a file that *has*.
-     */
+    /** Without a process to ask, a resumed run is in the conversation it was resumed with. */
     @Test
-    fun `a prompt appended after an empty-handed scan is still found`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        val context = run(tmp)
-        history(tmp, prompt("yesterday", at = startedAt - 86_400_000, conversation = "conv-old"))
-        assertNull(tailer.locate(context))
+    fun `with no process to ask, the resumed conversation is used`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-resumed", userInput("earlier"))
+        val tailer = AntigravityTailer(tmp) { _, _ -> null }
 
-        Files.writeString(
-            Antigravity.historyFile(tmp),
-            prompt("today", conversation = "conv-new") + "\n",
-            StandardOpenOption.APPEND,
+        assertEquals(
+            Antigravity.conversationTranscript(tmp, "conv-resumed"),
+            tailer.locate(run(tmp, pid = null, resumeId = "conv-resumed")),
+        )
+    }
+
+    @Test
+    fun `with no process to ask, only a history line that names its conversation counts`(@TempDir tmp: Path) {
+        transcript(tmp, "conv-named", userInput("second prompt"))
+        val tailer = AntigravityTailer(tmp) { _, _ -> null }
+        history(
+            tmp,
+            prompt("last week", at = startedAt - 86_400_000, conversation = "conv-old"),
+            prompt("elsewhere", workspace = "/home/dev/other", conversation = "conv-elsewhere"),
+            prompt("first prompt"),
+        )
+        assertNull(tailer.locate(run(tmp, pid = null)))
+
+        history(tmp, prompt("first prompt"), prompt("second prompt", at = startedAt + 2_000, conversation = "conv-named"))
+        assertEquals(Antigravity.conversationTranscript(tmp, "conv-named"), tailer.locate(run(tmp, pid = null)))
+    }
+
+    /** The real `/proc` reader, against a lock this test's own process holds open. */
+    @Test
+    fun `a presence lock held open by a process is found through proc`(@TempDir tmp: Path) {
+        if (!Files.isDirectory(Path.of("/proc/self/fd"))) return
+        val dir = Antigravity.presenceDir(tmp)
+        Files.createDirectories(dir)
+        Files.createFile(dir.resolve("conv-unheld.lock"))
+        FileChannel.open(dir.resolve("conv-held.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use {
+            val held = heldConversations(tmp, ProcessHandle.current().pid())!!
+            assertTrue("conv-held" in held)
+            assertFalse("conv-unheld" in held)
+        }
+    }
+
+    @Test
+    fun `a process that is gone cannot be asked`(@TempDir tmp: Path) {
+        assertNull(heldConversations(tmp, Long.MAX_VALUE))
+    }
+
+    // ── what is in a conversation ──
+
+    private fun located(tmp: Path): AntigravityTailer {
+        transcript(tmp, "conv-1", userInput("x"))
+        return tailer(tmp) { listOf("conv-1") }.also { it.locate(run(tmp)) }
+    }
+
+    @Test
+    fun `a prompt is the request the user typed, without the CLI's wrapping`(@TempDir tmp: Path) {
+        val events = located(tmp).parse(userInput("fix the failing test"))
+
+        assertEquals(listOf("fix the failing test"), events.filterIsInstance<AgentEvent.UserMessage>().map { it.text })
+    }
+
+    @Test
+    fun `a model turn carries its reasoning, its reply and its calls in the handoff's vocabulary`(@TempDir tmp: Path) {
+        val events = located(tmp).parse(
+            """{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2023-11-14T22:13:25Z",""" +
+                """"input_tokens":1200,"output_tokens":80,"cache_read_tokens":900,"thinking":"Look first.","content":"Checking.",""" +
+                """"tool_calls":[""" +
+                """{"name":"run_command","args":{"CommandLine":"\"./gradlew test\"","Cwd":"\"/home/dev/nop\"","toolAction":"\"Running\""}},""" +
+                """{"name":"replace_file_content","args":{"TargetFile":"\"/home/dev/nop/src/A.kt\"","ReplacementContent":"\"x\""}},""" +
+                """{"name":"write_to_file","args":{"TargetFile":"\"/home/dev/nop/src/B.kt\"","CodeContent":"\"y\""}}]}""",
         )
 
-        assertEquals(Antigravity.historyFile(tmp), tailer.locate(context))
-        assertEquals("conv-new", tailer.nativeSessionId())
-    }
-
-    // ── session titling via poll ──
-
-    @Test
-    fun `poll returns SessionTitled once title is written to annotations`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("hello", conversation = "conv-1"))
-        tailer.locate(run(tmp))
-
-        // Before annotation file exists, poll has nothing
-        assertTrue(tailer.poll().isEmpty())
-
-        // Write annotation file
-        val annotationFile = Antigravity.annotationsFile(tmp, "conv-1")
-        Files.createDirectories(annotationFile.parent)
-        Files.writeString(annotationFile, "title:\"Work on feature X\"\n")
-
-        val events = tailer.poll()
-        assertEquals(1, events.size)
-        val titled = events.first() as AgentEvent.SessionTitled
-        assertEquals("Work on feature X", titled.title)
-
-        // Subsequent poll returns nothing (already titled)
-        assertTrue(tailer.poll().isEmpty())
+        val turn = events.first() as AgentEvent.AssistantMessage
+        assertEquals(Block.Thinking("Look first."), turn.blocks[0])
+        assertEquals(Block.Text("Checking."), turn.blocks[1])
+        assertEquals(1200L, turn.usage?.inputTokens)
+        val started = events.filterIsInstance<AgentEvent.ToolStarted>()
+        assertEquals(listOf("Bash", "Edit", "Write"), started.map { it.tool })
+        assertEquals("./gradlew test", started[0].args["command"])
+        assertEquals("/home/dev/nop/src/A.kt", started[1].args["file_path"])
+        assertEquals(3, started.map { it.callId }.toSet().size)
     }
 
     @Test
-    fun `poll titles new conversation when conversationId changes`(@TempDir tmp: Path) {
-        val tailer = AntigravityTailer(tmp)
-        history(tmp, prompt("first", conversation = "conv-1"))
-        tailer.locate(run(tmp))
+    fun `tool results answer a turn's calls in order, with the command's exit code`(@TempDir tmp: Path) {
+        val tailer = located(tmp)
+        val started = tailer.parse(
+            """{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2023-11-14T22:13:25Z","tool_calls":[""" +
+                """{"name":"run_command","args":{"CommandLine":"\"make\""}},{"name":"view_file","args":{"AbsolutePath":"\"/a\""}}]}""",
+        ).filterIsInstance<AgentEvent.ToolStarted>()
 
-        val file1 = Antigravity.annotationsFile(tmp, "conv-1")
-        Files.createDirectories(file1.parent)
-        Files.writeString(file1, "title:\"Initial task\"\n")
-        assertEquals(listOf("Initial task"), tailer.poll().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+        val first = tailer.parse(
+            """{"step_index":4,"type":"GENERIC","status":"DONE","created_at":"2023-11-14T22:13:27Z",""" +
+                """"content":"Created At: now\nCompleted At: now\nbuild broke\nThe command exited with code 2"}""",
+        ).single() as AgentEvent.ToolFinished
+        val second = tailer.parse(
+            """{"step_index":5,"type":"GENERIC","status":"ERROR","error":"no such file","created_at":"2023-11-14T22:13:28Z","content":"x"}""",
+        ).single() as AgentEvent.ToolFinished
 
-        // Clear or new prompt moves to conv-2
-        tailer.parse(prompt("after clear", at = startedAt + 5_000, conversation = "conv-2"))
+        assertEquals(started[0].callId, first.callId)
+        assertEquals(2, first.exitCode)
+        assertTrue(first.summary.startsWith("build broke"))
+        assertEquals(2_000L, first.durationMs)
+        assertEquals(started[1].callId, second.callId)
+        assertTrue(second.isError)
+        assertEquals("no such file", second.summary)
+    }
 
-        val file2 = Antigravity.annotationsFile(tmp, "conv-2")
-        Files.writeString(file2, "title:\"Second task\"\n")
-        assertEquals(listOf("Second task"), tailer.poll().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+    /** A call left without a result row is over by the time the model speaks again. */
+    @Test
+    fun `calls still open when the model speaks again are closed`(@TempDir tmp: Path) {
+        val tailer = located(tmp)
+        val call = tailer.parse(
+            """{"step_index":3,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"manage_task","args":{"Action":"\"status\""}}]}""",
+        ).filterIsInstance<AgentEvent.ToolStarted>().single()
+
+        val next = tailer.parse("""{"step_index":5,"type":"PLANNER_RESPONSE","content":"Done."}""")
+
+        assertEquals(call.callId, (next.first() as AgentEvent.ToolFinished).callId)
+    }
+
+    /** The open question is what makes the tab show it is waiting for the user. */
+    @Test
+    fun `a question stays open until it is answered`(@TempDir tmp: Path) {
+        val tailer = located(tmp)
+        val asked = tailer.parse(
+            """{"step_index":3,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"ask_question","args":{"questions":"[]"}}]}""",
+        ).filterIsInstance<AgentEvent.ToolStarted>().single()
+
+        assertTrue(asked.tool in iondrive.nop.agent.ActivityTracker.QUESTION_TOOLS)
+    }
+
+    @Test
+    fun `the CLI's own notices and lines that are not JSON produce nothing`(@TempDir tmp: Path) {
+        val tailer = located(tmp)
+
+        assertTrue(tailer.parse("""{"type":"SYSTEM_MESSAGE","content":"a task finished"}""").isEmpty())
+        assertTrue(tailer.parse("""{"type":"CHECKPOINT"}""").isEmpty())
+        assertTrue(tailer.parse("""{"type":"GENERIC","content":"no call waiting"}""").isEmpty())
+        assertTrue(tailer.parse("{ not json").isEmpty())
+        assertTrue(tailer.parse("").isEmpty())
+    }
+
+    // ── titles ──
+
+    @Test
+    fun `poll returns the title once the CLI has written one, and only once`(@TempDir tmp: Path) {
+        val tailer = located(tmp)
+        assertTrue(tailer.poll().isEmpty())
+
+        val annotation = Antigravity.annotationsFile(tmp, "conv-1")
+        Files.createDirectories(annotation.parent)
+        Files.writeString(annotation, "title:\"Work on feature X\"\n")
+
+        assertEquals(listOf("Work on feature X"), tailer.poll().filterIsInstance<AgentEvent.SessionTitled>().map { it.title })
+        assertTrue(tailer.poll().isEmpty())
     }
 }

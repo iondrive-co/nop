@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.SplitRatios
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentConfig
 import iondrive.nop.agent.Accounts
@@ -164,16 +165,6 @@ fun App(
     renameSymbolTrigger: Int = 0,
     navigateBackTrigger: Int = 0,
     navigateForwardTrigger: Int = 0,
-    hRatio: Float = 0.22f,
-    onHRatioChange: (Float) -> Unit = {},
-    toolsRatio: Float = 0.68f,
-    onToolsRatioChange: (Float) -> Unit = {},
-    diffRatio: Float = 0.5f,
-    onDiffRatioChange: (Float) -> Unit = {},
-    sessionRatio: Float = 0.58f,
-    onSessionRatioChange: (Float) -> Unit = {},
-    toolsCollapsed: Boolean = true,
-    onToolsCollapsedChange: (Boolean) -> Unit = {},
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -312,6 +303,36 @@ fun App(
     }
     val editStore = remember(projectPath) { FileEditStore(localHistory) }
     val scope = rememberCoroutineScope()
+
+    // Split ratios and the tool-panel fold are kept per project: each project keeps the shape the
+    // user gave it, and dragging a divider in one project leaves every other project as it was. A
+    // project with nothing saved yet opens in the last layout saved for all projects.
+    val savedRatios = remember(projectPath) { Settings.loadSplitRatios(projectPath) }
+    var hRatio by remember(projectPath) { mutableStateOf(savedRatios.horizontal ?: 0.22f) }
+    // Share of the area right of the project tree given to the viewer; the rest is the tool
+    // panel (Commit/Search/Usages/Stash/Preview/Run) on the window's right edge.
+    var toolsRatio by remember(projectPath) { mutableStateOf(savedRatios.tools ?: 0.68f) }
+    // The divider between a diff's before/after halves — even by default, draggable to favour
+    // whichever side is being read.
+    var diffRatio by remember(projectPath) { mutableStateOf(savedRatios.diff ?: 0.5f) }
+    // Inside the tool region: how much of it the session pane (agents, terminals, runs) takes, with
+    // the tool panel beside it. Slightly past half by default — the pane holding a full-screen TUI
+    // is the one that suffers first when it is short of columns.
+    var sessionRatio by remember(projectPath) { mutableStateOf(savedRatios.session ?: 0.58f) }
+    LaunchedEffect(projectPath) {
+        snapshotFlow { SplitRatios(hRatio, toolsRatio, diffRatio, sessionRatio) }
+            .drop(1)
+            .debounce(500)
+            .distinctUntilChanged()
+            .collectLatest { Settings.saveSplitRatios(projectPath, it) }
+    }
+    // Whether the tool panel is folded away, leaving the whole region to the session.
+    var toolsCollapsed by remember(projectPath) { mutableStateOf(Settings.loadToolsCollapsed(projectPath)) }
+    LaunchedEffect(projectPath) {
+        snapshotFlow { toolsCollapsed }
+            .drop(1)
+            .collectLatest { Settings.saveToolsCollapsed(projectPath, it) }
+    }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
     // disk once and then cached for the whole session, so a file changed outside nop (another editor,
@@ -617,7 +638,7 @@ fun App(
      */
     fun showTool(tab: ToolTab) {
         toolTab = tab
-        onToolsCollapsedChange(false)
+        toolsCollapsed = false
     }
 
     /**
@@ -631,7 +652,7 @@ fun App(
      * rather than a different one.
      */
     fun toggleTool(tab: ToolTab) {
-        if (toolTab == tab && !toolsCollapsed) onToolsCollapsedChange(true) else showTool(tab)
+        if (toolTab == tab && !toolsCollapsed) toolsCollapsed = true else showTool(tab)
     }
 
     /**
@@ -1561,7 +1582,7 @@ fun App(
             HorizontalSplit(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 ratio = hRatio,
-                onRatioChange = onHRatioChange,
+                onRatioChange = { hRatio = it },
                 first = {
                     ProjectTreePanel(
                         projectPath = rootPath,
@@ -1636,7 +1657,7 @@ fun App(
                     HorizontalSplit(
                         modifier = Modifier.fillMaxSize(),
                         ratio = toolsRatio,
-                        onRatioChange = onToolsRatioChange,
+                        onRatioChange = { toolsRatio = it },
                         minFirstDp = 240.dp,
                         minSecondDp = 240.dp,
                         first = {
@@ -1675,7 +1696,7 @@ fun App(
                                     Settings.saveWrapLines(wrapLines)
                                 },
                                 diffSplitRatio = diffRatio,
-                                onDiffSplitRatioChange = onDiffRatioChange,
+                                onDiffSplitRatioChange = { diffRatio = it },
                                 onCompareWithRevision = { pendingCompare = it },
                                 onShowHistory = { file ->
                                     if (repo != null) {
@@ -1706,9 +1727,9 @@ fun App(
                                 onSelect = { toggleTool(it) },
                                 sessionTab = sessionTab,
                                 collapsed = toolsCollapsed,
-                                onToggleCollapsed = { onToolsCollapsedChange(!toolsCollapsed) },
+                                onToggleCollapsed = { toolsCollapsed = !toolsCollapsed },
                                 paneRatio = sessionRatio,
-                                onPaneRatioChange = onSessionRatioChange,
+                                onPaneRatioChange = { sessionRatio = it },
                                 terminals = terminals,
                                 onNewTerminal = {
                                     terminals.openShell(rootPath.toFile())
@@ -1878,7 +1899,7 @@ fun App(
                                         // one the user is watching rather than the first one opened.
                                         sessionBaselineSha = agentSessions.selected?.baselineSha,
                                         splitRatio = diffRatio,
-                                        onSplitRatioChange = onDiffRatioChange,
+                                        onSplitRatioChange = { diffRatio = it },
                                     )
                                 },
                                 commit = {

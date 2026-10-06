@@ -295,9 +295,9 @@ class ActivityTracker {
     companion object {
         /**
          * The tools whose whole job is to wait for the user: Claude Code's question and plan approval,
-         * and Codex's request for input.
+         * Codex's request for input, and Antigravity's question.
          */
-        val QUESTION_TOOLS: Set<String> = setOf("AskUserQuestion", "ExitPlanMode", "request_user_input")
+        val QUESTION_TOOLS: Set<String> = setOf("AskUserQuestion", "ExitPlanMode", "request_user_input", "ask_question")
 
         /**
          * A background task multiplexed with a queued question / survey (e.g. in Codex:

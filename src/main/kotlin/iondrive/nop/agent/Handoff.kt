@@ -224,10 +224,7 @@ object Handoff {
      *
      * Antigravity is grouped with Claude, and by default rather than by measurement: nobody has run
      * the comparison, and of the two behaviours the one that withholds another model's reasoning is
-     * the one whose failure is a thinner prompt rather than a confidently wrong premise. There is
-     * also nothing to withhold today — its transcript carries no reasoning for nop to read (see
-     * [iondrive.nop.agent.transcript.AntigravityTailer]) — so this only starts to matter if that
-     * ever changes.
+     * the one whose failure is a thinner prompt rather than a confidently wrong premise.
      */
     private fun conversation(events: List<AgentEvent>, target: Provider): String {
         val includeThinking = target == Provider.OpenAI
