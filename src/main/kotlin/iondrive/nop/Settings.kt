@@ -152,6 +152,8 @@ object Settings {
                 // Absent means open: only a window the user actually closed writes `open=false`.
                 open = map[prefix + "open"] != "false",
                 closedAt = map[prefix + "closed"]?.toLongOrNull(),
+                splitRatios = decodeSplitRatios(map[prefix + "split"]),
+                toolsCollapsed = map[prefix + "collapsed"]?.toBooleanStrictOrNull(),
             )
         }
     }
@@ -191,6 +193,8 @@ object Settings {
                 ?.let { map[prefix + "active"] = it.toString() }
             ws.closedAt?.let { map[prefix + "closed"] = it.toString() }
             ws.geometry?.let { map[prefix + "geom"] = encodeGeometry(it) }
+            ws.splitRatios?.let { map[prefix + "split"] = encodeSplitRatios(it) }
+            ws.toolsCollapsed?.let { map[prefix + "collapsed"] = it.toString() }
             ws.tabs.forEachIndexed { j, tab ->
                 map["${prefix}project.$j"] = tab.path.toAbsolutePath().normalize().toString()
                 // Only a renamed tab writes a name; the rest are named by their directory, and a row
@@ -258,6 +262,21 @@ object Settings {
         val h = parts[1].toIntOrNull() ?: return null
         if (w <= 0 || h <= 0) return null
         return WindowGeometry(w, h, parts.getOrNull(2)?.toIntOrNull(), parts.getOrNull(3)?.toIntOrNull())
+    }
+
+    private fun encodeSplitRatios(r: SplitRatios): String =
+        listOf(r.horizontal, r.tools, r.diff, r.session)
+            .joinToString(",") { it?.toString().orEmpty() }
+
+    private fun decodeSplitRatios(value: String?): SplitRatios? {
+        val parts = value?.split(',')?.map { it.trim() } ?: return null
+        if (parts.size < 4) return null
+        val h = parts[0].toFloatOrNull()?.takeIf { it in 0f..1f }
+        val t = parts[1].toFloatOrNull()?.takeIf { it in 0f..1f }
+        val d = parts[2].toFloatOrNull()?.takeIf { it in 0f..1f }
+        val s = parts[3].toFloatOrNull()?.takeIf { it in 0f..1f }
+        if (h == null && t == null && d == null && s == null) return null
+        return SplitRatios(horizontal = h, tools = t, diff = d, session = s)
     }
 
     /** Most-recently-opened first. */

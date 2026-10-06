@@ -1,7 +1,9 @@
 package iondrive.nop.agent
 
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -130,5 +132,45 @@ class AgentSessionStoreTest {
 
         assertTrue(one !== AgentSessionStore.of(root = tmp.resolve("one"), project = tmp.resolve("one")))
         assertTrue(two !== AgentSessionStore.of(root = tmp.resolve("two"), project = tmp.resolve("two")))
+    }
+
+    @Test
+    fun `sendSession moves a session between projects and updates persistence`(@TempDir tmp: Path) {
+        val projOne = tmp.resolve("one")
+        val projTwo = tmp.resolve("two")
+        val sessionsOne = AgentSessionStore.of(root = projOne, project = projOne)
+        val session = sessionsOne.open(projOne.toFile(), Account("claude-1", Provider.Anthropic, "/homes/claude-1"))
+
+        val moved = AgentSessionStore.sendSession(
+            sessionId = session.sessionId,
+            fromRoot = projOne,
+            toProject = projTwo,
+            toRoot = projTwo,
+        )
+
+        assertEquals(session, moved)
+        assertEquals(projTwo.toFile(), session.projectDir)
+        assertTrue(sessionsOne.sessions.isEmpty())
+
+        val sessionsTwo = AgentSessionStore.of(root = projTwo, project = projTwo)
+        assertEquals(listOf(session), sessionsTwo.sessions)
+        assertEquals(session.sessionId, sessionsTwo.selectedId)
+    }
+
+    @Test
+    fun `sendSession to the same project is a no-op returning null`(@TempDir tmp: Path) {
+        val project = tmp.resolve("repo")
+        val sessions = AgentSessionStore.of(root = project, project = project)
+        val session = sessions.open(project.toFile(), Account("claude-1", Provider.Anthropic, "/homes/claude-1"))
+
+        val result = AgentSessionStore.sendSession(
+            sessionId = session.sessionId,
+            fromRoot = project,
+            toProject = project,
+            toRoot = project,
+        )
+
+        assertNull(result)
+        assertEquals(listOf(session), sessions.sessions)
     }
 }

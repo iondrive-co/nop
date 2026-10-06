@@ -145,7 +145,7 @@ class AgentRun(
  * a tailer on a separate channel that this session owns but never renders.
  */
 class AgentSession(
-    val projectDir: File,
+    var projectDir: File,
     account: Account,
     seed: String? = null,
     resumeId: String? = null,
@@ -180,7 +180,7 @@ class AgentSession(
      * settings dialog is reachable the whole time a session is running: an account nominated ten
      * minutes into a session is the one the session should use.
      */
-    private val handoverTarget: (Account) -> Account? = { _ -> null },
+    var handoverTarget: (Account) -> Account? = { _ -> null },
     /**
      * Whether the poller's last reading agrees that [account] has run out — true when it does,
      * false when it says there is quota left, null when it cannot say. See
@@ -189,18 +189,18 @@ class AgentSession(
      * It is here to be allowed to say no. Everything else about a quota wall is inferred from text
      * on a screen the agent itself is writing to, and that is not evidence about an account.
      */
-    private val hasRunOut: (Account) -> Boolean? = { _ -> null },
+    var hasRunOut: (Account) -> Boolean? = { _ -> null },
     /**
      * When [account] can be served again, going by the poller's last reading, or null when it does
      * not say. See [UsageReading.spentUntil], and [onQuotaWall] for what a reset close at hand
      * changes.
      */
-    private val spentUntil: (Account) -> Instant? = { _ -> null },
+    var spentUntil: (Account) -> Instant? = { _ -> null },
     /**
      * Whether [account] waits out its wall and is then told to resume, rather than handing over or
      * ending the run. Asked at the wall for the same reason as [handoverTarget].
      */
-    private val resumesAfterReset: (Account) -> Boolean = { _ -> false },
+    var resumesAfterReset: (Account) -> Boolean = { _ -> false },
     /**
      * What to do when the CLI in this tab quits of its own accord and cleanly — `/exit`, `quit`,
      * Ctrl-D at its prompt. Wired by [AgentSessions] to closing the tab.
@@ -212,7 +212,7 @@ class AgentSession(
      * [iondrive.nop.ui.AgentExitPanel]). A non-zero exit is a crash as far as this can tell, so it
      * is not this.
      */
-    private val onExited: (AgentSession) -> Unit = { },
+    var onExited: (AgentSession) -> Unit = { },
     /**
      * The run the last nop handed over across a restart, still going, for this session to carry on
      * rather than start — see [handOff]. Null for every other session.

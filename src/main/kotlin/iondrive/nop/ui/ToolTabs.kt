@@ -4,6 +4,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.runtime.staticCompositionLocalOf
+import java.nio.file.Path
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -236,6 +238,8 @@ fun ToolTabs(
     onCloseAgent: (String) -> Unit,
     onRenameAgent: (String, String) -> Unit,
     onReorderAgent: (from: Int, to: Int) -> Unit = { from, to -> agents.move(from, to) },
+    onSendAgentToProject: (String, Path) -> Unit = { _, _ -> },
+    otherProjects: List<Path> = emptyList(),
     runs: RunSessions,
     onSelectRun: (String) -> Unit,
     onCloseRun: (String) -> Unit,
@@ -311,6 +315,8 @@ fun ToolTabs(
             onCloseAgent = onCloseAgent,
             onRenameAgent = onRenameAgent,
             onReorderAgent = onReorderAgent,
+            onSendAgentToProject = onSendAgentToProject,
+            otherProjects = otherProjects,
             runs = runs,
             onSelectRun = onSelectRun,
             onCloseRun = onCloseRun,
@@ -429,6 +435,8 @@ private fun SessionStrip(
     onCloseAgent: (String) -> Unit,
     onRenameAgent: (String, String) -> Unit,
     onReorderAgent: (Int, Int) -> Unit,
+    onSendAgentToProject: (String, Path) -> Unit = { _, _ -> },
+    otherProjects: List<Path> = emptyList(),
     runs: RunSessions,
     onSelectRun: (String) -> Unit,
     onCloseRun: (String) -> Unit,
@@ -551,6 +559,24 @@ private fun SessionStrip(
                             onClick = { onSelectAgent(agentSession.sessionId) },
                             onClose = { onCloseAgent(agentSession.sessionId) },
                             onRename = { renamingId = agentSession.sessionId },
+                            contextMenu = {
+                                listOf(
+                                    TabMenuItem.Item("Rename…") { renamingId = agentSession.sessionId },
+                                    TabMenuItem.Submenu(
+                                        "Send to project",
+                                        if (otherProjects.isEmpty()) {
+                                            listOf(TabMenuItem.Item("No other open projects", enabled = false) {})
+                                        } else {
+                                            otherProjects.map { project ->
+                                                val label = projectMenuLabel(project, otherProjects)
+                                                TabMenuItem.Item(label) {
+                                                    onSendAgentToProject(agentSession.sessionId, project)
+                                                }
+                                            }
+                                        },
+                                    ),
+                                )
+                            },
                             leading = {
                                 AgentStatusMark(
                                     activity = activity,
@@ -803,6 +829,144 @@ internal class StripPalette(isDark: Boolean) {
 /** The accent rule under the selected tab. Heavier than the theme's, which is the point of it. */
 private val SELECTED_RULE = 3.dp
 
+/** Formats a project path for the "Send to project" menu, disambiguating if multiple projects share a name. */
+private fun projectMenuLabel(project: Path, all: List<Path>): String {
+    val name = project.fileName?.toString() ?: project.toString()
+    val duplicates = all.count { (it.fileName?.toString() ?: it.toString()) == name } > 1
+    return if (duplicates) {
+        val parent = project.parent?.fileName?.toString()
+        if (parent != null) "$parent/$name" else project.toString()
+    } else {
+        name
+    }
+}
+
+val LocalWindow = staticCompositionLocalOf<java.awt.Window?> { null }
+
+/** An entry in a tool strip tab's context menu. */
+internal sealed interface TabMenuItem {
+    class Item(val label: String, val enabled: Boolean = true, val onClick: () -> Unit) : TabMenuItem
+    class Submenu(val label: String, val items: List<TabMenuItem>) : TabMenuItem
+}
+
+/**
+ * Displays a context menu for a strip tab using a heavyweight Swing [javax.swing.JPopupMenu].
+ *
+ * This uses a Swing heavyweight popup (`isLightWeightPopupEnabled = false`) rather than Compose's
+ * `ContextMenuArea` because the area directly beneath the strip is a [SwingPanel] hosting JediTerm
+ * (a heavyweight AWT component). Compose popups are lightweight and composited underneath heavyweight
+ * components, cutting off all items that extend past the strip into the terminal area. A heavyweight
+ * Swing popup is backed by a native [javax.swing.JWindow], floating above all AWT components.
+ */
+internal fun showTabContextMenu(
+    window: java.awt.Window,
+    isDark: Boolean,
+    items: List<TabMenuItem>,
+) {
+    val mouseLoc = java.awt.MouseInfo.getPointerInfo()?.location ?: return
+    val pt = java.awt.Point(mouseLoc)
+    javax.swing.SwingUtilities.convertPointFromScreen(pt, window)
+
+    val bg = if (isDark) java.awt.Color(0x2B, 0x2D, 0x30) else java.awt.Color(0xFF, 0xFF, 0xFF)
+    val fg = if (isDark) java.awt.Color(0xDF, 0xE1, 0xE5) else java.awt.Color(0x1F, 0x23, 0x29)
+    val disabledFg = if (isDark) java.awt.Color(0x6F, 0x73, 0x7A) else java.awt.Color(0x99, 0x9D, 0xA6)
+    val selBg = java.awt.Color(0x35, 0x74, 0xF0)
+    val selFg = java.awt.Color.WHITE
+    val borderColor = if (isDark) java.awt.Color(0x43, 0x45, 0x4A) else java.awt.Color(0xD0, 0xD2, 0xD5)
+    val font = java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 12)
+
+    val menu = javax.swing.JPopupMenu().apply {
+        isLightWeightPopupEnabled = false
+        background = bg
+        border = javax.swing.BorderFactory.createCompoundBorder(
+            javax.swing.BorderFactory.createLineBorder(borderColor, 1),
+            javax.swing.BorderFactory.createEmptyBorder(4, 0, 4, 0),
+        )
+    }
+
+    fun styleItem(item: javax.swing.JMenuItem, enabled: Boolean) {
+        item.font = font
+        item.background = bg
+        item.foreground = if (enabled) fg else disabledFg
+        item.isEnabled = enabled
+        item.isOpaque = true
+        item.border = javax.swing.BorderFactory.createEmptyBorder(5, 14, 5, 14)
+        item.setUI(object : javax.swing.plaf.basic.BasicMenuItemUI() {
+            override fun installDefaults() {
+                super.installDefaults()
+                selectionBackground = selBg
+                selectionForeground = selFg
+                disabledForeground = disabledFg
+            }
+        })
+    }
+
+    fun styleMenu(submenu: javax.swing.JMenu) {
+        submenu.font = font
+        submenu.background = bg
+        submenu.foreground = fg
+        submenu.isOpaque = true
+        submenu.border = javax.swing.BorderFactory.createEmptyBorder(5, 14, 5, 14)
+        submenu.popupMenu.isLightWeightPopupEnabled = false
+        submenu.popupMenu.background = bg
+        submenu.popupMenu.border = javax.swing.BorderFactory.createCompoundBorder(
+            javax.swing.BorderFactory.createLineBorder(borderColor, 1),
+            javax.swing.BorderFactory.createEmptyBorder(4, 0, 4, 0),
+        )
+
+        val arrow = object : javax.swing.Icon {
+            override fun getIconWidth() = 6
+            override fun getIconHeight() = 8
+            override fun paintIcon(c: java.awt.Component?, g: java.awt.Graphics, x: Int, y: Int) {
+                val g2 = g.create() as java.awt.Graphics2D
+                g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = if ((c as? javax.swing.JMenuItem)?.isArmed == true) selFg else fg
+                val p = java.awt.geom.Path2D.Float()
+                p.moveTo(x.toFloat(), y.toFloat())
+                p.lineTo((x + 5).toFloat(), (y + 4).toFloat())
+                p.lineTo(x.toFloat(), (y + 8).toFloat())
+                p.closePath()
+                g2.fill(p)
+                g2.dispose()
+            }
+        }
+
+        submenu.setUI(object : javax.swing.plaf.basic.BasicMenuUI() {
+            override fun installDefaults() {
+                super.installDefaults()
+                selectionBackground = selBg
+                selectionForeground = selFg
+                disabledForeground = disabledFg
+                arrowIcon = arrow
+            }
+        })
+    }
+
+    fun populate(container: javax.swing.JComponent, entries: List<TabMenuItem>) {
+        for (entry in entries) {
+            when (entry) {
+                is TabMenuItem.Item -> {
+                    val item = javax.swing.JMenuItem(entry.label)
+                    styleItem(item, entry.enabled)
+                    if (entry.enabled) {
+                        item.addActionListener { entry.onClick() }
+                    }
+                    container.add(item)
+                }
+                is TabMenuItem.Submenu -> {
+                    val sub = javax.swing.JMenu(entry.label)
+                    styleMenu(sub)
+                    populate(sub, entry.items)
+                    container.add(sub)
+                }
+            }
+        }
+    }
+
+    populate(menu, items)
+    menu.show(window, pt.x, pt.y)
+}
+
 /**
  * One tab in the strip: its label, the selected marks (see [StripPalette]), and — for a closeable
  * one — a close "x" once the pointer is on it, and [onRename] on a right-click.
@@ -821,12 +985,14 @@ private fun ToolStripTab(
     onClick: () -> Unit,
     onClose: (() -> Unit)?,
     onRename: (() -> Unit)? = null,
+    contextMenu: (() -> List<TabMenuItem>)? = null,
     modifier: Modifier = Modifier,
     leading: (@Composable () -> Unit)? = null,
     emphasis: Color? = null,
     wash: Color? = null,
     dragging: Boolean = false,
 ) {
+    val window = LocalWindow.current
     val palette = remember(isDark) { StripPalette(isDark) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -845,10 +1011,21 @@ private fun ToolStripTab(
             .tabUnderline(selected, palette.accent, SELECTED_RULE)
             .let { m -> if (selected || dragging) m else m.tabDivider(palette.divider) }
             .hoverable(interaction)
-            // Right-click, caught on the Initial pass so it is seen before `clickable` below claims
-            // the press — and consumed there, so the tab doesn't also select itself.
+            // Right-click: if a context menu is provided, show it as a heavyweight Swing menu
+            // so it floats above the heavyweight AWT terminal panel instead of being composited
+            // underneath it. Otherwise, fall back to onRename directly.
             .let { m ->
-                if (onRename == null) m else m.pointerInput(onRename) { secondaryClicks(onRename) }
+                if (contextMenu != null && window != null) {
+                    m.pointerInput(contextMenu, isDark, window) {
+                        secondaryClicks {
+                            showTabContextMenu(window, isDark, contextMenu())
+                        }
+                    }
+                } else if (onRename != null) {
+                    m.pointerInput(onRename) { secondaryClicks(onRename) }
+                } else {
+                    m
+                }
             }
             .clickable(onClick = onClick),
     ) {

@@ -172,9 +172,9 @@ object TitleSignal {
  * The title says working or stopped and nothing more — the end of a turn and a question held in
  * front of the user look identical there. The transcript tells those two apart: a question is a tool
  * call the CLI has made and not got an answer to. So a stopped title with a call still open in the
- * turn is [Activity.Asking], and one with every call answered is [Activity.Idle]. That is only
- * sound because every CLI nop starts runs with its permission prompts turned off, which leaves an
- * open call nothing to wait on but the user.
+ * turn is [Activity.Asking], and one with every call answered is [Activity.Idle]. PreToolUse hooks
+ * and confirmation dialogs can also hold open tool calls waiting on user approval; these are detected
+ * from the terminal output ([QUEUED_QUESTION]) even while the title still reads as working.
  *
  * A question tool is [Activity.Asking] whatever the title says, and before it has said anything:
  * the call being open is the question, and it is in the transcript from the moment it is asked.
@@ -244,7 +244,13 @@ class ActivityTracker {
                 recentOutput.setLength(0)
             }
             is AgentEvent.ToolStarted -> open[event.callId] = event.tool
-            is AgentEvent.ToolFinished -> open.remove(event.callId)
+            is AgentEvent.ToolFinished -> {
+                open.remove(event.callId)
+                if (open.isEmpty()) {
+                    hasQueuedQuestion = false
+                    recentOutput.setLength(0)
+                }
+            }
             else -> Unit
         }
     }
@@ -295,10 +301,12 @@ class ActivityTracker {
 
         /**
          * A background task multiplexed with a queued question / survey (e.g. in Codex:
-         * "• Queued follow-up inputs \n ? 1 question \n alt + ↑ to answer").
+         * "• Queued follow-up inputs \n ? 1 question \n alt + ↑ to answer"), or a permissions /
+         * confirmation prompt awaiting user approval (e.g. in Claude Code: "Do you want to proceed?",
+         * "requires confirmation", "needs your permission", or "Allow once").
          */
         val QUEUED_QUESTION: Regex = Regex(
-            """(?:queued\s+follow-up\s+inputs?|alt\s*\+\s*(?:↑|\^|up)\s*to\s*answer)""",
+            """(?:queued\s*follow-up\s*inputs?|alt\s*\+\s*(?:↑|\^|up)\s*to\s*answer|do\s*you\s*want\s*to\s*(?:proceed|run)\??|requires\s*confirmation|needs\s*your\s*permission|allow\s*once|❯\s*1\.\s*yes|1\.\s*yes\s*2\.\s*no)""",
             RegexOption.IGNORE_CASE,
         )
 

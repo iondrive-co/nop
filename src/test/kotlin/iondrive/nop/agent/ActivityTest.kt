@@ -218,6 +218,77 @@ class ActivityTest {
         assertEquals(Activity.Asking, tracker.activity(now = 0))
     }
 
+    @Test
+    fun `Claude Code permission prompt makes a working tab asking`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Handoff continuation from Claude", at = 0)
+        tracker.onEvent(started("toolu_01FGqtmWj4TbY9GFpDcC8NDm", "mcp__ainun-ssh__shell"))
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+
+        val changed = tracker.onOutput(
+            "Hook PreToolUse: mcp__ainun-ssh__shell requires confirmation for this command:\n" +
+                "First ainun-ssh call against \"dev\" environment in the last 4 hours.\n" +
+                "Do you want to proceed? ❯ 1. Yes  2. No\n" +
+                "Esc to cancel · Tab to amend\n",
+        )
+        assertTrue(changed)
+        assertEquals(Activity.Asking, tracker.activity(now = 10))
+    }
+
+    @Test
+    fun `Claude Code permission prompt with stripped ANSI escapes is detected`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Claude Code", at = 0)
+        tracker.onEvent(started("toolu_123", "Bash"))
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+
+        val changed = tracker.onOutput(
+            "HookPreToolUse:Bashrequiresconfirmationforthiscommand:\n" +
+                "Hookasksforconfirmationsettings.jsontoupdatehooksDoyouwanttoproceed? ❯ 1. Yes  2.NoEscto cancel",
+        )
+        assertTrue(changed)
+        assertEquals(Activity.Asking, tracker.activity(now = 10))
+    }
+
+    @Test
+    fun `answering a permission prompt returns the tab to working`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Claude Code", at = 0)
+        tracker.onEvent(started("toolu_123", "Bash"))
+        tracker.onOutput("Do you want to proceed? ❯ 1. Yes  2. No")
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+
+        val changed = tracker.onUserInput()
+        assertTrue(changed)
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+    }
+
+    @Test
+    fun `tool finishing clears the permission prompt state`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Claude Code", at = 0)
+        tracker.onEvent(started("toolu_123", "Bash"))
+        tracker.onOutput("Do you want to proceed? ❯ 1. Yes  2. No")
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+
+        tracker.onEvent(finished("toolu_123"))
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+    }
+
+    @Test
+    fun `real session screen tail permission prompt is detected`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Kafka Shadow", at = 0)
+        tracker.onEvent(started("toolu_456", "mcp__ainun-ssh__shell"))
+        val changed = tracker.onOutput(
+            "pen theirwindowsfor30minutes(eachapproved│callagainstahostrefreshesitswindow,upto4hoursfromnow, " +
+                "│ after which you are asked again). The server-side allowlist still │ " +
+                "applies.settings.json to update hooks Do you want to proceed? ❯1. Yes   2. NoEsc to cancel · Tab to amend",
+        )
+        assertTrue(changed)
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+    }
+
     /**
      * Codex's stopped title carries no glyph, so it means nothing until it has stood still — and
      * until then the tab is still what it was, not "running", which would be a change from working

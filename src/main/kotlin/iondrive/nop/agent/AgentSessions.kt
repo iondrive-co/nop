@@ -230,6 +230,40 @@ class AgentSessions {
     }
 
     /**
+     * Detaches the session behind [id] without closing or disposing it.
+     * Used when moving a session to another project.
+     * Returns the removed [AgentSession], or null if not found.
+     */
+    fun detach(id: String): AgentSession? {
+        val idx = _sessions.indexOfFirst { it.sessionId == id }
+        if (idx < 0) return null
+        val session = _sessions.removeAt(idx)
+        if (selectedId == id) {
+            selectedId = (_sessions.getOrNull(idx) ?: _sessions.getOrNull(idx - 1))?.sessionId
+        }
+        if (_sessions.isEmpty()) {
+            pickerTabVisible = true
+        }
+        return session
+    }
+
+    /**
+     * Attaches an existing [session] (from another project) to this collection.
+     * Re-wires its lifecycle callbacks to this collection and selects it.
+     */
+    fun attach(session: AgentSession) {
+        if (_sessions.any { it.sessionId == session.sessionId }) return
+        session.onExited = { ended -> close(ended.sessionId) }
+        session.handoverTarget = { from -> handoverTarget(from) }
+        session.hasRunOut = { of -> hasRunOut(of) }
+        session.spentUntil = { of -> spentUntil(of) }
+        session.resumesAfterReset = { of -> resumesAfterReset(of) }
+        _sessions.add(session)
+        selectedId = session.sessionId
+        pickerTabVisible = false
+    }
+
+    /**
      * Whether the selector tab for the sessions ("Agent") is showing in the strip.
      *
      * Only shows if there are no sessions running. While sessions are running, session selection /

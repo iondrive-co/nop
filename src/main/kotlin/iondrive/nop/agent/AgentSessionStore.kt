@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
+import iondrive.nop.Settings
 import java.nio.file.Path
 
 /**
@@ -93,6 +94,38 @@ object AgentSessionStore {
     /** Every agent session in every project, for the agents that message each other — see [AgentMessages]. */
     @Synchronized
     fun all(): List<AgentSession> = byRoot.values.flatMap { it.sessions.sessions }
+
+    /**
+     * Sends [sessionId] from [fromRoot] to [toProject] (with repo root [toRoot]).
+     * Detaches the session from [fromRoot]'s collection without killing it,
+     * updates its projectDir to [toProject], and attaches it to [toRoot]'s collection.
+     * Updates persistence for both projects.
+     */
+    @Synchronized
+    fun sendSession(sessionId: String, fromRoot: Path, toProject: Path, toRoot: Path): AgentSession? {
+        val fromKey = norm(fromRoot)
+        val toKey = norm(toRoot)
+        if (fromKey == toKey) return null
+
+        val fromEntry = byRoot[fromKey] ?: return null
+        val session = fromEntry.sessions.detach(sessionId) ?: return null
+
+        val toEntry = byRoot.getOrPut(toKey) { Entry(AgentSessions()) }
+        toEntry.projects.add(norm(toProject))
+        session.projectDir = toProject.toFile()
+        toEntry.sessions.attach(session)
+        generation += 1
+
+        val fromSaved = fromEntry.sessions.sessions.mapNotNull { it.asOpenAgent() }
+        Settings.saveOpenAgents(fromKey, fromSaved)
+
+        val existingTo = Settings.loadOpenAgents(toKey).filterNot { it.sessionId == session.sessionId }
+        val toRows = toEntry.sessions.sessions.mapNotNull { it.asOpenAgent() }
+        val mergedTo = toRows + existingTo.filterNot { ex -> toRows.any { it.sessionId == ex.sessionId } }
+        Settings.saveOpenAgents(toKey, mergedTo)
+
+        return session
+    }
 
     /**
      * Kills the sessions of every project no window has a tab on any more.

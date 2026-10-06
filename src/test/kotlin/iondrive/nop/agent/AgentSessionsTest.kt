@@ -127,6 +127,41 @@ class AgentSessionsTest {
     }
 
     @Test
+    fun `detaching a session removes it without disposing and updates selection`(@TempDir tmp: Path) {
+        val state = sessions()
+        val a = state.open(tmp.toFile(), account("claude-1"))
+        val b = state.open(tmp.toFile(), account("claude-2"))
+        state.select(a.sessionId)
+
+        val detached = state.detach(a.sessionId)
+        assertEquals(a, detached)
+        assertFalse(detached!!.ended)
+        assertEquals(listOf(b), state.sessions)
+        assertEquals(b.sessionId, state.selectedId)
+
+        val last = state.detach(b.sessionId)
+        assertEquals(b, last)
+        assertTrue(state.sessions.isEmpty())
+        assertNull(state.selectedId)
+        assertTrue(state.pickerTabVisible)
+    }
+
+    @Test
+    fun `attaching a session adds it, selects it, and sets pickerTabVisible false`(@TempDir tmp: Path) {
+        val src = sessions()
+        val session = src.open(tmp.toFile(), account("claude-1"))
+        val detached = src.detach(session.sessionId)!!
+
+        val dst = sessions()
+        assertTrue(dst.pickerTabVisible)
+        dst.attach(detached)
+
+        assertEquals(listOf(detached), dst.sessions)
+        assertEquals(detached.sessionId, dst.selectedId)
+        assertFalse(dst.pickerTabVisible)
+    }
+
+    @Test
     fun `the title the CLI gives the session replaces the default`(@TempDir tmp: Path) {
         val session = sessions().open(tmp.toFile(), account("claude-main"))
 
