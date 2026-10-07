@@ -79,8 +79,13 @@ import org.jetbrains.jewel.ui.component.styling.LazyTreeIcons
 import org.jetbrains.jewel.ui.component.styling.LazyTreeStyle
 import org.jetbrains.jewel.ui.component.styling.LocalLazyTreeStyle
 import org.jetbrains.jewel.ui.icon.PathIconKey
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.nio.file.Path
+
+// How long revealing a file waits for the directories above it to be listed before giving up on
+// scrolling to it. The file is selected either way.
+private const val REVEAL_WAIT_MS = 2_000L
 
 internal val ProjectIconTintDark = Color(0xFF9DA3AB)
 internal val ProjectIconTintLight = Color(0xFF4A5360)
@@ -107,18 +112,20 @@ private object ProjectIconsClass
 private val ChevronCollapsedIconKey = PathIconKey("icons/chevron-right.svg", ProjectIconsClass::class.java)
 private val ChevronExpandedIconKey = PathIconKey("icons/chevron-down.svg", ProjectIconsClass::class.java)
 
-private val IGNORED_DIR_NAMES = setOf(
-    ".git", ".idea", ".gradle", ".vscode",
-    "node_modules", "build", "out", "target", "dist", ".next", "__pycache__",
-)
-
 sealed class TreeEntry {
     abstract val id: String
 
+    /** A file or directory. What it is was read when its directory was listed — see [TreeChild]. */
     data class Node(
         val file: File,
+        val isDirectory: Boolean,
+        val link: TreeChild.Link = TreeChild.Link.None,
         override val id: String = file.absolutePath,
-    ) : TreeEntry()
+    ) : TreeEntry() {
+        constructor(child: TreeChild) : this(child.file, child.isDirectory, child.link)
+
+        val canOpen: Boolean get() = !isDirectory && (link == TreeChild.Link.None || link == TreeChild.Link.Resolved)
+    }
 
     data class Ellipsis(
         val parentDir: File,
@@ -137,6 +144,14 @@ sealed class TreeEntry {
         val isDirectory: Boolean,
         override val id: String = "collapse:$rangeId",
     ) : TreeEntry()
+
+    /** Stands in for a directory's entries while they are slow to arrive, or when they could not be read. */
+    data class Placeholder(
+        val dir: File,
+        val message: String,
+        val isProblem: Boolean,
+        override val id: String = "placeholder:${dir.absolutePath}",
+    ) : TreeEntry()
 }
 
 /**
@@ -145,16 +160,16 @@ sealed class TreeEntry {
  */
 internal fun computeDirectoryEntries(
     dir: File,
-    files: List<File>,
+    children: List<TreeChild>,
     openFilePaths: Set<String>,
     expandedEllipsisKeys: Set<String>,
     openDirectoryIds: Set<String> = emptySet(),
     minItemsForEllipsis: Int = Int.MAX_VALUE,
     minRunForEllipsis: Int = 3,
 ): List<TreeEntry> {
-    val (dirs, leafFiles) = files.partition { it.isDirectory }
-    val sortedDirs = dirs.sortedBy { it.name.lowercase() }
-    val sortedFiles = leafFiles.sortedBy { it.name.lowercase() }
+    val (dirs, leafFiles) = children.partition { it.isDirectory }
+    val sortedDirs = dirs.sortedBy { it.file.name.lowercase() }
+    val sortedFiles = leafFiles.sortedBy { it.file.name.lowercase() }
 
     val entries = mutableListOf<TreeEntry>()
 
@@ -166,9 +181,9 @@ internal fun computeDirectoryEntries(
     } else {
         // A directory is forced-visible if it contains an open file, is expanded, or is an open target
         val openDirIndices = sortedDirs.mapIndexedNotNull { idx, d ->
-            val dirPrefix = d.absolutePath + File.separator
-            val containsOpenFile = openFilePaths.any { it.startsWith(dirPrefix) || it == d.absolutePath }
-            val isExpanded = d.absolutePath in openDirectoryIds || openDirectoryIds.any { it.startsWith(dirPrefix) }
+            val dirPrefix = d.file.absolutePath + File.separator
+            val containsOpenFile = openFilePaths.any { it.startsWith(dirPrefix) || it == d.file.absolutePath }
+            val isExpanded = d.file.absolutePath in openDirectoryIds || openDirectoryIds.any { it.startsWith(dirPrefix) }
             if (containsOpenFile || isExpanded) idx else null
         }
 
@@ -191,7 +206,7 @@ internal fun computeDirectoryEntries(
                 entries.add(TreeEntry.Node(sortedDirs[idx]))
                 idx++
             } else {
-                val hiddenRun = mutableListOf<File>()
+                val hiddenRun = mutableListOf<TreeChild>()
                 while (idx < sortedDirs.size && idx !in visibleDirIndices) {
                     hiddenRun.add(sortedDirs[idx])
                     idx++
@@ -201,14 +216,14 @@ internal fun computeDirectoryEntries(
                         entries.add(TreeEntry.Node(d))
                     }
                 } else {
-                    val rangeId = "ellipsis:dirs:${dir.absolutePath}:${hiddenRun.first().name}..${hiddenRun.last().name}"
+                    val rangeId = "ellipsis:dirs:${dir.absolutePath}:${hiddenRun.first().file.name}..${hiddenRun.last().file.name}"
                     if (rangeId in expandedEllipsisKeys) {
                         for (d in hiddenRun) {
                             entries.add(TreeEntry.Node(d))
                         }
                         entries.add(TreeEntry.Collapse(dir, rangeId, hiddenRun.size, isDirectory = true))
                     } else {
-                        entries.add(TreeEntry.Ellipsis(dir, hiddenRun, rangeId, isDirectory = true))
+                        entries.add(TreeEntry.Ellipsis(dir, hiddenRun.map { it.file }, rangeId, isDirectory = true))
                     }
                 }
             }
@@ -224,7 +239,7 @@ internal fun computeDirectoryEntries(
     }
 
     val openIndices = sortedFiles.mapIndexedNotNull { idx, f ->
-        if (f.absolutePath in openFilePaths) idx else null
+        if (f.file.absolutePath in openFilePaths) idx else null
     }
 
     val visibleIndices = mutableSetOf<Int>()
@@ -246,7 +261,7 @@ internal fun computeDirectoryEntries(
             entries.add(TreeEntry.Node(sortedFiles[idx]))
             idx++
         } else {
-            val hiddenRun = mutableListOf<File>()
+            val hiddenRun = mutableListOf<TreeChild>()
             while (idx < sortedFiles.size && idx !in visibleIndices) {
                 hiddenRun.add(sortedFiles[idx])
                 idx++
@@ -256,14 +271,14 @@ internal fun computeDirectoryEntries(
                     entries.add(TreeEntry.Node(f))
                 }
             } else {
-                val rangeId = "ellipsis:files:${dir.absolutePath}:${hiddenRun.first().name}..${hiddenRun.last().name}"
+                val rangeId = "ellipsis:files:${dir.absolutePath}:${hiddenRun.first().file.name}..${hiddenRun.last().file.name}"
                 if (rangeId in expandedEllipsisKeys) {
                     for (f in hiddenRun) {
                         entries.add(TreeEntry.Node(f))
                     }
                     entries.add(TreeEntry.Collapse(dir, rangeId, hiddenRun.size, isDirectory = false))
                 } else {
-                    entries.add(TreeEntry.Ellipsis(dir, hiddenRun, rangeId, isDirectory = false))
+                    entries.add(TreeEntry.Ellipsis(dir, hiddenRun.map { it.file }, rangeId, isDirectory = false))
                 }
             }
         }
@@ -273,26 +288,43 @@ internal fun computeDirectoryEntries(
 }
 
 private fun Path.asFilteredTree(
+    listings: DirectoryListings,
     openFilePaths: Set<String>,
     expandedEllipsisKeys: Set<String>,
     openDirectoryIds: Set<String> = emptySet(),
 ): Tree<TreeEntry> = buildTree {
     val root = toFile()
-    val rootEntry = TreeEntry.Node(root)
+    val rootEntry = TreeEntry.Node(root, isDirectory = true)
     addNode(rootEntry, id = root.absolutePath) {
-        addChildren(root, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+        addChildren(root, listings, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
     }
 }
 
+// Runs while the tree is drawn, so it reads nothing but [listings]: the disk is read on a worker,
+// and a directory that is not in yet is asked for and drawn as soon as it arrives.
 private fun ChildrenGeneratorScope<TreeEntry>.addChildren(
     dir: File,
+    listings: DirectoryListings,
     openFilePaths: Set<String>,
     expandedEllipsisKeys: Set<String>,
     openDirectoryIds: Set<String>,
 ) {
+    val children = when (val listing = listings.childrenOf(dir)) {
+        null -> return
+        is DirectoryListings.Listing.Pending -> {
+            val message = if (listing.notResponding) "not responding — still waiting for the disk" else "loading…"
+            addLeaf(TreeEntry.Placeholder(dir, message, isProblem = listing.notResponding), id = "placeholder:${dir.absolutePath}")
+            return
+        }
+        is DirectoryListings.Listing.Failed -> {
+            addLeaf(TreeEntry.Placeholder(dir, "can't read: ${listing.reason}", isProblem = true), id = "placeholder:${dir.absolutePath}")
+            return
+        }
+        is DirectoryListings.Listing.Ready -> listing.children
+    }
     val entries = computeDirectoryEntries(
         dir = dir,
-        files = visibleChildren(dir),
+        children = children,
         openFilePaths = openFilePaths,
         expandedEllipsisKeys = expandedEllipsisKeys,
         openDirectoryIds = openDirectoryIds,
@@ -301,9 +333,9 @@ private fun ChildrenGeneratorScope<TreeEntry>.addChildren(
         when (entry) {
             is TreeEntry.Node -> {
                 val file = entry.file
-                if (file.isDirectory) {
+                if (entry.isDirectory) {
                     addNode(entry, id = file.absolutePath) {
-                        addChildren(file, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+                        addChildren(file, listings, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
                     }
                 } else {
                     addLeaf(entry, id = file.absolutePath)
@@ -315,18 +347,18 @@ private fun ChildrenGeneratorScope<TreeEntry>.addChildren(
             is TreeEntry.Collapse -> {
                 addLeaf(entry, id = entry.id)
             }
+            is TreeEntry.Placeholder -> {
+                addLeaf(entry, id = entry.id)
+            }
         }
     }
 }
 
-internal fun visibleChildren(dir: File): List<File> = (dir.listFiles() ?: emptyArray())
-    .filter { it.name !in IGNORED_DIR_NAMES }
-    .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-
 /**
  * Returns the 0-based row index of [targetPath] in the same DFS-of-expanded-nodes ordering the
  * LazyTree uses, given [openIds] (absolute paths of directories that are expanded). Returns -1
- * when the target isn't part of the visible tree, e.g. because an ancestor isn't open.
+ * when the target isn't part of the visible tree, e.g. because an ancestor isn't open, or when
+ * [childrenOf] does not have a directory on the way to it yet.
  */
 internal fun flattenedRowIndexOf(
     rootFile: File,
@@ -334,16 +366,17 @@ internal fun flattenedRowIndexOf(
     openIds: Set<String>,
     openFilePaths: Set<String> = emptySet(),
     expandedEllipsisKeys: Set<String> = emptySet(),
+    childrenOf: (File) -> List<TreeChild>?,
 ): Int {
     var counter = 0
     fun walk(dir: File): Int {
         if (dir.absolutePath == targetPath) return counter
         counter++
-        if (!dir.isDirectory) return -1
         if (dir.absolutePath != rootFile.absolutePath && dir.absolutePath !in openIds) return -1
+        val children = childrenOf(dir) ?: return -1
         val entries = computeDirectoryEntries(
             dir = dir,
-            files = visibleChildren(dir),
+            children = children,
             openFilePaths = openFilePaths,
             expandedEllipsisKeys = expandedEllipsisKeys,
             openDirectoryIds = openIds,
@@ -352,7 +385,7 @@ internal fun flattenedRowIndexOf(
             when (entry) {
                 is TreeEntry.Node -> {
                     val file = entry.file
-                    if (file.isDirectory) {
+                    if (entry.isDirectory) {
                         val found = walk(file)
                         if (found >= 0) return found
                     } else {
@@ -364,7 +397,7 @@ internal fun flattenedRowIndexOf(
                     if (entry.hiddenItems.any { it.absolutePath == targetPath }) return counter
                     counter++
                 }
-                is TreeEntry.Collapse -> {
+                is TreeEntry.Collapse, is TreeEntry.Placeholder -> {
                     counter++
                 }
             }
@@ -474,8 +507,19 @@ fun ProjectTreePanel(
     val treeState = rememberTreeState()
     val openDirectoryIds = treeState.openNodes.filterIsInstance<String>().toSet()
 
-    val tree = remember(projectPath, refreshKey, openFilePaths, expandedEllipsisKeys, openDirectoryIds) {
-        projectPath.asFilteredTree(openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+    // What the tree knows of the disk. Read on workers and only ever looked up here — see
+    // DirectoryListings for why drawing the tree must never wait on a directory.
+    val listings = remember(projectPath) { DirectoryListings.forProject(projectPath) }
+    val listingsVersion = listings.version
+
+    val tree = remember(projectPath, listingsVersion, openFilePaths, expandedEllipsisKeys, openDirectoryIds) {
+        projectPath.asFilteredTree(listings, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+    }
+
+    // Something on disk may have changed: read the open directories again, and forget the closed
+    // ones so a refresh costs what is on screen and not everything ever expanded.
+    LaunchedEffect(refreshKey, projectPath) {
+        listings.refresh(openDirectoryIds + rootId)
     }
 
     // Track which files have had their ancestors opened so we don't re-expand folders the user collapsed
@@ -525,8 +569,16 @@ fun ProjectTreePanel(
         treeState.openNodes(ancestors)
         treeState.selectedKeys = setOf(abs.absolutePath)
 
+        // The rows above the target are only countable once their directories are in. A directory
+        // that does not answer in time just means no scroll: the selection is already made.
+        withTimeoutOrNull(REVEAL_WAIT_MS) {
+            ancestors.asReversed().forEach { listings.awaitListed(File(it)) }
+        }
         val openIds = treeState.openNodes.filterIsInstance<String>().toSet() + rootFile.absolutePath
-        val targetIndex = flattenedRowIndexOf(rootFile, abs.absolutePath, openIds, openFilePaths, expandedEllipsisKeys)
+        val targetIndex = flattenedRowIndexOf(
+            rootFile, abs.absolutePath, openIds, openFilePaths, expandedEllipsisKeys,
+            childrenOf = listings::peek,
+        )
         if (targetIndex >= 0) {
             withFrameNanos { }
             val lazyList = treeState.lazyListState.lazyListState
@@ -658,8 +710,7 @@ fun ProjectTreePanel(
             onElementClick = { element ->
                 when (val entry = element.data) {
                     is TreeEntry.Node -> {
-                        val file = entry.file
-                        if (file.isFile && !pressCarriedSelectModifier) onFileClick(file)
+                        if (entry.canOpen && !pressCarriedSelectModifier) onFileClick(entry.file)
                     }
                     is TreeEntry.Ellipsis -> {
                         expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId
@@ -667,6 +718,7 @@ fun ProjectTreePanel(
                     is TreeEntry.Collapse -> {
                         expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId
                     }
+                    is TreeEntry.Placeholder -> Unit
                 }
             },
         ) { element ->
@@ -755,16 +807,37 @@ fun ProjectTreePanel(
                     }
                 }
 
+                is TreeEntry.Placeholder -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().height(22.dp).padding(end = 8.dp),
+                    ) {
+                        Spacer(Modifier.width(FileRowIndent))
+                        Text(
+                            text = entry.message,
+                            fontSize = 11.sp,
+                            fontFamily = NopFonts.Mono,
+                            color = when {
+                                entry.isProblem -> if (isDark) Color(0xFFE5A15C) else Color(0xFFA35A00)
+                                isDark -> Color(0xFF8B8F99)
+                                else -> Color(0xFF6C707E)
+                            },
+                        )
+                    }
+                }
+
                 is TreeEntry.Node -> {
                     val file: File = entry.file
-                    val isOpen = file.isFile && file.absolutePath in openFilePaths
-                    val isActive = file.isFile && file.absolutePath == effectiveActiveFile?.absolutePath
-                    val isDirty = file.isFile && file in dirtyFiles
+                    val isDirectory = entry.isDirectory
+                    val isFile = !isDirectory
+                    val isOpen = isFile && file.absolutePath in openFilePaths
+                    val isActive = isFile && file.absolutePath == effectiveActiveFile?.absolutePath
+                    val isDirty = isFile && file in dirtyFiles
 
                     val relPath = file.relativePathTo(projectPath)
                     val kind = when {
                         relPath == null -> null
-                        file.isFile -> status.byPath[relPath]
+                        isFile -> status.byPath[relPath]
                         else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
                     }
                     val color = kind?.let(ChangeColors::forKind)
@@ -788,7 +861,7 @@ fun ProjectTreePanel(
                             add(ContextMenuItem("New File…") { onNewFile(file) })
                             add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
                             add(ContextMenuItem("New Package…") { onNewPackage(file) })
-                            if (file.isFile) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                            if (entry.canOpen) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
                             add(ContextMenuItem("Copy") { onClipboardCopy(menuTargetsFor(file, selectionBeforeSecondaryPress)) })
                             if (canPaste()) {
                                 add(ContextMenuItem("Paste") { onPasteRequest(FileOperations.parentDirFor(file)) })
@@ -798,7 +871,7 @@ fun ProjectTreePanel(
                             }
                             if (gitEnabled) {
                                 add(ContextMenuItem("Show History") { onHistoryRequest(file) })
-                                if (file.isFile) {
+                                if (entry.canOpen) {
                                     add(ContextMenuItem("Compare with Revision…") { onCompareWithRevision(file) })
                                 }
                             }
@@ -817,7 +890,7 @@ fun ProjectTreePanel(
                         }
                     }) {
                         val rowCoords = remember(file.absolutePath) { mutableStateOf<LayoutCoordinates?>(null) }
-                        val isDropTarget = file.isDirectory && dropTargetPath == file.absolutePath &&
+                        val isDropTarget = isDirectory && dropTargetPath == file.absolutePath &&
                             draggedFile != null && draggedFile != file
                         val interactionSource = remember(file.absolutePath) { MutableInteractionSource() }
                         val isHovered by interactionSource.collectIsHoveredAsState()
@@ -846,7 +919,7 @@ fun ProjectTreePanel(
                                 .hoverable(interactionSource)
                                 .onGloballyPositioned { coords ->
                                     rowCoords.value = coords
-                                    if (file.isDirectory) {
+                                    if (isDirectory) {
                                         val bounds = coords.boundsInRoot()
                                         dirRowRanges[file.absolutePath] = bounds.top..bounds.bottom
                                     } else {
@@ -901,7 +974,7 @@ fun ProjectTreePanel(
                                 .alpha(if (draggedFile == file) 0.5f else 1f)
                                 .background(rowBackground),
                         ) {
-                            if (file.isDirectory) {
+                            if (isDirectory) {
                                 Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
                             } else {
                                 // Active file gets prominent glowing vertical accent bar
@@ -929,6 +1002,21 @@ fun ProjectTreePanel(
                                 Text(
                                     file.name,
                                     fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                            }
+
+                            // A link the tree has not looked behind yet, or could not: say so, since
+                            // its row cannot be opened and would otherwise look like any other file.
+                            val linkNote = when (entry.link) {
+                                TreeChild.Link.Pending -> "→ …"
+                                TreeChild.Link.Broken -> "→ broken link"
+                                else -> null
+                            }
+                            if (linkNote != null) {
+                                Text(
+                                    text = linkNote,
+                                    fontSize = 10.sp,
+                                    color = if (isDark) Color(0xFF8B8F99) else Color(0xFF6C707E),
                                 )
                             }
 

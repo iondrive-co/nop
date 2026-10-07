@@ -2,6 +2,7 @@ package iondrive.nop.ui
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import java.nio.file.Path
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.createDirectories
@@ -10,6 +11,11 @@ import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 
 class ProjectTreePanelTest {
+    private fun List<File>.asChildren() = map { TreeChild(it, it.isDirectory) }
+
+    // The panel reads listings a worker made; here the disk is read on the spot.
+    private fun rowOf(root: File, target: String, openIds: Set<String>) =
+        flattenedRowIndexOf(root, target, openIds, childrenOf = { listEntries(it) })
     @Test fun `flattened row index matches DFS-of-expanded-nodes`(@TempDir tmp: Path) {
         // Layout (alphabetical, dirs before files at each level):
         //   root            <- row 0
@@ -34,12 +40,12 @@ class ProjectTreePanelTest {
             // b/ is intentionally NOT in openIds
         )
 
-        assertEquals(0, flattenedRowIndexOf(root, root.absolutePath, openIds))
-        assertEquals(1, flattenedRowIndexOf(root, tmp.resolve("ansible").absolutePathString(), openIds))
-        assertEquals(4, flattenedRowIndexOf(root, tmp.resolve("ansible/roles/a/tasks").absolutePathString(), openIds))
-        assertEquals(5, flattenedRowIndexOf(root, tmp.resolve("ansible/roles/b").absolutePathString(), openIds))
-        assertEquals(6, flattenedRowIndexOf(root, tmp.resolve("ansible/all.yml").absolutePathString(), openIds))
-        assertEquals(7, flattenedRowIndexOf(root, tmp.resolve("README.md").absolutePathString(), openIds))
+        assertEquals(0, rowOf(root, root.absolutePath, openIds))
+        assertEquals(1, rowOf(root, tmp.resolve("ansible").absolutePathString(), openIds))
+        assertEquals(4, rowOf(root, tmp.resolve("ansible/roles/a/tasks").absolutePathString(), openIds))
+        assertEquals(5, rowOf(root, tmp.resolve("ansible/roles/b").absolutePathString(), openIds))
+        assertEquals(6, rowOf(root, tmp.resolve("ansible/all.yml").absolutePathString(), openIds))
+        assertEquals(7, rowOf(root, tmp.resolve("README.md").absolutePathString(), openIds))
     }
 
     @Test fun `returns -1 when ancestor is collapsed`(@TempDir tmp: Path) {
@@ -48,7 +54,7 @@ class ProjectTreePanelTest {
         val openIds = setOf(root.absolutePath) // a/ not expanded
 
         // a/b/c is not reachable when a/ is collapsed.
-        assertEquals(-1, flattenedRowIndexOf(root, tmp.resolve("a/b/c").absolutePathString(), openIds))
+        assertEquals(-1, rowOf(root, tmp.resolve("a/b/c").absolutePathString(), openIds))
     }
 
     @Test fun `directoryPathAtY finds the row whose band contains the pointer`() {
@@ -113,7 +119,7 @@ class ProjectTreePanelTest {
     @Test fun `computeDirectoryEntries does not compress when files count is small`(@TempDir tmp: Path) {
         val dir = tmp.toFile()
         val files = (1..4).map { tmp.resolve("file_$it.txt").createFile().toFile() }
-        val entries = computeDirectoryEntries(dir, files, emptySet(), emptySet(), minItemsForEllipsis = 6)
+        val entries = computeDirectoryEntries(dir, files.asChildren(), emptySet(), emptySet(), minItemsForEllipsis = 6)
         assertEquals(4, entries.size)
         assert(entries.all { it is TreeEntry.Node })
     }
@@ -124,7 +130,7 @@ class ProjectTreePanelTest {
         val openFile = files[10]
         val entries = computeDirectoryEntries(
             dir = dir,
-            files = files,
+            children = files.asChildren(),
             openFilePaths = setOf(openFile.absolutePath),
             expandedEllipsisKeys = emptySet(),
             minItemsForEllipsis = 6,
@@ -162,7 +168,7 @@ class ProjectTreePanelTest {
         // First find the rangeId of the first ellipsis
         val initialEntries = computeDirectoryEntries(
             dir = dir,
-            files = files,
+            children = files.asChildren(),
             openFilePaths = setOf(openFile.absolutePath),
             expandedEllipsisKeys = emptySet(),
             minItemsForEllipsis = 6,
@@ -171,7 +177,7 @@ class ProjectTreePanelTest {
 
         val expandedEntries = computeDirectoryEntries(
             dir = dir,
-            files = files,
+            children = files.asChildren(),
             openFilePaths = setOf(openFile.absolutePath),
             expandedEllipsisKeys = setOf(ellipsis1.rangeId),
             minItemsForEllipsis = 6,
@@ -195,7 +201,7 @@ class ProjectTreePanelTest {
 
         val entries = computeDirectoryEntries(
             dir = dir,
-            files = files,
+            children = files.asChildren(),
             openFilePaths = emptySet(),
             expandedEllipsisKeys = emptySet(),
             minItemsForEllipsis = 6,
@@ -219,7 +225,7 @@ class ProjectTreePanelTest {
 
         val entries = computeDirectoryEntries(
             dir = dir,
-            files = dirs,
+            children = dirs.asChildren(),
             openFilePaths = setOf(openFile.absolutePath),
             expandedEllipsisKeys = emptySet(),
             minItemsForEllipsis = 6,
@@ -260,7 +266,7 @@ class ProjectTreePanelTest {
 
         val initial = computeDirectoryEntries(
             dir = dir,
-            files = dirs,
+            children = dirs.asChildren(),
             openFilePaths = setOf(openFile.absolutePath),
             expandedEllipsisKeys = emptySet(),
             minItemsForEllipsis = 6,
@@ -269,7 +275,7 @@ class ProjectTreePanelTest {
 
         val expanded = computeDirectoryEntries(
             dir = dir,
-            files = dirs,
+            children = dirs.asChildren(),
             openFilePaths = setOf(openFile.absolutePath),
             expandedEllipsisKeys = setOf(ellipsis0.rangeId),
             minItemsForEllipsis = 6,
@@ -294,7 +300,7 @@ class ProjectTreePanelTest {
 
         val entries = computeDirectoryEntries(
             dir = dir,
-            files = dirs,
+            children = dirs.asChildren(),
             openFilePaths = emptySet(),
             expandedEllipsisKeys = emptySet(),
             openDirectoryIds = setOf(expandedDir.absolutePath),

@@ -51,6 +51,7 @@ import iondrive.nop.ui.NopTextContextMenu
 import iondrive.nop.ui.ProjectBar
 import iondrive.nop.ui.RestartDialog
 import iondrive.nop.ui.TerminalStore
+import iondrive.nop.ui.UiStallWatchdog
 import iondrive.nop.ui.projectAgentNews
 import iondrive.nop.ui.WindowPickerPanel
 import iondrive.nop.ui.nopMenuStyle
@@ -143,6 +144,10 @@ fun main(args: Array<String>) {
 
     // Only the nop that owns the windows backs the sessions up — see [Backup].
     Backup.start()
+
+    // The other way the UI thread fails without a trace: not by throwing, but by stopping. Only the
+    // nop that owns the windows has a UI thread worth watching.
+    UiStallWatchdog.start()
 
     val startup = resolveStartup(argPaths.firstOrNull())
     if (startup.workspaces.isEmpty()) exitProcess(0)
