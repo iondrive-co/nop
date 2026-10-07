@@ -113,6 +113,10 @@ object AgentSessionStore {
         val toEntry = byRoot.getOrPut(toKey) { Entry(AgentSessions()) }
         toEntry.projects.add(norm(toProject))
         session.projectDir = toProject.toFile()
+        // Written now, not left to the record the session writes when nop next restores it: a tab
+        // that ends before then would otherwise be listed under the project it was sent away from,
+        // and nowhere in the one it was sent to. See EventLog.sessions.
+        session.log.append(AgentEvent.SessionStarted(toProject.toFile().absolutePath, System.currentTimeMillis()))
         toEntry.sessions.attach(session)
         generation += 1
 

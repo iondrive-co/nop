@@ -207,6 +207,26 @@ class EventLogTest {
     }
 
     /**
+     * A tab sent to another project goes on writing the log it began with, so the log names both.
+     * Filed under the first, the conversation vanished from the project it was sent to as soon as
+     * it ended — on 2026-10-07 one moved from core to core2 was nowhere in core2's list. The move
+     * is placed far past the head, as it is in a long conversation.
+     */
+    @Test
+    fun `a session sent to another project is listed there, not where it began`(@TempDir tmp: Path) {
+        val began = tmp.resolve("began")
+        val sentTo = tmp.resolve("sent-to")
+        val moved = session("ours-moved", began.toString(), "Sent across", null)
+        repeat(300) { moved.append(AgentEvent.UserMessage("turn $it", now())) }
+        moved.append(AgentEvent.SessionStarted(sentTo.toString(), now() + 60_000))
+
+        assertTrue(EventLog.sessions(began).none { it.sessionId == "ours-moved" })
+        val listed = EventLog.sessions(sentTo).single { it.sessionId == "ours-moved" }
+        assertEquals("Sent across", listed.title)
+        assertTrue(listed.startedAt < now(), "it still began when it began")
+    }
+
+    /**
      * A conversation begun this morning and worked in until a minute ago is the one the user was
      * just in. Dated by its start, it sat below everything begun since.
      */

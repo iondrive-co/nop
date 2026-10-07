@@ -155,6 +155,11 @@ class AgentSessionStoreTest {
         val sessionsTwo = AgentSessionStore.of(root = projTwo, project = projTwo)
         assertEquals(listOf(session), sessionsTwo.sessions)
         assertEquals(session.sessionId, sessionsTwo.selectedId)
+        assertEquals(
+            projTwo.toFile().absolutePath,
+            EventLog.read(session.log.file).filterIsInstance<AgentEvent.SessionStarted>().last().projectPath,
+            "the log says where the session went, so it is listed there once it ends",
+        )
     }
 
     @Test

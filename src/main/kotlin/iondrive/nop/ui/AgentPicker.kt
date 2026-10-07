@@ -101,7 +101,14 @@ fun AgentPicker(
             }
         }
 
-        if (sessions.isNotEmpty()) {
+        // Only a session nop can actually get back into: the vendor left a transcript that is still
+        // there, and there is something to run it as. The rest used to be listed greyed out as
+        // "nothing to resume" — mostly tabs opened and closed before a word was typed — and a row
+        // that cannot be clicked is just clutter in a list whose whole purpose is reopening.
+        // The accounts decide this, not the row: whether nop can still run the account a session
+        // names is a question about the settings. See PastSession.accountIn.
+        val resumable = sessions.filter { it.accountIn(accounts) != null }
+        if (resumable.isNotEmpty()) {
             Spacer(Modifier.height(14.dp))
             Text("Earlier sessions here", fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(4.dp))
@@ -116,20 +123,13 @@ fun AgentPicker(
             // busy checkout can have hundreds. What a picker is for is getting back into work from the last day or
             // two, and a row five hundred deep is found by searching, which this is not.
             var showAll by remember(projectDir) { mutableStateOf(false) }
-            val shown = if (showAll) sessions else sessions.take(EARLIER_SESSIONS_SHOWN)
+            val shown = if (showAll) resumable else resumable.take(EARLIER_SESSIONS_SHOWN)
             shown.forEach { past ->
                 key(past.sessionId) {
-                    PastSessionRow(
-                        past = past,
-                        // The accounts decide this, not the row: a session names the account it
-                        // ran under, and whether nop can still run that account is a question
-                        // about the settings rather than about the session.
-                        account = past.accountIn(accounts),
-                        onReopen = { onReopen(past) },
-                    )
+                    PastSessionRow(past = past, onReopen = { onReopen(past) })
                 }
             }
-            val hidden = sessions.size - shown.size
+            val hidden = resumable.size - shown.size
             if (hidden > 0) {
                 Spacer(Modifier.height(4.dp))
                 Link("and $hidden older", onClick = { showAll = true })
@@ -153,19 +153,15 @@ private const val PICKER_PATH_MAX = 44
 
 /** One earlier session in this project: what it was about, and the account that was doing it. */
 @Composable
-private fun PastSessionRow(past: PastSession, account: Account?, onReopen: () -> Unit) {
+private fun PastSessionRow(past: PastSession, onReopen: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    // Only a session nop can actually get back into — the vendor left a transcript that is still
-    // there, and there is something to run it as. Without both, the row would promise to pick the
-    // work back up and instead fail at the CLI, or do nothing whatsoever. See PastSession.accountIn.
-    val resumable = account != null
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .hoverable(interaction)
-            .clickable(enabled = resumable, onClick = onReopen)
+            .clickable(onClick = onReopen)
             .padding(vertical = 5.dp),
     ) {
         Text(
@@ -177,7 +173,6 @@ private fun PastSessionRow(past: PastSession, account: Account?, onReopen: () ->
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(Ago.of(past.lastActiveAt), color = AgentMuted)
             past.lastAccount?.let { Text(it, color = AgentMuted) }
-            if (!resumable) Text("nothing to resume", color = AgentMuted)
         }
     }
 }

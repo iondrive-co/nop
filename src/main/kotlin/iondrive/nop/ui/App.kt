@@ -849,14 +849,20 @@ fun App(
         // alone so that a tab which switches conversation while the picker *is* up still refreshes.
         if (!pickerShowing) return@LaunchedEffect
         pastAgentSessions = withContext(Dispatchers.IO) {
-            val own = EventLog.sessions(rootPath)
+            val all = EventLog.sessions()
+            val wanted = rootPath.toAbsolutePath().normalize().toString()
+            val own = all.filter { it.projectPath == wanted }
             // Only a row that can actually be reopened is allowed to stand in for the vendor's own
             // copy of the same conversation. nop's side knows more about a session — which
             // configured account, and the name the user gave the tab — but a row it cannot place
             // knows less than the transcript does, and hiding the transcript behind it is how a
             // conversation that is sitting right there on disk becomes unreachable. Which is what a
             // log written before the store was recorded is: see PastSession.accountIn.
-            val seen = own.filter { it.accountIn(agentAccounts) != null }
+            //
+            // Every project's rows, not only this one's: a conversation sent from here to another
+            // project leaves its transcript in this project's store, and listing it here as well
+            // would offer the same conversation in two places.
+            val seen = all.filter { it.accountIn(agentAccounts) != null }
                 .mapNotNull { it.lastNativeSessionId }
                 .toSet()
             val native = NativeSessions.claude(rootPath, NativeSessions.stores(agentAccounts))

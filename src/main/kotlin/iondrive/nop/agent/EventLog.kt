@@ -309,14 +309,25 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
          * the account to resume from comes from the last run anywhere in the file. That second part
          * cannot be taken from the head: after a provider switch the run at the top of the log is
          * the one that ran out, so a row built from it would offer to reopen the account that
-         * already failed.
+         * already failed. The project is the last one the log names, for the same reason: a tab
+         * sent to another project carries on in this log, and filed under the project it began in
+         * it vanished from the one it was sent to as soon as it ended.
          */
         fun sessions(projectPath: Path): List<PastSession> {
+            val wanted = projectPath.toAbsolutePath().normalize().toString()
+            return sessions().filter { it.projectPath == wanted }
+        }
+
+        /**
+         * Every project's sessions, most recently active first. The picker needs the ones filed
+         * elsewhere too: a conversation sent from this project to another still has its transcript
+         * in this project's vendor store, and only nop's log says it now belongs over there.
+         */
+        fun sessions(): List<PastSession> {
             val dir = sessionsDir()
             val files = runCatching {
                 Files.list(dir).use { it.filter { p -> p.fileName.toString().endsWith(".jsonl") }.toList() }
             }.getOrDefault(emptyList())
-            val wanted = projectPath.toAbsolutePath().normalize().toString()
 
             val present = HashSet<String>(files.size)
             val rows = files.mapNotNull { file ->
@@ -327,12 +338,10 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             // A log that is no longer on disk keeps nothing here: the picker is drawn against what
             // the directory holds now, and a summary nothing can ask for again is just a leak.
             summaries.keys.retainAll(present)
-            // Filtered here rather than inside the read, so one log read serves every project. The
-            // check was always after the read anyway — a log does not say whose it is until its
-            // first record has been decoded — so this costs nothing and lets the summary be cached
-            // once for a directory that holds every project's sessions together.
-            return rows.filter { it.projectPath == wanted }
-                .sortedByDescending { it.lastActiveAt }
+            // Filtered by the caller rather than inside the read, so one log read serves every
+            // project: a log does not say whose it is until its records have been decoded, and the
+            // summary is cached once for a directory that holds every project's sessions together.
+            return rows.sortedByDescending { it.lastActiveAt }
         }
 
         /**
@@ -381,6 +390,9 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
 
         private fun summarise(file: Path, sessionId: String, modifiedAt: Long): PastSession? {
             var started: AgentEvent.SessionStarted? = null
+            // Where the session is now, which is not where it began once its tab has been sent to
+            // another project: see AgentSessionStore.sendSession.
+            var placed: AgentEvent.SessionStarted? = null
             var lastRun: AgentEvent.RunStarted? = null
             // The spawn record of the last run, which is the one with no transcript yet: it is
             // when the CLI was started, where [lastRun] is when its transcript was found. See
@@ -395,16 +407,19 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                     for (line in reader.lineSequence()) {
                         index += 1
                         if (line.isBlank()) continue
-                        // Cheap pre-filter: past the head only run records still matter, and
-                        // decoding a whole session's turns to find them would make drawing the
-                        // picker cost reading every log in full.
+                        // Cheap pre-filter: past the head only run and placement records still
+                        // matter, and decoding a whole session's turns to find them would make
+                        // drawing the picker cost reading every log in full.
                         val inHead = index <= HEAD_LINES
-                        if (!inHead && "\"run_started\"" !in line) continue
+                        if (!inHead && "\"run_started\"" !in line && "\"session_started\"" !in line) continue
                         val event = runCatching {
                             JSON.decodeFromString(AgentEvent.serializer(), line)
                         }.getOrNull() ?: continue
                         when (event) {
-                            is AgentEvent.SessionStarted -> started = started ?: event
+                            is AgentEvent.SessionStarted -> {
+                                started = started ?: event
+                                placed = event
+                            }
                             is AgentEvent.RunStarted -> {
                                 lastRun = event
                                 if (event.transcriptPath == null) lastSpawn = event
@@ -429,7 +444,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
 
             return PastSession(
                 sessionId = sessionId,
-                projectPath = session.projectPath,
+                projectPath = placed?.projectPath ?: session.projectPath,
                 startedAt = session.at,
                 title = resolvedTitle,
                 lastProvider = lastRun?.provider,
