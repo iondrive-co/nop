@@ -8,7 +8,10 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import iondrive.nop.Log
 
-enum class TokenKind { KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR, TYPE, FUNCTION }
+enum class TokenKind {
+    KEYWORD, STRING, COMMENT, NUMBER, LITERAL, PUNCT, HEADING, EMPHASIS, ERROR, TYPE, FUNCTION,
+    FIELD, STATIC_FIELD, FUNCTION_DECLARATION,
+}
 
 data class Token(val start: Int, val endExclusive: Int, val kind: TokenKind)
 
@@ -25,6 +28,9 @@ data class HighlightPalette(
     val error: SpanStyle,
     val type: SpanStyle = SpanStyle(color = Color.Unspecified),
     val function: SpanStyle = SpanStyle(color = Color.Unspecified),
+    val field: SpanStyle = SpanStyle(color = Color.Unspecified),
+    val staticField: SpanStyle = field.copy(fontStyle = FontStyle.Italic),
+    val functionDeclaration: SpanStyle = function,
 ) {
     fun styleFor(kind: TokenKind): SpanStyle = when (kind) {
         TokenKind.KEYWORD -> keyword
@@ -38,6 +44,9 @@ data class HighlightPalette(
         TokenKind.ERROR -> error
         TokenKind.TYPE -> type
         TokenKind.FUNCTION -> function
+        TokenKind.FIELD -> field
+        TokenKind.STATIC_FIELD -> staticField
+        TokenKind.FUNCTION_DECLARATION -> functionDeclaration
     }
 
     companion object {
@@ -55,8 +64,10 @@ data class HighlightPalette(
             // Errors are tinted red; the editor draws a red wavy underline under the range on top
             // of this (see ErrorSquiggles) for the IntelliJ-style "this is wrong" squiggle.
             error = SpanStyle(color = Color(0xFFFF6B68)),
-            type = SpanStyle(color = Color(0xFF4EC9B0)),     // Clean mint/teal for types/classes
-            function = SpanStyle(color = Color(0xFF56A8F5)), // Soft sky blue for functions/methods
+            type = SpanStyle(color = Color(0xFFBCBEC4)),
+            function = SpanStyle(color = Color(0xFFBCBEC4)),
+            field = SpanStyle(color = Color(0xFFC77DBB)),
+            functionDeclaration = SpanStyle(color = Color(0xFF56A8F5)),
         )
 
         // IntelliJ-default light palette — darker hues so they read on a near-white background.
@@ -70,8 +81,10 @@ data class HighlightPalette(
             heading = SpanStyle(color = Color(0xFF871094)),  // Purple headings
             emphasis = SpanStyle(color = Color(0xFF875700)), // Warm amber/gold for annotations
             error = SpanStyle(color = Color(0xFFFF0000)),    // Red errors
-            type = SpanStyle(color = Color(0xFF1F6B75)),     // Slate cyan for types/classes
-            function = SpanStyle(color = Color(0xFF00627A)), // Deep cyan/teal for functions/methods
+            type = SpanStyle(color = Color(0xFF000000)),
+            function = SpanStyle(color = Color(0xFF000000)),
+            field = SpanStyle(color = Color(0xFF871094)),
+            functionDeclaration = SpanStyle(color = Color(0xFF00627A)),
         )
 
         // Diff variants. A diff row paints a colour tint behind its text (see DiffRendering's

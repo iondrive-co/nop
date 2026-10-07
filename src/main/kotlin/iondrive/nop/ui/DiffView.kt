@@ -554,6 +554,7 @@ private fun DiffRowsList(
         onRatioChange = onSplitRatioChange,
         searchKey = searchKey,
         findTrigger = findTrigger,
+        itemRanges = remember(blocks) { blocks.map { it.range } },
         oldHeader = "HEAD: ${currentFile.name}",
         newHeader = "Current version",
         ignoreWhitespace = ignoreWhitespace,
@@ -874,6 +875,7 @@ private fun MergeLineRow(
             onResolveAt = onResolveAt,
             onJump = onJump,
             modifier = diffHalf(DiffSide.NEW),
+            selectable = false,
         )
     }
 }
@@ -960,6 +962,7 @@ private fun DiffBlockView(
                     onResolveAt = onResolveAt,
                     onJump = onJump,
                     modifier = diffHalf(DiffSide.NEW),
+                    selectable = false,
                 )
             }
         }
@@ -998,7 +1001,7 @@ private fun ReadOnlyBlockHalf(
     onResolveAt: (currentFile: File, text: String, offset: Int) -> JumpTarget?,
     onJump: (File, Int) -> Unit,
     modifier: Modifier = Modifier,
-    selectable: Boolean = true,
+    selectable: Boolean = (side == DiffSide.OLD),
 ) {
     val tokenize = LocalDiffTokenizer.current
     val palette = diffPalette()
@@ -1032,7 +1035,7 @@ private fun ReadOnlyBlockHalf(
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
-                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp, end = LINE_END_PAD)
+                    .padding(end = LINE_END_PAD)
                     // After the padding, so the squiggles are placed in the text's own coordinates.
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     // Ctrl-click resolves against the whole block's text — JumpResolver reads the
@@ -1330,17 +1333,8 @@ private fun BlockHalfFrame(
             .then(if (wrap) Modifier else Modifier.drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) }),
         verticalAlignment = Alignment.Top,
     ) {
-        val gutter = @Composable { BlockGutter(numbers, lineHeights) }
-        val content = @Composable {
-            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
-        }
-        if (side == DiffSide.OLD) {
-            content()
-            gutter()
-        } else {
-            gutter()
-            content()
-        }
+        BlockGutter(numbers, lineHeights)
+        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
     }
 }
 
@@ -1587,4 +1581,3 @@ internal fun revertHunk(rows: List<DiffRow>, hunk: IntRange, trailingNewline: Bo
     }
     return out.joinToString("\n") + if (trailingNewline) "\n" else ""
 }
-

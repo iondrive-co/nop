@@ -450,7 +450,7 @@ private fun FileEditView(
     }
 
     val isDark = JewelTheme.isDark
-    val fg =if (isDark) androidx.compose.ui.graphics.Color(0xFFBCBEC4) else androidx.compose.ui.graphics.Color(0xFF000000)
+    val fg = if (isDark) Color(0xFFBCBEC4) else Color(0xFF000000)
     val palette = if (isDark) HighlightPalette.Dark else HighlightPalette.Light
     // Word wrap, from the toggle in the tab strip. Off, the field is laid out at the width of the
     // file's longest line and the viewport scrolls sideways over it; on, it takes the pane's width
@@ -490,6 +490,18 @@ private fun FileEditView(
     // and the transformation body is just a cheap span-application.
     val tokens by remember(tab.id, tokenize) {
         derivedStateOf { tokenize?.invoke(edit.state.text.toString()) ?: emptyList() }
+    }
+    val indentColumns by remember(tab.id) {
+        derivedStateOf { editorIndentColumns(edit.state.text.toString()) }
+    }
+    val braceGuides by remember(tab.id) {
+        derivedStateOf {
+            when (tab.file.extension.lowercase()) {
+                "java", "kt", "kts", "go", "js", "mjs", "cjs", "ts", "tsx", "jsx" ->
+                    editorBraceGuides(edit.state.text.toString(), tokens, indentColumns)
+                else -> null
+            }
+        }
     }
 
     // Misspellings in this file's prose. Unlike the token list this deliberately does *not* live in
@@ -537,11 +549,13 @@ private fun FileEditView(
     var javaProblems by remember(tab.id) { mutableStateOf<List<JavaProblem>>(emptyList()) }
     // The same parse names the file's types, which the subtype gutter marks.
     var javaTypes by remember(tab.id) { mutableStateOf<List<JavaDecl>>(emptyList()) }
+    var javaHighlight by remember(tab.id) { mutableStateOf<Pair<String, List<Token>>?>(null) }
     val isJava = remember(tab.id) { tab.file.extension.equals("java", ignoreCase = true) }
     LaunchedEffect(tab.id, isJava) {
         if (!isJava) {
             javaProblems = emptyList()
             javaTypes = emptyList()
+            javaHighlight = null
             return@LaunchedEffect
         }
         // Opening a file checks straight away; only edits made afterwards wait for typing to settle.
@@ -552,13 +566,19 @@ private fun FileEditView(
             .collect { text ->
                 val parsed = withContext(Dispatchers.Default) {
                     JavaParse.parse(text, tab.file.name)?.let { parsed ->
-                        parsed.problems to JavaSymbols.declarations(parsed).filter { it.kind == JavaDeclKind.TYPE }
+                        val declarations = JavaSymbols.declarations(parsed)
+                        Triple(
+                            parsed.problems,
+                            declarations.filter { it.kind == JavaDeclKind.TYPE },
+                            javaMemberTokens(parsed, declarations),
+                        )
                     }
                 }
                 javaProblems = parsed?.first ?: emptyList()
                 // A parse that failed outright keeps the last types, so the arrows don't blink off
                 // while a half-typed edit is in the buffer.
                 if (parsed != null) javaTypes = parsed.second
+                javaHighlight = parsed?.let { text to it.third }
             }
     }
     // Derived rather than remembered so that a rebuilt index, which [onSubtypes] reads as state,
@@ -581,9 +601,11 @@ private fun FileEditView(
     var rightClickOffset by remember(tab.id) { mutableStateOf<Int?>(null) }
     val matchHighlight = findMatchColor()
     val activeMatchHighlight = findActiveMatchColor()
-    val transformation = remember(tokens, palette, hoverUnderline, matches, currentMatch, matchHighlight, activeMatchHighlight) {
+    val memberTokens = javaHighlight?.takeIf { it.first == edit.state.text.toString() }?.second ?: emptyList()
+    val transformation = remember(tokens, memberTokens, palette, hoverUnderline, matches, currentMatch, matchHighlight, activeMatchHighlight) {
         OutputTransformation {
             applyTokens(this, tokens, palette)
+            applyTokens(this, memberTokens, palette)
             val range = hoverUnderline
             if (range != null && range.first in 0 until length && range.last in 0 until length) {
                 addStyle(SpanStyle(textDecoration = TextDecoration.Underline), range.first, range.last + 1)
@@ -814,7 +836,7 @@ private fun FileEditView(
                 },
             )
         }
-    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+    Row(modifier = Modifier.weight(1f).fillMaxWidth().background(editorBackground(isDark))) {
         // IntelliJ-style annotate column, kept to the left of the text and aligned to it by sharing
         // the editor's scrollState + layout. The top padding mirrors the text Box's so line 0 of the
         // gutter sits level with line 0 of the file.
@@ -859,6 +881,11 @@ private fun FileEditView(
                 .fillMaxSize()
                 .then(if (wrap) Modifier else Modifier.horizontalScroll(hScroll)),
         ) {
+        Canvas(modifier = Modifier.matchParentSize()) {
+            layout?.let { tl ->
+                drawEditorGuides(tl, indentColumns, braceGuides, charWidth.toPx(), scrollState.value.toFloat(), isDark)
+            }
+        }
         // Appended to the text field's own right-click menu (cut/copy/paste/select all), which is
         // where the file in front of the user is: "what did this look like before?" belongs beside
         // the editing actions rather than behind a trip to the project tree. "Add to dictionary"
@@ -1093,4 +1120,3 @@ internal fun matchIndexForLine(text: String, matches: List<IntRange>, line: Int)
     val idx = matches.indexOfFirst { it.first >= start }
     return if (idx >= 0) idx else 0
 }
-

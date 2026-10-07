@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -88,6 +89,7 @@ import iondrive.nop.diff.RowKind
 import iondrive.nop.index.JumpTarget
 import java.io.File
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 
 // Shared building blocks for every side-by-side diff renderer (the working-tree [DiffView] and the
@@ -614,7 +616,7 @@ internal fun ReadOnlyDiffHalf(
     background: Color,
     inlineHighlight: Color,
     modifier: Modifier = Modifier,
-    selectable: Boolean = true,
+    selectable: Boolean = (side == DiffSide.OLD),
     rowIndex: Int = -1,
     currentFile: File? = null,
     onResolveAt: ((currentFile: File, text: String, offset: Int) -> JumpTarget?)? = null,
@@ -636,6 +638,7 @@ internal fun ReadOnlyDiffHalf(
         modifier = modifier.fillMaxSize().then(if (wrap) Modifier else Modifier.background(background)),
         verticalAlignment = Alignment.Top,
     ) {
+        GutterCell(lineNumber)
         val jumpModifier = if (currentFile != null && onResolveAt != null && onJump != null) {
             Modifier.ctrlClickJump(
                 layoutProvider = { layout },
@@ -662,24 +665,14 @@ internal fun ReadOnlyDiffHalf(
                 onTextLayout = { layout = it },
                 modifier = Modifier
                     .diffLineWidth(side)
-                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp, end = LINE_END_PAD)
+                    .padding(end = LINE_END_PAD)
                     // After the padding, so the squiggles are placed in the text's own coordinates.
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     .then(jumpModifier),
             )
         }
-        val gutter = @Composable { GutterCell(lineNumber) }
-        val code = @Composable {
-            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
-                if (selectable) body() else DisableSelection { body() }
-            }
-        }
-        if (side == DiffSide.OLD) {
-            code()
-            gutter()
-        } else {
-            gutter()
-            code()
+        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
+            if (selectable) body() else DisableSelection { body() }
         }
     }
 }
@@ -858,6 +851,7 @@ internal fun DiffListScaffold(
     searchKey: Any = Unit,
     findTrigger: Int = 0,
     rowLocation: (Int) -> RowLocation = { RowLocation(it, 0) },
+    itemRanges: List<IntRange>? = null,
     oldHeader: String? = null,
     newHeader: String? = null,
     ignoreWhitespace: Boolean = false,
@@ -965,6 +959,16 @@ internal fun DiffListScaffold(
         val maxRatio = (1f - minRatio).coerceIn(minRatio, 1f)
         val clamped = ratio.coerceIn(minRatio, maxRatio)
         val oldWidth = with(density) { (available * clamped).toDp() }
+        val wrap = LocalWrapLines.current
+        val ranges = remember(itemRanges, kinds.size) { itemRanges ?: kinds.indices.map { it..it } }
+        val scrollbar = remember(listState, ranges, lineHeightPx, wrap, if (wrap) constraints.maxWidth else 0, if (wrap) oldWidth else 0.dp) {
+            DiffScrollbarAdapter(listState, ranges, lineHeightPx)
+        }
+        LaunchedEffect(scrollbar) {
+            snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.index to it.size } }
+                .distinctUntilChanged()
+                .collect { scrollbar.updateMeasurements(it) }
+        }
 
         val hunks = remember(rows) { hunkRanges(rows) }
         var currentHunkIndex by remember(hunks) { mutableStateOf(-1) }
@@ -1033,7 +1037,7 @@ internal fun DiffListScaffold(
                 ) {
                     list(Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W))
                 }
-                ChangeMarkerLane(kinds, listState, overrideColor)
+                ChangeMarkerLane(kinds, scrollbar, overrideColor)
                 DividerGrabBand(
                     dividerX = oldWidth,
                     onDrag = { deltaPx ->
@@ -1177,7 +1181,7 @@ internal fun Modifier.trackRightClick(
 @Composable
 internal fun BoxScope.ChangeMarkerLane(
     kinds: List<RowKind>,
-    listState: LazyListState,
+    scrollbar: DiffScrollbarAdapter,
     overrideColor: (Int) -> Color? = { null },
 ) {
     // Marker lane sits just to the left of the scrollbar, so the markers stay readable even while
@@ -1187,20 +1191,22 @@ internal fun BoxScope.ChangeMarkerLane(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Canvas(Modifier.width(MARKER_LANE_W).fillMaxHeight()) {
-            drawChangeMarkers(kinds, overrideColor)
+            drawChangeMarkers(kinds, scrollbar.metrics, scrollbar.viewportSize, overrideColor)
         }
         VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(listState),
+            adapter = scrollbar,
             style = NopScrollbarStyle,
             modifier = Modifier.width(SCROLLBAR_W).fillMaxHeight(),
         )
     }
 }
 
-private fun DrawScope.drawChangeMarkers(kinds: List<RowKind>, overrideColor: (Int) -> Color?) {
-    val n = kinds.size
-    if (n == 0) return
-    val markerH = (size.height / n).coerceAtLeast(3f)
+private fun DrawScope.drawChangeMarkers(
+    kinds: List<RowKind>,
+    metrics: DiffScrollMetrics,
+    viewportHeight: Double,
+    overrideColor: (Int) -> Color?,
+) {
     val w = size.width
     kinds.forEachIndexed { idx, kind ->
         val color = overrideColor(idx) ?: when (kind) {
@@ -1209,7 +1215,7 @@ private fun DrawScope.drawChangeMarkers(kinds: List<RowKind>, overrideColor: (In
             RowKind.DELETE -> DELETE_MARK
             RowKind.CHANGE -> CHANGE_MARK
         }
-        val y = (idx.toFloat() / n) * size.height
-        drawRect(color = color, topLeft = Offset(0f, y), size = Size(w, markerH))
+        val marker = metrics.markerBounds(idx, size.height, viewportHeight)
+        drawRect(color = color, topLeft = Offset(0f, marker.top), size = Size(w, marker.height))
     }
 }

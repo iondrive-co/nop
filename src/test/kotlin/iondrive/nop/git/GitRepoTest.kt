@@ -496,7 +496,7 @@ class GitRepoTest {
     @Test
     fun `batched staging of converted files commits every file`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
-        (tmp / ".gitattributes").writeText("*.txt text=auto\n")
+        (tmp / ".gitattributes").writeText("*.txt text=auto\n*.dat -text\n")
         runShell(tmp, "git add -A && git commit -q -m init")
         seedBulkTree(tmp)
         seedConvertedTree(tmp)
@@ -504,7 +504,7 @@ class GitRepoTest {
         val repo = GitRepo.discover(tmp, ceiling = tmp)!!
         repo.stageAndCommit("bulk", repo.loadStatus().changes)
 
-        assertTrue(gitOutput(tmp, "git status --porcelain").isEmpty(), "every change must be committed")
+        assertEquals("", gitOutput(tmp, "git status --porcelain"), "every change must be committed")
         assertEquals("line 0\nmore", gitOutput(tmp, "git show HEAD:conv/c0.txt"), "CRLF must be converted on the way in")
         repo.close()
     }
@@ -518,7 +518,7 @@ class GitRepoTest {
             "git init -q && git config user.email t@x && git config user.name T && " +
                 "git config filter.up.clean 'tr a-z A-Z' && git config filter.up.smudge cat",
         )
-        (tmp / ".gitattributes").writeText("*.up filter=up\n")
+        (tmp / ".gitattributes").writeText("*.up filter=up\n*.dat -text\n")
         runShell(tmp, "git add -A && git commit -q -m init")
         seedBulkTree(tmp)
         (tmp / "up").createDirectories()
@@ -533,7 +533,7 @@ class GitRepoTest {
 
         assertTrue((tmp / ".git" / "git-staged").toFile().exists(), "the filtered files must go through git add")
 
-        assertTrue(gitOutput(tmp, "git status --porcelain").isEmpty(), "every change must be committed")
+        assertEquals("", gitOutput(tmp, "git status --porcelain"), "every change must be committed")
         assertEquals("LOWER 7", gitOutput(tmp, "git show HEAD:up/u7.up"))
         assertEquals("plain line 0", gitOutput(tmp, "git show HEAD:data/f0.dat"))
         repo.close()
