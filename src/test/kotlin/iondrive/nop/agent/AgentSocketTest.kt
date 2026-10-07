@@ -45,6 +45,31 @@ class AgentSocketTest {
             sent += to to message
             return AgentMessages.Outcome("queued")
         }
+        val memory = mutableListOf<Triple<Boolean, SharedMemory.Scope, String>>()
+        override fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome {
+            memory += Triple(forget, scope, text)
+            return AgentMessages.Outcome("remembered")
+        }
+    }
+
+    @Test
+    fun `remember has to say who the entry is for`(@TempDir dir: Path) {
+        val (tab) = tabs(dir, "a")
+        val tools = Recorder()
+        assertTrue(AgentSocket.handle("${tab.agentTicket}\nremember\nproject\nbuild with -x\n", { tab }, tools).first)
+        assertTrue(AgentSocket.handle("${tab.agentTicket}\nremember\nall user\nlikes scripts\n", { tab }, tools).first)
+        assertTrue(AgentSocket.handle("${tab.agentTicket}\nforget\nall software\nold line", { tab }, tools).first)
+        assertEquals(
+            listOf(
+                Triple(false, SharedMemory.Scope.Project, "build with -x\n"),
+                Triple(false, SharedMemory.Scope.All(SharedMemory.Category.User), "likes scripts\n"),
+                Triple(true, SharedMemory.Scope.All(SharedMemory.Category.Software), "old line"),
+            ),
+            tools.memory,
+        )
+        assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nall\nno category\n", { tab }, tools).first)
+        assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nall misc\nwrong category\n", { tab }, tools).first)
+        assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nsomewhere\nno scope\n", { tab }, tools).first)
     }
 
     @Test

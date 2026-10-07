@@ -155,7 +155,7 @@ class AgentMessagesTest {
 
     @Test
     fun `every run is told how to reach the other tabs`() {
-        val text = SharedMemory.instructions()
+        val text = SharedMemory.instructions(null)
         assertTrue("nop-msg list" in text && "nop-msg send" in text)
         assertTrue(AgentSocket.helperPath().toString() in text)
     }

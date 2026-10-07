@@ -42,12 +42,12 @@ object Spawn {
         resumeId: String? = null,
         mcp: McpServers.Launch = McpServers.Launch.NONE,
     ): AgentCommand = when (account.provider) {
-        Provider.Anthropic -> claude(account, seed, resumeId, mcp)
+        Provider.Anthropic -> claude(account, projectDir, seed, resumeId, mcp)
         Provider.OpenAI -> codex(account, projectDir, seed, resumeId, mcp)
         Provider.Antigravity -> antigravity(account, projectDir, seed, resumeId)
     }
 
-    private fun claude(account: Account, seed: String?, resumeId: String?, mcp: McpServers.Launch): AgentCommand {
+    private fun claude(account: Account, projectDir: File, seed: String?, resumeId: String?, mcp: McpServers.Launch): AgentCommand {
         val argv = mutableListOf(CliTools.resolve(Provider.Anthropic), "--permission-mode", "bypassPermissions")
         account.model?.takeIf { it != DEFAULT_CHOICE }?.let { argv += listOf("--model", it) }
 
@@ -59,7 +59,7 @@ object Spawn {
 
         // The text itself, not --append-system-prompt-file: the CLI carries appended text into a fork
         // of the session, but refuses to fork one whose system prompt came from a file.
-        argv += listOf("--append-system-prompt", SharedMemory.instructions())
+        argv += listOf("--append-system-prompt", SharedMemory.instructions(projectDir.toPath()))
         // The user's own servers, which CLAUDE_CONFIG_DIR hides from this run — see McpServers.
         mcp.claudeConfig?.let { argv += listOf("--mcp-config", it.toString()) }
 
@@ -96,7 +96,7 @@ object Spawn {
             "--dangerously-skip-permissions",
             "--add-dir",
             projectDir.absolutePath,
-            // The shared memory's own directory, or the CLI won't open a file outside the project.
+            // The memory's own directory, or the CLI won't open its files outside the project.
             // The instructions that point at it arrive as a rule — see SharedMemory.installRule.
             "--add-dir",
             SharedMemory.dir().toString(),
@@ -155,7 +155,7 @@ object Spawn {
             ?.let { argv += listOf("-c", "model_reasoning_effort=\"$it\"") }
         // A developer message is Codex's one per-run way in for extra instructions. It replaces any
         // `developer_instructions` in the account's own config.toml for runs nop starts.
-        argv += listOf("-c", "developer_instructions=${tomlString(SharedMemory.instructions())}")
+        argv += listOf("-c", "developer_instructions=${tomlString(SharedMemory.instructions(projectDir.toPath()))}")
         argv += McpServers.codexOverrides(mcp.servers)
 
         // `resume` is a subcommand, so it follows the options rather than joining them.

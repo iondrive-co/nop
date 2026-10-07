@@ -44,9 +44,9 @@ import javax.swing.SwingUtilities
  * closing its writing half:
  *
  *     <ticket>
- *     list                        or    send
- *                                       <id or title>
- *                                       <message, to the end of the stream>
+ *     list                        or    send                    or    remember | forget
+ *                                       <id or title>                 project | all <category>
+ *                                       <message, to the end>         <entry, to the end>
  *
  * The answer is `ok` or `error` on its first line, then text.
  */
@@ -162,6 +162,7 @@ object AgentSocket {
     internal interface Tools {
         fun list(caller: AgentSession): AgentMessages.Outcome
         fun send(caller: AgentSession, to: String, message: String): AgentMessages.Outcome
+        fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome
     }
 
     /** One request answered: whether it worked, and what to say. */
@@ -175,7 +176,12 @@ object AgentSocket {
                 val to = lines.getOrNull(2)?.trim().orEmpty()
                 tools.send(caller, to, lines.getOrNull(3).orEmpty())
             }
-            else -> return false to "unknown request; nop-msg takes `list` or `send <id or title> <message>`"
+            "remember", "forget" -> {
+                val scope = SharedMemory.parseScope(lines.getOrNull(2)?.trim().orEmpty().split(' ').filter { it.isNotEmpty() })?.first
+                    ?: return false to "say who it is for: `project`, or `all <${SharedMemory.Category.entries.joinToString("|") { it.id }}>`"
+                tools.memory(caller, lines[1].trim() == "forget", scope, lines.getOrNull(3).orEmpty())
+            }
+            else -> return false to "unknown request; nop-msg takes `list`, `send`, `remember` or `forget`"
         }
         return !outcome.isError to outcome.text
     }
@@ -190,6 +196,12 @@ object AgentSocket {
 
         override fun send(caller: AgentSession, to: String, message: String) =
             onEdt { AgentMessages.send(caller, to, message) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
+
+        // Only the project is read on the EDT; the files are written on the socket's own thread.
+        override fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome {
+            val project = onEdt { caller.projectDir.toPath() } ?: return AgentMessages.Outcome("nop did not answer in time", isError = true)
+            return if (forget) SharedMemory.forget(project, scope, text) else SharedMemory.remember(project, scope, text)
+        }
     }
 
     /** [block]'s value, computed on the EDT; null if the EDT did not get to it within a few seconds. */
@@ -259,13 +271,16 @@ object AgentSocket {
      */
     internal val HELPER = """
         |#!/bin/sh
-        |# nop-msg: message another agent tab in nop, whatever CLI runs it.
+        |# nop-msg: message another agent tab in nop, whatever CLI runs it, or add to the agents' memory.
         |# Written by nop at each start (agent/AgentSocket.kt); edits here are overwritten.
         |#
         |#   nop-msg list                            the agent tabs open in nop, with their ids
         |#   nop-msg send <id or title> <message...>  type the message into that tab's prompt
         |#   nop-msg send <id or title> < file        the same, with the message on stdin
-        |usage() { sed -n '5,7s/^# *//p' "${'$'}0" >&2; exit 2; }
+        |#   nop-msg remember project <text...>       add a line to this project's memory
+        |#   nop-msg remember all <category> <text...> add a line to every project's (user|hardware|software)
+        |#   nop-msg forget project|all <category> <text...>  take that line out again
+        |usage() { sed -n '5,10s/^# *//p' "${'$'}0" >&2; exit 2; }
         |if [ -z "${'$'}NOP_SOCKET" ] || [ -z "${'$'}NOP_AGENT_TICKET" ]; then
         |    echo "nop-msg: this only works inside one of nop's agent tabs" >&2
         |    exit 2
@@ -285,6 +300,20 @@ object AgentSocket {
         |            request() { printf '%s\nsend\n%s\n%s' "${'$'}NOP_AGENT_TICKET" "${'$'}to" "${'$'}msg"; }
         |        else
         |            request() { printf '%s\nsend\n%s\n' "${'$'}NOP_AGENT_TICKET" "${'$'}to"; cat; }
+        |        fi ;;
+        |    remember|forget)
+        |        verb=${'$'}1
+        |        shift
+        |        case "${'$'}1" in
+        |            project) scope=project; shift ;;
+        |            all) [ ${'$'}# -ge 2 ] || usage; scope="all ${'$'}2"; shift 2 ;;
+        |            *) echo "nop-msg: say who it is for: project, or all <user|hardware|software>" >&2; exit 2 ;;
+        |        esac
+        |        if [ ${'$'}# -gt 0 ]; then
+        |            msg=${'$'}*
+        |            request() { printf '%s\n%s\n%s\n%s' "${'$'}NOP_AGENT_TICKET" "${'$'}verb" "${'$'}scope" "${'$'}msg"; }
+        |        else
+        |            request() { printf '%s\n%s\n%s\n' "${'$'}NOP_AGENT_TICKET" "${'$'}verb" "${'$'}scope"; cat; }
         |        fi ;;
         |    *) usage ;;
         |esac

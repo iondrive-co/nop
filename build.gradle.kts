@@ -59,6 +59,9 @@ tasks.test {
     // stale jar from build/compose/binaries/main/app/nop/. Up-to-date checks make this a ~1s
     // no-op when nothing has changed.
     finalizedBy("installDesktopEntry")
+    // Accounts.dataRoot follows XDG_DATA_HOME. Without this, a test that opens an agent tab writes
+    // its session log and project memory into the user's real ~/.local/share/nop/agent.
+    environment("XDG_DATA_HOME", layout.buildDirectory.dir("test-data-home").get().asFile.absolutePath)
 }
 
 // The version nop reports about itself, read at runtime by iondrive.nop.update.BuildInfo. Taken from

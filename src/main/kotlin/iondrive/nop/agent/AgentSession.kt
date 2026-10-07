@@ -1093,8 +1093,8 @@ class AgentSession(
                 // from whether it has a token — so an account inherited with a perfectly good login
                 // would be asked to sign in again. See VendorConfig.
                 VendorConfig.prepareForInteractive(account)
-                // Every run is told to read the shared memory first, so it has to be there to read.
-                SharedMemory.ensure()
+                // Every run is told to read the memory first, so it has to be there to read.
+                SharedMemory.ensure(projectDir.toPath())
             }
         }
         Log.info(
@@ -1110,8 +1110,10 @@ class AgentSession(
         val terminal = TerminalSession.agent(
             command = command.argv,
             // Marked as nop's, so a nop the agent starts can tell it would be reaching into this one,
-            // and given what `nop-msg` needs to message the other tabs.
-            env = command.env + (SingleInstance.INSIDE_AGENT_ENV to sessionId) + AgentSocket.runEnv(agentTicket),
+            // given what `nop-msg` needs to message the other tabs, and told where its project's
+            // memory is, which `agy`'s instructions can only name this way.
+            env = command.env + (SingleInstance.INSIDE_AGENT_ENV to sessionId) + AgentSocket.runEnv(agentTicket) +
+                (SharedMemory.PROJECT_ENV to SharedMemory.projectFile(projectDir.toPath()).toString()),
             dir = projectDir,
             title = account.name,
             adopted = adoption?.second,

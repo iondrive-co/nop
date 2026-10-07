@@ -264,7 +264,7 @@ class SpawnTest {
      */
     @Test
     fun `every run is pointed at the shared memory`() {
-        val instructions = SharedMemory.instructions()
+        val instructions = SharedMemory.instructions(projectDir.toPath())
 
         assertEquals(instructions, Spawn.command(claude(), projectDir).argv.after("--append-system-prompt"))
         assertTrue(
