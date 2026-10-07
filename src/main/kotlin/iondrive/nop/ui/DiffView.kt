@@ -41,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,11 +60,12 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isShiftPressed as isPointerShiftPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -572,6 +574,8 @@ private fun DiffRowsList(
         // One SelectionContainer over the whole list so a drag spans blocks — the user can select a
         // multi-line deleted region on the old (left) side and copy it back. Gutters, the editable
         // column and action chips opt out via DisableSelection so the copy is clean left-side text.
+        val editorFocus = remember { EditorFocus() }
+        CompositionLocalProvider(LocalEditorFocus provides editorFocus) {
         SelectionContainer {
         LazyColumn(
             state = listState,
@@ -610,6 +614,36 @@ private fun DiffRowsList(
                 )
             }
         }
+        }
+        }
+    }
+}
+
+/**
+ * Whether one of the diff's editable blocks holds the focus. The blocks sit inside the list-wide
+ * SelectionContainer, and the container taking the focus straight from one of them drops the
+ * selection that the same press has just started, so a drag on the read-only side straight after
+ * editing would select nothing. [releaseEditorFocusOnPress] lets go of the block's focus first.
+ */
+private class EditorFocus {
+    var focused = false
+}
+
+private val LocalEditorFocus = staticCompositionLocalOf<EditorFocus?> { null }
+
+/** On a primary press, takes the focus off an editable block before a selection starts here. */
+@Composable
+private fun Modifier.releaseEditorFocusOnPress(): Modifier {
+    val editorFocus = LocalEditorFocus.current ?: return this
+    val focusManager = LocalFocusManager.current
+    return pointerInput(editorFocus, focusManager) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed && editorFocus.focused) {
+                    focusManager.clearFocus()
+                }
+            }
         }
     }
 }
@@ -794,6 +828,7 @@ private fun HunkRevertButton(
         Box(
             modifier = modifier
                 .size(16.dp)
+                .dividerControl()
                 .background(bg, RoundedCornerShape(3.dp))
                 .border(0.5.dp, borderCol, RoundedCornerShape(3.dp))
                 .pointerInput(Unit) {
@@ -1009,13 +1044,14 @@ private fun ReadOnlyBlockHalf(
     val find = rememberFindHits(firstRowIndex, rows.size, side)
     val typos = rememberTypos(rows.map { it.lineOn(side) ?: "" }, tokenize)
     val typoColor = typoSquiggleColor()
-    val text = remember(rows, side, tokenize, palette, find, diffColors) {
-        annotateBlock(
+    val text = remember(rows, side, tokenize, palette) {
+        annotateBlock(rows.map { it.lineOn(side) }, tokenize, palette)
+    }
+    val backgrounds = remember(rows, side, find, diffColors) {
+        blockBackgrounds(
             rows.map { it.lineOn(side) },
             rows.map { if (side == DiffSide.OLD) it.oldSpans else it.newSpans },
             if (side == DiffSide.OLD) diffColors.inlineWordBgOld else diffColors.inlineWordBg,
-            tokenize,
-            palette,
             find,
         )
     }
@@ -1034,10 +1070,16 @@ private fun ReadOnlyBlockHalf(
                 softWrap = wrap,
                 onTextLayout = { layout = it },
                 modifier = Modifier
+                    // The old half's text starts at the pane's edge, so it is set in from it —
+                    // outside the line width, which only has room for the text.
+                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp)
                     .diffLineWidth(side)
                     .padding(end = LINE_END_PAD)
-                    // After the padding, so the squiggles are placed in the text's own coordinates.
+                    // After the padding, so the tints and squiggles are placed in the text's own
+                    // coordinates.
+                    .textBackgrounds(backgrounds) { layout }
                     .spellcheckSquiggles(typos, typoColor) { layout }
+                    .then(if (selectable) Modifier.releaseEditorFocusOnPress() else Modifier)
                     // Ctrl-click resolves against the whole block's text — JumpResolver reads the
                     // word straddling an offset, and a newline is as good a word boundary as any.
                     .ctrlClickJump(
@@ -1077,6 +1119,7 @@ private fun EditableBlockHalf(
     modifier: Modifier = Modifier,
 ) {
     val fullState = editor.edit.state
+    val editorFocus = LocalEditorFocus.current
     val state = editor.blockStates.getOrPut(startLine) {
         TextFieldState(rows.joinToString("\n") { it.newLine ?: "" })
     }
@@ -1157,13 +1200,7 @@ private fun EditableBlockHalf(
     val blockText by remember(state) { derivedStateOf { state.text.toString() } }
     val typos = rememberTypos(blockText.split('\n'), tokenize)
     val typoColor = typoSquiggleColor()
-    // Find hits are painted here rather than by annotateBlock, because an editable half renders
-    // through an OutputTransformation instead of an AnnotatedString — same colours, same order
-    // (last, so the highlight reads over the syntax colour and the inline word tint).
-    val find = rememberFindHits(firstRowIndex, rows.size, DiffSide.NEW)
-    val spans = remember(rows) { rows.map { it.newSpans } }
-    val diffColors = currentDiffColors()
-    val transformation = remember(spans, lineTokens, palette, find, diffColors) {
+    val transformation = remember(lineTokens, palette) {
         OutputTransformation {
             forEachLine(asCharSequence().toString()) { index, start, end ->
                 for (t in lineTokens.getOrElse(index) { emptyList() }) {
@@ -1171,21 +1208,21 @@ private fun EditableBlockHalf(
                     val e = (start + t.endExclusive).coerceIn(s, end)
                     if (e > s) addStyle(palette.styleFor(t.kind), s, e)
                 }
-                for (span in spans.getOrElse(index) { emptyList() }) {
-                    if (!span.changed) continue
-                    val s = (start + span.startChar).coerceIn(start, end)
-                    val e = (start + span.endCharExclusive).coerceIn(s, end)
-                    if (e > s) addStyle(SpanStyle(background = diffColors.inlineWordBg), s, e)
-                }
-                val hits = find.getOrElse(index) { null } ?: return@forEachLine
-                for (r in hits.ranges) {
-                    val s = (start + r.first).coerceIn(start, end)
-                    val e = (start + r.last + 1).coerceIn(s, end)
-                    val bg = if (r == hits.active) hits.activeColor else hits.color
-                    if (e > s) addStyle(SpanStyle(background = bg), s, e)
-                }
             }
         }
+    }
+    // The changed-word tints and find hits, painted behind the field (see [TextBackground]). They
+    // follow the field's own lines, which are what is on screen while the user types.
+    val find = rememberFindHits(firstRowIndex, rows.size, DiffSide.NEW)
+    val spans = remember(rows) { rows.map { it.newSpans } }
+    val diffColors = currentDiffColors()
+    val backgrounds = remember(blockText, spans, find, diffColors) {
+        val out = ArrayList<TextBackground>()
+        forEachLine(blockText) { index, start, end ->
+            val lineSpans = spans.getOrElse(index) { emptyList() }
+            lineBackgrounds(end - start, lineSpans, diffColors.inlineWordBg, find.getOrElse(index) { null }, start, out)
+        }
+        out
     }
 
     val fg = textColor()
@@ -1236,7 +1273,10 @@ private fun EditableBlockHalf(
                     .focusRequester(focusRequester)
                     // Tell the list which block the caret is in, so a re-diff can't dissolve this
                     // one underneath it — see [diffBlocks]' splitAtLine.
-                    .onFocusChanged { if (it.isFocused) editor.onFocusGained(startLine) }
+                    .onFocusChanged {
+                        if (it.isFocused) editor.onFocusGained(startLine)
+                        editorFocus?.focused = it.isFocused
+                    }
                     .onPreviewKeyEvent { event -> onBlockKey(event, state, startLine, owned, editor) }
                     .ctrlClickJump(
                         layoutProvider = { layout },
@@ -1246,6 +1286,7 @@ private fun EditableBlockHalf(
                         onJump = onJump,
                     )
                     .trackRightClick(layoutProvider = { layout }) { rightClickOffset = it }
+                    .textBackgrounds(backgrounds) { layout }
                     .spellcheckSquiggles(typos, typoColor) { layout },
                 textStyle = DIFF_TEXT_STYLE.copy(color = fg),
                 cursorBrush = SolidColor(fg),
@@ -1333,8 +1374,19 @@ private fun BlockHalfFrame(
             .then(if (wrap) Modifier else Modifier.drawBehind { drawLineBackgrounds(backgrounds, lineHeightPx) }),
         verticalAlignment = Alignment.Top,
     ) {
-        BlockGutter(numbers, lineHeights)
-        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
+        // Line numbers sit either side of the divider, so each half's numbers are beside the
+        // other half's.
+        val gutter = @Composable { BlockGutter(numbers, lineHeights) }
+        val content = @Composable {
+            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side), content = body)
+        }
+        if (side == DiffSide.OLD) {
+            content()
+            gutter()
+        } else {
+            gutter()
+            content()
+        }
     }
 }
 

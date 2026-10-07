@@ -36,10 +36,13 @@ import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -51,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -66,13 +70,14 @@ import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.layout
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.Tooltip
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -81,6 +86,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import iondrive.nop.diff.DiffRow
@@ -88,6 +94,7 @@ import iondrive.nop.diff.InlineSpan
 import iondrive.nop.diff.RowKind
 import iondrive.nop.index.JumpTarget
 import java.io.File
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -386,48 +393,81 @@ internal fun backgroundsFor(row: DiffRow, colors: DiffColors = DiffColors.Dark):
     RowKind.DELETE -> colors.deleteBg to colors.emptyBg
 }
 
+/** A line's syntax colouring. Its tints — changed words, find hits — are [lineBackgrounds]. */
 internal fun annotateLine(
     text: String,
-    spans: List<InlineSpan>,
-    highlightColor: Color,
     tokens: List<Token> = emptyList(),
     palette: HighlightPalette? = null,
-    find: LineFindHits? = null,
 ): AnnotatedString {
-    val hasSyntax = palette != null && tokens.isNotEmpty()
-    if (spans.isEmpty() && !hasSyntax && find == null) return AnnotatedString(text)
+    if (palette == null || tokens.isEmpty()) return AnnotatedString(text)
     return buildAnnotatedString {
         append(text)
-        // Syntax colouring underneath, so the inline-change background (added next) layers over it.
-        if (palette != null) {
-            for (t in tokens) {
-                val s = t.start.coerceIn(0, text.length)
-                val e = t.endExclusive.coerceIn(s, text.length)
-                if (e > s) addStyle(palette.styleFor(t.kind), s, e)
-            }
+        for (t in tokens) {
+            val s = t.start.coerceIn(0, text.length)
+            val e = t.endExclusive.coerceIn(s, text.length)
+            if (e > s) addStyle(palette.styleFor(t.kind), s, e)
         }
-        for (s in spans) {
-            if (!s.changed) continue
-            // Defensive: clamp into the line. A malformed span (e.g. start > end after clamping,
-            // or a negative start from a stray close sentinel) would throw StringIndexOOB and
-            // tear down the whole row during scroll.
-            val start = s.startChar.coerceIn(0, text.length)
-            val end = s.endCharExclusive.coerceIn(start, text.length)
-            if (end > start) addStyle(SpanStyle(background = highlightColor), start, end)
-        }
-        // Find hits go on last so the search highlight reads over both the syntax colour and the
-        // inline word-change tint, rather than being swallowed by them.
-        if (find != null) addFindHits(find, text.length)
     }
 }
 
-/** Paints [find]'s ranges onto a line of [length] chars, the active hit in its own colour. */
-private fun AnnotatedString.Builder.addFindHits(find: LineFindHits, length: Int) {
-    for (r in find.ranges) {
-        val start = r.first.coerceIn(0, length)
-        val end = (r.last + 1).coerceIn(start, length)
-        if (end > start) {
-            addStyle(SpanStyle(background = if (r == find.active) find.activeColor else find.color), start, end)
+/**
+ * A tint behind a run of text: a changed word, or a find hit.
+ *
+ * These are painted by [textBackgrounds] rather than carried as span backgrounds. A span
+ * background is part of the paragraph, and the paragraph is painted over the selection highlight,
+ * so an opaque one would hide the selection on exactly the words a diff is about.
+ */
+internal data class TextBackground(val start: Int, val end: Int, val color: Color)
+
+/**
+ * The tints of one line of [length] chars that starts at [offset] in the text it is laid out in:
+ * the changed words in [spans], then [find]'s hits, so a hit reads over the word-change tint.
+ */
+internal fun lineBackgrounds(
+    length: Int,
+    spans: List<InlineSpan>,
+    highlightColor: Color,
+    find: LineFindHits?,
+    offset: Int = 0,
+    into: MutableList<TextBackground> = ArrayList(),
+): MutableList<TextBackground> {
+    for (s in spans) {
+        if (!s.changed) continue
+        // Clamped into the line: a malformed span (a negative start from a stray close sentinel,
+        // say) must not tint a neighbouring line or throw while the row scrolls into view.
+        val start = s.startChar.coerceIn(0, length)
+        val end = s.endCharExclusive.coerceIn(start, length)
+        if (end > start) into += TextBackground(offset + start, offset + end, highlightColor)
+    }
+    if (find != null) {
+        for (r in find.ranges) {
+            val start = r.first.coerceIn(0, length)
+            val end = (r.last + 1).coerceIn(start, length)
+            val color = if (r == find.active) find.activeColor else find.color
+            if (end > start) into += TextBackground(offset + start, offset + end, color)
+        }
+    }
+    return into
+}
+
+/**
+ * Paints [backgrounds] behind the text this modifies, in the coordinates of the [layout] it
+ * reports — so it goes after any padding, like [spellcheckSquiggles]. Being behind the text node,
+ * it is also behind the selection highlight that node draws.
+ */
+internal fun Modifier.textBackgrounds(
+    backgrounds: List<TextBackground>,
+    layout: () -> TextLayoutResult?,
+): Modifier {
+    if (backgrounds.isEmpty()) return this
+    return drawBehind {
+        val tl = layout() ?: return@drawBehind
+        // The layout can be a frame behind the text while it is being edited.
+        val length = tl.layoutInput.text.length
+        for (b in backgrounds) {
+            val start = b.start.coerceIn(0, length)
+            val end = b.end.coerceIn(start, length)
+            if (end > start) drawPath(tl.getPathForRange(start, end), b.color)
         }
     }
 }
@@ -482,26 +522,32 @@ internal fun rememberFindHits(firstRowIndex: Int, count: Int, side: DiffSide): L
  */
 internal fun annotateBlock(
     lines: List<String?>,
-    spans: List<List<InlineSpan>>,
-    highlightColor: Color,
     tokenize: ((String) -> List<Token>)?,
     palette: HighlightPalette?,
-    find: List<LineFindHits?>,
 ): AnnotatedString = buildAnnotatedString {
     lines.forEachIndexed { i, line ->
         if (i > 0) append('\n')
         val text = line ?: ""
-        append(
-            annotateLine(
-                text,
-                spans.getOrElse(i) { emptyList() },
-                highlightColor,
-                tokenize?.invoke(text) ?: emptyList(),
-                if (tokenize != null) palette else null,
-                find.getOrElse(i) { null },
-            ),
-        )
+        append(annotateLine(text, tokenize?.invoke(text) ?: emptyList(), if (tokenize != null) palette else null))
     }
+}
+
+/** [lineBackgrounds] for every line of a block laid out as [annotateBlock] lays it out. */
+internal fun blockBackgrounds(
+    lines: List<String?>,
+    spans: List<List<InlineSpan>>,
+    highlightColor: Color,
+    find: List<LineFindHits?>,
+): List<TextBackground> {
+    val out = ArrayList<TextBackground>()
+    var offset = 0
+    lines.forEachIndexed { i, line ->
+        val length = line?.length ?: 0
+        val lineSpans = spans.getOrElse(i) { emptyList() }
+        lineBackgrounds(length, lineSpans, highlightColor, find.getOrElse(i) { null }, offset, out)
+        offset += length + 1
+    }
+    return out
 }
 
 /** Paints one full-width band per line of a block, in the row tints [backgrounds] gives. */
@@ -630,6 +676,9 @@ internal fun ReadOnlyDiffHalf(
     val typos = rememberTypos(listOf(displayText), tokenize)
     val typoColor = typoSquiggleColor()
     val find = findHitsFor(rowIndex, side)
+    val backgrounds = remember(displayText, spans, inlineHighlight, find) {
+        lineBackgrounds(displayText.length, spans, inlineHighlight, find)
+    }
     val wrap = LocalWrapLines.current
     Row(
         // A wrapped row's tint is painted by the row itself (see [wrappedRowChrome]), across the
@@ -638,7 +687,6 @@ internal fun ReadOnlyDiffHalf(
         modifier = modifier.fillMaxSize().then(if (wrap) Modifier else Modifier.background(background)),
         verticalAlignment = Alignment.Top,
     ) {
-        GutterCell(lineNumber)
         val jumpModifier = if (currentFile != null && onResolveAt != null && onJump != null) {
             Modifier.ctrlClickJump(
                 layoutProvider = { layout },
@@ -652,27 +700,37 @@ internal fun ReadOnlyDiffHalf(
         }
         val body = @Composable {
             BasicText(
-                text = annotateLine(
-                    displayText,
-                    spans,
-                    inlineHighlight,
-                    tokens,
-                    if (tokenize != null) palette else null,
-                    find,
-                ),
+                text = annotateLine(displayText, tokens, if (tokenize != null) palette else null),
                 style = DIFF_TEXT_STYLE.copy(color = textColor()),
                 softWrap = wrap,
                 onTextLayout = { layout = it },
                 modifier = Modifier
+                    // The old half's text starts at the pane's edge, so it is set in from it —
+                    // outside the line width, which only has room for the text.
+                    .padding(start = if (side == DiffSide.OLD) 8.dp else 0.dp)
                     .diffLineWidth(side)
                     .padding(end = LINE_END_PAD)
-                    // After the padding, so the squiggles are placed in the text's own coordinates.
+                    // After the padding, so the tints and squiggles are placed in the text's own
+                    // coordinates.
+                    .textBackgrounds(backgrounds) { layout }
                     .spellcheckSquiggles(typos, typoColor) { layout }
                     .then(jumpModifier),
             )
         }
-        Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
-            if (selectable) body() else DisableSelection { body() }
+        // Line numbers sit either side of the divider, so each half's numbers are beside the
+        // other half's.
+        val gutter = @Composable { GutterCell(lineNumber) }
+        val code = @Composable {
+            Box(Modifier.weight(1f).fillMaxHeight().diffHorizontalScroll(side)) {
+                if (selectable) body() else DisableSelection { body() }
+            }
+        }
+        if (side == DiffSide.OLD) {
+            code()
+            gutter()
+        } else {
+            gutter()
+            code()
         }
     }
 }
@@ -970,6 +1028,7 @@ internal fun DiffListScaffold(
                 .collect { scrollbar.updateMeasurements(it) }
         }
 
+        val dividerControls = remember { DividerControls() }
         val hunks = remember(rows) { hunkRanges(rows) }
         var currentHunkIndex by remember(hunks) { mutableStateOf(-1) }
         val onNextHunk: () -> Unit = {
@@ -1034,12 +1093,14 @@ internal fun DiffListScaffold(
                 CompositionLocalProvider(
                     LocalDiffLayout provides DiffLayout(oldWidth, oldScroll, newScroll),
                     LocalDiffSearch provides search,
+                    LocalDividerControls provides dividerControls,
                 ) {
                     list(Modifier.fillMaxSize().padding(end = MARKER_LANE_W + SCROLLBAR_W))
                 }
                 ChangeMarkerLane(kinds, scrollbar, overrideColor)
                 DividerGrabBand(
                     dividerX = oldWidth,
+                    controls = dividerControls,
                     onDrag = { deltaPx ->
                         onRatioChange(((clamped * available + deltaPx) / available).coerceIn(minRatio, maxRatio))
                     },
@@ -1057,26 +1118,87 @@ private const val CONTEXT_ROWS = 3
 internal data class RowLocation(val item: Int, val offsetPx: Int)
 
 /**
+ * Where the controls that sit on the centre divider are — the revert arrows — so that
+ * [DividerGrabBand] can leave them out. The band lies over every row, and a press it takes never
+ * reaches whatever is underneath, however much of it the band covers.
+ */
+internal class DividerControls {
+    /** Each control's bounds in window coordinates, clipped to what is on screen. */
+    val bounds = mutableStateMapOf<Any, Rect>()
+}
+
+internal val LocalDividerControls = compositionLocalOf<DividerControls?> { null }
+
+/** Keeps the enclosing diff's [DividerGrabBand] off this control, so it gets its own clicks. */
+@Composable
+internal fun Modifier.dividerControl(): Modifier {
+    val controls = LocalDividerControls.current ?: return this
+    val key = remember { Any() }
+    DisposableEffect(controls, key) { onDispose { controls.bounds.remove(key) } }
+    return onGloballyPositioned { controls.bounds[key] = it.boundsInWindow() }
+}
+
+/**
+ * The vertical spans of [band] left to grab once [controls] are kept clear, as (top, bottom) in the
+ * band's own pixels, top to bottom. Every rect is in the same (window) coordinates; a control that
+ * is off screen or beside the band leaves it whole.
+ */
+internal fun grabStrips(band: Rect, controls: Collection<Rect>): List<Pair<Float, Float>> {
+    val strips = ArrayList<Pair<Float, Float>>()
+    var top = 0f
+    controls
+        .filter { it.width > 0f && it.height > 0f && it.overlaps(band) }
+        .map { (it.top - band.top) to (it.bottom - band.top) }
+        .sortedBy { it.first }
+        .forEach { (start, end) ->
+            if (start > top) strips += top to start
+            top = maxOf(top, end)
+        }
+    if (band.height > top) strips += top to band.height
+    return strips
+}
+
+/**
  * The invisible band you grab to move the split. It's wider than the hairline it sits on so the
  * divider is catchable, and — like [SplitPane]'s dividers — starts dragging on the first press:
  * pointer events stop arriving once the cursor leaves the band, which it would while covering
  * Compose's drag slop.
+ *
+ * It is laid as strips between the [controls] on the divider rather than as one band, so a click on
+ * one of them reaches it.
  */
 @Composable
-private fun BoxScope.DividerGrabBand(dividerX: Dp, onDrag: (Float) -> Unit) {
+private fun BoxScope.DividerGrabBand(dividerX: Dp, controls: DividerControls, onDrag: (Float) -> Unit) {
+    val dragState = rememberDraggableState(onDelta = onDrag)
+    var band by remember { mutableStateOf(Rect.Zero) }
+    val strips = grabStrips(band, controls.bounds.values)
+    val density = LocalDensity.current
     Box(
         Modifier
             .align(Alignment.TopStart)
             .offset(x = dividerX - (DIVIDER_GRAB_W - DIVIDER_W) / 2)
             .width(DIVIDER_GRAB_W)
             .fillMaxHeight()
-            .pointerHoverIcon(HorizontalResizeCursor)
-            .draggable(
-                state = rememberDraggableState(onDelta = onDrag),
-                orientation = Orientation.Horizontal,
-                startDragImmediately = true,
-            ),
-    )
+            .onGloballyPositioned { band = it.boundsInWindow() },
+    ) {
+        strips.forEachIndexed { i, (stripTop, stripBottom) ->
+            // Keyed by position so a strip keeps its drag going while the split moves under it.
+            key(i) {
+                Box(
+                    Modifier
+                        .offset { IntOffset(0, stripTop.roundToInt()) }
+                        .width(DIVIDER_GRAB_W)
+                        .height(with(density) { (stripBottom - stripTop).toDp() })
+                        .pointerHoverIcon(HorizontalResizeCursor)
+                        .draggable(
+                            state = dragState,
+                            orientation = Orientation.Horizontal,
+                            startDragImmediately = true,
+                        ),
+                )
+            }
+        }
+    }
 }
 
 /**

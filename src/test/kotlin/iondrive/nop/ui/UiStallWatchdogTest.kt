@@ -43,11 +43,15 @@ class UiStallWatchdogTest {
 
         val release = CountDownLatch(1)
         val stuck = CountDownLatch(1)
+        var uiThread: Thread? = null
         ui.execute {
+            uiThread = Thread.currentThread()
             stuck.countDown()
             stuckOnTheDisk(release)
         }
         stuck.await()
+        // Past the signal and parked in stuckOnTheDisk, so that is where its stack is read.
+        while (uiThread!!.state != Thread.State.WAITING) Thread.onSpinWait()
 
         watchdog.tick()
         now.set(1_999)
