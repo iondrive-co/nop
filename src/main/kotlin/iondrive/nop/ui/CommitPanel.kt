@@ -267,12 +267,18 @@ fun CommitPanel(
             val measurer = rememberTextMeasurer()
             val labelStyle = JewelTheme.defaultTextStyle
             val naturalTextPx = remember(groups, labelStyle) {
+                // Only the longest labels by character count are laid out: measuring each one is a
+                // paragraph layout on the UI thread, and a change list can run to tens of thousands.
+                // The widest label is among the longest ones short of a pathological mix of glyphs.
+                val labels = groups.flatMap { group -> group.paths.map { group.labelFor(it) } }
+                    .sortedByDescending { it.length }
+                    .take(MEASURED_LABELS)
                 var widest = 0
                 for (group in groups) {
                     widest = maxOf(widest, measurer.measure(group.header, labelStyle.copy(fontWeight = FontWeight.Bold)).size.width)
-                    for (path in group.paths) {
-                        widest = maxOf(widest, measurer.measure(group.labelFor(path), labelStyle).size.width)
-                    }
+                }
+                for (label in labels) {
+                    widest = maxOf(widest, measurer.measure(label, labelStyle).size.width)
                 }
                 widest
             }
@@ -300,6 +306,9 @@ fun CommitPanel(
 
 /** Row chrome to the left of the file name (checkbox, kind prefix, gaps) plus the list scrollbar. */
 private val CHANGE_ROW_CHROME = 76.dp
+
+/** How many of the longest change labels are laid out to find the column width. */
+private const val MEASURED_LABELS = 64
 
 /** The change rows filling one column of the grid, under the heading [GroupColumnGrid] draws. */
 @Composable

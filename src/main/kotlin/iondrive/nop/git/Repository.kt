@@ -124,6 +124,19 @@ class GitRepo private constructor(
         val stagedPaths = mutableListOf<String>()
         var parallelCommitted = false
         try {
+            // Removals go first. A tracked directory replaced by a file or symlink is a removal of
+            // everything under it plus an addition at its path, and while the index still holds
+            // that tree JGit's add reads it as the path's index entry: under autocrlf it asks it for
+            // CRLF content and throws on the null entry a tree gives.
+            if (removed.isNotEmpty()) {
+                for (batch in removed.chunked(STAGE_BATCH_FILES)) {
+                    if (isCancelled()) throw CancellationException("Commit cancelled")
+                    val rm = git.rm().setCached(true)
+                    batch.forEach { rm.addFilepattern(it.path) }
+                    rm.call()
+                    batch.mapTo(stagedPaths) { it.path }
+                }
+            }
             if (staged.isNotEmpty()) {
                 if (!stageBlobsInParallel(staged, progress, isCancelled)) {
                     if (isCancelled()) throw CancellationException("Commit cancelled")
@@ -136,16 +149,6 @@ class GitRepo private constructor(
                     }
                 } else {
                     parallelCommitted = true
-                }
-            }
-            if (removed.isNotEmpty()) {
-                if (isCancelled()) throw CancellationException("Commit cancelled")
-                for (batch in removed.chunked(STAGE_BATCH_FILES)) {
-                    if (isCancelled()) throw CancellationException("Commit cancelled")
-                    val rm = git.rm().setCached(true)
-                    batch.forEach { rm.addFilepattern(it.path) }
-                    rm.call()
-                    batch.mapTo(stagedPaths) { it.path }
                 }
             }
             if (isCancelled()) throw CancellationException("Commit cancelled")

@@ -1543,6 +1543,34 @@ class GitRepoTest {
         repo.close()
     }
 
+    @Test
+    fun `commits a tracked directory replaced by a symlink under autocrlf`(@TempDir tmp: Path) {
+        // The index still holds a tree where the working tree now has a file, and with autocrlf on,
+        // JGit's add asks that tree for its CRLF content and dies on a null entry. Every staging path
+        // is covered: few files (AddCommand only), enough for the parallel writer, and a partial commit.
+        for ((name, extra, partial) in listOf(Triple("small", 0, false), Triple("bulk", 40, false), Triple("partial", 40, true))) {
+            val dir = (tmp / name).also { it.createDirectories() }
+            runShell(dir, "git init -q && git config user.email t@x && git config user.name T && git config core.autocrlf input")
+            (dir / "moved").createDirectories()
+            repeat(3) { i -> (dir / "moved" / "f$i.txt").writeText("f$i\n") }
+            (dir / "kept.txt").writeText("kept\n")
+            runShell(dir, "git add -A && git commit -q -m init")
+
+            val archive = (tmp / "$name-archive").also { it.createDirectories() }
+            runShell(dir, "mv moved/* '$archive'/ && rmdir moved && ln -s '$archive' moved")
+            repeat(extra) { i -> (dir / "n$i.bin").toFile().writeBytes(ByteArray(64) { j -> (i + j).toByte() }) }
+
+            val repo = GitRepo.discover(dir, ceiling = tmp)!!
+            repo.stageAndCommit("archive", repo.loadStatus().changes, partial = partial)
+            repo.close()
+
+            assertEquals("120000", gitOutput(dir, "git ls-tree HEAD moved").substringBefore(' '),
+                "$name: moved must be committed as a symlink")
+            assertEquals("", gitOutput(dir, "git ls-tree -r HEAD moved/"), "$name: the files under the old directory must be gone")
+            assertTrue(gitOutput(dir, "git status --porcelain").isEmpty(), "$name: everything should be committed")
+        }
+    }
+
     private operator fun Path.div(name: String): Path = resolve(name)
 
     /** Runs [cmd] in [cwd] and returns its trimmed stdout, for asserting against real git. */
