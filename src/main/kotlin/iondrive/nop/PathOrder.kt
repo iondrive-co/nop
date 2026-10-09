@@ -15,11 +15,26 @@ package iondrive.nop
  * differing only in case must not compare equal, or a sort could still swap them run to run.
  */
 object PathOrder : Comparator<String> {
-    override fun compare(a: String, b: String): Int {
-        val dirA = a.substringBeforeLast('/', "")
-        val dirB = b.substringBeforeLast('/', "")
-        compareParts(dirA, dirB).let { if (it != 0) return it }
-        return compareParts(a.substringAfterLast('/'), b.substringAfterLast('/'))
+    override fun compare(a: String, b: String): Int = Split(a, a).compareTo(Split(b, b))
+
+    /**
+     * [items] sorted by [path] in this order — what to use for a list rather than this comparator.
+     *
+     * Each path is split into its folder and its name once, up front. A comparator has to split
+     * both of its paths on every call, and a sort makes n log n calls: on a change list of a few
+     * hundred thousand paths that is tens of millions of throwaway strings, and most of the sort.
+     */
+    fun <T> sorted(items: Iterable<T>, path: (T) -> String): List<T> =
+        items.map { Split(path(it), it) }.sorted().map { it.item }
+
+    private class Split<T>(path: String, val item: T) : Comparable<Split<*>> {
+        private val dir = path.substringBeforeLast('/', "")
+        private val name = path.substringAfterLast('/')
+
+        override fun compareTo(other: Split<*>): Int {
+            compareParts(dir, other.dir).let { if (it != 0) return it }
+            return compareParts(name, other.name)
+        }
     }
 
     private fun compareParts(a: String, b: String): Int {

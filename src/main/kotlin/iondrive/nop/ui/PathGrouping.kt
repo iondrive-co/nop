@@ -89,7 +89,7 @@ object PathGrouping {
             out.getOrPut(title) { mutableListOf() } += members
         }
         return out.map { (title, members) ->
-            val ordered = members.sortedWith(compareBy(PathOrder) { it.path })
+            val ordered = PathOrder.sorted(members) { it.path }
             PathGroup(title, ordered.map { it.item }, ordered.map { it.path })
         }
     }

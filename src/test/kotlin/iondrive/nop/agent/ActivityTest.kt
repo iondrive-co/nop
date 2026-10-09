@@ -187,6 +187,57 @@ class ActivityTest {
     }
 
     @Test
+    fun `a Codex async question stays asking through the calls after it until the user answers`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("[ ⠹ ] Working | hermes", at = 0)
+        tracker.onEvent(started("q", "request_user_input_async"))
+        tracker.onEvent(finished("q"))                       // returns {"accepted":true} at once
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+        tracker.onEvent(started("b", "Bash"))
+        tracker.onEvent(finished("b"))
+        tracker.onTitle("[ ] Idle | hermes", at = 10)
+        assertEquals(Activity.Asking, tracker.activity(now = 10_000))
+        assertTrue(tracker.onUserInput())
+        assertEquals(Activity.Idle, tracker.activity(now = 10_000))
+    }
+
+    @Test
+    fun `words about a queued question on screen do not hold a tab asking`() {
+        // A Claude tab whose reply quotes Codex's prompt is not asking once its turn's calls are done.
+        val tracker = ActivityTracker()
+        tracker.onEvent(started("b", "Bash"))
+        tracker.onOutput("Codex shows \"? 1 question · alt + ↑ to answer\"\n")
+        tracker.onEvent(finished("b"))
+        tracker.onTitle("✳ x", at = 0)
+        assertEquals(Activity.Idle, tracker.activity(now = 0))
+    }
+
+    @Test
+    fun `a Codex async question survives a nop restart`() {
+        val tracker = ActivityTracker()
+        tracker.onEvent(started("q", "request_user_input_async"))
+        tracker.onEvent(finished("q"))
+        val next = ActivityTracker()
+        next.restore(tracker.snapshot(), now = 0)
+        next.onTitle("[ ] Idle | hermes", at = 0)
+        assertEquals(Activity.Asking, next.activity(now = 10_000))
+        next.onEvent(AgentEvent.UserMessage("my answer", at = 0))
+        assertEquals(Activity.Idle, next.activity(now = 10_000))
+    }
+
+    @Test
+    fun `an answered permission prompt still clears with its call`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("[ ⠹ ] Working | ops", at = 0)
+        tracker.onEvent(started("b", "Bash"))
+        tracker.onOutput("Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
+        val asked = tracker.activity(now = 0)
+        tracker.onEvent(finished("b"))
+        assertEquals(Activity.Working, tracker.activity(now = 0))
+        assertEquals(Activity.Asking, asked)
+    }
+
+    @Test
     fun `user input clears the queued question state`() {
         val tracker = ActivityTracker()
         tracker.onTitle("[ ⠹ ] Working | ops", at = 0)

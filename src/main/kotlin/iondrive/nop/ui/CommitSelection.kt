@@ -26,6 +26,12 @@ internal data class CommitSelection(
     fun toggle(path: String): CommitSelection =
         copy(ticked = if (path in ticked) ticked - path else ticked + path).acknowledge(path)
 
+    /**
+     * Ticks exactly [paths], for the panel's All / None. The marks stay: ticking everything at once
+     * is not looking at each file, so the Commit button still asks about the returned and new ones.
+     */
+    fun tickOnly(paths: Set<String>): CommitSelection = copy(ticked = paths)
+
     fun acknowledge(path: String): CommitSelection = copy(returned = returned - path, arrived = arrived - path)
 
     /**

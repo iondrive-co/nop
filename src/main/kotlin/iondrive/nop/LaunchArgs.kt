@@ -80,6 +80,9 @@ sealed interface LaunchArgs {
             |               place into the build now on disk, every window back and the agents and
             |               terminals in them still running
             |
+            |NOP_WM_CLASS, if set, is the X11 window class of nop's windows, which docks group windows by.
+            |Set it for a second nop, such as one run as another user, so its windows get their own icon.
+            |
             |There is one nop per config directory (${'$'}XDG_CONFIG_HOME/nop, else ~/.config/nop). Starting
             |a nop built from a different binary than the running one replaces it: the running one quits,
             |ending every agent tab, and the new one puts them back. To run a separate nop beside it, give

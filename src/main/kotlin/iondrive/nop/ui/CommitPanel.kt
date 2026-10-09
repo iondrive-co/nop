@@ -47,6 +47,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import iondrive.nop.git.CommitIdentity
 import iondrive.nop.git.CommitProgress
 import iondrive.nop.git.FileChange
@@ -56,6 +57,7 @@ import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.DefaultButton
+import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextArea
@@ -68,6 +70,8 @@ fun CommitPanel(
     status: GitStatus,
     selectedPaths: Set<String>,
     onToggle: (String) -> Unit,
+    // Ticks exactly these paths: every change for "All", none for "None".
+    onTickOnly: (Set<String>) -> Unit,
     onChangeClick: (FileChange) -> Unit,
     onRevert: (FileChange) -> Unit,
     onRevertAll: () -> Unit,
@@ -130,7 +134,19 @@ fun CommitPanel(
         }
         // The tool panel is a narrow column on the window's right edge, so the header sits on
         // its own line instead of competing with the action buttons for row width.
-        Text(header, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(header, modifier = Modifier.weight(1f))
+            if (anyChanges) {
+                val small = JewelTheme.defaultTextStyle.copy(fontSize = 11.sp)
+                val allPaths = status.changes.map { it.path }.toSet()
+                Link("All", onClick = { onTickOnly(allPaths) }, enabled = selectedPaths != allPaths, textStyle = small)
+                Link("None", onClick = { onTickOnly(emptySet()) }, enabled = selectedPaths.isNotEmpty(), textStyle = small)
+            }
+        }
         // A FlowRow, not a Row: the tool panel is user-resizable down to a narrow column, and a
         // fixed row would squeeze the buttons until their labels truncated to single letters.
         // Wrapping onto a second line keeps every action readable at any panel width.

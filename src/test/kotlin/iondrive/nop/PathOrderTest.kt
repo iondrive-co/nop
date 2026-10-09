@@ -51,6 +51,16 @@ class PathOrderTest {
     }
 
     @Test
+    fun `sorting a list by path gives the comparator's order`() {
+        val paths = listOf(
+            "src/Billing/page.kt", "README.md", "docs/README.md", "docs/readme.md", "src/Admin/page.kt",
+            "docs/api/endpoints.md", "src/advertising/page.kt", "docs/index.md", "SUMMARY.md", "a/b/c/d.txt",
+        )
+        val items = paths.shuffled(kotlin.random.Random(7)).map { it to it.length }
+        assertEquals(paths.sortedWith(PathOrder), PathOrder.sorted(items) { it.first }.map { it.first })
+    }
+
+    @Test
     fun `paths differing only in case still have an order`() {
         // A tie would let a sort swap them between runs — the exact reshuffling this order exists
         // to stop — so the case-insensitive comparison falls through to a case-sensitive one.

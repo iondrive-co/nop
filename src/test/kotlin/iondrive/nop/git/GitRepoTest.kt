@@ -61,6 +61,53 @@ class GitRepoTest {
     }
 
     @Test
+    fun `hasChanges agrees with loadStatus for every kind of change`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
+        (tmp / ".gitignore").writeText("build/\n*.log\n")
+        (tmp / "src" / "main").createDirectories()
+        (tmp / "src" / "main" / "a.txt").writeText("a\n")
+        (tmp / "src" / "b.txt").writeText("b\n")
+        (tmp / "z.txt").writeText("z\n")
+        runShell(tmp, "git add -A && git commit -q -m init")
+        val repo = GitRepo.discover(tmp)!!
+
+        fun check(case: String, dirty: Boolean, undo: String) {
+            assertEquals(dirty, !repo.loadStatus().isClean, "$case: status")
+            assertEquals(dirty, repo.hasChanges(), "$case: hasChanges")
+            runShell(tmp, undo)
+            assertFalse(repo.hasChanges(), "$case: clean again after undo")
+        }
+
+        assertFalse(repo.hasChanges(), "a fresh commit leaves nothing to report")
+        (tmp / "build").createDirectories()
+        (tmp / "build" / "out.bin").writeText("ignored\n")
+        (tmp / "run.log").writeText("ignored\n")
+        check("ignored files only", dirty = false, undo = "rm -r build run.log")
+        // The last path in the walk, so nothing before it can answer in its place.
+        (tmp / "z.txt").writeText("z2\n")
+        check("modified", dirty = true, undo = "git checkout -q -- z.txt")
+        (tmp / "src" / "main" / "new.txt").writeText("new\n")
+        check("untracked", dirty = true, undo = "rm src/main/new.txt")
+        runShell(tmp, "echo staged > staged.txt && git add staged.txt")
+        check("staged addition", dirty = true, undo = "git rm -q --cached staged.txt && rm staged.txt")
+        runShell(tmp, "git rm -q --cached src/b.txt")
+        check("staged removal", dirty = true, undo = "git add src/b.txt")
+        runShell(tmp, "rm src/main/a.txt")
+        check("deleted from disk", dirty = true, undo = "git checkout -q -- src/main/a.txt")
+        repo.close()
+    }
+
+    @Test
+    fun `hasChanges sees untracked files in a repository with no commits`(@TempDir tmp: Path) {
+        runShell(tmp, "git init -q")
+        val repo = GitRepo.discover(tmp)!!
+        assertFalse(repo.hasChanges(), "an empty repository has nothing to report")
+        (tmp / "first.txt").writeText("first\n")
+        assertTrue(repo.hasChanges(), "an untracked file in an unborn branch is a change")
+        repo.close()
+    }
+
+    @Test
     fun `stageAndCommit stages selected changes and produces a clean status`(@TempDir tmp: Path) {
         runShell(tmp, "git init -q && git config user.email t@x && git config user.name T")
         (tmp / "a.txt").writeText("a\n")

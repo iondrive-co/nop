@@ -86,6 +86,8 @@ sourceSets.main { resources.srcDir(generateBuildInfo) }
 compose.desktop {
     application {
         mainClass = "iondrive.nop.MainKt"
+        // WindowClass sets AWT's X11 window class from NOP_WM_CLASS, through a private field.
+        jvmArgs += listOf("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
         javaHome = javaToolchains.launcherFor {
             languageVersion = JavaLanguageVersion.of(21)
         }.get().metadata.installationPath.asFile.absolutePath
@@ -99,7 +101,11 @@ compose.desktop {
         // gives it room to die young; G1 commits only what it uses, so a quiet nop stays small.
         // String dedup reclaims the many identical strings the index produces (repeated file
         // paths, symbol names); it requires G1, which is already the default GC.
-        jvmArgs += listOf("-Xmx2g", "-XX:+UseStringDeduplication")
+        // The native heap needs trimming as well. glibc keeps what a thread frees inside that
+        // thread's malloc arena rather than giving it back, and Skia frees a paragraph's native
+        // memory only when the GC reaches its Java wrapper, so a burst of text layout leaves
+        // gigabytes resident long after it was freed. Trimming once a minute returns it.
+        jvmArgs += listOf("-Xmx2g", "-XX:+UseStringDeduplication", "-XX:TrimNativeHeapInterval=60000")
 
         nativeDistributions {
             targetFormats(TargetFormat.AppImage, TargetFormat.Deb, TargetFormat.Dmg, TargetFormat.Msi)

@@ -95,8 +95,8 @@ class TerminalSession private constructor(
     var onExit: ((Int) -> Unit)? = null
 
     /**
-     * Called when the user types input (e.g. Enter) or sends text to the session. Used by agent sessions
-     * to detect when a prompt is submitted in a resumed session.
+     * Called when Enter is sent to the session. Used by agent sessions to detect submitted prompts
+     * and answers; navigating, pasting and adding a newline to a draft do not submit anything.
      */
     @Volatile
     var onUserInput: (() -> Unit)? = null
@@ -209,9 +209,7 @@ class TerminalSession private constructor(
         w.terminalPanel.addCustomKeyListener(AltArrowKeys { sendText(it) })
         w.terminalPanel.addCustomKeyListener(object : java.awt.event.KeyAdapter() {
             override fun keyPressed(e: java.awt.event.KeyEvent) {
-                if (e.keyCode == java.awt.event.KeyEvent.VK_ENTER) {
-                    onUserInput?.invoke()
-                } else if (e.keyCode == java.awt.event.KeyEvent.VK_S &&
+                if (e.keyCode == java.awt.event.KeyEvent.VK_S &&
                     e.isControlDown && e.isShiftDown && !e.isAltDown
                 ) {
                     e.consume()
@@ -316,8 +314,7 @@ class TerminalSession private constructor(
      */
     fun sendText(text: String) {
         settings?.nudgeActive()
-        noteDraft(text.toByteArray(Charsets.UTF_8))
-        onUserInput?.invoke()
+        noteInput(text.toByteArray(Charsets.UTF_8))
         write(text)
     }
 
@@ -356,11 +353,11 @@ class TerminalSession private constructor(
             // Unbracketed, a newline is Enter and a tab is Tab (completion, in most of these TUIs).
             safe.trim().replace(LINE_BREAKS, " ").replace('\t', ' ')
         }
-        onUserInput?.invoke()
+        noteDraft(body.toByteArray(Charsets.UTF_8))
         write(body)
         javax.swing.Timer(SUBMIT_DELAY_MS) {
             write("\r")
-            lastSubmitAt = System.currentTimeMillis()
+            noteInput(byteArrayOf('\r'.code.toByte()))
             // Enter sends the whole prompt, so whatever was in it has gone too.
             draftPending = false
         }.apply {
@@ -503,15 +500,7 @@ class TerminalSession private constructor(
                 noteBracketedPaste(text)
                 outputTap?.invoke(text)
             },
-            inputTap = { bytes ->
-                noteDraft(bytes)
-                if (bytes.any { it == '\r'.code.toByte() }) {
-                    lastSubmitAt = System.currentTimeMillis()
-                }
-                if (bytes.any { it == '\r'.code.toByte() || it == '\n'.code.toByte() }) {
-                    onUserInput?.invoke()
-                }
-            },
+            inputTap = ::noteInput,
         )
         connector = c
         w.ttyConnector = c
@@ -539,6 +528,17 @@ class TerminalSession private constructor(
         rec.freeze { wakeReader(proc) }
         val (cols, rows) = Posix.windowSize(fd) ?: (INITIAL_COLUMNS to INITIAL_ROWS)
         return PtyHandoff(fd = fd, pid = proc.pid(), columns = cols, rows = rows, replay = rec.replay(), process = proc)
+    }
+
+    /** Records input from both JediTerm and [sendText], with submission only for an Enter key. */
+    internal fun noteInput(bytes: ByteArray) {
+        noteDraft(bytes)
+        // Enter arrives as its own carriage return. A paste may contain line breaks too, but
+        // those are part of the draft, as is the line feed Shift+Enter inserts.
+        if (bytes.size == 1 && bytes[0] == '\r'.code.toByte()) {
+            lastSubmitAt = System.currentTimeMillis()
+            onUserInput?.invoke()
+        }
     }
 
     /** Keeps [draftPending] up to date with [bytes] on their way to the program. */

@@ -199,6 +199,15 @@ class ActivityTracker {
     private val open = LinkedHashMap<String, String>()
 
     private var hasQueuedQuestion = false
+
+    /**
+     * A question Codex has queued for the user ("? 1 question · alt + ↑ to answer"), asked with its
+     * `request_user_input_async` tool. That call returns at once and the agent works on, so the
+     * question outlives every tool call after it: submitting an answer or a new prompt ends it.
+     * Only the call sets it, never words on the screen: a Claude tab quoting Codex's "alt + ↑ to
+     * answer" in its reply would otherwise read as asking until its user submitted input.
+     */
+    private var asyncQuestion = false
     private val recentOutput = StringBuilder()
 
     fun onTitle(text: String, at: Long) {
@@ -230,9 +239,11 @@ class ActivityTracker {
         return false
     }
 
+    /** An answer or prompt was submitted with Enter; draft edits and navigation do not clear it. */
     fun onUserInput(): Boolean {
-        if (hasQueuedQuestion) {
+        if (hasQueuedQuestion || asyncQuestion) {
             hasQueuedQuestion = false
+            asyncQuestion = false
             recentOutput.setLength(0)
             return true
         }
@@ -246,9 +257,13 @@ class ActivityTracker {
             is AgentEvent.UserMessage -> {
                 open.clear()
                 hasQueuedQuestion = false
+                asyncQuestion = false
                 recentOutput.setLength(0)
             }
-            is AgentEvent.ToolStarted -> open[event.callId] = event.tool
+            is AgentEvent.ToolStarted -> {
+                open[event.callId] = event.tool
+                if (event.tool == ASYNC_QUESTION_TOOL) asyncQuestion = true
+            }
             is AgentEvent.ToolFinished -> {
                 open.remove(event.callId)
                 if (open.isEmpty()) {
@@ -265,21 +280,27 @@ class ActivityTracker {
      * turn and the title last shown. The transcript before the handover is not read again, so a
      * question asked before it would otherwise never be seen as one.
      */
-    fun snapshot(): Snapshot = Snapshot(LinkedHashMap(open), title)
+    fun snapshot(): Snapshot = Snapshot(LinkedHashMap(open), title, asyncQuestion)
 
     /** Takes up where [snapshot] left off, in another nop. */
     fun restore(from: Snapshot, now: Long) {
         open.clear()
         open.putAll(from.openCalls)
+        asyncQuestion = from.asyncQuestion
         from.title?.let { onTitle(it, now) }
     }
 
     @kotlinx.serialization.Serializable
-    data class Snapshot(val openCalls: Map<String, String> = emptyMap(), val title: String? = null)
+    data class Snapshot(
+        val openCalls: Map<String, String> = emptyMap(),
+        val title: String? = null,
+        /** A Codex question still queued for the user, which a restart must not forget. */
+        val asyncQuestion: Boolean = false,
+    )
 
     /** What the tab is doing at [now], for a run that is alive. */
     fun activity(now: Long): Activity {
-        if (hasQueuedQuestion || open.values.any { it in QUESTION_TOOLS }) return Activity.Asking
+        if (hasQueuedQuestion || asyncQuestion || open.values.any { it in QUESTION_TOOLS }) return Activity.Asking
         return when (said) {
             TitleSignal.Says.Working -> Activity.Working
             TitleSignal.Says.Blocked -> Activity.Asking
@@ -302,6 +323,9 @@ class ActivityTracker {
          * The tools whose whole job is to wait for the user: Claude Code's question and plan approval,
          * Codex's request for input, and Antigravity's question.
          */
+        /** Codex's question that returns at once and stays queued for the user: see [asyncQuestion]. */
+        const val ASYNC_QUESTION_TOOL = "request_user_input_async"
+
         val QUESTION_TOOLS: Set<String> = setOf("AskUserQuestion", "ExitPlanMode", "request_user_input", "ask_question")
 
         /**

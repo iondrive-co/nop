@@ -51,6 +51,17 @@ class UsageTest {
             """{"primary":{"used_percent":$primaryPercent,"window_minutes":$windowMinutes,"resets_at":$resetsAt},""" +
             """"secondary":null}}}"""
 
+    @Test
+    fun `the pace estimate is due to one caller per interval however many windows ask`() {
+        // Far ahead of the real clock, so a turn taken elsewhere in this JVM cannot hold the slot.
+        val start = Instant.now().plus(Duration.ofDays(365)).toEpochMilli()
+        val interval = 30 * 60 * 1000L
+        assertTrue(Usage.paceEstimateDue(interval, now = start), "the first window to ask runs it")
+        assertFalse(Usage.paceEstimateDue(interval, now = start), "a second window at the same moment does not")
+        assertFalse(Usage.paceEstimateDue(interval, now = start + interval - 1), "nor does anyone inside the interval")
+        assertTrue(Usage.paceEstimateDue(interval, now = start + interval), "the next turn comes once it has passed")
+    }
+
     // ── Codex ──
 
     @Test

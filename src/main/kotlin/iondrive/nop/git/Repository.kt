@@ -1128,9 +1128,34 @@ class GitRepo private constructor(
             // last saw it, and so files in a folder stay together. distinctBy runs first: it keeps
             // the earliest entry for a path, which is how added wins over the modified/changed a
             // staged-then-edited new file is also reported under, and modified/changed over the rest.
-            .sortedWith(compareBy(PathOrder) { it.path })
+            .let { changes -> PathOrder.sorted(changes) { it.path } }
         val branch = repository.branch
         return GitStatus(branch = branch, changes = changes)
+    }
+
+    /**
+     * Whether [loadStatus] would report anything, answered at the first change the walk meets.
+     *
+     * A project tab's dirty dot needs only this, and a full status pays for the length of the change
+     * list as well as the size of the tree: a checkout with a quarter of a million deleted files
+     * builds, de-duplicates and sorts every one of them to answer yes. This walks the same three trees
+     * with the filter JGit's own status uses and stops at the first path it yields, so a dirty tree
+     * usually answers in a handful of entries. A clean one is still walked in full.
+     *
+     * A submodule counts as changed when its checked-out commit differs from the one recorded, not
+     * when its own working tree has edits.
+     */
+    fun hasChanges(): Boolean = repository.newObjectReader().use { reader ->
+        TreeWalk(repository, reader).use { walk ->
+            walk.isRecursive = true
+            val head = repository.resolve("${Constants.HEAD}^{tree}")
+            if (head != null) walk.addTree(head) else walk.addTree(EmptyTreeIterator())
+            walk.addTree(DirCacheIterator(repository.readDirCache()))
+            walk.addTree(FileTreeIterator(repository))
+            walk.getTree(2, FileTreeIterator::class.java).setDirCacheIterator(walk, 1)
+            walk.filter = AndTreeFilter.create(SkipWorkTreeFilter(1), IndexDiffFilter(1, 2))
+            walk.next()
+        }
     }
 
     /**
@@ -1154,7 +1179,7 @@ class GitRepo private constructor(
         val byPath = LinkedHashMap<String, FileChange>()
         committed.forEach { byPath[it.path] = it }
         status.changes.forEach { byPath[it.path] = it }
-        return byPath.values.sortedWith(compareBy(PathOrder) { it.path })
+        return PathOrder.sorted(byPath.values) { it.path }
     }
 
     /**

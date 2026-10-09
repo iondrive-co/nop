@@ -10,6 +10,9 @@ import androidx.compose.ui.text.TextRange
 import iondrive.nop.diff.ThreeWayMerge
 import iondrive.nop.history.LocalHistory
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 
 /** Outcome of a [FileEdit.save]. */
 sealed interface SaveResult {
@@ -256,9 +259,20 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
      */
     fun diskTextIfDivergedAndClean(): String? {
         if (hasUserEdit) return null
+        val stamp = DiskStamp.of(file) ?: return null
+        val shown = state.text
+        // Every open file is checked on every status poll, and reading each one in full to find it
+        // unchanged was most of what nop allocated. While neither the file's stamp nor the buffer has
+        // moved since the last comparison, it would come out the same.
+        lastCompared?.let { (seen, text) -> if (seen == stamp && text === shown) return null }
         val disk = runCatching { file.readText() }.getOrNull() ?: return null
-        return if (disk == state.text.toString()) null else disk
+        if (!stamp.isRacy()) lastCompared = stamp to shown
+        return if (disk == shown.toString()) null else disk
     }
+
+    /** The stamp and the buffer [diskTextIfDivergedAndClean] last compared. Read and written off the UI thread. */
+    @Volatile
+    private var lastCompared: Pair<DiskStamp, CharSequence>? = null
 
     /**
      * Replace the buffer with [diskText] and treat it as the new on-disk baseline. Call on the UI
@@ -284,6 +298,31 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
         // Taking the disk copy resolves any conflict by definition — there is nothing left of ours
         // to be blocked on.
         saveBlock = null
+    }
+}
+
+/**
+ * What a stat says about a file, to tell whether it may have been written since it was last read:
+ * when it was modified, how big it is, and which inode it is (a write through a temporary file and a
+ * rename leaves a new one).
+ */
+private data class DiskStamp(val modified: FileTime, val size: Long, val key: Any?) {
+    /**
+     * Whether another write could still land inside the same timestamp. A filesystem stamps files
+     * with a coarse clock — a few milliseconds on a local disk, whole seconds on some network shares
+     * — so a write of the same length just after a read can leave every field above unchanged. Only
+     * a stamp older than that is trusted to mean "not written since"; a file still being written is
+     * read in full each time.
+     */
+    fun isRacy(now: Long = System.currentTimeMillis()): Boolean = now - modified.toMillis() < RACY_MS
+
+    companion object {
+        private const val RACY_MS = 3_000L
+
+        fun of(file: File): DiskStamp? = runCatching {
+            val attributes = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
+            DiskStamp(attributes.lastModifiedTime(), attributes.size(), attributes.fileKey())
+        }.getOrNull()
     }
 }
 

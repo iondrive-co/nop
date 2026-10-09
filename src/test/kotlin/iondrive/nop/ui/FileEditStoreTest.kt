@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import kotlin.io.path.writeText
 
 class FileEditStoreTest {
@@ -403,6 +404,43 @@ class FileEditStoreTest {
             edit.diskTextIfDivergedAndClean(),
             "a drifted-but-not-user-edited buffer must reload from disk, not show stale content",
         )
+    }
+
+    @Test
+    fun `a settled file is read again only once its stamp or the buffer moves`(@TempDir tmp: Path) {
+        val path = tmp.resolve("a.txt").also { it.writeText("one\n") }
+        val settled = FileTime.fromMillis(System.currentTimeMillis() - 60_000)
+        Files.setLastModifiedTime(path, settled)
+        val edit = FileEditStore().edit(Tab.FileView(path.toFile()))
+        assertNull(edit.diskTextIfDivergedAndClean(), "matches disk")
+
+        // New bytes behind an unchanged stamp: no real write leaves one, which is what lets a check
+        // that finds the stamp where it was skip reading the file.
+        path.writeText("two\n")
+        Files.setLastModifiedTime(path, settled)
+        assertNull(edit.diskTextIfDivergedAndClean(), "an unchanged stamp is not read again")
+
+        // A buffer that drifted is compared afresh, stamp or no stamp.
+        edit.state.edit { replace(0, length, "drift\n") }
+        assertEquals("two\n", edit.diskTextIfDivergedAndClean(), "a moved buffer is compared again")
+        edit.adoptDiskText("two\n")
+
+        // And a write that moves the stamp is seen, even one of the same length.
+        path.writeText("six\n")
+        assertEquals("six\n", edit.diskTextIfDivergedAndClean(), "a moved stamp is read again")
+    }
+
+    @Test
+    fun `a file written within the last moments is read on every check`(@TempDir tmp: Path) {
+        // Two same-length writes inside one tick of the filesystem's clock leave identical stamps, so
+        // a stamp that fresh proves nothing and the file is read each time.
+        val path = tmp.resolve("a.txt").also { it.writeText("one\n") }
+        val edit = FileEditStore().edit(Tab.FileView(path.toFile()))
+        val stamp = Files.getLastModifiedTime(path)
+        assertNull(edit.diskTextIfDivergedAndClean())
+        path.writeText("two\n")
+        Files.setLastModifiedTime(path, stamp)
+        assertEquals("two\n", edit.diskTextIfDivergedAndClean(), "a fresh stamp is never trusted")
     }
 
     @Test

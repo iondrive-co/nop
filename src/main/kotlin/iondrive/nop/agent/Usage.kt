@@ -19,6 +19,7 @@ import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * One rate-limit window: how much of it is spent, when it rolls over, and how long it runs for.
@@ -274,6 +275,20 @@ object Usage {
     /** [reading] with the latest weekly pace ratio, without learning from it. */
     fun withPace(account: Account, reading: UsageReading): UsageReading =
         if (UsageFixture.file != null) reading else pace.annotate(account.name, reading, learn = false)
+
+    /** When a caller last took its turn at [estimatePace]; see [paceEstimateDue]. */
+    private val paceEstimatedAt = AtomicLong(0L)
+
+    /**
+     * Whether it is time to run [estimatePace] again, at most once per [intervalMs] across the whole
+     * process — true to exactly one caller, which then owns the run. Every window polls usage on a
+     * loop of its own, and the estimate is a property of the account rather than of the window, so
+     * one run serves them all: the others pick it up with their next reading.
+     */
+    fun paceEstimateDue(intervalMs: Long, now: Long = System.currentTimeMillis()): Boolean {
+        val last = paceEstimatedAt.get()
+        return now - last >= intervalMs && paceEstimatedAt.compareAndSet(last, now)
+    }
 
     /**
      * Estimates each account's weekly pace ratio from its transcripts, for the accounts that have

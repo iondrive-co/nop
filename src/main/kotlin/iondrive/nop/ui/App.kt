@@ -917,7 +917,6 @@ fun App(
     val agentUsage = remember { mutableStateMapOf<String, UsageReading>() }
     LaunchedEffect(agentAccounts) {
         if (agentAccounts.isEmpty()) return@LaunchedEffect
-        var paceEstimatedAt = 0L
         while (true) {
             for (account in agentAccounts) {
                 // Contained per account. A poller is background convenience; nothing it can hit —
@@ -939,8 +938,7 @@ fun App(
             }
             // Until an account has a weekly pace ratio of its own, one estimated from its transcripts
             // stands in. Reading a month of transcripts is not free, so not every poll.
-            if (System.currentTimeMillis() - paceEstimatedAt >= PACE_ESTIMATE_INTERVAL_MS) {
-                paceEstimatedAt = System.currentTimeMillis()
+            if (Usage.paceEstimateDue(PACE_ESTIMATE_INTERVAL_MS)) {
                 runCatching {
                     val readings = agentUsage.toMap()
                     if (withContext(Dispatchers.IO) { Usage.estimatePace(agentAccounts, readings) }) {
@@ -1945,6 +1943,7 @@ fun App(
                                         returnedPaths = commitSelection.returned,
                                         arrivedPaths = commitSelection.arrived,
                                         onToggle = { path -> commitSelection = commitSelection.toggle(path) },
+                                        onTickOnly = { paths -> commitSelection = commitSelection.tickOnly(paths) },
                                         activePath = when (val t = tabsState.selectedTab) {
                                             is Tab.Diff -> t.change.path
                                             is Tab.FileView -> repo?.let { repoRelativePath(it, t.file) }

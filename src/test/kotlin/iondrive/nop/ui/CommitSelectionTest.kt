@@ -87,4 +87,17 @@ class CommitSelectionTest {
 
         assertEquals(emptyList<String>(), popped.unreviewed(popped.ticked))
     }
+
+    @Test
+    fun `ticking all or none keeps the marks`() {
+        val start = setOf(test, fix)
+        val popped = CommitSelection.loaded(start)
+            .move(start, setOf(test))
+            .move(setOf(test), start)
+
+        assertEquals(emptySet<String>(), popped.tickOnly(emptySet()).ticked)
+        val all = popped.tickOnly(emptySet()).tickOnly(start)
+        assertEquals(start, all.ticked)
+        assertEquals(listOf(fix), all.unreviewed(all.ticked))
+    }
 }

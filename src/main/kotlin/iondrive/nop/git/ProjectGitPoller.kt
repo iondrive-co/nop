@@ -98,7 +98,7 @@ class ProjectGitPoller(
             project.walked = true
             project.lastWalkMs = now
             project.lastGeneration = generation
-            dirty[project.path] = runCatching { !repo.loadStatus().isClean }
+            dirty[project.path] = runCatching { repo.hasChanges() }
                 .onFailure { Log.error("project git poll: status for ${project.path} failed", it) }
                 .getOrDefault(false)
             // The walk loaded the pack indexes to compare against HEAD, and nothing will look an

@@ -166,6 +166,9 @@ fun main(args: Array<String>) {
     // without this the ~90k-word load would be the first thing the UI thread does after opening one.
     Thread { Dictionary.warmUp() }.apply { isDaemon = true; name = "dictionary-warmup" }.start()
 
+    // Before the first window: a window takes its class as it is created. See [WindowClass].
+    WindowClass.apply()
+
     // Not exiting the process when the last window closes, so a restart can replace it instead.
     application(exitProcessOnExit = false) {
         // Every window the user has: a name, its own bar of project tabs, and whether it is showing.
