@@ -129,7 +129,7 @@ compose.desktop {
             // were wrong. Costs ~2 MB in the jlinked image.
             modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
             packageName = "nop"
-            packageVersion = "1.1.10"
+            packageVersion = "1.2.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
