@@ -173,12 +173,15 @@ fun App(
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
 
-    var status by remember(projectPath) { mutableStateOf(GitStatus.EMPTY) }
+    // What this repository looked like when it was last on screen, if it has been this run: the view
+    // opens on that while it reloads, instead of on an empty placeholder. See [StatusLoads].
+    val lastLoaded = remember(projectPath) { repo?.let { StatusLoads.last(it.rootDir) } }
+    var status by remember(projectPath) { mutableStateOf(lastLoaded?.status ?: GitStatus.EMPTY) }
     // The commit HEAD points at, reloaded alongside [status]. A merge, pull, commit or reset moves
     // it without necessarily changing which files are dirty, and that is exactly the case an open
     // diff can't see for itself: its left-hand side is HEAD's copy of the file, read once when it
     // loaded. Null on an unborn branch, and until the first status load.
-    var headSha by remember(projectPath) { mutableStateOf<String?>(null) }
+    var headSha by remember(projectPath) { mutableStateOf(lastLoaded?.headSha) }
     // The watcher generation the last status walk covered, so a poll can tell a quiet tree from one
     // it simply hasn't looked at yet. UNKNOWN until the first walk, and never equal to a real count.
     var polledGeneration by remember(projectPath) { mutableStateOf(RepoWatcher.UNKNOWN) }
@@ -187,10 +190,12 @@ fun App(
     // reported dirtiness depends on this: switching to a project starts a fresh composition, and
     // announcing the placeholder's "clean" upward would blink the tab's dot off and back on
     // once the real status landed a moment later.
-    var statusLoaded by remember(projectPath) { mutableStateOf(false) }
+    var statusLoaded by remember(projectPath) { mutableStateOf(lastLoaded != null) }
     var stashes by remember(projectPath) { mutableStateOf<List<StashEntry>>(emptyList()) }
     // The commit panel's ticks, and which of them nop set by itself. See [CommitSelection].
-    var commitSelection by remember(projectPath) { mutableStateOf(CommitSelection()) }
+    var commitSelection by remember(projectPath) {
+        mutableStateOf(lastLoaded?.let { CommitSelection.loaded(it.status.changes.map { c -> c.path }.toSet()) } ?: CommitSelection())
+    }
     // Whether the commit message is not blank. Held here because the status loaders below read it,
     // and the message state itself is declared after them.
     var commitMessageWriting by remember(projectPath) { mutableStateOf(false) }
@@ -371,7 +376,7 @@ fun App(
     suspend fun reloadStatus() {
         if (repo != null) {
             reconcileEdits()
-            val fresh = withContext(Dispatchers.IO) { repo.loadStatus() }
+            val fresh = StatusLoads.load(repo.rootDir)
             val freshStashes = withContext(Dispatchers.IO) {
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
             }
@@ -386,6 +391,7 @@ fun App(
             headSha = freshHead
             status = fresh
             statusLoaded = true
+            StatusLoads.remember(repo.rootDir, fresh, freshHead)
             stashes = freshStashes
             canSoftReset = withContext(Dispatchers.IO) {
                 runCatching { repo.canSoftResetHead() }.getOrDefault(false)
@@ -466,6 +472,7 @@ fun App(
         headSha = freshHead
         status = fresh
         statusLoaded = true
+        StatusLoads.remember(repo.rootDir, fresh, freshHead)
         stashes = freshStashes
         fsRefreshKey += 1
     }
@@ -1939,6 +1946,7 @@ fun App(
                                 commit = {
                                     CommitPanel(
                                         status = status,
+                                        loading = repo != null && !statusLoaded,
                                         selectedPaths = commitSelection.ticked,
                                         returnedPaths = commitSelection.returned,
                                         arrivedPaths = commitSelection.arrived,

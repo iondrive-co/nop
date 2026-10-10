@@ -69,6 +69,9 @@ import java.awt.Cursor
 fun CommitPanel(
     status: GitStatus,
     selectedPaths: Set<String>,
+    // True while [status] is still the placeholder for a repository whose first walk has not landed.
+    // It looks exactly like "no repository" otherwise, and on a big checkout that walk takes a minute.
+    loading: Boolean = false,
     onToggle: (String) -> Unit,
     // Ticks exactly these paths: every change for "All", none for "None".
     onTickOnly: (Set<String>) -> Unit,
@@ -128,6 +131,7 @@ fun CommitPanel(
 
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         val header = when {
+            loading -> "Loading git status…"
             status.isClean && status.branch == null -> "Not a git repository"
             status.isClean -> "Commit — on ${status.branch} · no changes"
             else -> "Commit — on ${status.branch} · ${selectedPaths.size}/${status.changes.size} selected"

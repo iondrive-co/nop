@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Cut a release. No arguments: reads the current packageVersion from build.gradle.kts,
-# bumps the patch by 1 (1.0.0 -> 1.0.1, 1.1.0 -> 1.1.1), commits, tags v<version>, and
-# pushes. The tag push triggers .github/workflows/release.yml, which builds .deb/.msi/.dmg
-# on Linux/Windows/macOS runners and attaches them to a fresh GitHub release.
+# auto-bumps the patch (0-9) rolling over into minor (1.1.0 -> 1.1.1 ... 1.1.9 -> 1.2.0),
+# commits, tags v<version>, and pushes. The tag push triggers .github/workflows/release.yml,
+# which builds .deb/.msi/.dmg on Linux/Windows/macOS runners and attaches them to a fresh
+# GitHub release.
 #
 # Pass an explicit version to override the auto-bump:
-#     scripts/release.sh           # auto-bump patch (e.g. 1.1.0 -> 1.1.1)
-#     scripts/release.sh 1.2.0     # force a specific version
+#     scripts/release.sh           # auto-bump (e.g. 1.1.9 -> 1.2.0)
+#     scripts/release.sh 2.0.0     # force a specific version
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,13 +23,21 @@ fi
 if [[ $# -ge 1 ]]; then
     VERSION="$1"
 else
-    # Auto-bump: increment patch.
+    # Auto-bump: single-digit patch (0..9) rolls over into minor, and minor (0..9) into major.
     IFS=. read -r MAJ MIN PATCH <<<"$CURRENT"
     if ! [[ "$MAJ" =~ ^[0-9]+$ && "$MIN" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]]; then
         echo "Current version '$CURRENT' is not MAJOR.MINOR.PATCH; pass an explicit version." >&2
         exit 1
     fi
-    VERSION="${MAJ}.${MIN}.$((PATCH + 1))"
+    if [[ "$PATCH" -ge 9 ]]; then
+        if [[ "$MIN" -ge 9 ]]; then
+            VERSION="$((MAJ + 1)).0.0"
+        else
+            VERSION="${MAJ}.$((MIN + 1)).0"
+        fi
+    else
+        VERSION="${MAJ}.${MIN}.$((PATCH + 1))"
+    fi
 fi
 
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
