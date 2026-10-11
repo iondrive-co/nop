@@ -91,6 +91,18 @@ class QuotaEchoTest {
         assertEquals(Verdict.Refused, judge(file, "You've hit your usage limit"))
     }
 
+    @Test
+    fun `a Codex task_complete error with curly apostrophe is a vendor refusal`(@TempDir tmp: Path) {
+        val file = transcript(
+            tmp,
+            """{"type":"event_msg","timestamp":"${since.plusSeconds(5)}","payload":{"type":"agent_message","message":"working on task"}}""",
+            codexTaskComplete(now.minusMillis(50), message = "You’ve hit your usage limit. Try again at 5:00 PM."),
+        )
+
+        assertEquals(Verdict.Refused, judge(file, "You’ve hit your usage limit"))
+    }
+
+
     /**
      * A session that is itself a handover: its first act is to read a handoff whose last line is the
      * previous account's wall, word for word. With the phrase in the conversation from then on, its

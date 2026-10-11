@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.time.Instant
+import java.time.ZoneOffset
 
 /**
  * The quota watcher: what it fires on, and — more importantly — what it does not.
@@ -175,6 +177,7 @@ class QuotaTest {
             "insufficient_quota",
             "rate_limit_exceeded",
             "ratelimitexceeded",
+            "usage_limit_exceeded",
             "billing_hard_limit_reached",
             "You exceeded your current quota",
             "You have exceeded your rate limit",
@@ -293,4 +296,30 @@ class QuotaTest {
     fun `an image quota reached is still not the account running out`() {
         assertNull(fire("Your image generation quota reached. Please try again later.\n"))
     }
+
+    @Test
+    fun `curly apostrophe in limit phrasing is caught`() {
+        val hit = fire("You’ve hit your usage limit. Upgrade your account.\n")
+        assertNotNull(hit)
+        assertEquals("usage limit", hit!!.kind)
+    }
+
+    @Test
+    fun `a vendor clock time is parsed into a reset duration`() {
+        val now = Instant.parse("2026-06-15T10:00:00Z")
+        val zone = ZoneOffset.UTC
+        val line = "You’ve reached your usage limit. Try again at 11:30 AM."
+        val resetsIn = QuotaWatcher.resetsInFrom(line, now, zone)
+        assertEquals(Duration.ofHours(1).plusMinutes(30), resetsIn)
+    }
+
+    @Test
+    fun `a vendor clock time past midnight is parsed across the day boundary`() {
+        val now = Instant.parse("2026-06-15T23:30:00Z")
+        val zone = ZoneOffset.UTC
+        val line = "You’ve hit your usage limit. Try again at 1:45 AM."
+        val resetsIn = QuotaWatcher.resetsInFrom(line, now, zone)
+        assertEquals(Duration.ofHours(2).plusMinutes(15), resetsIn)
+    }
 }
+

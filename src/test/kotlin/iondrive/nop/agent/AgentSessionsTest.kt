@@ -366,6 +366,25 @@ class AgentSessionsTest {
         assertFalse(session.ended)
     }
 
+    @Test
+    fun `a session hitting a wall with clock time retry sets resume wait for that time`(@TempDir tmp: Path) {
+        val codex = Account("codex-alpha", Provider.OpenAI, "/homes/codex-alpha", resumeAfterReset = true)
+        val state = sessions()
+        state.resumesAfterReset = { from -> listOf(codex).resumesAfterReset(from) }
+        val session = state.open(tmp.toFile(), codex)
+
+        val now = java.time.Instant.parse("2026-06-15T10:00:00Z")
+        val zone = java.time.ZoneOffset.UTC
+        val line = "You’ve hit your usage limit. Try again at 11:30 AM."
+        val resetsIn = QuotaWatcher.resetsInFrom(line, now, zone)
+        session.onQuotaWall(QuotaHit("usage limit", line, matched = "You’ve hit your usage limit", resetsIn = resetsIn), now = now)
+
+        assertNotNull(session.resumeWait)
+        assertEquals(now.plus(Duration.ofHours(1).plusMinutes(30)), session.resumeWait?.resumeAt)
+        assertFalse(session.ended)
+    }
+
+
     /** A wall reported for a run that is already over is news about nothing. */
     @Test
     fun `a wall hit after the run has ended changes nothing`(@TempDir tmp: Path) {

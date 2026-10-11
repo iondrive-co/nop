@@ -1,6 +1,10 @@
 package iondrive.nop.agent
 
 import java.time.Duration
+import java.time.Instant
+import java.time.LocalTime
+import java.time.ZoneId
+
 
 /**
  * A quota wall the vendor's own output announced, the line that announced it, the phrase that
@@ -267,9 +271,9 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 // because the sentence is the one place a limit on something else would read the
                 // same: "session" and "weekly" are the windows the plan actually has, and the 429
                 // itself is the source of the first — "You've hit your session limit · resets 8:10pm"
-                // is the text Claude Code files against the refused request.
-                """you(?:'ve| have)\s+hit\s+your\s+(?:usage\s+|session\s+|weekly\s+)?limit""",
-                """you(?:'ve| have)\s+reached\s+your\s+(?:usage\s+|session\s+|weekly\s+)?limit""",
+                // is the text Claude Code files against the refused request. Codex uses right single quotation marks.
+                """you(?:['’]ve| have)\s+hit\s+your\s+(?:usage\s+|session\s+|weekly\s+)?limit""",
+                """you(?:['’]ve| have)\s+reached\s+your\s+(?:usage\s+|session\s+|weekly\s+)?limit""",
                 """approaching\s+your\s+usage\s+limit.*resets""",
                 """\b5-hour\s+limit\s+reached\b""",
                 """\bweekly\s+limit\s+reached\b""",
@@ -278,9 +282,10 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 """\binsufficient_quota\b""",
                 """\brate_limit_exceeded\b""",
                 """\bratelimitexceeded\b""",
+                """\busage_limit_exceeded\b""",
                 """\bbilling_hard_limit_reached\b""",
-                """you\s+exceeded\s+your\s+current\s+quota""",
-                """you\s+have\s+exceeded\s+your\s+(?:rate|usage)\s+limit""",
+                """you(?:['’]ve|\s+have)?\s+exceeded\s+your\s+current\s+quota""",
+                """you(?:['’]ve|\s+have)?\s+exceeded\s+your\s+(?:rate|usage)\s+limit""",
                 // Anthropic API.
                 """\bcredit_balance\b.*\binsufficient\b""",
                 """rate\s+limit\s+exceeded""",
@@ -312,15 +317,22 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
          * How long the vendor said the wall lasts, taken from the refusal itself, or null when it
          * did not time it.
          *
-         * Only the compact form `7m31s`, and only on the line the phrase was found on. This is
-         * read as the vendor naming the allowance it refused against — [AgentSession.onQuotaWall]
-         * lets it outrank a usage reading that knows nothing about that allowance — so the looser
-         * a shape it were allowed to take, the more of the agent's own output could wear it.
-         * Claude Code's "resets 8:10pm" is deliberately not matched: it is a clock time rather
-         * than a countdown, and for that provider the account's own reading says when the window
-         * turns over anyway.
+         * Two formats:
+         * - The compact countdown form `7m31s`, used by Antigravity.
+         * - A clock time `try again at 11:40 PM`, used by Codex on task completion error.
+         *
+         * Only on the line the phrase was found on. This is read as the vendor naming the allowance
+         * it refused against — [AgentSession.onQuotaWall] lets it outrank a usage reading that knows
+         * nothing about that allowance — so the looser a shape it were allowed to take, the more of
+         * the agent's own output could wear it. Claude Code's "resets 8:10pm" is deliberately not
+         * matched: it is a clock time for a provider where the account's own reading says when the
+         * window turns over anyway.
          */
-        internal fun resetsInFrom(text: String): Duration? =
+        internal fun resetsInFrom(
+            text: String,
+            now: Instant = Instant.now(),
+            zone: ZoneId = ZoneId.systemDefault(),
+        ): Duration? {
             RESETS_IN.findAll(text).firstNotNullOfOrNull { match ->
                 val (hours, minutes, seconds) = match.destructured
                 if (hours.isEmpty() && minutes.isEmpty() && seconds.isEmpty()) {
@@ -330,13 +342,42 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                         .plusMinutes(minutes.toLongOrNull() ?: 0)
                         .plusSeconds(seconds.toLongOrNull() ?: 0)
                 }
+            }?.let { return it }
+
+            return TRY_AGAIN_AT.findAll(text).firstNotNullOfOrNull { match ->
+                val (hStr, mStr, meridiem) = match.destructured
+                val rawHour = hStr.toIntOrNull() ?: return@firstNotNullOfOrNull null
+                val minute = mStr.toIntOrNull() ?: return@firstNotNullOfOrNull null
+                if (rawHour !in 1..12 || minute !in 0..59) return@firstNotNullOfOrNull null
+                val hour = when {
+                    meridiem.equals("am", ignoreCase = true) -> if (rawHour == 12) 0 else rawHour
+                    else -> if (rawHour == 12) 12 else rawHour + 12
+                }
+                val targetTime = LocalTime.of(hour, minute)
+                val currentZdt = now.atZone(zone)
+                val todayTarget = currentZdt.with(targetTime)
+                val targetInstant = todayTarget.toInstant()
+                when {
+                    targetInstant.isAfter(now) -> Duration.between(now, targetInstant)
+                    Duration.between(targetInstant, now) <= CLOCK_DRIFT_TOLERANCE -> Duration.ZERO
+                    else -> Duration.between(now, todayTarget.plusDays(1).toInstant())
+                }
             }
+        }
 
         /** The countdown's shape. Every part is optional; [resetsInFrom] rejects a match with none. */
         private val RESETS_IN = Regex(
             """\bresets?\s+in\s+(?:(\d{1,3})h)?(?:(\d{1,3})m)?(?:(\d{1,3})s)?""",
             RegexOption.IGNORE_CASE,
         )
+
+        /** Clock time when Codex allows retry after a usage limit wall. */
+        private val TRY_AGAIN_AT = Regex(
+            """\btry\s+again\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)\b""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        private val CLOCK_DRIFT_TOLERANCE: Duration = Duration.ofMinutes(1)
 
         /** A short name for what was hit, for the exit panel to say. */
         internal fun kindOf(matched: String): String {

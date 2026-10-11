@@ -184,8 +184,8 @@ fun App(
     var headSha by remember(projectPath) { mutableStateOf(lastLoaded?.headSha) }
     // The watcher generation the last status walk covered, so a poll can tell a quiet tree from one
     // it simply hasn't looked at yet. UNKNOWN until the first walk, and never equal to a real count.
-    var polledGeneration by remember(projectPath) { mutableStateOf(RepoWatcher.UNKNOWN) }
-    val statusPacer = remember(projectPath) { WalkPacer() }
+    var polledGeneration by remember(projectPath) { mutableStateOf(lastLoaded?.generation ?: RepoWatcher.UNKNOWN) }
+    val statusPacer = remember(projectPath) { repo?.let { StatusLoads.pacer(it.rootDir) } ?: WalkPacer() }
     // Whether [status] has been loaded yet, as opposed to still being the empty placeholder. Only
     // reported dirtiness depends on this: switching to a project starts a fresh composition, and
     // announcing the placeholder's "clean" upward would blink the tab's dot off and back on
@@ -225,7 +225,9 @@ fun App(
     // end in a commit.
     var messageClearTrigger by remember(projectPath) { mutableStateOf(0) }
     var stashInFlight by remember(projectPath) { mutableStateOf(false) }
-    var refreshing by remember(projectPath) { mutableStateOf(false) }
+    var refreshing by remember(projectPath) {
+        mutableStateOf(repo != null && StatusLoads.isInFlight(repo.rootDir))
+    }
     // Whether HEAD has a parent to soft-reset back onto, and whether a soft reset is in flight.
     var canSoftReset by remember(projectPath) { mutableStateOf(false) }
     var resetInFlight by remember(projectPath) { mutableStateOf(false) }
@@ -376,7 +378,7 @@ fun App(
     suspend fun reloadStatus() {
         if (repo != null) {
             reconcileEdits()
-            val fresh = StatusLoads.load(repo.rootDir)
+            val fresh = StatusLoads.load(repo.rootDir, repoWatcher)
             val freshStashes = withContext(Dispatchers.IO) {
                 runCatching { repo.stashList() }.getOrDefault(emptyList())
             }
@@ -391,7 +393,9 @@ fun App(
             headSha = freshHead
             status = fresh
             statusLoaded = true
-            StatusLoads.remember(repo.rootDir, fresh, freshHead)
+            val currentGen = repoWatcher?.generation(repo.rootDir) ?: RepoWatcher.UNKNOWN
+            polledGeneration = currentGen
+            StatusLoads.remember(repo.rootDir, fresh, freshHead, currentGen)
             stashes = freshStashes
             canSoftReset = withContext(Dispatchers.IO) {
                 runCatching { repo.canSoftResetHead() }.getOrDefault(false)
@@ -472,7 +476,7 @@ fun App(
         headSha = freshHead
         status = fresh
         statusLoaded = true
-        StatusLoads.remember(repo.rootDir, fresh, freshHead)
+        StatusLoads.remember(repo.rootDir, fresh, freshHead, generation)
         stashes = freshStashes
         fsRefreshKey += 1
     }
@@ -609,7 +613,15 @@ fun App(
                 Log.error("git poll: $what failed", t)
             }
         }
-        tick("initial status load") { reloadStatus() }
+        if (repo != null && (!statusLoaded || StatusLoads.isInFlight(repo.rootDir))) {
+            val wasInFlight = StatusLoads.isInFlight(repo.rootDir)
+            if (wasInFlight) refreshing = true
+            try {
+                tick("initial status load") { reloadStatus() }
+            } finally {
+                if (wasInFlight) refreshing = false
+            }
+        }
         while (true) {
             delay(GIT_POLL_INTERVAL_MS)
             tick("poll") { pollStatus() }
