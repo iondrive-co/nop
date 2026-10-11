@@ -1,6 +1,7 @@
 package iondrive.nop
 
 import iondrive.nop.agent.Account
+import iondrive.nop.agent.AgentMessages
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.handoverTarget
 import iondrive.nop.agent.resumesAfterReset
@@ -127,6 +128,7 @@ object RestartInPlace {
             sessions.handoverTarget = { from -> accounts.handoverTarget(from) }
             sessions.resumesAfterReset = { from -> accounts.resumesAfterReset(from) }
             val session = sessions.adopt(record, adopted, root.toFile(), account)
+            if (session.inbox.isNotEmpty()) Log.info("restart: carried ${session.inbox.size} waiting message(s) into agent tab ${record.title}")
             runCatching { session.session.getOrCreateWidget() }
                 .onFailure { Log.error("restart: could not attach agent tab ${record.title}", it) }
         }
@@ -144,6 +146,8 @@ object RestartInPlace {
             }
         }
         Handover.hangUpUnclaimed()
+        // Messages that were on their way in when the last nop went carry on going in.
+        AgentMessages.startPump()
     }
 
     /** The launcher runs a restart would stop, by tab name: they are put back waiting to be run again. */

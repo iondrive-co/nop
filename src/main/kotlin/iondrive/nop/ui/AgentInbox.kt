@@ -86,7 +86,7 @@ fun AgentInbox(session: AgentSession, modifier: Modifier = Modifier) {
                         message.approved -> AgentMessages.waitReason(session, now)?.let {
                             Text("Delivering once $it.", color = AgentMuted)
                         }
-                        session.run.session.draftPending -> Text(
+                        session.run.session.mayHoldDraft(now) -> Text(
                             "The prompt may hold text you have not sent. Deliver presses Enter, which would send it " +
                                 "as part of this message — send or clear it first.",
                             color = warn,

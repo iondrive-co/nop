@@ -203,4 +203,33 @@ class AgentMessagesTest {
         onEdt { AgentMessages.pump(later) }
         assertEquals(0, to.inbox.size, "message delivered once user draft and submit have cleared")
     }
+
+    @Test
+    fun `a waiting message comes back from a restart as it was, Deliver and all`() {
+        val held = AgentMessages.Held(
+            from = "\"Undertaker\"", fromId = "166b7acc", fromProject = java.io.File("/tmp/hermes"),
+            body = "assignment #202", typed = "[header]\n\nassignment #202", at = 5_000L,
+        )
+        held.approved = true
+        val back = AgentMessages.Held.of(held.record())
+        assertEquals(listOf(held.from, held.fromId, held.fromProject, held.body, held.typed, held.at, true),
+            listOf(back.from, back.fromId, back.fromProject, back.body, back.typed, back.at, back.approved))
+    }
+
+    @Test
+    fun `a draft the screen shows is not there no longer holds a message back`(
+        @TempDir project: Path,
+        @TempDir config: Path,
+    ) = withConfigRoot(config) {
+        val (_, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.Anthropic)
+        val term = to.run.session
+        term.testStarted = true
+        term.running = true
+        term.deferred = false
+        to.run.startedAt = java.time.Instant.now().minusSeconds(10)
+        term.draftPending = true
+        // No screen to read here, so the keystrokes' word stands: the check only ever lets a message
+        // through on a prompt it can see is empty (PromptScreenTest), never on a guess.
+        assertEquals("the draft in its prompt is sent or cleared", AgentMessages.waitReason(to, System.currentTimeMillis() + 60_000))
+    }
 }

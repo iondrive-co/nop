@@ -3,6 +3,8 @@ package iondrive.nop.terminal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.jediterm.terminal.TextStyle
+import com.jediterm.terminal.model.TerminalLine
 import com.jediterm.terminal.ui.JediTermWidget
 import com.pty4j.PtyProcess
 import com.pty4j.PtyProcessBuilder
@@ -114,6 +116,33 @@ class TerminalSession private constructor(
      */
     var draftPending: Boolean by mutableStateOf(false)
         internal set
+
+    /** When input last left [draftPending] set, for [mayHoldDraft] to give the screen time to draw it. */
+    private var draftAt = 0L
+
+    /**
+     * Whether text typed in and submitted now could take a draft with it: [draftPending], unless the
+     * program's own screen shows its prompt empty ([promptLooksEmpty]).
+     *
+     * The keystrokes alone err towards yes and then stay there: an Esc, an arrow key or a line typed
+     * and rubbed out leaves them saying draft until the next Enter, which held other agents' messages
+     * for hours behind a prompt with nothing in it. The screen settles that, but only once it has had
+     * [DRAFT_SETTLE_MS] to draw the last key, so a letter still on its way to the program is not
+     * read as an empty prompt. A screen it cannot read the prompt off leaves the answer at yes.
+     */
+    fun mayHoldDraft(now: Long = System.currentTimeMillis()): Boolean =
+        draftPending && (now - draftAt < DRAFT_SETTLE_MS || !promptShowsEmpty())
+
+    private fun promptShowsEmpty(): Boolean {
+        val buffer = widget?.terminalTextBuffer ?: return false
+        buffer.lock()
+        val lines = try {
+            (0 until buffer.height).map { screenLine(buffer.getLine(it)) }
+        } finally {
+            buffer.unlock()
+        }
+        return promptLooksEmpty(lines)
+    }
 
     /** When a prompt was last submitted (by the user or via [submit]) in this terminal. */
     var lastSubmitAt: Long = 0L
@@ -544,6 +573,7 @@ class TerminalSession private constructor(
     /** Keeps [draftPending] up to date with [bytes] on their way to the program. */
     private fun noteDraft(bytes: ByteArray) {
         draftPending = draftAfter(draftPending, bytes)
+        if (draftPending && bytes.isNotEmpty() && !isTerminalReport(bytes)) draftAt = System.currentTimeMillis()
     }
 
     /** The last word in [text] on bracketed paste wins; a switch split across two reads is missed. */
@@ -600,6 +630,68 @@ class TerminalSession private constructor(
             if (clear < 0) return true
             return clear < bytes.size - 1 && !isTerminalReport(bytes.copyOfRange(clear + 1, bytes.size))
         }
+
+        internal fun screenLine(line: TerminalLine): ScreenLine {
+            val text = StringBuilder()
+            val dim = ArrayList<Boolean>()
+            line.forEachEntry { entry ->
+                val faint = entry.style.hasOption(TextStyle.Option.DIM)
+                // By index: CharBuffer's own iterator never moves past its first character.
+                val chars = entry.text
+                for (i in 0 until chars.length) {
+                    text.append(chars[i])
+                    dim += faint
+                }
+            }
+            return ScreenLine(text.toString(), dim.toBooleanArray())
+        }
+
+        /**
+         * Whether [lines], an agent CLI's screen, show its prompt with nothing typed in it.
+         *
+         * Claude (`❯`), Codex (`›`) and Antigravity (`>`) each draw their input as a marker at the
+         * start of a row, optionally inside a box, with the text after it. Empty, the row holds nothing
+         * after the marker but blanks, or a placeholder drawn dim (`Try "…"`, `Ask Codex to do
+         * anything`), which typed text never is. The prompt is the lowest such row: it sits below
+         * the conversation, where past prompts are echoed with the same marker. A draft can run
+         * onto the rows beneath it, so the next row has to end the prompt too: blank, or one of the
+         * rules or box edges these CLIs draw under it.
+         *
+         * False whenever the screen does not read that way — a menu, a dialog, a CLI drawing something
+         * else — which leaves the keystrokes' answer standing.
+         */
+        internal fun promptLooksEmpty(lines: List<ScreenLine>): Boolean {
+            val at = lines.indexOfLast { promptStart(it.text) >= 0 }
+            if (at < 0) return false
+            if (!lines[at].blankFrom(promptStart(lines[at].text))) return false
+            val next = lines.getOrNull(at + 1) ?: return true
+            if (next.blankFrom(0)) return true
+            val first = next.text.first { !isBlank(it) }
+            return first in PROMPT_ENDS
+        }
+
+        /** Where the text after a prompt marker starts on [text], or -1 when [text] is not a prompt row. */
+        private fun promptStart(text: String): Int {
+            var i = 0
+            while (i < text.length && isBlank(text[i])) i++
+            if (i < text.length && text[i] in BOX_SIDES) {
+                i++
+                while (i < text.length && isBlank(text[i])) i++
+            }
+            if (i >= text.length || text[i] !in PROMPT_MARKERS) return -1
+            i++
+            return if (i == text.length || isBlank(text[i])) i else -1
+        }
+
+        /** Space as a terminal row holds it: a cell never written, a no-break space, a wide character's second half. */
+        internal fun isBlank(c: Char): Boolean = c.isWhitespace() || c == '\u0000' || c == '\u00a0' || c == '\uE000'
+
+        private const val PROMPT_MARKERS = "❯›>"
+        private const val BOX_SIDES = "│┃"
+        private const val PROMPT_ENDS = "─━╰╯└┘│┃"
+
+        /** How long a key has to draw before [mayHoldDraft] believes the screen over it. */
+        internal const val DRAFT_SETTLE_MS = 1000L
 
         /**
          * Whether [bytes] are JediTerm replying to something the program asked it — the cursor's
@@ -766,3 +858,9 @@ class PtyHandoff(
 
 /** A handed-over program as this nop takes it up. See [TerminalSession.handOff]. */
 class Adopted(val pty: AdoptedPty, val columns: Int, val rows: Int, val replay: ByteArray)
+
+/** One row of a terminal's screen: its characters, and which of them are drawn dim (SGR 2). */
+internal class ScreenLine(val text: String, val dim: BooleanArray) {
+    /** Whether nothing from [start] on is more than blank or dim. */
+    fun blankFrom(start: Int): Boolean = (start until text.length).all { TerminalSession.isBlank(text[it]) || dim[it] }
+}

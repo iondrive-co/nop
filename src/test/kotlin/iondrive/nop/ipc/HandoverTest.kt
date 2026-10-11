@@ -51,6 +51,13 @@ class HandoverTest {
         titleIsUsers = true,
         ticket = "ticket-$id",
         selected = true,
+        inbox = listOf(
+            Handover.HeldRecord(
+                from = "\"Undertaker\" (166b7acc)", fromId = "166b7acc", fromProject = "/tmp/project",
+                body = "assignment #202", typed = "[header]\n\nassignment #202", at = 5_000L, approved = true,
+            ),
+        ),
+        draftPending = true,
     )
 
     @Test
@@ -72,6 +79,8 @@ class HandoverTest {
             assertEquals("Restart test", rec.title)
             assertEquals(42L, rec.transcriptOffset)
             assertEquals(mapOf("call-1" to "AskUserQuestion"), rec.tracker.openCalls)
+            assertEquals(record("a1").inbox, rec.inbox, "a message still waiting to go in goes across with its tab")
+            assertTrue(rec.draftPending)
             assertEquals("what it showed", String(adopted.replay))
             assertEquals(100 to 30, adopted.columns to adopted.rows)
 

@@ -41,7 +41,7 @@ import org.jetbrains.jewel.ui.component.Tooltip
  * provider is going badly.
  *
  * Collapsed it is a single line saying what the agent is doing and naming the account. Expanded it
- * lists the others with what each has left, because "which one instead" is the same question the
+ * lists available accounts with what each has left, because "which one instead" is the same question the
  * usage strip answers. The list is drawn inline rather than in a popup: the terminal below is a
  * heavyweight AWT component, and Compose composites popups underneath it, so a menu opened here would
  * simply not be on screen.
@@ -63,7 +63,9 @@ fun AgentSessionBar(
     onUpdateAccount: ((Account) -> Unit)? = null,
     onHandOver: (Account) -> Unit,
 ) {
-    val others = accounts.filter { it.name != session.account.name }
+    val handoverAccounts = remember(accounts, session.account) {
+        handoverAccountsFor(session.account, accounts)
+    }
     var expanded by remember(session.sessionId) { mutableStateOf(false) }
     // Reset per run, so the confirmation belongs to the command actually on the clipboard rather
     // than to one copied before a handoff changed which account is running.
@@ -141,7 +143,7 @@ fun AgentSessionBar(
                     modifier = Modifier.clickable { session.session.snipArea() },
                 )
             }
-            if (others.isNotEmpty()) {
+            if (handoverAccounts.isNotEmpty()) {
                 Row(
                     modifier = Modifier.clickable { expanded = !expanded },
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -201,14 +203,14 @@ fun AgentSessionBar(
             }
         }
 
-        if (expanded && others.isNotEmpty()) {
+        if (expanded && handoverAccounts.isNotEmpty()) {
             Text(
                 "Ends this run, writes a summary of it, and opens the chosen account on that summary.",
                 color = AgentMuted,
                 modifier = Modifier.padding(top = 4.dp, bottom = 6.dp),
             )
             HandoverProviderList(
-                accounts = others,
+                accounts = handoverAccounts,
                 readings = readings,
                 modelsFor = modelsFor,
                 actionLabel = "Hand over",

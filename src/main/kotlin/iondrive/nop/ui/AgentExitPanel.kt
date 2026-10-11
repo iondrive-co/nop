@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,7 +53,9 @@ fun AgentExitPanel(
 ) {
     val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
     val quota = session.run.quota
-    val others = accounts.filter { it.name != session.account.name }
+    val handoverAccounts = remember(accounts, session.account) {
+        handoverAccountsFor(session.account, accounts)
+    }
 
     Column(
         modifier = modifier
@@ -124,15 +127,15 @@ fun AgentExitPanel(
             }
         }
 
-        if (others.isNotEmpty()) {
+        if (handoverAccounts.isNotEmpty()) {
             Text(
-                "Or hand over to another provider:",
+                "Or hand over to a provider:",
                 color = AgentMuted,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(top = 4.dp),
             )
             HandoverProviderList(
-                accounts = others,
+                accounts = handoverAccounts,
                 readings = readings,
                 modelsFor = modelsFor,
                 actionLabel = "Switch",

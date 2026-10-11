@@ -234,10 +234,12 @@ class AgentSession(
     /**
      * Messages other agents have sent this tab, waiting for the user to deliver or discard them —
      * see [AgentMessages]. Compose state: the tab's inbox and its mark in the strip are drawn from it.
-     * Kept for the life of the tab and never written down; a message is not worth more than the
-     * nop it was sent to.
+     * Kept for the life of the tab, across a restart in place too ([handOff]), but never written to
+     * disk; a message is not worth more than the tab it was sent to.
      */
-    val inbox = androidx.compose.runtime.mutableStateListOf<AgentMessages.Held>()
+    val inbox = androidx.compose.runtime.mutableStateListOf<AgentMessages.Held>().apply {
+        adoption?.first?.inbox?.forEach { add(AgentMessages.Held.of(it)) }
+    }
 
     /**
      * What happened in this session, in a vocabulary neither vendor uses — which is what makes a
@@ -1047,6 +1049,8 @@ class AgentSession(
             baselineSha = baselineSha,
             ticket = agentTicket,
             selected = selected,
+            inbox = inbox.map { it.record() },
+            draftPending = current.session.draftPending,
         )
         return record to pty
     }
@@ -1146,6 +1150,8 @@ class AgentSession(
         if (carried != null) {
             newRun.userPromptSubmitted = carried.userPromptSubmitted
             newRun.waitedOutWallAt = carried.waitedOutWallAt?.let(Instant::ofEpochMilli)
+            // The prompt is the same one, so whatever the user left in it is still there.
+            terminal.draftPending = carried.draftPending
         }
         terminal.onUserInput = {
             newRun.userPromptSubmitted = true

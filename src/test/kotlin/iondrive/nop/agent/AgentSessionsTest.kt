@@ -1063,6 +1063,15 @@ class AgentSessionsTest {
     }
 
     @Test
+    fun `a handover to the same account starts the new run with the chosen model`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
+        session.handOver(account("claude-alpha").copy(model = "claude-haiku-4-5"))
+
+        assertEquals("claude-alpha", session.account.name)
+        assertEquals("claude-haiku-4-5", session.run.account.model)
+    }
+
+    @Test
     fun `a handover eagerly starts the new terminal run if the previous run was started`(@TempDir tmp: Path) {
         org.junit.jupiter.api.Assumptions.assumeFalse(
             java.awt.GraphicsEnvironment.isHeadless(),

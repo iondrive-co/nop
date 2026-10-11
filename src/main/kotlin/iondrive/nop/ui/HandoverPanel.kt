@@ -59,6 +59,21 @@ fun modelOptionsFor(account: Account, discovered: List<String>): List<String> {
     return result
 }
 
+/**
+ * Prepares the list of accounts to offer for handover from [currentAccount], ensuring the account
+ * itself is included (with its active model if running) alongside any configured [accounts].
+ */
+fun handoverAccountsFor(currentAccount: Account, accounts: List<Account>): List<Account> {
+    val base = if (accounts.any { it.name == currentAccount.name }) accounts else listOf(currentAccount) + accounts
+    return base.map {
+        if (it.name == currentAccount.name && currentAccount.model != null) {
+            it.copy(model = currentAccount.model)
+        } else {
+            it
+        }
+    }
+}
+
 /** Formats an account's quota percentage and reset ETA for the handover card. */
 fun usageDescription(reading: UsageReading?): String {
     if (reading == null) return ""

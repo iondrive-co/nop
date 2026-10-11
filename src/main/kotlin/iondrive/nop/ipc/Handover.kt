@@ -32,8 +32,10 @@ import java.nio.file.Path
  * reads them once and deletes them.
  *
  * What does not survive is anything nop itself held only in memory and no tab could be rebuilt from:
- * a message waiting in an inbox, a launcher run (which comes back waiting to be run, as it always
- * has), and anything else this nop had started outside a PTY.
+ * a launcher run (which comes back waiting to be run, as it always has), and anything else this nop
+ * had started outside a PTY. The messages waiting in an agent tab's inbox do: they go across in its
+ * [AgentRecord], since a restart is the user's doing and not a reason for another agent's word to go
+ * missing.
  */
 object Handover {
 
@@ -77,7 +79,24 @@ object Handover {
         val ticket: String,
         /** Whether it was the tab its project was showing. */
         val selected: Boolean = false,
+        /** The messages other agents had sent it that were not yet typed in, oldest first. */
+        val inbox: List<HeldRecord> = emptyList(),
+        /** Whether its prompt might hold a draft; see [iondrive.nop.terminal.TerminalSession.draftPending]. */
+        val draftPending: Boolean = false,
         val pty: PtyRecord? = null,
+    )
+
+    /** A message waiting in an agent tab's inbox, as [iondrive.nop.agent.AgentMessages.Held] holds it. */
+    @Serializable
+    data class HeldRecord(
+        val from: String,
+        val fromId: String,
+        val fromProject: String,
+        val body: String,
+        val typed: String,
+        val at: Long,
+        /** Whether the user had pressed Deliver, or the project lets it through without asking. */
+        val approved: Boolean,
     )
 
     /** A Term tab carried across. */

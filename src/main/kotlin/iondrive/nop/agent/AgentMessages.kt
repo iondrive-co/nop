@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.ipc.Handover
 import java.io.File
 import javax.swing.Timer
 
@@ -59,6 +60,16 @@ object AgentMessages {
         /** The user has pressed Deliver; it goes in as soon as the tab can take it. */
         var approved: Boolean by mutableStateOf(false)
             internal set
+
+        /** As the next nop is handed it across a restart. */
+        fun record() = Handover.HeldRecord(from, fromId, fromProject.path, body, typed, at, approved)
+
+        companion object {
+            /** A message the last nop handed over, back in an inbox as it was. */
+            fun of(record: Handover.HeldRecord) = Held(
+                record.from, record.fromId, File(record.fromProject), record.body, record.typed, record.at,
+            ).also { it.approved = record.approved }
+        }
     }
 
     private var lastSubmitAt = 0L
@@ -164,7 +175,8 @@ object AgentMessages {
         startPump()
     }
 
-    private fun startPump() {
+    /** Starts typing in what is already approved: messages a restart carried across, waiting to go in. */
+    internal fun startPump() {
         pump(System.currentTimeMillis())
         if (sessions().any { s -> !s.ended && s.inbox.any { it.approved } }) pump.start()
     }
@@ -203,7 +215,7 @@ object AgentMessages {
             !terminal.running -> "its CLI is running again"
             now - s.run.startedAt.toEpochMilli() < BOOT_MS -> "its CLI has finished starting"
             s.activity == Activity.Asking -> "the question it is asking has been answered"
-            terminal.draftPending -> "the draft in its prompt is sent or cleared"
+            terminal.mayHoldDraft(now) -> "the draft in its prompt is sent or cleared"
             terminal.lastSubmitAt > 0L && now - terminal.lastSubmitAt < BETWEEN_SUBMITS_MS -> "the prompt has finished sending"
             else -> null
         }

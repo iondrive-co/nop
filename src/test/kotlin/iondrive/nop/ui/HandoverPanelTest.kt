@@ -91,4 +91,42 @@ class HandoverPanelTest {
     fun `usageDescription returns empty string for null reading`() {
         assertEquals("", usageDescription(null))
     }
+
+    @Test
+    fun `handoverAccountsFor includes current account alongside other providers`() {
+        val current = account("claude-alpha")
+        val other = account("codex", provider = Provider.OpenAI)
+        val result = handoverAccountsFor(current, listOf(current, other))
+
+        assertEquals(listOf("claude-alpha", "codex"), result.map { it.name })
+    }
+
+    @Test
+    fun `handoverAccountsFor includes accounts of the same provider`() {
+        val current = account("claude-alpha")
+        val sibling = account("claude-bravo")
+        val other = account("codex", provider = Provider.OpenAI)
+        val result = handoverAccountsFor(current, listOf(current, sibling, other))
+
+        assertEquals(listOf("claude-alpha", "claude-bravo", "codex"), result.map { it.name })
+    }
+
+    @Test
+    fun `handoverAccountsFor preserves current account active model`() {
+        val current = account("claude-alpha", model = "claude-haiku-4-5")
+        val configured = account("claude-alpha", model = "claude-3-5-sonnet")
+        val other = account("codex", provider = Provider.OpenAI)
+        val result = handoverAccountsFor(current, listOf(configured, other))
+
+        assertEquals("claude-haiku-4-5", result.first { it.name == "claude-alpha" }.model)
+    }
+
+    @Test
+    fun `handoverAccountsFor includes current account when missing from accounts list`() {
+        val current = account("claude-alpha")
+        val other = account("codex", provider = Provider.OpenAI)
+        val result = handoverAccountsFor(current, listOf(other))
+
+        assertEquals(listOf("claude-alpha", "codex"), result.map { it.name })
+    }
 }
