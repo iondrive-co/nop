@@ -58,6 +58,10 @@ fun AgentPicker(
     sessions: List<PastSession>,
     /** Where launching or resuming from here runs the CLI — this project's repository root. */
     projectDir: Path,
+    modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
+    /** Saves a model picked here as the account's own, as the handover cards do. */
+    onUpdateAccount: ((Account) -> Unit)? = null,
+    /** Starts a session on the account, carrying the model picked for it. */
     onLaunch: (Account) -> Unit,
     onReopen: (PastSession) -> Unit,
     onSettings: () -> Unit,
@@ -87,17 +91,30 @@ fun AgentPicker(
             )
         }
 
-        accounts.forEach { account ->
-            key(account.name) {
-                AccountRow(
-                    account = account,
-                    reading = readings[account.name],
-                    // Resolved against the configured accounts rather than taken off the account
-                    // itself, so a nomination naming one that has since been removed says nothing
-                    // here — exactly as it will do nothing when the wall is hit.
-                    handsOverTo = accounts.handoverTarget(account)?.name,
-                    onLaunch = { onLaunch(account) },
-                )
+        // One model list open at a time, as in the handover panel.
+        var openDropdown by remember { mutableStateOf<String?>(null) }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            accounts.forEach { account ->
+                key(account.name) {
+                    AccountCard(
+                        account = account,
+                        reading = readings[account.name],
+                        // Read on every composition, not remembered: the live list arrives after the
+                        // picker is first drawn, and the read is what redraws it when it does.
+                        models = modelOptionsFor(account, modelsFor(account)),
+                        // Resolved against the configured accounts rather than taken off the account
+                        // itself, so a nomination naming one that has since been removed says nothing
+                        // here — exactly as it will do nothing when the wall is hit.
+                        handsOverTo = accounts.handoverTarget(account)?.name,
+                        dropdownOpen = openDropdown == account.name,
+                        onToggleDropdown = {
+                            openDropdown = if (openDropdown == account.name) null else account.name
+                        },
+                        onPicked = { openDropdown = null },
+                        onUpdateAccount = onUpdateAccount,
+                        onLaunch = onLaunch,
+                    )
+                }
             }
         }
 
@@ -178,64 +195,69 @@ private fun PastSessionRow(past: PastSession, onReopen: () -> Unit) {
 }
 
 /**
- * One launchable account. The whole row is the button: starting a session is what you came here to
- * do, so a control hidden inside the row would be ceremony around its only action.
+ * One launchable account, as the same card a handover offers it on: the model is chosen here, with
+ * the account's own as the default, and Start opens the session on it.
  */
 @Composable
-private fun AccountRow(
+private fun AccountCard(
     account: Account,
     reading: UsageReading?,
+    models: List<String>,
     /** Who takes over when this one runs out, or null when the choice is left to the user. */
     handsOverTo: String?,
-    onLaunch: () -> Unit,
+    dropdownOpen: Boolean,
+    onToggleDropdown: () -> Unit,
+    onPicked: () -> Unit,
+    onUpdateAccount: ((Account) -> Unit)?,
+    onLaunch: (Account) -> Unit,
 ) {
-    val interaction = remember { MutableInteractionSource() }
-    val hovered by interaction.collectIsHoveredAsState()
-    // Looked up on composition rather than cached for the session: a CLI installed while nop was
-    // open should stop the row claiming it is missing, without needing a restart.
-    val cli = CliTools.locate(account.provider)
+    // Follows the account's model when the settings change it, and a pick here saves to it.
+    var selected by remember(account.model) { mutableStateOf(account.model ?: DEFAULT_CHOICE) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .hoverable(interaction)
-            .clickable(enabled = cli != null, onClick = onLaunch)
-            .padding(vertical = 5.dp),
-    ) {
-        Text(
-            account.name,
-            fontWeight = if (hovered) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        // Two lines, not one wrapping row: the tool panel is a few hundred pixels wide, and
-        // provider, model and both usage windows on one line reflowed into four ragged lines that
-        // read as one paragraph rather than as two facts about an account.
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(account.provider.label, color = AgentMuted)
-            Text(account.model ?: DEFAULT_CHOICE, color = AgentMuted)
-            account.reasoning?.takeIf { it != DEFAULT_CHOICE }?.let { Text(it, color = AgentMuted) }
-        }
-        // The same numbers as the corner strip, spelled out: choosing which account to spend the
-        // next hour on is exactly the decision this row is asking about.
-        Text(usageLine(reading), color = AgentMuted)
-        // And where the hour after that comes from, when it has been decided in advance. Only when
-        // it has: a line on every row saying nobody is nominated would be the settings dialog's
-        // list printed into the picker, where the answer is almost always "nobody" and says nothing.
-        handsOverTo?.let { Text("hands over to $it when it runs out", color = AgentMuted) }
-        if (cli == null) {
-            val install = CliTools.installCommand(account.provider)
+    HandoverProviderCard(
+        account = account,
+        reading = reading,
+        models = models,
+        selectedModel = selected,
+        onSelectModel = { chosen ->
+            selected = chosen
+            onPicked()
+            onUpdateAccount?.invoke(account.copy(model = chosen.takeIf { it != DEFAULT_CHOICE }))
+        },
+        isDropdownOpen = dropdownOpen,
+        onToggleDropdown = onToggleDropdown,
+        actionLabel = "Start",
+        onAction = { onLaunch(account.copy(model = selected.takeIf { it != DEFAULT_CHOICE })) },
+        usage = "",
+        details = {
+            // The same numbers as the corner strip, spelled out: choosing which account to spend the
+            // next hour on is exactly the decision this card is asking about.
             Text(
-                if (install != null) {
-                    "${account.provider.binary} is not installed — run `$install`"
-                } else {
-                    // Nothing to paste for this one: see CliTools.installCommand.
-                    "${account.provider.binary} is not installed — get it from " +
-                        CliTools.installPage(account.provider)
-                },
-                color = ChangeColors.REMOVED,
+                listOfNotNull(
+                    account.reasoning?.takeIf { it != DEFAULT_CHOICE }?.let { "$it thinking" },
+                    usageLine(reading),
+                ).joinToString("   "),
+                color = AgentMuted,
             )
-        }
-    }
+            // And where the hour after that comes from, when it has been decided in advance. Only
+            // when it has: a line on every card saying nobody is nominated would be the settings
+            // dialog's list printed into the picker, where the answer is almost always "nobody".
+            handsOverTo?.let { Text("hands over to $it when it runs out", color = AgentMuted) }
+            // Looked up on composition rather than cached for the session: a CLI installed while nop
+            // was open should stop the card claiming it is missing, without needing a restart.
+            if (CliTools.locate(account.provider) == null) {
+                val install = CliTools.installCommand(account.provider)
+                Text(
+                    if (install != null) {
+                        "run `$install` to install it"
+                    } else {
+                        // Nothing to paste for this one: see CliTools.installCommand.
+                        "get it from ${CliTools.installPage(account.provider)}"
+                    },
+                    color = ChangeColors.REMOVED,
+                )
+            }
+        },
+    )
 }
 

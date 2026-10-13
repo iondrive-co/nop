@@ -1100,8 +1100,28 @@ class AgentSession(
         log.close()
     }
 
+    /**
+     * [account] in the model the conversation [resumeId] was last in, when its transcript says, so
+     * a resume carries on where the conversation was rather than on the account's model — see
+     * [Transcripts.lastModel].
+     */
+    private fun inLastModel(account: Account, resumeId: String): Account {
+        val last = Transcripts.lastModel(account, projectDir, resumeId) ?: return account
+        val resumed = account.copy(
+            model = last.model.takeIf { it != DEFAULT_CHOICE },
+            reasoning = last.reasoning ?: account.reasoning,
+        )
+        if (resumed != account) {
+            Log.info(
+                "resuming $resumeId on ${resumed.model ?: DEFAULT_CHOICE}, the model it was last in, " +
+                    "rather than ${account.name}'s ${account.model ?: DEFAULT_CHOICE}",
+            )
+        }
+        return resumed
+    }
+
     private fun start(
-        account: Account,
+        requested: Account,
         seed: String?,
         resumeId: String?,
         seededFromHandoff: Boolean,
@@ -1111,9 +1131,14 @@ class AgentSession(
         val carried = adoption?.first
         // A resume reads the CLI's own transcript and nothing of nop's. When the home has lost it the
         // backup may still have it, and it is put back before the CLI looks.
-        val conversationMissing = carried == null && resumeId != null && Transcripts.missing(account, projectDir, resumeId) &&
-            !Backup.restore(account, projectDir, resumeId)
-        if (conversationMissing) Log.info("${account.name} has no transcript for conversation $resumeId")
+        val conversationMissing = carried == null && resumeId != null && Transcripts.missing(requested, projectDir, resumeId) &&
+            !Backup.restore(requested, projectDir, resumeId)
+        if (conversationMissing) Log.info("${requested.name} has no transcript for conversation $resumeId")
+        val account = if (carried == null && resumeId != null && !conversationMissing) {
+            inLastModel(requested, resumeId)
+        } else {
+            requested
+        }
         val command = if (carried != null) {
             // Already running: the argv is what it was started with, and its environment is its own.
             AgentCommand(carried.argv, emptyMap(), carried.nativeSessionId, carried.isResume)

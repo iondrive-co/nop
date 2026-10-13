@@ -57,6 +57,8 @@ fun AgentPanel(
             readings = readings,
             sessions = sessions,
             projectDir = projectDir,
+            modelsFor = modelsFor,
+            onUpdateAccount = onUpdateAccount,
             onLaunch = onLaunch,
             onReopen = onReopen,
             onSettings = onSettings,

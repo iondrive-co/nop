@@ -121,9 +121,8 @@ fun HandoverProviderList(
     ) {
         accounts.forEach { account ->
             key(account.name) {
-                val availableModels = remember(account, modelsFor) {
-                    modelOptionsFor(account, modelsFor(account))
-                }
+                // Not remembered: the live list can arrive after the panel is drawn.
+                val availableModels = modelOptionsFor(account, modelsFor(account))
                 val currentModel = selectedModels[account.name] ?: account.model ?: DEFAULT_CHOICE
                 HandoverProviderCard(
                     account = account,
@@ -155,6 +154,7 @@ fun HandoverProviderList(
  * One provider card in the handover panel.
  *
  * Shows the account name, vendor name, usage, a model dropdown picker, and the start/handover button.
+ * The new-session picker uses it too, with its fuller usage line in [details].
  */
 @Composable
 fun HandoverProviderCard(
@@ -168,6 +168,10 @@ fun HandoverProviderCard(
     actionLabel: String,
     onAction: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The usage beside the name, or empty for none. */
+    usage: String = usageDescription(reading),
+    /** Lines about the account between its name and its model. */
+    details: @Composable () -> Unit = {},
 ) {
     val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
     val cardBackground = if (JewelTheme.isDark) Color(0xFF26282B) else Color(0xFFF7F8FA)
@@ -208,7 +212,6 @@ fun HandoverProviderCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            val usage = usageDescription(reading)
             if (usage.isNotEmpty()) {
                 Text(
                     usage,
@@ -227,6 +230,7 @@ fun HandoverProviderCard(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        details()
 
         Row(
             modifier = Modifier.fillMaxWidth(),

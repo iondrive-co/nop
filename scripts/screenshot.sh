@@ -1067,13 +1067,14 @@ scaled() { scaled_to "$1" "$AW"; }
 tool_left=$(split_x "$AW" "$SHOT_H_RATIO" "$AGENT_TOOLS_RATIO")
 AGENT_TABS="$AGENT_DATA/agents"
 
-# Start a session on claude-work by clicking its row in the agent picker, which fills the tool
-# region at startup: the first row sits ~190px down. It runs the claude stand-in. nop writes every
-# open Claude session to the project's `agents` file as soon as it opens, which is how the script
-# knows the click landed. A single click, not a sweep of offsets like the diff shot's, because a
-# miss here would land on another account's row and start the wrong session.
+# Start a session on claude-work with the Start button on its card in the agent picker, which fills
+# the tool region at startup: the first card's button sits ~780px in and ~248px down. It runs the
+# claude stand-in. nop writes every open Claude session to the project's `agents` file as soon as it
+# opens, which is how the script knows the click landed. A single click, not a sweep of offsets like
+# the diff shot's, because a miss here would land on another account's card and start the wrong
+# session.
 DISPLAY="$DISPLAY_SPEC" xdotool windowactivate --sync "$agent_wid" 2>/dev/null || true
-DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + tool_left + $(scaled 120) )) $(( AY + $(scaled 190) ))
+DISPLAY="$DISPLAY_SPEC" xdotool mousemove $(( AX + tool_left + $(scaled 780) )) $(( AY + $(scaled 248) ))
 sleep 0.15
 DISPLAY="$DISPLAY_SPEC" xdotool click 1
 for _ in $(seq 20); do

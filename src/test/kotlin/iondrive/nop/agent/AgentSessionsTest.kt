@@ -586,6 +586,32 @@ class AgentSessionsTest {
         assertEquals(bravo.name, session.account.name, "work must have handed over to bravo after prompt")
     }
 
+    @Test
+    fun `a resumed conversation comes back in the model it was last switched to`(@TempDir tmp: Path) {
+        val home = tmp.resolve("home")
+        val transcript = home.resolve("projects")
+            .resolve(iondrive.nop.agent.transcript.ClaudeTailer.slug(tmp.resolve("work")))
+            .resolve("native-1.jsonl")
+        java.nio.file.Files.createDirectories(transcript.parent)
+        java.nio.file.Files.writeString(
+            transcript,
+            """{"type":"assistant","message":{"model":"claude-fable-9-0","content":[]}}""" + "\n" +
+                """{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to """ +
+                """`Opus 9.1 (default)` and saved as your default for new sessions</local-command-stdout>"}}""" + "\n",
+        )
+        val alpha = Account("claude-alpha", Provider.Anthropic, home.toString(), model = "claude-fable-9-0")
+        java.nio.file.Files.createDirectories(tmp.resolve("work"))
+
+        val session = sessions().open(tmp.resolve("work").toFile(), alpha, resumeId = "native-1")
+
+        assertEquals("claude-opus-9-1", session.account.model)
+        val argv = session.run.command.argv
+        assertEquals("claude-opus-9-1", argv[argv.indexOf("--model") + 1])
+
+        session.reopen()
+        assertEquals("claude-opus-9-1", session.account.model, "a reopen resumes in the same model")
+    }
+
     /**
      * The 19:48 wall. A session nop has handed over reads a handoff quoting the wall that ended the
      * last run, so the phrase is in its conversation from its first turn — and its own wall, when it
