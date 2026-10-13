@@ -73,14 +73,17 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       # What nop's self-updater installs from (src/main/kotlin/iondrive/nop/update): the app image as a
-      # tarball, update.json listing every file in it by sha256, and update.json.sig, an Ed25519
-      # signature over update.json made with NOP_UPDATE_SIGNING_KEY (scripts/update-signing-key.sh).
-      # A release without the signature is still published, but no nop will update itself to it.
+      # tarball; update-linux-x64.json listing every file in it by sha256; a delta tarball of only the
+      # files that differ from the previous release's, which a nop on that release downloads instead;
+      # and update-linux-x64.json.sig, an Ed25519 signature over the manifest made with
+      # NOP_UPDATE_SIGNING_KEY (scripts/update-signing-key.sh). A release without the signature is
+      # still published, but no nop will update itself to it.
       - name: Self-update bundle (Linux)
         if: runner.os == 'Linux'
         shell: bash
         env:
           SIGNING_KEY: ${{ secrets.NOP_UPDATE_SIGNING_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           version="$(grep -E '^[[:space:]]*packageVersion[[:space:]]*=' build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -88,23 +91,34 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match packageVersion $version" >&2
             exit 1
           fi
+          platform=linux-x64
           ./gradlew createDistributable --no-daemon
           image=build/compose/binaries/main/app/nop
-          archive="release/nop-$version-linux-x64.tar.gz"
+          archive="release/nop-$version-$platform.tar.gz"
+          mtime="$(git log -1 --format=%ct)"
           tar --sort=name --owner=0 --group=0 --numeric-owner \
-              --mtime="@$(git log -1 --format=%ct)" \
+              --mtime="@$mtime" \
               -C "$(dirname "$image")" -czf "$archive" nop
-          python3 scripts/update-manifest.py "$image" "$archive" "$version" linux-x64 > release/update.json
+          manifest="release/update-$platform.json"
+          previous="$RUNNER_TEMP/previous-update.json"
+          python3 scripts/previous-update-manifest.py "$GITHUB_REPOSITORY" "v$version" "$platform" > "$previous"
+          if [[ -s "$previous" ]]; then
+            python3 scripts/update-manifest.py "$image" "$archive" "$version" "$platform" \
+                --previous "$previous" --delta "release/nop-$version-$platform-delta.tar.gz" --mtime "$mtime" > "$manifest"
+          else
+            echo "No earlier release with a $platform manifest: this one has no delta."
+            python3 scripts/update-manifest.py "$image" "$archive" "$version" "$platform" > "$manifest"
+          fi
           if [[ -n "$SIGNING_KEY" ]]; then
             key="$RUNNER_TEMP/update-signing.key"
             (umask 077; printf '%s\n' "$SIGNING_KEY" > "$key")
-            openssl pkeyutl -sign -inkey "$key" -rawin -in release/update.json -out release/update.json.sig
+            openssl pkeyutl -sign -inkey "$key" -rawin -in "$manifest" -out "$manifest.sig"
             openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-signing.pub"
             openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/update-signing.pub" -rawin \
-                -in release/update.json -sigfile release/update.json.sig
+                -in "$manifest" -sigfile "$manifest.sig"
             rm -f "$key"
           else
-            echo "::warning::NOP_UPDATE_SIGNING_KEY is not set: update.json is unsigned, and no nop will update itself to this release."
+            echo "::warning::NOP_UPDATE_SIGNING_KEY is not set: $manifest is unsigned, and no nop will update itself to this release."
           fi
           ls -l release/
 

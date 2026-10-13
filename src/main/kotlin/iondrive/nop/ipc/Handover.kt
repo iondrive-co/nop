@@ -245,7 +245,7 @@ object Handover {
         val read = runCatching { json.decodeFromString(Manifest.serializer(), Files.readString(manifest)) }
             .onFailure { Log.warn("restart: could not read the handover at $manifest: $it") }
             .getOrNull()
-        if (read == null || read.nopPid != me || read.version != VERSION) {
+        if (read == null || read.nopPid != me || read.version !in ADOPTS) {
             if (read != null) Log.warn("restart: the handover at $manifest is not this process's (pid ${read.nopPid}, version ${read.version})")
             clear(dir)
             return false
@@ -327,6 +327,16 @@ object Handover {
 
     private const val MANIFEST = "manifest.json"
     private val REPLAY = Regex("""\d+\.replay""")
-    /** The manifest format; generateBuildInfo stamps it into nop-build.properties for the updater. */
+    /**
+     * The manifest format this build writes; generateBuildInfo stamps it into nop-build.properties. A
+     * change to it keeps reading the format before and lists both in [ADOPTS].
+     */
     internal const val VERSION = 1
+
+    /**
+     * The manifest versions this build takes up: [VERSION] and, once there is one, the version before
+     * it. An update is only installed at a restart when its build adopts what the running nop writes,
+     * so a release that moves [VERSION] on still carries every terminal across the restart into it.
+     */
+    internal val ADOPTS: Set<Int> = setOf(VERSION)
 }

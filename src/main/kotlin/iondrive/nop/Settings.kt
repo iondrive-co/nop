@@ -434,6 +434,18 @@ object Settings {
     }
 
     /**
+     * Whether a nop installed from a release checks for new releases and installs them at its next
+     * restart (see [iondrive.nop.update.SelfUpdate]). On unless the user turned it off.
+     */
+    fun loadAutoUpdate(): Boolean = load()["autoUpdate"]?.lowercase() != "false"
+
+    fun saveAutoUpdate(on: Boolean) {
+        val map = load()
+        map["autoUpdate"] = on.toString()
+        save(map)
+    }
+
+    /**
      * Whether long lines soft-wrap in the editor and in diffs. Global rather than per-project, like
      * the theme: it's a preference about how the user reads code, not about a particular repo.
      * Defaults to off (long lines run off the edge behind a horizontal scrollbar), which is what a

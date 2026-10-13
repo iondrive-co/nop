@@ -38,12 +38,20 @@ sealed interface LaunchArgs {
      */
     data class Adopt(val manifest: Path) : LaunchArgs
 
+    /**
+     * Say which build this is and which handovers it takes up, then exit: how a nop about to install
+     * a downloaded update checks that the update starts at all, and that a restart into it would carry
+     * the terminals across (see [iondrive.nop.update.UpdateProbe]). Not in the usage: only nop runs it.
+     */
+    data object UpdateProbe : LaunchArgs
+
     /** Not something nop can do; [why] is what to say before the usage. */
     data class Invalid(val why: String) : LaunchArgs
 
     companion object {
         fun parse(args: Array<String>, isDirectory: (Path) -> Boolean = Files::isDirectory, exists: (Path) -> Boolean = Files::exists): LaunchArgs {
             if (args.size == 2 && args[0] == Handover.ADOPT_FLAG) return Adopt(Paths.get(args[1]))
+            if (args.size == 1 && args[0] == iondrive.nop.update.UpdateProbe.FLAG) return UpdateProbe
             if (args.any { it == "-h" || it == "--help" }) return Help
             val projects = mutableListOf<Path>()
             var options = true

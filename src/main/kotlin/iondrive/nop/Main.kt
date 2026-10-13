@@ -89,6 +89,9 @@ private const val DEFAULT_WINDOW_HEIGHT = 700
 // what a tick may actually *walk* is bounded by ProjectGitPoller instead.
 private const val PROJECT_GIT_POLL_MS = 3000L
 
+// How long nop has to have been up, windows and all, before a newly installed version counts as working.
+private const val HEALTHY_AFTER_MS = 10_000L
+
 @OptIn(FlowPreview::class)
 fun main(args: Array<String>) {
     // Before anything that can reach a running nop, or even write to its log: a launch that was
@@ -102,6 +105,10 @@ fun main(args: Array<String>) {
         }
         LaunchArgs.Help -> {
             println(LaunchArgs.USAGE)
+            exitProcess(0)
+        }
+        LaunchArgs.UpdateProbe -> {
+            println(iondrive.nop.update.UpdateProbe.answer())
             exitProcess(0)
         }
         // Allowed from inside an agent's session, since it is what an agent should do instead of
@@ -129,6 +136,17 @@ fun main(args: Array<String>) {
     // First thing, before any UI: route uncaught throwables to ~/.config/nop/nop.log. Without this
     // a crash on the AWT thread takes the window down and leaves no trace anywhere findable.
     Log.install(args)
+
+    // A newer version of this install — staged by an earlier run, or already installed under the
+    // user's home for a package install this launcher belongs to — starts in place of this one. Only
+    // when no nop is running: there is nothing yet to carry over, and a launch that would only have
+    // forwarded to a running nop must not become a different build that takes that nop over.
+    if (adoptFrom == null && !SingleInstance.isRunning(Settings.configRoot)) {
+        SelfUpdate.redirectAtStart()?.let { launcher ->
+            val errno = Restart.execNow(launcher, args.toList())
+            Log.error("update: could not start $launcher (errno $errno); carrying on as this version", null)
+        }
+    }
 
     // A restart in place: this process was the nop before, and the exec that made it this one kept
     // its pid, its children and the terminals it handed over (see [Handover]). It is the primary
@@ -454,6 +472,12 @@ fun main(args: Array<String>) {
                 .collectLatest { Settings.saveRecentProjects(it) }
         }
         LaunchedEffect(darkMode) { Settings.saveDarkMode(darkMode) }
+        // Up, with every window composed and the terminals handed over taken up: what tells an update
+        // that it works, so the install's launchers move to it. See [SelfUpdate.markHealthy].
+        LaunchedEffect(Unit) {
+            delay(HEALTHY_AFTER_MS)
+            withContext(Dispatchers.IO) { SelfUpdate.markHealthy() }
+        }
 
         // Per-project "has uncommitted changes" flags backing the dirty dot on each project tab,
         // shared by every window since a project's working tree is the same tree wherever its tab
@@ -912,6 +936,7 @@ private fun ApplicationScope.WorkspaceWindow(
                     asking = others.filter { it.activity == Activity.Asking }.map { it.title },
                     onRestart = onRestart,
                     onCancel = onNotRestarting,
+                    update = SelfUpdate.status as? SelfUpdate.Status.Ready,
                 )
             }
             }

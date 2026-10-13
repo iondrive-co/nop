@@ -39,6 +39,17 @@ object Restart {
     }
 
     /**
+     * Replaces this process with [launcher], given [args], before it has done anything that matters:
+     * how a nop starting up hands over to a newer version of itself (see
+     * [iondrive.nop.update.SelfUpdate.redirectAtStart]). Returns the errno only if the exec failed,
+     * and this is then still the nop it was, which carries on starting.
+     */
+    fun execNow(launcher: Path, args: List<String>): Int {
+        iondrive.nop.terminal.Posix.keepOnlyAcrossExec(emptyList())
+        return iondrive.nop.terminal.Posix.exec(launcher.toString(), listOf(launcher.toString()) + args, successorEnvironment(System.getenv()))
+    }
+
+    /**
      * `sh` waiting for [pid] to be gone, then becoming [launcher]. A minute at most: a nop that has
      * not exited by then is stuck, and the successor's own start deals with it (it takes over a
      * running nop of another build, and forwards to one of its own).

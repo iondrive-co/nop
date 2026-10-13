@@ -102,14 +102,13 @@ object RestartInPlace {
         val manifest = runCatching { Handover.write(p.out, strays) }
             .onFailure { Log.error("restarting: could not write the handover", it) }
             .getOrNull()
-        // An update downloaded in the background goes in now, as late as it can: the launcher started
-        // below is then the update's, and the files this nop started from are moved aside only once
-        // there is nothing left for it to load from them.
-        SelfUpdate.installForRestart(p.launcher)
+        // An update staged in the background is what starts, from its own directory, rather than this
+        // build: see [SelfUpdate]. Nothing this nop started from moves.
+        val launcher = SelfUpdate.restartTarget() ?: p.launcher
         if (manifest != null && Handover.supported) {
-            Handover.exec(p.launcher, manifest, p.out.fds, Restart.successorEnvironment(System.getenv()))
+            Handover.exec(launcher, manifest, p.out.fds, Restart.successorEnvironment(System.getenv()))
         }
-        runCatching { Restart.startSuccessor(p.launcher) }.onFailure { Log.error("restart: could not start ${p.launcher}", it) }
+        runCatching { Restart.startSuccessor(launcher) }.onFailure { Log.error("restart: could not start $launcher", it) }
         exitProcess(0)
     }
 

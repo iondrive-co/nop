@@ -54,6 +54,10 @@ sealed interface Installation {
 
         internal const val BUILT_FROM = ".built-from-checkout"
 
+        /** Whether [launcher] is someone's own build: inside a checkout, or a copy of one. */
+        fun isOwnBuild(launcher: Path?): Boolean =
+            launcher != null && (checkoutAbove(launcher) != null || installedFrom(launcher) != null)
+
         internal fun checkoutAbove(path: Path): Path? {
             var dir: Path? = path.toAbsolutePath().normalize().parent
             while (dir != null) {

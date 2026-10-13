@@ -10,6 +10,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import iondrive.nop.update.SelfUpdate
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
@@ -38,6 +39,8 @@ fun RestartDialog(
     asking: List<String>,
     onRestart: () -> Unit,
     onCancel: () -> Unit,
+    /** An update downloaded in the background, which the restart may start — see [SelfUpdate]. */
+    update: SelfUpdate.Status.Ready? = null,
 ) {
     DialogFrame(title = "Restart nop?", onClose = onCancel, size = DpSize(460.dp, Dp.Unspecified)) {
         if (!byUser) {
@@ -62,6 +65,17 @@ fun RestartDialog(
             if (asking.isNotEmpty()) {
                 Text("Waiting on a question, which is lost: ${quoted(asking)}.", color = ChangeColors.REMOVED)
             }
+        }
+        if (update != null) {
+            Text(
+                if (update.atRestart) {
+                    "It comes back as ${update.version}, the update downloaded in the background."
+                } else {
+                    "${update.version} is downloaded, but cannot take over running terminals: it starts the next " +
+                        "time nop is started, not at this restart."
+                },
+                fontWeight = if (update.atRestart) FontWeight.SemiBold else FontWeight.Normal,
+            )
         }
         if (stopping.isNotEmpty()) {
             Text("Stopped, and put back ready to run again: ${quoted(stopping)}.", color = ChangeColors.MODIFIED)

@@ -128,6 +128,7 @@ fun ProjectBar(
     val reorder = remember { BarReorder() }
     var dialog by remember { mutableStateOf<BarDialog?>(null) }
     var picking by remember { mutableStateOf(false) }
+    var showingUpdates by remember { mutableStateOf(false) }
 
     Row(
         modifier = Modifier
@@ -175,6 +176,8 @@ fun ProjectBar(
         // indicator, and the editor tab strip is per viewer panel where this bar is drawn once per
         // window — in a split view the toggle would render twice, one theme control too many.
         if (onRestart != null) {
+            // Only once an update is staged, beside the restart that would start it.
+            UpdateBadge(onRestart = onRestart, onDetails = { showingUpdates = true }, height = BAR_HEIGHT)
             Box(
                 modifier = Modifier.height(BAR_HEIGHT),
                 contentAlignment = Alignment.Center,
@@ -188,6 +191,8 @@ fun ProjectBar(
         ) {
             ThemeToggleButton(onToggle = onToggleTheme, modifier = Modifier)
         }
+        // Which nop this is, and the way to its updates.
+        VersionLabel(onClick = { showingUpdates = true }, height = BAR_HEIGHT)
         // The way back to a window that was closed, and to this window's name. At the far right,
         // away from the tabs: it is about the window, not about what is in it.
         WindowsTab(
@@ -195,6 +200,10 @@ fun ProjectBar(
             iconTint = iconTint,
             onClick = { picking = true },
         )
+    }
+
+    if (showingUpdates) {
+        UpdateDialog(onRestart = onRestart, onClose = { showingUpdates = false })
     }
 
     if (picking) {

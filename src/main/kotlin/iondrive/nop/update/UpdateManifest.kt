@@ -23,7 +23,23 @@ data class UpdateManifest(
     val platform: String,
     val archive: Archive,
     val files: List<Entry>,
+    /** A smaller tarball holding only the files that differ from release [Delta.from]'s, when there is one. */
+    val delta: Delta? = null,
 ) {
+    /**
+     * The files of this release that release [from] does not have, alone in a tarball under [root].
+     * A nop that already has the rest — any version close enough — takes those from its own images
+     * by hash and downloads only this; every file is checked against [files] either way.
+     */
+    @Serializable
+    data class Delta(
+        val from: String,
+        val name: String,
+        val sha256: String,
+        val size: Long,
+        val root: String = "nop",
+    )
+
     @Serializable
     data class Archive(
         val name: String,
