@@ -81,7 +81,7 @@ fun AgentPanel(
             readings = readings,
             modelsFor = modelsFor,
             onUpdateAccount = onUpdateAccount,
-            onHandOver = { account -> selected.handOver(account) },
+            onHandOver = { draft -> selected.handOver(draft.target, draft = draft) },
         )
         // What other agents have sent this one, held until the user delivers or discards it.
         AgentInbox(selected)
@@ -103,13 +103,9 @@ fun AgentPanel(
                     dismissedAt = selected.endedAt
                     selected.startFresh()
                 },
-                onContinueFromRecord = {
+                onSwitch = { draft ->
                     dismissedAt = selected.endedAt
-                    selected.handOver(selected.account)
-                },
-                onSwitch = { account ->
-                    dismissedAt = selected.endedAt
-                    selected.handOver(account)
+                    selected.handOver(draft.target, draft = draft)
                 },
                 onClose = { state.close(selected.sessionId) },
             )

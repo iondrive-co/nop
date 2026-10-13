@@ -113,14 +113,15 @@ internal class TerminalFileDrop(private val onPaths: (List<String>) -> Unit) : D
  *
  * Under the system temp directory rather than in the project: a picture dragged in, pasted,
  * or snipped to be looked at is not part of the repository, and a file nop drops into the
- * working tree is one the user has to notice and delete — possibly after committing it.
+ * working tree is one the user has to notice and delete — possibly after committing it. Named
+ * per user: the temp directory is shared, and another user's directory there is not writable.
  */
 internal fun saveImageToTemp(image: Image?): Path? {
     if (image == null) return null
     val rendered = image as? RenderedImage ?: rasterizeImage(image) ?: return null
     return runCatching {
         val dir = Files.createDirectories(
-            Path.of(System.getProperty("java.io.tmpdir"), "nop-drops"),
+            Path.of(System.getProperty("java.io.tmpdir"), "nop-drops-${System.getProperty("user.name")}"),
         )
         Files.createTempFile(dir, "image-", ".png").also { file ->
             Files.newOutputStream(file).use { out ->

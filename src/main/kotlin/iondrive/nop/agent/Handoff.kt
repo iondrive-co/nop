@@ -29,27 +29,43 @@ object Handoff {
      * notice, gitignore and clean up — and the one place it must not appear is a commit made by the
      * very session it describes.
      */
-    fun write(sessionId: String, events: List<AgentEvent>, target: Provider): Written {
+    fun write(
+        sessionId: String,
+        events: List<AgentEvent>,
+        target: Provider,
+        at: Path = nextPath(sessionId),
+    ): Written {
         val text = summary(events, target)
-        val dir = Accounts.dataRoot().resolve("handoffs").resolve(sessionId)
         val path = runCatching {
-            OwnerOnly.directory(dir)
-            // One past the highest that is already there, rather than one past how many there are:
-            // deleting an earlier handoff must not make the next one land on a later one's name.
-            val highest = Files.list(dir).use { stream ->
+            OwnerOnly.directory(at.parent)
+            at.also {
+                OwnerOnly.file(it)
+                Files.writeString(it, text)
+            }
+        }.onFailure { Log.warn("could not write the handoff summary: $it") }
+            .getOrDefault(at)
+
+        return Written(path, fromScreenOnly = fromScreenOnly(events), text = text)
+    }
+
+    /**
+     * Where the next summary for [sessionId] goes, without writing anything: the seed prompt names
+     * it, and the user may edit that prompt before the summary exists.
+     *
+     * One past the highest that is already there, rather than one past how many there are:
+     * deleting an earlier handoff must not make the next one land on a later one's name.
+     */
+    fun nextPath(sessionId: String): Path {
+        val dir = Accounts.dataRoot().resolve("handoffs").resolve(sessionId)
+        val highest = runCatching {
+            Files.list(dir).use { stream ->
                 stream.mapToInt { file ->
                     file.fileName.toString().removePrefix("handoff-").removeSuffix(".md")
                         .toIntOrNull() ?: 0
                 }.max().orElse(0)
             }
-            dir.resolve("handoff-${highest + 1}.md").also {
-                OwnerOnly.file(it)
-                Files.writeString(it, text)
-            }
-        }.onFailure { Log.warn("could not write the handoff summary: $it") }
-            .getOrDefault(dir.resolve("handoff-1.md"))
-
-        return Written(path, fromScreenOnly = fromScreenOnly(events), text = text)
+        }.getOrDefault(0)
+        return dir.resolve("handoff-${highest + 1}.md")
     }
 
     /**

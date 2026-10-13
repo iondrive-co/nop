@@ -4,6 +4,7 @@ import iondrive.nop.Settings
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -1079,6 +1080,33 @@ class AgentSessionsTest {
         session.handOver(account("claude-bravo").copy(model = "claude-haiku-4-5"))
 
         assertEquals("claude-haiku-4-5", session.run.account.model)
+    }
+
+    @Test
+    fun `a handover starts the new run with the prompt the user edited`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
+        val draft = session.handoverDraft(account("claude-bravo"))
+        val edited = draft.prompt + " Then run the tests."
+
+        val written = session.handOver(draft.target, draft = draft.copy(prompt = edited))
+
+        assertEquals(draft.path, written.path)
+        assertTrue(java.nio.file.Files.exists(written.path))
+        assertEquals(edited, session.run.command.argv.last())
+    }
+
+    @Test
+    fun `an edited handover prompt follows the summary when its path was taken meanwhile`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-alpha"))
+        val draft = session.handoverDraft(account("claude-bravo"))
+        java.nio.file.Files.createDirectories(draft.path.parent)
+        java.nio.file.Files.writeString(draft.path, "another handover")
+
+        val written = session.handOver(draft.target, draft = draft)
+
+        assertNotEquals(draft.path, written.path)
+        assertEquals("another handover", java.nio.file.Files.readString(draft.path))
+        assertTrue(written.path.toAbsolutePath().toString() in session.run.command.argv.last())
     }
 
     @Test

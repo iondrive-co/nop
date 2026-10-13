@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -21,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentSession
 import iondrive.nop.agent.EndReason
+import iondrive.nop.agent.HandoverDraft
 import iondrive.nop.agent.UsageReading
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.DefaultButton
@@ -46,8 +50,7 @@ fun AgentExitPanel(
     onUpdateAccount: ((Account) -> Unit)? = null,
     onReopen: () -> Unit,
     onStartFresh: () -> Unit,
-    onContinueFromRecord: () -> Unit,
-    onSwitch: (Account) -> Unit,
+    onSwitch: (HandoverDraft) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -56,6 +59,7 @@ fun AgentExitPanel(
     val handoverAccounts = remember(accounts, session.account) {
         handoverAccountsFor(session.account, accounts)
     }
+    var draft by remember(session.id) { mutableStateOf<HandoverDraft?>(null) }
 
     Column(
         modifier = modifier
@@ -115,7 +119,7 @@ fun AgentExitPanel(
             // id. The same account can still pick the work up from nop's own record, which is what a
             // handover to another provider would be built from anyway.
             if (session.run.conversationMissing) {
-                DefaultButton(onClick = onContinueFromRecord) {
+                DefaultButton(onClick = { draft = session.handoverDraft(session.account) }) {
                     Text("Continue on ${session.account.name} from nop's record")
                 }
                 OutlinedButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
@@ -127,7 +131,19 @@ fun AgentExitPanel(
             }
         }
 
-        if (handoverAccounts.isNotEmpty()) {
+        val pending = draft
+        if (pending != null) {
+            HandoverPromptEditor(
+                draft = pending,
+                actionLabel = if (pending.target.name == session.account.name) "Continue" else "Switch",
+                onConfirm = { edited ->
+                    draft = null
+                    onSwitch(edited)
+                },
+                onCancel = { draft = null },
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        } else if (handoverAccounts.isNotEmpty()) {
             Text(
                 "Or hand over to a provider:",
                 color = AgentMuted,
@@ -139,7 +155,7 @@ fun AgentExitPanel(
                 readings = readings,
                 modelsFor = modelsFor,
                 actionLabel = "Switch",
-                onHandOver = onSwitch,
+                onHandOver = { target -> draft = session.handoverDraft(target) },
                 onUpdateAccount = onUpdateAccount,
             )
         }

@@ -11,12 +11,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -35,10 +37,13 @@ import androidx.compose.ui.unit.dp
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.CliTools
 import iondrive.nop.agent.DEFAULT_CHOICE
+import iondrive.nop.agent.HandoverDraft
 import iondrive.nop.agent.UsageReading
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.TextArea
 import org.jetbrains.jewel.ui.theme.defaultTabStyle
 
 /**
@@ -309,6 +314,44 @@ fun HandoverProviderCard(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * The prompt a chosen handover will start the incoming CLI with, open for editing before it goes.
+ *
+ * The CLI submits a prompt it is started with straight away, so this is the only place to add to
+ * or change it without interrupting the new agent and typing it in a second time. The run being
+ * handed over keeps going until [onConfirm]; its summary is built then.
+ */
+@Composable
+fun HandoverPromptEditor(
+    draft: HandoverDraft,
+    actionLabel: String,
+    onConfirm: (HandoverDraft) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val state = rememberTextFieldState(draft.prompt)
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            "Prompt for ${draft.target.name} (${draft.target.provider.label}):",
+            color = AgentMuted,
+            fontWeight = FontWeight.SemiBold,
+        )
+        TextArea(
+            state = state,
+            modifier = Modifier.fillMaxWidth().height(110.dp),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DefaultButton(onClick = { onConfirm(draft.copy(prompt = state.text.toString())) }) {
+                Text(actionLabel)
+            }
+            OutlinedButton(onClick = onCancel) { Text("Cancel") }
         }
     }
 }

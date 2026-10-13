@@ -24,6 +24,7 @@ import androidx.compose.foundation.Canvas
 import iondrive.nop.ShortPath
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentSession
+import iondrive.nop.agent.HandoverDraft
 import iondrive.nop.agent.UsageReading
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
@@ -61,12 +62,14 @@ fun AgentSessionBar(
     readings: Map<String, UsageReading>,
     modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
     onUpdateAccount: ((Account) -> Unit)? = null,
-    onHandOver: (Account) -> Unit,
+    onHandOver: (HandoverDraft) -> Unit,
 ) {
     val handoverAccounts = remember(accounts, session.account) {
         handoverAccountsFor(session.account, accounts)
     }
     var expanded by remember(session.sessionId) { mutableStateOf(false) }
+    // Per run: a prompt drafted for one run names that run's provider and summary path.
+    var draft by remember(session.id) { mutableStateOf<HandoverDraft?>(null) }
     // Reset per run, so the confirmation belongs to the command actually on the clipboard rather
     // than to one copied before a handoff changed which account is running.
     var copied by remember(session.id) { mutableStateOf(false) }
@@ -205,21 +208,33 @@ fun AgentSessionBar(
 
         if (expanded && handoverAccounts.isNotEmpty()) {
             Text(
-                "Ends this run, writes a summary of it, and opens the chosen account on that summary.",
+                "Ends this run, writes a summary of it, and opens the chosen account on that summary " +
+                    "with a prompt you can edit first.",
                 color = AgentMuted,
                 modifier = Modifier.padding(top = 4.dp, bottom = 6.dp),
             )
-            HandoverProviderList(
-                accounts = handoverAccounts,
-                readings = readings,
-                modelsFor = modelsFor,
-                actionLabel = "Hand over",
-                onHandOver = { target ->
-                    expanded = false
-                    onHandOver(target)
-                },
-                onUpdateAccount = onUpdateAccount,
-            )
+            val pending = draft
+            if (pending != null) {
+                HandoverPromptEditor(
+                    draft = pending,
+                    actionLabel = "Hand over",
+                    onConfirm = { edited ->
+                        draft = null
+                        expanded = false
+                        onHandOver(edited)
+                    },
+                    onCancel = { draft = null },
+                )
+            } else {
+                HandoverProviderList(
+                    accounts = handoverAccounts,
+                    readings = readings,
+                    modelsFor = modelsFor,
+                    actionLabel = "Hand over",
+                    onHandOver = { target -> draft = session.handoverDraft(target) },
+                    onUpdateAccount = onUpdateAccount,
+                )
+            }
             Box(modifier = Modifier.padding(bottom = 2.dp))
         }
     }

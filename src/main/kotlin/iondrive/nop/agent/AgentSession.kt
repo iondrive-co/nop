@@ -21,6 +21,7 @@ import iondrive.nop.ui.TerminalTab
 import java.awt.Color
 import java.awt.GraphicsEnvironment
 import java.io.File
+import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
@@ -41,6 +42,12 @@ data class AutoHandover(val from: String, val to: String, val kind: String)
  * A wall this session is waiting out so it can tell the CLI to carry on, for the session bar to say
  * so. [resumeAt] is when nop next checks, which is the reset when anything said when that is.
  */
+/**
+ * A handover the user has chosen but not yet sent: the prompt the incoming CLI will be started with,
+ * shown for editing first, and the summary path that prompt names. See [AgentSession.handoverDraft].
+ */
+data class HandoverDraft(val target: Account, val path: Path, val prompt: String)
+
 data class ResumeWait(val account: String, val kind: String, val resumeAt: Instant, val resetKnown: Boolean)
 
 /**
@@ -696,19 +703,40 @@ class AgentSession(
     }
 
     /**
+     * The prompt a handover to [target] would start it with, for the user to edit before
+     * [handOver] sends it. Nothing is written yet: the summary is built when the handover happens.
+     */
+    fun handoverDraft(target: Account): HandoverDraft {
+        val path = Handoff.nextPath(sessionId)
+        return HandoverDraft(target, path, Handoff.seedPrompt(run.account.provider, path))
+    }
+
+    /**
      * Hands the work to [target]: builds a summary of what has happened, writes it beside the log,
-     * and opens the new provider pointed at it.
+     * and opens the new provider pointed at it, with [draft]'s prompt when the user edited one.
      *
      * The summary is written before the new CLI starts, and the prompt is one line naming the file,
      * so a handoff that reads badly leaves something on disk to look at rather than only a process
      * that has already exited.
      */
-    fun handOver(target: Account, reason: EndReason = EndReason.Switched): Handoff.Written {
+    fun handOver(
+        target: Account,
+        reason: EndReason = EndReason.Switched,
+        draft: HandoverDraft? = null,
+    ): Handoff.Written {
         endRun(reason)
-        val written = Handoff.write(sessionId, log.events(), target.provider)
+        // The draft was shown while this run was still going, so the summary is built now, from
+        // everything up to the end, at the path the user's prompt already names. If something else
+        // took that name meanwhile, the summary goes to the next free one and the prompt follows it.
+        val at = draft?.path?.takeIf { !Files.exists(it) } ?: Handoff.nextPath(sessionId)
+        val written = Handoff.write(sessionId, log.events(), target.provider, at)
+        val seed = draft?.prompt
+            ?.replace(draft.path.toAbsolutePath().toString(), written.path.toAbsolutePath().toString())
+            ?.takeIf { it.isNotBlank() }
+            ?: Handoff.seedPrompt(run.account.provider, written.path)
         switchTo(
             account = target,
-            seed = Handoff.seedPrompt(run.account.provider, written.path),
+            seed = seed,
             reason = reason,
             seededFromHandoff = true,
             handoffPath = written.path.toString(),
