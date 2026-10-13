@@ -30,6 +30,7 @@ sealed interface Installation {
         internal fun of(launcher: Path?, version: Version?): Installation {
             launcher ?: return NotUpdatable("nop is not running from an installed launcher")
             checkoutAbove(launcher)?.let { return NotUpdatable("nop is built from the checkout at $it; rebuild it to update") }
+            installedFrom(launcher)?.let { return NotUpdatable("nop is installed from the checkout at $it; rebuild it to update") }
             version ?: return NotUpdatable("this build does not say which version it is")
             return Release(launcher, version)
         }
@@ -40,6 +41,19 @@ sealed interface Installation {
          * only when it holds `HEAD`, as it must for git itself to see a repository there — an empty
          * `.git` left in a shared directory such as `/tmp` is not one.
          */
+        /**
+         * The checkout a copy of its build was installed from, or null: `installLocalCopy` in
+         * build.gradle.kts copies a checkout's app image out of the checkout, to `~/.local/opt/nop`,
+         * and names the checkout in [BUILT_FROM] at the image's root, beside `bin/`.
+         */
+        internal fun installedFrom(launcher: Path): String? {
+            val marker = launcher.toAbsolutePath().normalize().parent?.parent?.resolve(BUILT_FROM) ?: return null
+            if (!Files.isRegularFile(marker)) return null
+            return runCatching { Files.readString(marker).trim() }.getOrNull()?.ifBlank { "unknown" } ?: "unknown"
+        }
+
+        internal const val BUILT_FROM = ".built-from-checkout"
+
         internal fun checkoutAbove(path: Path): Path? {
             var dir: Path? = path.toAbsolutePath().normalize().parent
             while (dir != null) {

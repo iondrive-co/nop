@@ -4,6 +4,8 @@ import java.awt.Color
 import java.awt.Font
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import javax.imageio.ImageIO
 
 plugins {
@@ -73,12 +75,20 @@ val generateBuildInfo = tasks.register("generateBuildInfo") {
     group = "build"
     description = "Write nop-build.properties with the version this build packages as"
     val version = provider { compose.desktop.application.nativeDistributions.packageVersion ?: "0.0.0" }
+    // The handover this build adopts (Handover.VERSION), so a nop about to restart into a downloaded
+    // update can tell, without running it, whether it would take over the running terminals.
+    val handoverSource = layout.projectDirectory.file("src/main/kotlin/iondrive/nop/ipc/Handover.kt")
+    val handover = provider {
+        Regex("""const val VERSION = (\d+)""").find(handoverSource.asFile.readText())?.groupValues?.get(1)
+            ?: throw GradleException("no `const val VERSION` in ${handoverSource.asFile}")
+    }
     inputs.property("version", version)
+    inputs.property("handover", handover)
     outputs.dir(buildInfoDir)
     doLast {
         val file = buildInfoDir.get().asFile.resolve("iondrive/nop/update/nop-build.properties")
         file.parentFile.mkdirs()
-        file.writeText("version=${version.get()}\n")
+        file.writeText("version=${version.get()}\nhandover=${handover.get()}\n")
     }
 }
 sourceSets.main { resources.srcDir(generateBuildInfo) }
@@ -164,15 +174,16 @@ compose.desktop {
 // gate lives here where every build goes through it regardless of who or what started it.
 // AGENTS.md explains the rule; this makes skipping it an error rather than a silent no-op.
 val excludedImageTasks = gradle.startParameter.excludedTaskNames
-    .filter { it.substringAfterLast(':') in setOf("installDesktopEntry", "createDistributable") }
+    .filter { it.substringAfterLast(':') in setOf("installDesktopEntry", "createDistributable", "installLocalCopy") }
 if (excludedImageTasks.isNotEmpty()) {
     throw GradleException(
         """
         Refusing to build with ${excludedImageTasks.joinToString(", ") { "-x $it" }}.
 
-        That skips rebuilding build/compose/binaries/main/app/nop/, which is what the user actually
-        runs, so the build would pass while your change reached nobody. installDesktopEntry rebuilds
-        the image even when a test fails, which is why it must not be excluded.
+        That skips rebuilding build/compose/binaries/main/app/nop/, or copying it to
+        ~/.local/opt/nop, which is what the user actually runs, so the build would pass while your
+        change reached nobody. installDesktopEntry rebuilds the image even when a test fails, which
+        is why it must not be excluded.
 
         Run ./gradlew test with no -x, then tell the user to restart nop. See AGENTS.md.
         """.trimIndent(),
@@ -186,6 +197,7 @@ tasks.register("installDesktopEntry") {
     group = "distribution"
     description = "Write ~/.local/share/applications/iondrive.nop.desktop pointing at the local distributable"
     dependsOn("createDistributable")
+    finalizedBy("installLocalCopy")
 
     val distDir = layout.buildDirectory.dir("compose/binaries/main/app/nop")
     val home = System.getProperty("user.home")
@@ -285,6 +297,62 @@ tasks.register("installDesktopEntry") {
         println("Wrote ${desktopFile.absolutePath} -> ${bin.absolutePath}")
         for ((_, f) in themedIcons) println("Wrote ${f.absolutePath}")
         println("Wrote ${fallbackIcon.absolutePath}")
+    }
+}
+
+// Replaces the installed copy at ~/.local/opt/nop with this build's app image, when there is one.
+//
+// A workspace can run nop from there rather than from build/: its `nop` on PATH links to
+// ~/.local/opt/nop/bin/nop. A restart execs the launcher the running nop started from, so without
+// this a build there reaches nobody, however often nop is restarted. A machine with no copy there
+// gets none: this only ever refreshes one that exists.
+//
+// The new image is copied beside the old and swapped in by renaming, so the copy is never half
+// written where the launcher looks. The old one is kept as ~/.local/opt/nop.previous to go back to.
+// It writes .built-from-checkout into the image, naming this checkout, so the self-updater can tell
+// this copy is someone's own build and not a release (see iondrive.nop.update.Installation).
+tasks.register("installLocalCopy") {
+    group = "distribution"
+    description = "Replace the installed copy at ~/.local/opt/nop with this build's app image"
+    dependsOn("createDistributable")
+
+    val distDir = layout.buildDirectory.dir("compose/binaries/main/app/nop")
+    val installDir = file("${System.getProperty("user.home")}/.local/opt/nop")
+    val checkout = rootDir
+    // Not from a linked worktree, for the reason installDesktopEntry gives.
+    onlyIf { !checkout.resolve(".git").isFile && installDir.isDirectory }
+
+    doLast {
+        val dist = distDir.get().asFile
+        // Every file under lib/app with its size. A change to the code renames the nop jar, so
+        // equal listings mean the installed copy already holds this build.
+        fun listing(root: File): Map<String, Long> = root.resolve("lib/app").walkTopDown()
+            .filter { it.isFile }
+            .associate { it.relativeTo(root).path to it.length() }
+        if (listing(dist) == listing(installDir) &&
+            installDir.resolve(".built-from-checkout").isFile
+        ) {
+            println("$installDir already holds this build")
+            return@doLast
+        }
+
+        val staging = installDir.resolveSibling("${installDir.name}.installing")
+        val previous = installDir.resolveSibling("${installDir.name}.previous")
+        staging.deleteRecursively()
+        // cp -a, not copyRecursively: the launcher and the runtime's binaries must stay executable,
+        // and the runtime carries symlinks.
+        val copy = ProcessBuilder("cp", "-a", dist.absolutePath, staging.absolutePath)
+            .redirectErrorStream(true).start()
+        val output = copy.inputStream.bufferedReader().readText()
+        if (copy.waitFor() != 0) throw GradleException("could not copy $dist to $staging: $output")
+        staging.resolve(".built-from-checkout").writeText(checkout.absolutePath + "\n")
+        // The copy keeps the installed one's permissions on its top directory (often owner-only).
+        Files.setPosixFilePermissions(staging.toPath(), Files.getPosixFilePermissions(installDir.toPath()))
+
+        previous.deleteRecursively()
+        Files.move(installDir.toPath(), previous.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        Files.move(staging.toPath(), installDir.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        println("Installed $dist to $installDir (the old copy is $previous). Restart nop to run it.")
     }
 }
 

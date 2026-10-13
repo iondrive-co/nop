@@ -11,9 +11,21 @@ object BuildInfo {
     /** This build's version, `MAJOR.MINOR.PATCH`; null when the stamp is missing or unreadable. */
     val version: Version? by lazy { load()?.getProperty("version")?.let(Version::parse) }
 
+    /** The handover this build adopts; see [handoverOf]. */
+    val handover: Int by lazy { handoverOf(load() ?: Properties()) }
+
+    /**
+     * The handover a build stamped with [stamp] adopts — what [iondrive.nop.ipc.Handover] calls its
+     * VERSION. A stamp without the field adopts version 1: no build that leaves it out knows another.
+     */
+    fun handoverOf(stamp: Properties): Int = stamp.getProperty("handover")?.trim()?.toIntOrNull() ?: 1
+
     private fun load(): Properties? = runCatching {
         BuildInfo::class.java.getResourceAsStream(RESOURCE)?.use { s -> Properties().apply { load(s) } }
     }.getOrNull()
+
+    /** Where the stamp sits, in the jar and in the sources it is generated into. */
+    const val RESOURCE_PATH = "iondrive/nop/update/nop-build.properties"
 
     private const val RESOURCE = "nop-build.properties"
 }

@@ -57,6 +57,7 @@ import iondrive.nop.ui.WindowPickerPanel
 import iondrive.nop.ui.nopMenuStyle
 import iondrive.nop.ui.projectTint
 import iondrive.nop.ui.projectWindowIcon
+import iondrive.nop.update.SelfUpdate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
@@ -144,6 +145,9 @@ fun main(args: Array<String>) {
 
     // Only the nop that owns the windows backs the sessions up — see [Backup].
     Backup.start()
+
+    // And keeps itself up to date, when it is a release install — see [SelfUpdate].
+    SelfUpdate.start()
 
     // The other way the UI thread fails without a trace: not by throwing, but by stopping. Only the
     // nop that owns the windows has a UI thread worth watching.

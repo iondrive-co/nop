@@ -33,6 +33,14 @@ class InstallationTest {
     }
 
     @Test
+    fun `a checkout's build installed outside it is not updated from releases`() {
+        val launcher = tmp.resolve("opt/nop/bin/nop").also { it.parent.createDirectories() }
+        tmp.resolve("opt/nop/.built-from-checkout").writeText("/home/dev/nop\n")
+        val result = assertIs<Installation.NotUpdatable>(Installation.of(launcher, v))
+        assertTrue("/home/dev/nop" in result.reason, result.reason)
+    }
+
+    @Test
     fun `an empty git directory is not a checkout`() {
         tmp.resolve("shared/.git").createDirectories()
         assertNull(Installation.checkoutAbove(tmp.resolve("shared/opt/nop/bin/nop"))?.takeIf { it.startsWith(tmp) })

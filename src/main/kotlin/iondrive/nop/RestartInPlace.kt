@@ -10,6 +10,7 @@ import iondrive.nop.ipc.Restart
 import iondrive.nop.terminal.Posix
 import iondrive.nop.ui.TerminalStore
 import iondrive.nop.ui.ToolTab
+import iondrive.nop.update.SelfUpdate
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -101,6 +102,10 @@ object RestartInPlace {
         val manifest = runCatching { Handover.write(p.out, strays) }
             .onFailure { Log.error("restarting: could not write the handover", it) }
             .getOrNull()
+        // An update downloaded in the background goes in now, as late as it can: the launcher started
+        // below is then the update's, and the files this nop started from are moved aside only once
+        // there is nothing left for it to load from them.
+        SelfUpdate.installForRestart(p.launcher)
         if (manifest != null && Handover.supported) {
             Handover.exec(p.launcher, manifest, p.out.fds, Restart.successorEnvironment(System.getenv()))
         }

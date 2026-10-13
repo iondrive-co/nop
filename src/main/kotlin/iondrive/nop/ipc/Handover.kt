@@ -327,5 +327,6 @@ object Handover {
 
     private const val MANIFEST = "manifest.json"
     private val REPLAY = Regex("""\d+\.replay""")
-    private const val VERSION = 1
+    /** The manifest format; generateBuildInfo stamps it into nop-build.properties for the updater. */
+    internal const val VERSION = 1
 }
