@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test
 /**
  * Reading an agent CLI's prompt off its screen, to tell a prompt that is really empty from one the
  * keystrokes only guess may hold a draft. The screens are drawn by JediTerm from the escape sequences
- * each CLI was seen writing (Claude Code, Codex 0.160, Antigravity 1.3), cut down to the prompt.
+ * each CLI was seen writing (Claude Code 2.1, Codex 0.160, Antigravity 1.3), cut down to the prompt.
  */
 class PromptScreenTest {
 
@@ -52,6 +52,32 @@ class PromptScreenTest {
             empty("$conversation$rule\n\u001b[39m❯ hello\u001b[2m there\u001b[22m\n$rule\n"),
             "a dim suggestion after typed text still leaves the text",
         )
+    }
+
+    @Test
+    fun `Claude's caret on its placeholder or suggested prompt still reads as an empty prompt`() {
+        val conversation = "\u001b[39m❯ fix the tests\n\n● Done.\n\n"
+        // Claude draws its caret by reversing the cell under it: on an empty prompt that is the
+        // placeholder's first character, with the rest of the placeholder dim behind it.
+        assertTrue(
+            empty("$conversation$rule\n❯ \u001b[7mT\u001b[27m\u001b[2mry \"how does <filepath> work?\"\u001b[22m\n$rule\n"),
+            "an example placeholder",
+        )
+        assertTrue(empty("$conversation$rule\n❯ \u001b[7mr\u001b[27m\u001b[2mun the full test suite\u001b[22m\n$rule\n"), "a suggested prompt")
+        assertTrue(empty("$conversation$rule\n❯ \u001b[7m \u001b[27m\n$rule\n"), "the caret alone")
+        val long = "run the whole test suite again and then fix whatever it turns up in the parser"
+        assertTrue(
+            empty("$conversation$rule\n❯ \u001b[7m${long.first()}\u001b[27m\u001b[2m${long.drop(1)}\u001b[22m\n$rule\n"),
+            "a suggestion long enough to run onto the next row",
+        )
+    }
+
+    @Test
+    fun `Claude's caret on a draft leaves it a draft`() {
+        assertFalse(empty("$rule\n❯ half a thought\u001b[7m \u001b[27m\n$rule\n"), "the caret after the text")
+        assertFalse(empty("$rule\n❯ \u001b[7mh\u001b[27malf a thought\n$rule\n"), "the caret moved back to the start")
+        assertFalse(empty("$rule\n❯ \u001b[7mx\u001b[27m\n$rule\n"), "one character under the caret")
+        assertFalse(empty("$rule\n❯ \u001b[7m/\u001b[27m\u001b[2mhelp\u001b[22m\n$rule\n"), "a command's first character under the caret")
     }
 
     @Test

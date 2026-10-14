@@ -97,6 +97,10 @@ object Handover {
         val at: Long,
         /** Whether the user had pressed Deliver, or the project lets it through without asking. */
         val approved: Boolean,
+        /** The message's id, which its sender asks after it by; empty from a nop that gave none. */
+        val id: String = "",
+        /** Who may ask after it — see [iondrive.nop.agent.AgentMessages.Held.sender]. */
+        val sender: String = "",
     )
 
     /** A Term tab carried across. */

@@ -51,6 +51,15 @@ class AgentSocketTest {
             services += name
             return AgentMessages.Outcome("registration path")
         }
+        val asked = mutableListOf<String>()
+        override fun status(caller: AgentSession, id: String): AgentMessages.Outcome {
+            asked += "tab $id"
+            return AgentMessages.Outcome("message $id waiting: behind a draft")
+        }
+        override fun statusService(caller: AgentServices.Registration, id: String): AgentMessages.Outcome {
+            asked += "service $id"
+            return AgentMessages.Outcome("message $id submitted: just now")
+        }
         override fun listService(caller: AgentServices.Registration) = AgentMessages.Outcome("service list")
         override fun sendService(caller: AgentServices.Registration, to: String, message: String): AgentMessages.Outcome {
             sent += to to message
@@ -77,10 +86,15 @@ class AgentSocketTest {
         assertTrue(tools.memory.isEmpty())
         assertTrue(tools.services.isEmpty())
 
+        // A service asks after what it sent, and a tab after what it sent; each through its own door.
+        assertEquals(true to "message m12345678 submitted: just now", AgentSocket.handle("${service.ticket}\nstatus\nm12345678\n", { null }, tools, identify))
+
         // Only a tab registers a service.
         val (tab) = tabs(dir, "a")
         assertEquals(true to "registration path", AgentSocket.handle("${tab.agentTicket}\nservice-register\nTask scheduler", { tab }, tools, identify))
         assertEquals(listOf("Task scheduler"), tools.services)
+        assertEquals(true to "message m87654321 waiting: behind a draft", AgentSocket.handle("${tab.agentTicket}\nstatus\nm87654321", { tab }, tools, identify))
+        assertEquals(listOf("service m12345678", "tab m87654321"), tools.asked)
     }
 
     @Test
@@ -174,6 +188,10 @@ class AgentSocketTest {
         val (sent, reply) = helper(me.agentTicket, "send", other.shortId, "hello", "there")
         assertEquals(0, sent, reply)
         assertTrue(reply.startsWith("Held for the user"), reply)
+        val id = reply.trim().lines().last().split(" ")[1]
+        val (asked, status) = helper(me.agentTicket, "status", id)
+        assertEquals(0, asked, status)
+        assertTrue(status.startsWith("message $id held: "), status)
 
         val (piped, pipedReply) = helper(me.agentTicket, "send", "other", stdin = "first line\nsecond line\n")
         assertEquals(0, piped, pipedReply)

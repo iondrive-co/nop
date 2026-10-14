@@ -68,7 +68,7 @@ fun AgentInbox(session: AgentSession, modifier: Modifier = Modifier) {
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f),
                         )
-                        Text(agoLabel(now - message.at), color = AgentMuted)
+                        Text("${agoLabel(now - message.at)} · ${message.id}", color = AgentMuted)
                     }
                     Box(
                         modifier = Modifier
@@ -83,7 +83,7 @@ fun AgentInbox(session: AgentSession, modifier: Modifier = Modifier) {
                     }
                     when {
                         session.ended -> Text("This tab's CLI has ended, so it can only be discarded.", color = AgentMuted)
-                        message.approved -> AgentMessages.waitReason(session, now)?.let {
+                        message.approved -> AgentMessages.blocker(session, message, now)?.let {
                             Text("Delivering once $it.", color = AgentMuted)
                         }
                         session.run.session.mayHoldDraft(now) -> Text(

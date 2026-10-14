@@ -4,6 +4,7 @@ import iondrive.nop.agent.Activity
 import iondrive.nop.agent.ActivityTracker
 import iondrive.nop.agent.AgentEvent
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -83,5 +84,28 @@ class QuestionSubmissionTest {
         assertTrue(submitted.await(5, TimeUnit.SECONDS), "the delayed Enter should submit the answer")
         assertEquals(Activity.Idle, tracker.activity(now = 10_000))
         assertTrue(terminal.lastSubmitAt > 0)
+    }
+
+    @Test
+    fun `nop's own submission is not a draft, and says when its Enter has gone`(@TempDir tmp: Path) {
+        val terminal = terminal(tmp, question())
+        val entered = CountDownLatch(1)
+        var reached: Boolean? = null
+        SwingUtilities.invokeAndWait {
+            terminal.submit("a message from another tab") {
+                reached = it
+                entered.countDown()
+            }
+            assertTrue(terminal.submitting)
+            assertFalse(terminal.draftPending, "the text is nop's own, on its way in")
+            assertFalse(terminal.mayHoldDraft())
+        }
+
+        assertTrue(entered.await(5, TimeUnit.SECONDS), "told once the Enter has been written")
+        SwingUtilities.invokeAndWait {
+            assertFalse(terminal.submitting)
+            assertTrue(terminal.lastSubmitAt > 0)
+        }
+        assertEquals(false, reached, "no program was running to take the Enter")
     }
 }

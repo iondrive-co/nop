@@ -39,19 +39,6 @@ Open several projects in one window, each with its own file tree and editor tabs
 
 <!-- screenshot -->
 
-## Project services
-
-A program of your own, such as a scheduler or a controller, can message a project's agent tabs under its own name,
-with no agent tab of its own. Register it once from an agent tab in that project:
-
-    nop-msg service-register "Task scheduler"
-
-That prints the path of an owner-only JSON file holding the service's `name`, `project`, `ticket` and `socket`. The
-service sends `nop-msg`'s requests to that socket with its ticket in place of a tab's: only `list` and `send`, and only
-to tabs in that project. Its messages wait for your approval like any other, unless the project lets its tabs message
-each other freely. The registration outlives the tab that made it, registering again keeps its ticket, and nop points
-its `socket` at the new socket when it restarts. Keep the ticket out of prompts; delete the file to remove the service.
-
 ## Shortcuts
 
 - Ctrl click on an element to jump to source

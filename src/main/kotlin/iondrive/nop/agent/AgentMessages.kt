@@ -7,6 +7,11 @@ import iondrive.nop.Log
 import iondrive.nop.Settings
 import iondrive.nop.ipc.Handover
 import java.io.File
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
+import java.util.UUID
 import javax.swing.Timer
 
 /**
@@ -37,6 +42,11 @@ import javax.swing.Timer
  * still waits while the tab cannot safely take it: a CLI still starting, or holding a question (the
  * text would be taken as the answer).
  *
+ * Every message has an id, and its sender is told where it has got to ([Status]): held for the user,
+ * waiting and on what, being typed in, sent with Enter, or discarded. The answer to a send says so
+ * as it stands once nop has tried to type it in, and `status` asks again later; the log records each
+ * step, and what holds a message back whenever that changes.
+ *
  * Everything here runs on the AWT EDT, where the keyboard's writes happen too.
  */
 object AgentMessages {
@@ -60,23 +70,72 @@ object AgentMessages {
         /** What is typed: [body] under its header. */
         val typed: String,
         val at: Long,
+        /** This message's own id: what its sender is told, and asks after it by ([status]). */
+        val id: String = newId(),
+        /**
+         * Who may ask after it — `tab:<session id>` or `service:<project>:<name>` — so that no sender
+         * can read where another's messages have got to. Empty for one nobody can ask after.
+         */
+        val sender: String = "",
     ) {
         /** The user has pressed Deliver; it goes in as soon as the tab can take it. */
         var approved: Boolean by mutableStateOf(false)
             internal set
 
+        /** What the log last said holds it back, so the log speaks when that changes rather than at every pass. */
+        internal var loggedBlocker: String? = null
+
         /** As the next nop is handed it across a restart. */
-        fun record() = Handover.HeldRecord(from, fromId, fromProject.path, body, typed, at, approved)
+        fun record() = Handover.HeldRecord(from, fromId, fromProject.path, body, typed, at, approved, id, sender)
 
         companion object {
             /** A message the last nop handed over, back in an inbox as it was. */
             fun of(record: Handover.HeldRecord) = Held(
                 record.from, record.fromId, File(record.fromProject), record.body, record.typed, record.at,
+                id = record.id.ifEmpty { newId() }, sender = record.sender,
             ).also { it.approved = record.approved }
         }
     }
 
-    private var lastSubmitAt = 0L
+    /**
+     * Where one message has got to, as its sender is told: [line] is one line a program can read,
+     * `message <id> <state>: <detail>`, with the state one of [State]'s words.
+     */
+    data class Status(val id: String, val state: State, val detail: String) {
+        enum class State(val word: String) {
+            /** In the recipient's inbox until the user chooses Deliver. */
+            Held("held"),
+
+            /** Let through, and waiting until the tab can take it; the detail says on what. */
+            Waiting("waiting"),
+
+            /** Typed into the prompt, with the Enter that sends it a moment behind. */
+            Submitting("submitting"),
+
+            /** Typed in and sent with Enter. */
+            Submitted("submitted"),
+
+            /** Discarded by the user. */
+            Discarded("discarded"),
+
+            /** It cannot go in: the tab's CLI has ended, or stopped before the Enter. */
+            Undeliverable("undeliverable"),
+        }
+
+        val line: String get() = "message $id ${state.word}: $detail"
+    }
+
+    /** The messages that have left an inbox, by id, with who sent each; the last [MAX_GONE], for [status]. */
+    private val gone = object : LinkedHashMap<String, Pair<String, Status>>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, Status>>) = size > MAX_GONE
+    }
+
+    /** How [pump] types a message in, and hears whether its Enter reached a running CLI. Replaced in tests. */
+    internal var typeInto: (AgentSession, String, (Boolean) -> Unit) -> Unit =
+        { s, text, entered -> s.run.session.submit(text, entered) }
+
+    /** When the pump last typed a message in, in any tab. Set in tests. */
+    internal var lastSubmitAt = 0L
 
     private val pump = Timer(PUMP_MS) { pump(System.currentTimeMillis()) }.apply { isRepeats = true }
 
@@ -132,11 +191,23 @@ object AgentMessages {
         return Outcome("Agent tabs open in nop in ${caller.projectDir.name}. Address one by its id (the first column) or its exact title.\n$rows")
     }
 
-    private fun row(s: AgentSession, unasked: Boolean, you: Boolean): String {
-        val waiting = s.inbox.size.takeIf { it > 0 }?.let { ", $it message(s) waiting for the user" }.orEmpty()
+    /**
+     * One tab as [list] shows it. Its inbox is told apart: messages the user has not let through yet,
+     * and ones that are let through and waiting for the tab, with what the first of those waits on.
+     */
+    private fun row(s: AgentSession, unasked: Boolean, you: Boolean, now: Long = System.currentTimeMillis()): String {
+        val forUser = s.inbox.count { !it.approved }
+        val waiting = forUser.takeIf { it > 0 }?.let { ", $it message(s) waiting for the user" }.orEmpty()
+        val letThrough = s.inbox.filter { it.approved }
+        val going = when {
+            letThrough.isEmpty() -> ""
+            s.ended -> ", ${letThrough.size} message(s) that cannot go in now its CLI has ended"
+            else -> ", ${letThrough.size} message(s) waiting to be typed in once ${blocker(s, letThrough.first(), now) ?: NEXT_PASS}"
+        }
         val freely = if (unasked) ", takes your messages without asking the user" else ""
         val mine = if (you) "  (you)" else ""
-        return "- ${s.shortId}  \"${clean(s.title)}\"  ${s.account.provider.id}/${s.account.name}  in ${s.projectDir.name}  — ${describe(s)}$waiting$freely$mine"
+        return "- ${s.shortId}  \"${clean(s.title)}\"  ${s.account.provider.id}/${s.account.name}  in ${s.projectDir.name}  — " +
+            "${describe(s)}$waiting$going$freely$mine"
     }
 
     /** Holds [message] in the inbox of the tab [to] names, for the user to deliver or discard. */
@@ -157,6 +228,7 @@ object AgentMessages {
             body = text,
             typed = envelope(caller, text, unasked),
             at = System.currentTimeMillis(),
+            sender = senderOf(caller),
         )
         return enqueue(target, held, unasked, shownAs = "your tab's name", freely = "tabs in ${target.projectDir.name} may message each other freely")
     }
@@ -182,6 +254,7 @@ object AgentMessages {
             body = text,
             typed = serviceEnvelope(caller, text, unasked),
             at = System.currentTimeMillis(),
+            sender = senderOf(caller),
         )
         return enqueue(
             target, held, unasked,
@@ -198,30 +271,36 @@ object AgentMessages {
 
     private fun refuseTarget(target: AgentSession): Outcome? = when {
         target.ended -> Outcome("\"${clean(target.title)}\" has ended; nothing is running there to read it", isError = true)
-        target.inbox.size >= MAX_HELD -> Outcome("\"${clean(target.title)}\" already has $MAX_HELD messages waiting for the user", isError = true)
+        target.inbox.size >= MAX_HELD -> Outcome("\"${clean(target.title)}\" already has $MAX_HELD messages waiting in its inbox", isError = true)
         else -> null
     }
 
     /**
      * Puts [held] in [target]'s inbox, approved already when [unasked], and says what became of it:
-     * the inbox shows it under [shownAs], and [freely] is why it went in without the user.
+     * the inbox shows it under [shownAs], and [freely] is why it went in without the user. A message
+     * let through is offered to the pump at once, so the answer says what actually happened to it —
+     * typed in, or waiting and on what — and ends with its [Status] line.
      */
     private fun enqueue(target: AgentSession, held: Held, unasked: Boolean, shownAs: String, freely: String): Outcome {
         target.inbox.add(held)
+        val to = "\"${clean(target.title)}\" (${target.shortId})"
         if (unasked) {
             held.approved = true
-            Log.info("agent message from ${held.fromId} to ${target.shortId}: delivered without asking, as ${target.projectDir.name} allows")
+            Log.info("agent message ${held.id} from ${held.fromId} to ${target.shortId}: delivered without asking, as ${target.projectDir.name} allows")
             startPump()
-            val waiting = waitReason(target)?.let { " It goes in once $it." }.orEmpty()
-            return Outcome(
-                "Delivered to \"${clean(target.title)}\" (${target.shortId}) without asking the user, since $freely. " +
-                    "nop types it into that agent's prompt.$waiting",
-            )
+            val now = System.currentTimeMillis()
+            val status = lookUp(held.id, held.sender, now) ?: statusOf(target, held, now)
+            val what = when (status.state) {
+                Status.State.Submitting, Status.State.Submitted -> "nop is typing it into that agent's prompt now."
+                Status.State.Waiting -> "nop types it into that agent's prompt once ${blocker(target, held, now) ?: NEXT_PASS}."
+                else -> "${status.detail}."
+            }
+            return Outcome("Delivered to $to without asking the user, since $freely. $what\n${status.line}")
         }
-        Log.info("agent message from ${held.fromId} to ${target.shortId}: held for the user")
+        Log.info("agent message ${held.id} from ${held.fromId} to ${target.shortId}: held for the user")
         return Outcome(
-            "Held for the user in \"${clean(target.title)}\" (${target.shortId}). nop shows it there with $shownAs, " +
-                "and nothing is typed into that agent until the user chooses Deliver; they may discard it instead.",
+            "Held for the user in $to. nop shows it there with $shownAs, and nothing is typed into that agent until the " +
+                "user chooses Deliver; they may discard it instead.\n${statusOf(target, held).line}",
         )
     }
 
@@ -229,7 +308,7 @@ object AgentMessages {
     fun deliver(session: AgentSession, held: Held) {
         if (held !in session.inbox) return
         held.approved = true
-        Log.info("agent message from ${held.fromId} to ${session.shortId}: delivered by the user")
+        Log.info("agent message ${held.id} from ${held.fromId} to ${session.shortId}: delivered by the user")
         startPump()
     }
 
@@ -242,14 +321,21 @@ object AgentMessages {
     /** The user taking back a Deliver that has not gone in yet. */
     fun hold(held: Held) {
         held.approved = false
+        held.loggedBlocker = null
+        Log.info("agent message ${held.id} from ${held.fromId}: held back by the user")
     }
 
     /** The user's Discard. */
     fun discard(session: AgentSession, held: Held) {
-        if (session.inbox.remove(held)) Log.info("agent message from ${held.fromId} to ${session.shortId}: discarded by the user")
+        if (!session.inbox.remove(held)) return
+        gone[held.id] = held.sender to Status(held.id, Status.State.Discarded, "discarded by the user at ${clock(System.currentTimeMillis())}")
+        Log.info("agent message ${held.id} from ${held.fromId} to ${session.shortId}: discarded by the user")
     }
 
-    /** Types in whatever the user has delivered and can go now: one message per pass, so each one's Enter lands first. */
+    /**
+     * Types in whatever the user has delivered and can go now: one message per pass, so each one's
+     * Enter lands first. Logs what holds each of the rest back, when that changes.
+     */
     internal fun pump(now: Long) {
         val waiting = sessions().filter { s -> !s.ended && s.inbox.any { it.approved } }
         if (now - lastSubmitAt >= BETWEEN_SUBMITS_MS) {
@@ -257,11 +343,37 @@ object AgentMessages {
             if (ready != null) {
                 val next = ready.inbox.first { it.approved }
                 ready.inbox.remove(next)
-                ready.run.session.submit(next.typed)
                 lastSubmitAt = now
+                typeIn(ready, next, now)
             }
         }
+        for (s in waiting) for (held in s.inbox.toList()) if (held.approved) noteBlocker(s, held, now)
         if (sessions().none { s -> !s.ended && s.inbox.any { it.approved } }) pump.stop()
+    }
+
+    /** Types [held], out of [s]'s inbox now, into its prompt, and keeps its [Status] as it goes. */
+    private fun typeIn(s: AgentSession, held: Held, now: Long) {
+        val to = "\"${clean(s.title)}\" (${s.shortId})"
+        gone[held.id] = held.sender to Status(held.id, Status.State.Submitting, "typed into $to's prompt at ${clock(now)}; its Enter follows")
+        Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: typing it in")
+        typeInto(s, held.typed) { entered ->
+            val at = System.currentTimeMillis()
+            gone[held.id] = held.sender to if (entered) {
+                Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: submitted")
+                Status(held.id, Status.State.Submitted, "typed into $to's prompt and sent with Enter at ${clock(at)}")
+            } else {
+                Log.warn("agent message ${held.id} from ${held.fromId} to ${s.shortId}: its CLI stopped before the Enter that sends it")
+                Status(held.id, Status.State.Undeliverable, "typed into $to's prompt, but its CLI stopped before the Enter that sends it")
+            }
+        }
+    }
+
+    /** Logs what holds [held] back from [s], if that is not what the log last said. */
+    private fun noteBlocker(s: AgentSession, held: Held, now: Long) {
+        val why = blocker(s, held, now) ?: return
+        if (why == held.loggedBlocker) return
+        held.loggedBlocker = why
+        Log.info("agent message ${held.id} to ${s.shortId}: waiting until $why")
     }
 
     /** Why a delivered message cannot be typed into [s] at [now], or null when it can. */
@@ -273,11 +385,69 @@ object AgentMessages {
             !terminal.running -> "its CLI is running again"
             now - s.run.startedAt.toEpochMilli() < BOOT_MS -> "its CLI has finished starting"
             s.activity == Activity.Asking -> "the question it is asking has been answered"
+            terminal.submitting -> "nop has finished typing another message into it"
             terminal.mayHoldDraft(now) -> "the draft in its prompt is sent or cleared"
             terminal.lastSubmitAt > 0L && now - terminal.lastSubmitAt < BETWEEN_SUBMITS_MS -> "the prompt has finished sending"
             else -> null
         }
     }
+
+    /**
+     * Why [held], let through, is not being typed into [s] at [now], or null when nop's next pass takes
+     * it: [waitReason] for the tab, then what the pump itself waits on — the message ahead of it in the
+     * same inbox, which goes first, and the pause nop leaves after typing any message in, so that each
+     * Enter lands before the next text arrives.
+     */
+    internal fun blocker(s: AgentSession, held: Held, now: Long = System.currentTimeMillis()): String? {
+        waitReason(s, now)?.let { return it }
+        val first = s.inbox.firstOrNull { it.approved }
+        if (first != null && first !== held) return "the message ahead of it has gone in"
+        if (now - lastSubmitAt < BETWEEN_SUBMITS_MS) return "nop has paused after typing in another message"
+        return null
+    }
+
+    /** Where [held], still in [s]'s inbox, stands at [now]. */
+    internal fun statusOf(s: AgentSession, held: Held, now: Long = System.currentTimeMillis()): Status {
+        val to = "\"${clean(s.title)}\" (${s.shortId})"
+        return when {
+            s.ended -> Status(held.id, Status.State.Undeliverable, "$to's CLI has ended; the user can only discard it")
+            !held.approved -> Status(held.id, Status.State.Held, "in $to's inbox until the user chooses Deliver")
+            else -> Status(held.id, Status.State.Waiting, "in $to's inbox; it goes in once ${blocker(s, held, now) ?: NEXT_PASS}")
+        }
+    }
+
+    /** Where the message [id] that [sender] sent has got to, or null when nop has no record of it from them. */
+    internal fun lookUp(id: String, sender: String, now: Long = System.currentTimeMillis()): Status? {
+        for (s in sessions()) s.inbox.firstOrNull { it.id == id && it.sender == sender }?.let { return statusOf(s, it, now) }
+        return gone[id]?.takeIf { it.first == sender }?.second
+    }
+
+    /** Where the message [id] that [caller] sent has got to. */
+    fun status(caller: AgentSession, id: String): Outcome = statusFor(id, senderOf(caller))
+
+    /** As [status], for a service's own messages. */
+    internal fun statusService(caller: AgentServices.Registration, id: String): Outcome = statusFor(id, senderOf(caller))
+
+    private fun statusFor(id: String, sender: String): Outcome {
+        val wanted = id.trim()
+        if (wanted.isEmpty()) return Outcome("say which message: the answer to a send ends with its id", isError = true)
+        val found = lookUp(wanted, sender) ?: return Outcome(
+            "nop has no record of a message ${clean(wanted)} from you. It keeps the last $MAX_GONE that have left an inbox " +
+                "since it last started, and loses a message with the tab it was sent to when that tab is closed.",
+            isError = true,
+        )
+        return Outcome(found.line)
+    }
+
+    private fun senderOf(tab: AgentSession) = "tab:${tab.sessionId}"
+
+    private fun senderOf(service: AgentServices.Registration) = "service:${key(service.projectDir)}:${service.name}"
+
+    private fun newId(): String = "m" + UUID.randomUUID().toString().replace("-", "").take(8)
+
+    /** [ms] as a local time with its offset, to the millisecond, for status lines read beside other logs. */
+    private fun clock(ms: Long): String =
+        OffsetDateTime.ofInstant(Instant.ofEpochMilli(ms), ZoneId.systemDefault()).truncatedTo(ChronoUnit.MILLIS).toString()
 
     internal sealed interface Found {
         data class One(val session: AgentSession) : Found
@@ -356,6 +526,9 @@ object AgentMessages {
         }
     }
 
+    /** What a message waits on when nothing holds it back: the pump's next pass. */
+    private const val NEXT_PASS = "nop's next pass, within half a second"
+    private const val MAX_GONE = 500
     private const val PUMP_MS = 500
     internal const val BETWEEN_SUBMITS_MS = 1500L
     private const val BOOT_MS = 5000L

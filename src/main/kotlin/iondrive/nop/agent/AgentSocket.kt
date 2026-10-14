@@ -44,17 +44,20 @@ import javax.swing.SwingUtilities
  * closing its writing half:
  *
  *     <ticket>
- *     list                        or    send                    or    remember | forget
- *                                       <id or title>                 project | all <category>
+ *     list                        or    send                    or    remember | forget    or    status
+ *                                       <id or title>                 project | all <category>    <message id>
  *                                       <message, to the end>         <entry, to the end>
  *
- * The answer is `ok` or `error` on its first line, then text.
+ * The answer is `ok` or `error` on its first line, then text. A send's text ends with the message's
+ * own line, `message <id> <state>: <detail>`, and `status` answers with that line as it stands now —
+ * see [AgentMessages.Status].
  *
  * A tab can also register a service for its project (`service-register`, then the service's name on
  * the next line), and is answered with the path of the registration [AgentServices] keeps. The
  * service — a program of the user's with no tab — then makes the same `list` and `send` requests
  * with the registration's ticket in place of a tab's, and reaches only that project's tabs. It can
- * do nothing else: no memory, and no registering of other services.
+ * also ask after its own messages (`status`), and do nothing else: no memory, and no registering of
+ * other services.
  */
 object AgentSocket {
 
@@ -171,9 +174,11 @@ object AgentSocket {
         fun list(caller: AgentSession): AgentMessages.Outcome
         fun send(caller: AgentSession, to: String, message: String): AgentMessages.Outcome
         fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome
+        fun status(caller: AgentSession, id: String): AgentMessages.Outcome
         fun registerService(caller: AgentSession, name: String): AgentMessages.Outcome
         fun listService(caller: AgentServices.Registration): AgentMessages.Outcome
         fun sendService(caller: AgentServices.Registration, to: String, message: String): AgentMessages.Outcome
+        fun statusService(caller: AgentServices.Registration, id: String): AgentMessages.Outcome
     }
 
     /** One request answered: whether it worked, and what to say. */
@@ -194,23 +199,28 @@ object AgentSocket {
                 val to = lines.getOrNull(2)?.trim().orEmpty()
                 tools.send(caller, to, lines.getOrNull(3).orEmpty())
             }
+            "status" -> tools.status(caller, lines.getOrNull(2)?.trim().orEmpty())
             "service-register" -> tools.registerService(caller, lines.getOrNull(2)?.trim().orEmpty())
             "remember", "forget" -> {
                 val scope = SharedMemory.parseScope(lines.getOrNull(2)?.trim().orEmpty().split(' ').filter { it.isNotEmpty() })?.first
                     ?: return false to "say who it is for: `project`, or `all <${SharedMemory.Category.entries.joinToString("|") { it.id }}>`"
                 tools.memory(caller, lines[1].trim() == "forget", scope, lines.getOrNull(3).orEmpty())
             }
-            else -> return false to "unknown request; nop-msg takes `list`, `send`, `remember`, `forget` or `service-register`"
+            else -> return false to "unknown request; nop-msg takes `list`, `send`, `status`, `remember`, `forget` or `service-register`"
         }
         return !outcome.isError to outcome.text
     }
 
-    /** A service's request: only `list` and `send`, which [AgentMessages] keeps to the service's project. */
+    /**
+     * A service's request: only `list` and `send`, which [AgentMessages] keeps to the service's project,
+     * and `status` for its own messages.
+     */
     private fun handleService(service: AgentServices.Registration, lines: List<String>, tools: Tools): Pair<Boolean, String> {
         val outcome = when (lines.getOrNull(1)?.trim()) {
             "list" -> tools.listService(service)
             "send" -> tools.sendService(service, lines.getOrNull(2)?.trim().orEmpty(), lines.getOrNull(3).orEmpty())
-            else -> return false to "a service can only `list` and `send`, to the tabs of its own project"
+            "status" -> tools.statusService(service, lines.getOrNull(2)?.trim().orEmpty())
+            else -> return false to "a service can only `list`, `send` to the tabs of its own project, and ask the `status` of what it sent"
         }
         return !outcome.isError to outcome.text
     }
@@ -226,6 +236,9 @@ object AgentSocket {
         override fun send(caller: AgentSession, to: String, message: String) =
             onEdt { AgentMessages.send(caller, to, message) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
 
+        override fun status(caller: AgentSession, id: String) =
+            onEdt { AgentMessages.status(caller, id) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
+
         // As memory: the project is read on the EDT, the registration written here.
         override fun registerService(caller: AgentSession, name: String): AgentMessages.Outcome {
             val project = onEdt { caller.projectDir } ?: return AgentMessages.Outcome("nop did not answer in time", isError = true)
@@ -239,6 +252,9 @@ object AgentSocket {
 
         override fun sendService(caller: AgentServices.Registration, to: String, message: String) =
             onEdt { AgentMessages.sendService(caller, to, message) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
+
+        override fun statusService(caller: AgentServices.Registration, id: String) =
+            onEdt { AgentMessages.statusService(caller, id) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
 
         // Only the project is read on the EDT; the files are written on the socket's own thread.
         override fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome {
@@ -320,11 +336,12 @@ object AgentSocket {
         |#   nop-msg list                            the agent tabs open in nop, with their ids
         |#   nop-msg send <id or title> <message...>  type the message into that tab's prompt
         |#   nop-msg send <id or title> < file        the same, with the message on stdin
+        |#   nop-msg status <message id>              where a message you sent has got to
         |#   nop-msg remember project <text...>       add a line to this project's memory
         |#   nop-msg remember all <category> <text...> add a line to every project's (user|hardware|software)
         |#   nop-msg forget project|all <category> <text...>  take that line out again
         |#   nop-msg service-register <name>          let a program message this project's tabs as <name>
-        |usage() { sed -n '5,11s/^# *//p' "${'$'}0" >&2; exit 2; }
+        |usage() { sed -n '5,12s/^# *//p' "${'$'}0" >&2; exit 2; }
         |if [ -z "${'$'}NOP_SOCKET" ] || [ -z "${'$'}NOP_AGENT_TICKET" ]; then
         |    echo "nop-msg: this only works inside one of nop's agent tabs" >&2
         |    exit 2
@@ -345,6 +362,12 @@ object AgentSocket {
         |        else
         |            request() { printf '%s\nsend\n%s\n' "${'$'}NOP_AGENT_TICKET" "${'$'}to"; cat; }
         |        fi ;;
+        |    status)
+        |        [ ${'$'}# -eq 2 ] || usage
+        |        id=${'$'}2
+        |        case "${'$'}id" in *'
+        |'*) echo "nop-msg: a message id has no newline in it" >&2; exit 2 ;; esac
+        |        request() { printf '%s\nstatus\n%s\n' "${'$'}NOP_AGENT_TICKET" "${'$'}id"; } ;;
         |    service-register)
         |        [ ${'$'}# -eq 2 ] || usage
         |        service=${'$'}2

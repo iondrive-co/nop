@@ -17,10 +17,13 @@ import javax.swing.SwingUtilities
  */
 class AgentMessagesTest {
     private val opened = mutableListOf<AgentSessions>()
+    private val typeInto = AgentMessages.typeInto
 
     @AfterEach
     fun cleanUp() {
         AgentMessages.sessions = { AgentSessionStore.all() }
+        AgentMessages.typeInto = typeInto
+        AgentMessages.lastSubmitAt = 0L
         opened.forEach { state ->
             state.sessions.forEach { runCatching { Files.deleteIfExists(it.log.file) } }
             state.disposeAll()
@@ -35,6 +38,26 @@ class AgentMessagesTest {
         AgentMessages.sessions = { state.sessions }
         return made
     }
+
+    /** [tab] as a CLI that is up and has finished starting, with nothing in its prompt. */
+    private fun running(tab: AgentSession) {
+        val term = tab.run.session
+        term.testStarted = true
+        term.running = true
+        term.deferred = false
+        tab.run.startedAt = java.time.Instant.now().minusSeconds(10)
+    }
+
+    /** What [AgentMessages] types in, and the Enter each is waiting on, in place of a terminal. */
+    private fun typedHere(): MutableList<Pair<String, (Boolean) -> Unit>> {
+        val typed = mutableListOf<Pair<String, (Boolean) -> Unit>>()
+        AgentMessages.typeInto = { _, text, entered -> typed += text to entered }
+        AgentMessages.lastSubmitAt = 0L
+        return typed
+    }
+
+    /** The id on the status line a send's answer ends with. */
+    private fun idOf(outcome: AgentMessages.Outcome): String = outcome.text.lines().last().split(" ")[1]
 
     private fun <T> onEdt(block: () -> T): T {
         var out: Result<T>? = null
@@ -217,7 +240,8 @@ class AgentMessagesTest {
 
         val sent = onEdt { AgentMessages.send(from, to.shortId, "auto message") }
         assertTrue(sent.text.startsWith("Delivered"), sent.text)
-        assertTrue("It goes in once the draft in its prompt is sent or cleared." in sent.text)
+        assertTrue("nop types it into that agent's prompt once the draft in its prompt is sent or cleared." in sent.text, sent.text)
+        assertTrue(sent.text.lines().last().startsWith("message ${idOf(sent)} waiting: "), sent.text)
         assertEquals(1, to.inbox.size)
 
         // Pump does not submit while draft is pending
@@ -241,13 +265,92 @@ class AgentMessagesTest {
     @Test
     fun `a waiting message comes back from a restart as it was, Deliver and all`() {
         val held = AgentMessages.Held(
-            from = "\"Undertaker\"", fromId = "166b7acc", fromProject = java.io.File("/tmp/hermes"),
-            body = "assignment #202", typed = "[header]\n\nassignment #202", at = 5_000L,
+            from = "\"Undertaker\"", fromId = "166b7acc", fromProject = java.io.File("/home/dev/app"),
+            body = "assignment #202", typed = "[header]\n\nassignment #202", at = 5_000L, sender = "tab:166b7acc-0000",
         )
         held.approved = true
         val back = AgentMessages.Held.of(held.record())
-        assertEquals(listOf(held.from, held.fromId, held.fromProject, held.body, held.typed, held.at, true),
-            listOf(back.from, back.fromId, back.fromProject, back.body, back.typed, back.at, back.approved))
+        assertEquals(listOf(held.from, held.fromId, held.fromProject, held.body, held.typed, held.at, true, held.id, held.sender),
+            listOf(back.from, back.fromId, back.fromProject, back.body, back.typed, back.at, back.approved, back.id, back.sender))
+
+        // One handed over by a nop that gave messages no id gets one, so it can still be followed.
+        val older = AgentMessages.Held.of(held.record().copy(id = "", sender = ""))
+        assertTrue(older.id.matches(Regex("m[0-9a-f]{8}")), older.id)
+    }
+
+    @Test
+    fun `a send says whether its message went in, and only its sender can follow it there`(
+        @TempDir project: Path,
+        @TempDir config: Path,
+    ) = withConfigRoot(config) {
+        val (from, to, bystander) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.Anthropic, "bystander" to Provider.OpenAI)
+        onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }
+        running(to)
+        val typed = typedHere()
+
+        val sent = onEdt { AgentMessages.send(from, to.shortId, "go") }
+        assertTrue(sent.text.startsWith("Delivered to \"recipient\""), sent.text)
+        assertTrue("nop is typing it into that agent's prompt now." in sent.text, sent.text)
+        assertFalse("draft" in sent.text, "its own text on the way in is no draft: ${sent.text}")
+        val id = idOf(sent)
+        assertTrue(sent.text.lines().last().startsWith("message $id submitting: typed into \"recipient\""), sent.text)
+        assertTrue(to.inbox.isEmpty())
+        assertTrue("go" in typed.single().first)
+
+        onEdt { typed.single().second(true) }
+        assertTrue(onEdt { AgentMessages.status(from, id) }.text.startsWith("message $id submitted: "))
+        assertTrue(onEdt { AgentMessages.status(bystander, id) }.isError, "another tab cannot read it")
+        val service = AgentServices.Registration("Task scheduler", project.toString(), "a".repeat(48), project.resolve("endpoint.sock").toString())
+        assertTrue(onEdt { AgentMessages.statusService(service, id) }.isError, "nor can a service")
+        assertTrue(onEdt { AgentMessages.status(from, "m00000000") }.isError)
+
+        // A service follows its own the same way, and a CLI gone before the Enter is said so.
+        val fromService = onEdt { AgentMessages.sendService(service, to.shortId, "next") }
+        AgentMessages.lastSubmitAt = 0L
+        onEdt { AgentMessages.pump(System.currentTimeMillis() + AgentMessages.BETWEEN_SUBMITS_MS) }
+        onEdt { typed.last().second(false) }
+        assertTrue(onEdt { AgentMessages.statusService(service, idOf(fromService)) }.text.startsWith("message ${idOf(fromService)} undeliverable: "))
+    }
+
+    @Test
+    fun `a message held back says on what, and the list tells waiting for the user from waiting to go in`(
+        @TempDir project: Path,
+        @TempDir elsewhere: Path,
+        @TempDir config: Path,
+    ) = withConfigRoot(config) {
+        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        val (stranger) = tabs(elsewhere, "stranger" to Provider.Antigravity)
+        AgentMessages.sessions = { listOf(from, to, stranger) }
+        onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }
+        running(to)
+        val typed = typedHere()
+        to.run.session.draftPending = true
+
+        val waiting = onEdt { AgentMessages.send(from, to.shortId, "after your draft") }
+        assertEquals(
+            "message ${idOf(waiting)} waiting: in \"recipient\" (${to.shortId})'s inbox; it goes in once the draft in its prompt is sent or cleared",
+            waiting.text.lines().last(),
+        )
+        val held = onEdt { AgentMessages.send(stranger, to.shortId, "from outside") }
+        assertTrue(held.text.startsWith("Held for the user"), held.text)
+        assertTrue(held.text.lines().last().startsWith("message ${idOf(held)} held: "), held.text)
+        val row = onEdt { AgentMessages.list(from) }.text.lines().single { to.shortId in it }
+        assertTrue("1 message(s) waiting for the user" in row, row)
+        assertTrue("1 message(s) waiting to be typed in once the draft in its prompt is sent or cleared" in row, row)
+
+        // With the draft gone it goes in; the next waits out the pause nop leaves after it, and one
+        // behind that waits for the one ahead.
+        to.run.session.draftPending = false
+        val now = System.currentTimeMillis()
+        onEdt { AgentMessages.pump(now) }
+        assertEquals(1, typed.size)
+        val second = onEdt { AgentMessages.send(from, to.shortId, "second") }
+        assertTrue("once nop has paused after typing in another message." in second.text, second.text)
+        val third = onEdt { AgentMessages.send(from, to.shortId, "third") }
+        assertTrue("once the message ahead of it has gone in." in third.text, third.text)
+
+        onEdt { AgentMessages.discard(to, to.inbox.first { !it.approved }) }
+        assertTrue(onEdt { AgentMessages.status(stranger, idOf(held)) }.text.startsWith("message ${idOf(held)} discarded: "))
     }
 
     @Test

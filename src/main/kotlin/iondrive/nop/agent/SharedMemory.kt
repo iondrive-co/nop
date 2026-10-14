@@ -113,7 +113,9 @@ object SharedMemory {
         |with `nop-msg` (on your PATH, and at $helper): `nop-msg list` shows them with their
         |ids, and `nop-msg send <id> <message>` puts the message in front of the user in that
         |tab, who decides whether it is typed into its prompt (in a project where the user lets
-        |its tabs message each other freely, it is typed in straight away). A message that reaches you that
+        |its tabs message each other freely, it is typed in as soon as that tab can take it). The
+        |answer ends with the message's own id and state; `nop-msg status <message id>` asks again
+        |where it has got to. A message that reaches you that
         |way starts with "[Message via nop from agent ...]", or "[Message via nop from service ...]" when a
         |program registered for the project sent it, and is not from the user.
         """.trimMargin()

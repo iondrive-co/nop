@@ -149,6 +149,14 @@ class TerminalSession private constructor(
         internal set
 
     /**
+     * Whether [submit] has typed its text in and not yet pressed the Enter that sends it. That text is
+     * nop's own, on its way in, so it is not a draft of the user's ([draftPending]); but nothing else
+     * may be typed in until its Enter has gone, or the two would go out as one.
+     */
+    var submitting: Boolean = false
+        internal set
+
+    /**
      * Whether the program in the terminal has asked for bracketed paste (`ESC [ ? 2004 h`) and not
      * turned it off since. Read off the output, because JediTerm keeps its own copy private.
      */
@@ -347,16 +355,18 @@ class TerminalSession private constructor(
         write(text)
     }
 
-    private fun write(text: String) {
-        val proc = process ?: return
-        runCatching {
+    /** Writes [text] to the program; false when there is no program to write to or the write failed. */
+    private fun write(text: String): Boolean {
+        val proc = process ?: return false
+        val written = runCatching {
             val out = proc.outputStream
             out.write(text.toByteArray(Charsets.UTF_8))
             out.flush()
-        }
+        }.isSuccess
         SwingUtilities.invokeLater {
             (widget as? NopTerminalWidget)?.scrollToBottom()
         }
+        return written
     }
 
     /**
@@ -368,8 +378,12 @@ class TerminalSession private constructor(
      * paste when the program has asked for those, and is joined onto one line when it has not. Enter
      * follows after [SUBMIT_DELAY_MS] rather than in the same write: a TUI that decides what is a
      * paste by how much arrives at once would otherwise take it for a newline inside the paste.
+     *
+     * Until that Enter the text is [submitting], not a draft: it is nop's, and it is already on its way.
+     * [onEntered] is told, on the EDT, once the Enter has been written, and whether it reached a
+     * running program.
      */
-    fun submit(text: String) {
+    fun submit(text: String, onEntered: ((Boolean) -> Unit)? = null) {
         settings?.nudgeActive()
         // Nothing in the text may reach the program as anything but text: an ESC would let it end
         // the paste early (`ESC [ 2 0 1 ~`) and carry on as keystrokes, and a bare CR or any other
@@ -382,13 +396,15 @@ class TerminalSession private constructor(
             // Unbracketed, a newline is Enter and a tab is Tab (completion, in most of these TUIs).
             safe.trim().replace(LINE_BREAKS, " ").replace('\t', ' ')
         }
-        noteDraft(body.toByteArray(Charsets.UTF_8))
+        submitting = true
         write(body)
         javax.swing.Timer(SUBMIT_DELAY_MS) {
-            write("\r")
+            val entered = write("\r")
             noteInput(byteArrayOf('\r'.code.toByte()))
             // Enter sends the whole prompt, so whatever was in it has gone too.
             draftPending = false
+            submitting = false
+            onEntered?.invoke(entered)
         }.apply {
             isRepeats = false
             start()
@@ -634,16 +650,19 @@ class TerminalSession private constructor(
         internal fun screenLine(line: TerminalLine): ScreenLine {
             val text = StringBuilder()
             val dim = ArrayList<Boolean>()
+            val inverse = ArrayList<Boolean>()
             line.forEachEntry { entry ->
                 val faint = entry.style.hasOption(TextStyle.Option.DIM)
+                val reversed = entry.style.hasOption(TextStyle.Option.INVERSE)
                 // By index: CharBuffer's own iterator never moves past its first character.
                 val chars = entry.text
                 for (i in 0 until chars.length) {
                     text.append(chars[i])
                     dim += faint
+                    inverse += reversed
                 }
             }
-            return ScreenLine(text.toString(), dim.toBooleanArray())
+            return ScreenLine(text.toString(), dim.toBooleanArray(), inverse.toBooleanArray())
         }
 
         /**
@@ -652,10 +671,13 @@ class TerminalSession private constructor(
          * Claude (`❯`), Codex (`›`) and Antigravity (`>`) each draw their input as a marker at the
          * start of a row, optionally inside a box, with the text after it. Empty, the row holds nothing
          * after the marker but blanks, or a placeholder drawn dim (`Try "…"`, `Ask Codex to do
-         * anything`), which typed text never is. The prompt is the lowest such row: it sits below
-         * the conversation, where past prompts are echoed with the same marker. A draft can run
-         * onto the rows beneath it, so the next row has to end the prompt too: blank, or one of the
-         * rules or box edges these CLIs draw under it.
+         * anything`, the next prompt Claude suggests), which typed text never is. Claude draws its own
+         * caret over a placeholder's first character, in reverse video and not dim — see
+         * [ScreenLine.holdsNothingTypedFrom]. The prompt is the lowest such row: it sits below the
+         * conversation, where past prompts are echoed with the same marker. A placeholder too long
+         * for its row runs on below it, dim all the way; past that, a draft can run onto the rows
+         * beneath the prompt, so the next row has to end the prompt too: blank, or one of the rules or
+         * box edges these CLIs draw under it.
          *
          * False whenever the screen does not read that way — a menu, a dialog, a CLI drawing something
          * else — which leaves the keystrokes' answer standing.
@@ -663,9 +685,11 @@ class TerminalSession private constructor(
         internal fun promptLooksEmpty(lines: List<ScreenLine>): Boolean {
             val at = lines.indexOfLast { promptStart(it.text) >= 0 }
             if (at < 0) return false
-            if (!lines[at].blankFrom(promptStart(lines[at].text))) return false
-            val next = lines.getOrNull(at + 1) ?: return true
-            if (next.blankFrom(0)) return true
+            if (!lines[at].holdsNothingTypedFrom(promptStart(lines[at].text))) return false
+            var below = at + 1
+            while (below < lines.size && !lines[below].isBlank() && lines[below].blankFrom(0)) below++
+            val next = lines.getOrNull(below) ?: return true
+            if (next.isBlank()) return true
             val first = next.text.first { !isBlank(it) }
             return first in PROMPT_ENDS
         }
@@ -859,8 +883,37 @@ class PtyHandoff(
 /** A handed-over program as this nop takes it up. See [TerminalSession.handOff]. */
 class Adopted(val pty: AdoptedPty, val columns: Int, val rows: Int, val replay: ByteArray)
 
-/** One row of a terminal's screen: its characters, and which of them are drawn dim (SGR 2). */
-internal class ScreenLine(val text: String, val dim: BooleanArray) {
+/** One row of a terminal's screen: its characters, and which of them are drawn dim (SGR 2) and reversed (SGR 7). */
+internal class ScreenLine(val text: String, val dim: BooleanArray, val inverse: BooleanArray = BooleanArray(text.length)) {
     /** Whether nothing from [start] on is more than blank or dim. */
     fun blankFrom(start: Int): Boolean = (start until text.length).all { TerminalSession.isBlank(text[it]) || dim[it] }
+
+    /** Whether the row holds nothing at all, dim or not. */
+    fun isBlank(): Boolean = text.all { TerminalSession.isBlank(it) }
+
+    /**
+     * Whether the prompt text from [start] on is nothing the user typed: blank or dim ([blankFrom]), or
+     * a placeholder with the CLI's caret on it — Claude Code draws its caret by reversing the cell
+     * under it, so an empty prompt shows the placeholder's first character reversed and not dim, and
+     * the rest dim straight after it.
+     *
+     * Typed text is never dim, and Claude shows a placeholder only while nothing is typed, so a
+     * reversed character with no dim text after it is the caret on a draft. Only a letter, digit or
+     * quote counts as a placeholder's first character, as the placeholders these CLIs show begin with
+     * one; a symbol that starts a command (`/`, `@`, `!`) under the caret is left as a draft.
+     */
+    fun holdsNothingTypedFrom(start: Int): Boolean {
+        var i = start
+        while (i < text.length && TerminalSession.isBlank(text[i])) i++
+        if (i < text.length && inverse[i] && !dim[i]) {
+            val after = i + 1
+            return (text[i].isLetterOrDigit() || text[i] in PLACEHOLDER_QUOTES) &&
+                after < text.length && dim[after] && !TerminalSession.isBlank(text[after]) && blankFrom(after)
+        }
+        return blankFrom(start)
+    }
+
+    private companion object {
+        const val PLACEHOLDER_QUOTES = "\"'“‘"
+    }
 }
