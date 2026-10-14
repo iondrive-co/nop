@@ -386,7 +386,21 @@ class Updater(
                 val handover = jarHandover(image, version)
                 UpdateProbe.Answer(version, handover, setOf(handover))
             }
-            is UpdateProbe.Outcome.Failed -> throw UpdateException("the update does not start: ${outcome.why}")
+            is UpdateProbe.Outcome.Failed -> {
+                // The running build's own launcher, started the same way, says whose fault it is: an
+                // environment no nop can start in, or this update.
+                val control = iondrive.nop.ipc.Restart.launcher()?.let { UpdateProbe.run(it) }
+                val blame = when (control) {
+                    null -> ""
+                    is UpdateProbe.Outcome.Failed -> "; nop's own launcher does the same when started from here (${control.why}), so it is something about this nop's environment, not the update"
+                    else -> "; nop's own launcher starts from here, so it is the update"
+                }
+                iondrive.nop.Log.warn(
+                    "update: the update's launcher ${outcome.why}$blame. It printed:\n" +
+                        outcome.output.ifBlank { "(nothing)" }.take(4000),
+                )
+                throw UpdateException("the update does not start: ${outcome.why}$blame")
+            }
         }
 
     /** The handover in the stamp of the one `lib/app` jar that has one, whose version must be [version]. */

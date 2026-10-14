@@ -24,7 +24,7 @@ import org.jetbrains.jewel.ui.component.Tooltip
 
 /** What the updater is doing, in a sentence. */
 internal fun updateStatusLine(status: SelfUpdate.Status): String = when (status) {
-    SelfUpdate.Status.Idle -> "Checks for updates a couple of minutes after nop starts, then every 6 hours."
+    SelfUpdate.Status.Idle -> "Checks for updates a couple of minutes after nop starts, then every hour."
     is SelfUpdate.Status.Off -> "Not updated from releases: ${status.reason}."
     SelfUpdate.Status.Disabled -> "Automatic updates are off."
     SelfUpdate.Status.Checking -> "Checking for an update…"

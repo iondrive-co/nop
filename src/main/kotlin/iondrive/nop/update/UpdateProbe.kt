@@ -30,7 +30,8 @@ object UpdateProbe {
         /** A build older than the flag, which refuses it as an unknown option and starts nothing. */
         data object TooOld : Outcome
 
-        data class Failed(val why: String) : Outcome
+        /** [why] in a phrase (`it crashed with signal 11 (SIGSEGV)`), and all it printed. */
+        data class Failed(val why: String, val output: String = "") : Outcome
     }
 
     /** This build's answer. */
@@ -50,15 +51,14 @@ object UpdateProbe {
     }
 
     /**
-     * Runs [launcher] with [FLAG], in an environment of its own: this nop's, less what makes a
-     * jpackage launcher misbehave, and with config, data and runtime directories that are empty, so a
-     * build that took the flag for something else would still find no nop to reach.
+     * Runs [launcher] with [FLAG] in the environment a restart would exec it in ([Restart.successorEnvironment]),
+     * so an answer says the restart would start too — but with config, data and runtime directories
+     * that are empty, so a build that took the flag for something else would still find no nop to reach.
      */
     fun run(launcher: Path): Outcome {
         val scratch = Files.createTempDirectory("nop-update-probe")
         try {
             val env = Restart.successorEnvironment(System.getenv()).toMutableMap()
-            env.remove("LD_LIBRARY_PATH")
             for (dir in listOf("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR")) {
                 env[dir] = Files.createDirectory(scratch.resolve(dir.lowercase())).toString()
             }
@@ -73,19 +73,30 @@ object UpdateProbe {
             }.apply { isDaemon = true; start() }
             if (!process.waitFor(PROBE_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
-                return Outcome.Failed("it did not answer within $PROBE_SECONDS seconds")
+                return Outcome.Failed("it did not answer within $PROBE_SECONDS seconds", output.toString())
             }
             reader.join(1000)
             val text = output.toString()
             parse(text)?.let { return Outcome.Answered(it) }
             if (process.exitValue() == 2 && "unknown option" in text) return Outcome.TooOld
-            return Outcome.Failed("it exited ${process.exitValue()}: ${text.trim().lines().lastOrNull().orEmpty().take(200)}")
+            val said = text.trim().lines().lastOrNull()?.takeIf { it.isNotBlank() }?.let { ", saying: ${it.take(200)}" } ?: " without printing anything"
+            return Outcome.Failed("it ${ended(process.exitValue())}$said", text)
         } catch (e: Exception) {
             return Outcome.Failed("it could not be run: ${e.message ?: e}")
         } finally {
             scratch.toFile().deleteRecursively()
         }
     }
+
+    /** How a process that exited with [status] ended, in words: a status over 128 is a signal. */
+    internal fun ended(status: Int): String {
+        if (status <= 128) return "exited $status"
+        val signal = status - 128
+        val name = SIGNALS[signal]?.let { " ($it)" }.orEmpty()
+        return "crashed with signal $signal$name"
+    }
+
+    private val SIGNALS = mapOf(4 to "SIGILL", 6 to "SIGABRT", 7 to "SIGBUS", 8 to "SIGFPE", 9 to "SIGKILL", 11 to "SIGSEGV", 15 to "SIGTERM")
 
     private const val PROBE_SECONDS = 60L
 }

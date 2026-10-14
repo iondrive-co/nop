@@ -72,6 +72,7 @@ class UpdaterTest {
             echo "launcher $version"
         """.trimIndent()
         "too old" -> "#!/bin/sh\necho \"nop: unknown option: ${'$'}1\"\nexit 2\n"
+        "segfault" -> "#!/bin/sh\nkill -SEGV ${'$'}${'$'}\n"
         else -> "#!/bin/sh\necho 'cannot start'\nexit 1\n"
     }
 
@@ -226,6 +227,19 @@ class UpdaterTest {
 
         assertTrue("does not start" in refused.message!!, refused.message)
         assertEquals(emptyList(), updater.images(home))
+    }
+
+    @Test
+    fun `an update whose launcher crashes says which signal it died of`() {
+        val home = install()
+        publish(launcher = "segfault")
+        val updater = updater()
+
+        val refused = assertFailsWith<UpdateException> { updater.stage(home, updater.latest()) }
+
+        assertTrue("crashed with signal 11 (SIGSEGV) without printing anything" in refused.message!!, refused.message)
+        assertEquals("exited 2", UpdateProbe.ended(2))
+        assertEquals("crashed with signal 6 (SIGABRT)", UpdateProbe.ended(134))
     }
 
     @Test

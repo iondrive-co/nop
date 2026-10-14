@@ -2,19 +2,35 @@
 # Install a nop release for the current user, the way nop's self-updater lays one out, so it keeps
 # itself up to date from then on (src/main/kotlin/iondrive/nop/update).
 #
-#     scripts/install-release.sh            # the latest release
-#     scripts/install-release.sh v1.2.6     # a given one
+#     scripts/install-release.sh                    # the latest release
+#     scripts/install-release.sh v1.2.6             # a given one
+#     scripts/install-release.sh --replace-build    # also over a build of a checkout
 #
 # The release goes in ~/.local/opt/nop-<version> and ~/.local/opt/nop becomes a link to it, which is
 # what launchers should name (~/.local/bin/nop -> ~/.local/opt/nop/bin/nop). An ~/.local/opt/nop that
-# is still a directory of its own is moved aside as the version it holds; one built from a checkout
-# (it has .built-from-checkout) is left alone and nothing is installed. The release's manifest is
-# checked against the signing key in this checkout, and the tarball against the manifest's hash.
+# is still a directory of its own is moved aside as the version it holds. One that is a build of a
+# checkout (it has .built-from-checkout, from ./gradlew's installLocalCopy) is left alone unless
+# --replace-build says otherwise; it is then kept as ~/.local/opt/nop.build, and builds stop being
+# installed there. To run builds again instead of releases:
 #
-# A running nop is not touched: restart it (the bar's restart button) to run the new version.
-# NOP_OPT_DIR puts the install somewhere other than ~/.local/opt.
+#     rm ~/.local/opt/nop && mv ~/.local/opt/nop.build ~/.local/opt/nop    # then ./gradlew test
+#
+# The release's manifest is checked against the signing key in this checkout, and the tarball
+# against the manifest's hash. A running nop is not touched: restart it (the bar's restart button)
+# to run the new version. NOP_OPT_DIR puts the install somewhere other than ~/.local/opt.
 
 set -euo pipefail
+
+replace_build=false
+tag=""
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        --replace-build) replace_build=true ;;
+        v*) tag="$arg" ;;
+        *) echo "install-release: unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
 
 REPO=iondrive-co/nop
 PLATFORM=linux-x64
@@ -26,8 +42,9 @@ for cmd in curl openssl python3 tar sha256sum; do
     command -v "$cmd" >/dev/null || { echo "install-release: $cmd is needed" >&2; exit 1; }
 done
 [ -f "$KEY" ] || { echo "install-release: no signing key at $KEY" >&2; exit 1; }
-if [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ] && [ -e "$HOME_LINK/.built-from-checkout" ]; then
+if [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ] && [ -e "$HOME_LINK/.built-from-checkout" ] && ! $replace_build; then
     echo "install-release: $HOME_LINK is a build from $(cat "$HOME_LINK/.built-from-checkout"); not replacing it" >&2
+    echo "(--replace-build installs the release in its place and keeps the build as $HOME_LINK.build)" >&2
     exit 1
 fi
 
@@ -35,7 +52,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # The release, and its asset URLs by name.
-if [ $# -ge 1 ]; then api="https://api.github.com/repos/$REPO/releases/tags/$1"; else api="https://api.github.com/repos/$REPO/releases/latest"; fi
+if [ -n "$tag" ]; then api="https://api.github.com/repos/$REPO/releases/tags/$tag"; else api="https://api.github.com/repos/$REPO/releases/latest"; fi
 curl -fsSL -H "Accept: application/vnd.github+json" "$api" > "$work/release.json"
 asset() {
     python3 -I - "$work/release.json" "$1" <<'PY_EOF'
@@ -92,8 +109,13 @@ else
     mv "$work/unpacked/$root" "$target"
 fi
 
-# Point the home at it. A home that is a directory of its own goes aside as the version it holds.
-if [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ]; then
+# Point the home at it. A build of a checkout goes aside as nop.build, to switch back to; any other
+# home that is a directory of its own goes aside as the version it holds.
+if [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ] && [ -e "$HOME_LINK/.built-from-checkout" ]; then
+    rm -rf "$HOME_LINK.build"
+    mv "$HOME_LINK" "$HOME_LINK.build"
+    echo "Kept the build that was there as $HOME_LINK.build"
+elif [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ]; then
     old="$(unzip -p "$HOME_LINK"/lib/app/nop-*.jar iondrive/nop/update/nop-build.properties 2>/dev/null | sed -n 's/^version=//p' | head -1 || true)"
     aside="$OPT/nop-${old:-previous}"
     [ -e "$aside" ] && aside="$OPT/nop.previous" && rm -rf "$aside"

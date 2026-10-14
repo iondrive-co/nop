@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.window.DialogWindow
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.rememberDialogState
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
@@ -83,7 +84,15 @@ fun DialogFrame(
     // the buttons under it. So the height is fitted here, from the content as laid out at the
     // window's own width; until then it is a guess.
     val fitsContent = !size.height.isSpecified
-    val state = rememberDialogState(size = if (fitsContent) DpSize(size.width, 200.dp) else size)
+    // Over the window it was opened from, rather than in the middle of the whole desktop: across
+    // several monitors, or a remote session whose one screen spans them all, the middle of the
+    // desktop can be a monitor nobody is looking at.
+    val owner = LocalWindow.current
+    val firstSize = if (fitsContent) DpSize(size.width, 200.dp) else size
+    val state = rememberDialogState(
+        position = owner?.let { centredOver(it, firstSize) } ?: WindowPosition(Alignment.Center),
+        size = firstSize,
+    )
     DialogWindow(
         onCloseRequest = onClose,
         state = state,
@@ -98,6 +107,9 @@ fun DialogFrame(
         },
     ) {
         var contentHeight by remember { mutableStateOf<Dp?>(null) }
+        // Centred again once, when the fitted height is known; not after, so a dialog the user moved
+        // stays where they put it.
+        var centred by remember { mutableStateOf(false) }
         if (fitsContent) {
             // The frame's insets are only known once the window manager has put the window up, so
             // the fit is done again when it opens.
@@ -115,6 +127,10 @@ fun DialogFrame(
                 val height = contentHeight ?: return@LaunchedEffect
                 val insets = window.insets
                 state.size = DpSize(size.width, height + (insets.top + insets.bottom).dp)
+                if (!centred && opened && owner != null) {
+                    state.position = centredOver(owner, state.size)
+                    centred = true
+                }
             }
         }
         val density = LocalDensity.current
@@ -149,3 +165,10 @@ fun DialogFrame(
         }
     }
 }
+
+/** Where a dialog of [size] sits centred over [owner], whose bounds are in the same units as dp here. */
+private fun centredOver(owner: java.awt.Window, size: DpSize): WindowPosition =
+    WindowPosition(
+        x = (owner.x + (owner.width - size.width.value) / 2).dp,
+        y = (owner.y + (owner.height - size.height.value) / 2).dp,
+    )

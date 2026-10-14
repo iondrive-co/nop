@@ -300,12 +300,15 @@ tasks.register("installDesktopEntry") {
     }
 }
 
-// Replaces the installed copy at ~/.local/opt/nop with this build's app image, when there is one.
+// Replaces the installed copy at ~/.local/opt/nop with this build's app image, when that copy is
+// itself a build of a checkout.
 //
 // A workspace can run nop from there rather than from build/: its `nop` on PATH links to
 // ~/.local/opt/nop/bin/nop. A restart execs the launcher the running nop started from, so without
 // this a build there reaches nobody, however often nop is restarted. A machine with no copy there
-// gets none: this only ever refreshes one that exists.
+// gets none: this only ever refreshes one that exists. Nor does a workspace that runs releases
+// (scripts/install-release.sh): its nop updates itself from those, and a build dropped over it would
+// take it off them.
 //
 // The new image is copied beside the old and swapped in by renaming, so the copy is never half
 // written where the launcher looks. The old one is kept as ~/.local/opt/nop.previous to go back to.
@@ -323,6 +326,13 @@ tasks.register("installLocalCopy") {
     onlyIf { !checkout.resolve(".git").isFile && installDir.isDirectory }
 
     doLast {
+        if (!installDir.resolve(".built-from-checkout").isFile) {
+            println(
+                "Not installing this build to $installDir: that is a release install, which updates itself " +
+                    "from releases. scripts/install-release.sh --help says how to switch it back to builds.",
+            )
+            return@doLast
+        }
         val dist = distDir.get().asFile
         // Every file under lib/app with its size. A change to the code renames the nop jar, so
         // equal listings mean the installed copy already holds this build.
