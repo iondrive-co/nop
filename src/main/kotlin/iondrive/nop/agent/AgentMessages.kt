@@ -27,6 +27,10 @@ import javax.swing.Timer
  * reach it did not have — its agents already read and run it — while a message from any other
  * project's tab is still held, so the risk above stays shut.
  *
+ * A service ([AgentServices]) — a program of the user's with no tab, registered from one of a
+ * project's tabs — sends the same way under its own name, but only to that project's tabs, so it is
+ * held or let through exactly as a message between those tabs would be.
+ *
  * Delivered, a message is typed into the prompt and submitted exactly as if the user had, headed
  * with its sender and how to answer ([envelope]). Its text is cleaned when it is held ([clean]), so
  * what the user reads is what is typed, and no byte of it can act as a key. A delivered message
@@ -45,9 +49,9 @@ object AgentMessages {
      * may be closed or renamed before the user gets to this.
      */
     class Held(
-        /** Who sent it, as the inbox names them: title, id, CLI/account and project. */
+        /** Who sent it, as the inbox names them: `tab` with its title, id, CLI/account and project, or `service` with its name and project. */
         val from: String,
-        /** The sender's id, for the log. */
+        /** The sender's id, or a service's name, for the log. */
         val fromId: String,
         /** The sender's project, which decides whether [setAutoDeliver] lets it through. */
         val fromProject: File,
@@ -117,52 +121,106 @@ object AgentMessages {
 
     /** The tabs [caller] can write to, one line each, with the caller's own marked. */
     fun list(caller: AgentSession): Outcome {
-        val rows = sessions().joinToString("\n") { s ->
-            val you = if (s === caller) "  (you)" else ""
-            val waiting = s.inbox.size.takeIf { it > 0 }?.let { ", $it message(s) waiting for the user" }.orEmpty()
-            val unasked = if (s !== caller && passesUnasked(caller, s)) ", takes your messages without asking the user" else ""
-            "- ${s.shortId}  \"${clean(s.title)}\"  ${s.account.provider.id}/${s.account.name}  in ${s.projectDir.name}  — ${describe(s)}$waiting$unasked$you"
-        }
+        val rows = sessions().joinToString("\n") { s -> row(s, unasked = s !== caller && passesUnasked(caller, s), you = s === caller) }
         return Outcome("Agent tabs open in nop. Address one by its id (the first column) or its exact title.\n$rows")
+    }
+
+    /** As [list], for a service: only its project's tabs, the only ones it can write to. */
+    internal fun listService(caller: AgentServices.Registration): Outcome {
+        val rows = sessions().filter { key(it.projectDir) == key(caller.projectDir) }
+            .joinToString("\n") { s -> row(s, unasked = autoDelivers(s.projectDir), you = false) }
+        return Outcome("Agent tabs open in nop in ${caller.projectDir.name}. Address one by its id (the first column) or its exact title.\n$rows")
+    }
+
+    private fun row(s: AgentSession, unasked: Boolean, you: Boolean): String {
+        val waiting = s.inbox.size.takeIf { it > 0 }?.let { ", $it message(s) waiting for the user" }.orEmpty()
+        val freely = if (unasked) ", takes your messages without asking the user" else ""
+        val mine = if (you) "  (you)" else ""
+        return "- ${s.shortId}  \"${clean(s.title)}\"  ${s.account.provider.id}/${s.account.name}  in ${s.projectDir.name}  — ${describe(s)}$waiting$freely$mine"
     }
 
     /** Holds [message] in the inbox of the tab [to] names, for the user to deliver or discard. */
     fun send(caller: AgentSession, to: String, message: String): Outcome {
         val text = clean(message).trim()
-        if (text.isEmpty()) return Outcome("the message is empty", isError = true)
-        if (text.length > MAX_CHARS) return Outcome("the message is ${text.length} characters; the limit is $MAX_CHARS", isError = true)
+        refuseText(text)?.let { return it }
         val target = when (val found = resolve(to, sessions())) {
             is Found.One -> found.session
             is Found.Error -> return Outcome(found.why, isError = true)
         }
         if (target === caller) return Outcome("that is your own tab", isError = true)
-        if (target.ended) return Outcome("\"${clean(target.title)}\" has ended; nothing is running there to read it", isError = true)
-        if (target.inbox.size >= MAX_HELD) {
-            return Outcome("\"${clean(target.title)}\" already has $MAX_HELD messages waiting for the user", isError = true)
-        }
+        refuseTarget(target)?.let { return it }
         val unasked = passesUnasked(caller, target)
         val held = Held(
-            from = "\"${clean(caller.title)}\" (${caller.shortId}, ${caller.account.provider.id}/${caller.account.name}, in ${caller.projectDir.name})",
+            from = "tab \"${clean(caller.title)}\" (${caller.shortId}, ${caller.account.provider.id}/${caller.account.name}, in ${caller.projectDir.name})",
             fromId = caller.shortId,
             fromProject = caller.projectDir,
             body = text,
             typed = envelope(caller, text, unasked),
             at = System.currentTimeMillis(),
         )
+        return enqueue(target, held, unasked, shownAs = "your tab's name", freely = "tabs in ${target.projectDir.name} may message each other freely")
+    }
+
+    /**
+     * As [send], from a service: only to a tab of its own project, and headed with the service's name
+     * rather than any tab's. It goes in unasked exactly when a message between that project's own tabs
+     * would.
+     */
+    internal fun sendService(caller: AgentServices.Registration, to: String, message: String): Outcome {
+        val text = clean(message).trim()
+        refuseText(text)?.let { return it }
+        val target = when (val found = resolve(to, sessions().filter { key(it.projectDir) == key(caller.projectDir) })) {
+            is Found.One -> found.session
+            is Found.Error -> return Outcome(found.why, isError = true)
+        }
+        refuseTarget(target)?.let { return it }
+        val unasked = autoDelivers(target.projectDir)
+        val held = Held(
+            from = "service \"${clean(caller.name)}\" (in ${caller.projectDir.name})",
+            fromId = "service \"${clean(caller.name)}\"",
+            fromProject = caller.projectDir,
+            body = text,
+            typed = serviceEnvelope(caller, text, unasked),
+            at = System.currentTimeMillis(),
+        )
+        return enqueue(
+            target, held, unasked,
+            shownAs = "your service's name",
+            freely = "the user lets messages from within ${target.projectDir.name} go in freely",
+        )
+    }
+
+    private fun refuseText(text: String): Outcome? = when {
+        text.isEmpty() -> Outcome("the message is empty", isError = true)
+        text.length > MAX_CHARS -> Outcome("the message is ${text.length} characters; the limit is $MAX_CHARS", isError = true)
+        else -> null
+    }
+
+    private fun refuseTarget(target: AgentSession): Outcome? = when {
+        target.ended -> Outcome("\"${clean(target.title)}\" has ended; nothing is running there to read it", isError = true)
+        target.inbox.size >= MAX_HELD -> Outcome("\"${clean(target.title)}\" already has $MAX_HELD messages waiting for the user", isError = true)
+        else -> null
+    }
+
+    /**
+     * Puts [held] in [target]'s inbox, approved already when [unasked], and says what became of it:
+     * the inbox shows it under [shownAs], and [freely] is why it went in without the user.
+     */
+    private fun enqueue(target: AgentSession, held: Held, unasked: Boolean, shownAs: String, freely: String): Outcome {
         target.inbox.add(held)
         if (unasked) {
             held.approved = true
-            Log.info("agent message from ${caller.shortId} to ${target.shortId}: delivered without asking, as ${target.projectDir.name} allows")
+            Log.info("agent message from ${held.fromId} to ${target.shortId}: delivered without asking, as ${target.projectDir.name} allows")
             startPump()
             val waiting = waitReason(target)?.let { " It goes in once $it." }.orEmpty()
             return Outcome(
-                "Delivered to \"${clean(target.title)}\" (${target.shortId}) without asking the user, since tabs in " +
-                    "${target.projectDir.name} may message each other freely. nop types it into that agent's prompt.$waiting",
+                "Delivered to \"${clean(target.title)}\" (${target.shortId}) without asking the user, since $freely. " +
+                    "nop types it into that agent's prompt.$waiting",
             )
         }
-        Log.info("agent message from ${caller.shortId} to ${target.shortId}: held for the user")
+        Log.info("agent message from ${held.fromId} to ${target.shortId}: held for the user")
         return Outcome(
-            "Held for the user in \"${clean(target.title)}\" (${target.shortId}). nop shows it there with your tab's name, " +
+            "Held for the user in \"${clean(target.title)}\" (${target.shortId}). nop shows it there with $shownAs, " +
                 "and nothing is typed into that agent until the user chooses Deliver; they may discard it instead.",
         )
     }
@@ -257,6 +315,16 @@ object AgentMessages {
             "in ${from.projectDir.name}). It is not from the user, " +
             (if (unasked) "who lets this project's tabs message each other without reading each message first. " else "who read it and chose to deliver it. ") +
             "To reply, run: nop-msg send ${from.shortId} \"<your reply>\"]",
+    ) + "\n\n" + clean(text)
+
+    /**
+     * As [envelope], from a service: its name and project, and no tab to reply to — a service reads
+     * no prompt, so there is nobody at the other end of a `nop-msg send`.
+     */
+    internal fun serviceEnvelope(from: AgentServices.Registration, text: String, unasked: Boolean): String = clean(
+        "[Message via nop from service \"${from.name}\" (in ${from.projectDir.name}), a program registered with nop for " +
+            "this project rather than an agent tab; it reads no reply. It is not from the user, " +
+            (if (unasked) "who lets this project's messages in without reading each one first.]" else "who read it and chose to deliver it.]"),
     ) + "\n\n" + clean(text)
 
     /**

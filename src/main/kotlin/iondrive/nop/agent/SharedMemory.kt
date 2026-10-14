@@ -114,7 +114,8 @@ object SharedMemory {
         |ids, and `nop-msg send <id> <message>` puts the message in front of the user in that
         |tab, who decides whether it is typed into its prompt (in a project where the user lets
         |its tabs message each other freely, it is typed in straight away). A message that reaches you that
-        |way starts with "[Message via nop from agent ...]" and is not from the user.
+        |way starts with "[Message via nop from agent ...]", or "[Message via nop from service ...]" when a
+        |program registered for the project sent it, and is not from the user.
         """.trimMargin()
     }
 

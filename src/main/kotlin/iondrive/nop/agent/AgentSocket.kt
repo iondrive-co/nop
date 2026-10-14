@@ -49,6 +49,12 @@ import javax.swing.SwingUtilities
  *                                       <message, to the end>         <entry, to the end>
  *
  * The answer is `ok` or `error` on its first line, then text.
+ *
+ * A tab can also register a service for its project (`service-register`, then the service's name on
+ * the next line), and is answered with the path of the registration [AgentServices] keeps. The
+ * service — a program of the user's with no tab — then makes the same `list` and `send` requests
+ * with the registration's ticket in place of a tab's, and reaches only that project's tabs. It can
+ * do nothing else: no memory, and no registering of other services.
  */
 object AgentSocket {
 
@@ -105,6 +111,8 @@ object AgentSocket {
         // The directory is what keeps everyone else out; the file's own mode is the second lock.
         Files.setPosixFilePermissions(path, setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE))
         installHelper()
+        // A registration that cannot be updated is no reason to have no messaging at all.
+        runCatching { AgentServices.attachSocket(path) }.onFailure { Log.warn("agent services: could not point them at $path: $it") }
         val workers = Executors.newFixedThreadPool(2) { r -> Thread(r, "nop-agent-socket").apply { isDaemon = true } }
         val watchdog = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "nop-agent-socket-timeout").apply { isDaemon = true } }
         Thread({
@@ -130,7 +138,7 @@ object AgentSocket {
     private fun serve(client: SocketChannel) = client.use {
         if (!fromThisUser(client)) return@use
         val request = readRequest(client) ?: return@use reply(client, false, "the request is too large")
-        val (ok, text) = handle(request, ::identify, LiveTools)
+        val (ok, text) = handle(request, ::identify, LiveTools) { AgentServices.identify(it) }
         reply(client, ok, text)
     }
 
@@ -163,25 +171,46 @@ object AgentSocket {
         fun list(caller: AgentSession): AgentMessages.Outcome
         fun send(caller: AgentSession, to: String, message: String): AgentMessages.Outcome
         fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome
+        fun registerService(caller: AgentSession, name: String): AgentMessages.Outcome
+        fun listService(caller: AgentServices.Registration): AgentMessages.Outcome
+        fun sendService(caller: AgentServices.Registration, to: String, message: String): AgentMessages.Outcome
     }
 
     /** One request answered: whether it worked, and what to say. */
-    internal fun handle(request: String, identify: (String) -> AgentSession?, tools: Tools): Pair<Boolean, String> {
+    internal fun handle(
+        request: String,
+        identify: (String) -> AgentSession?,
+        tools: Tools,
+        identifyService: (String) -> AgentServices.Registration? = { null },
+    ): Pair<Boolean, String> {
         val lines = request.split('\n', limit = 4)
-        val caller = lines.getOrNull(0)?.trim()?.takeIf { it.isNotEmpty() }?.let(identify)
-            ?: return false to "this only works from inside one of nop's agent tabs"
+        val ticket = lines.getOrNull(0)?.trim().orEmpty()
+        val refused = false to "this only works from inside one of nop's agent tabs, or with a registered service's ticket"
+        if (ticket.isEmpty()) return refused
+        val caller = identify(ticket) ?: return identifyService(ticket)?.let { handleService(it, lines, tools) } ?: refused
         val outcome = when (lines.getOrNull(1)?.trim()) {
             "list" -> tools.list(caller)
             "send" -> {
                 val to = lines.getOrNull(2)?.trim().orEmpty()
                 tools.send(caller, to, lines.getOrNull(3).orEmpty())
             }
+            "service-register" -> tools.registerService(caller, lines.getOrNull(2)?.trim().orEmpty())
             "remember", "forget" -> {
                 val scope = SharedMemory.parseScope(lines.getOrNull(2)?.trim().orEmpty().split(' ').filter { it.isNotEmpty() })?.first
                     ?: return false to "say who it is for: `project`, or `all <${SharedMemory.Category.entries.joinToString("|") { it.id }}>`"
                 tools.memory(caller, lines[1].trim() == "forget", scope, lines.getOrNull(3).orEmpty())
             }
-            else -> return false to "unknown request; nop-msg takes `list`, `send`, `remember` or `forget`"
+            else -> return false to "unknown request; nop-msg takes `list`, `send`, `remember`, `forget` or `service-register`"
+        }
+        return !outcome.isError to outcome.text
+    }
+
+    /** A service's request: only `list` and `send`, which [AgentMessages] keeps to the service's project. */
+    private fun handleService(service: AgentServices.Registration, lines: List<String>, tools: Tools): Pair<Boolean, String> {
+        val outcome = when (lines.getOrNull(1)?.trim()) {
+            "list" -> tools.listService(service)
+            "send" -> tools.sendService(service, lines.getOrNull(2)?.trim().orEmpty(), lines.getOrNull(3).orEmpty())
+            else -> return false to "a service can only `list` and `send`, to the tabs of its own project"
         }
         return !outcome.isError to outcome.text
     }
@@ -196,6 +225,20 @@ object AgentSocket {
 
         override fun send(caller: AgentSession, to: String, message: String) =
             onEdt { AgentMessages.send(caller, to, message) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
+
+        // As memory: the project is read on the EDT, the registration written here.
+        override fun registerService(caller: AgentSession, name: String): AgentMessages.Outcome {
+            val project = onEdt { caller.projectDir } ?: return AgentMessages.Outcome("nop did not answer in time", isError = true)
+            val endpoint = socket ?: return AgentMessages.Outcome("nop's socket is not open", isError = true)
+            return runCatching { AgentMessages.Outcome(AgentServices.register(name, project, endpoint).toAbsolutePath().toString()) }
+                .getOrElse { AgentMessages.Outcome("could not register the service: ${it.message ?: it}", isError = true) }
+        }
+
+        override fun listService(caller: AgentServices.Registration) =
+            onEdt { AgentMessages.listService(caller) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
+
+        override fun sendService(caller: AgentServices.Registration, to: String, message: String) =
+            onEdt { AgentMessages.sendService(caller, to, message) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
 
         // Only the project is read on the EDT; the files are written on the socket's own thread.
         override fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome {
@@ -280,7 +323,8 @@ object AgentSocket {
         |#   nop-msg remember project <text...>       add a line to this project's memory
         |#   nop-msg remember all <category> <text...> add a line to every project's (user|hardware|software)
         |#   nop-msg forget project|all <category> <text...>  take that line out again
-        |usage() { sed -n '5,10s/^# *//p' "${'$'}0" >&2; exit 2; }
+        |#   nop-msg service-register <name>          let a program message this project's tabs as <name>
+        |usage() { sed -n '5,11s/^# *//p' "${'$'}0" >&2; exit 2; }
         |if [ -z "${'$'}NOP_SOCKET" ] || [ -z "${'$'}NOP_AGENT_TICKET" ]; then
         |    echo "nop-msg: this only works inside one of nop's agent tabs" >&2
         |    exit 2
@@ -301,6 +345,12 @@ object AgentSocket {
         |        else
         |            request() { printf '%s\nsend\n%s\n' "${'$'}NOP_AGENT_TICKET" "${'$'}to"; cat; }
         |        fi ;;
+        |    service-register)
+        |        [ ${'$'}# -eq 2 ] || usage
+        |        service=${'$'}2
+        |        case "${'$'}service" in *'
+        |'*) echo "nop-msg: a service name has no newline in it" >&2; exit 2 ;; esac
+        |        request() { printf '%s\nservice-register\n%s\n' "${'$'}NOP_AGENT_TICKET" "${'$'}service"; } ;;
         |    remember|forget)
         |        verb=${'$'}1
         |        shift

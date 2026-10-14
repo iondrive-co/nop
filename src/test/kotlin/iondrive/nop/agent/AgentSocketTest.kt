@@ -46,10 +46,41 @@ class AgentSocketTest {
             return AgentMessages.Outcome("queued")
         }
         val memory = mutableListOf<Triple<Boolean, SharedMemory.Scope, String>>()
+        val services = mutableListOf<String>()
+        override fun registerService(caller: AgentSession, name: String): AgentMessages.Outcome {
+            services += name
+            return AgentMessages.Outcome("registration path")
+        }
+        override fun listService(caller: AgentServices.Registration) = AgentMessages.Outcome("service list")
+        override fun sendService(caller: AgentServices.Registration, to: String, message: String): AgentMessages.Outcome {
+            sent += to to message
+            return AgentMessages.Outcome("service queued")
+        }
         override fun memory(caller: AgentSession, forget: Boolean, scope: SharedMemory.Scope, text: String): AgentMessages.Outcome {
             memory += Triple(forget, scope, text)
             return AgentMessages.Outcome("remembered")
         }
+    }
+
+    @Test
+    fun `service authentication is independent and cannot remember or register another identity`(@TempDir dir: Path) {
+        val service = AgentServices.Registration("Task scheduler", dir.toString(), "b".repeat(48), dir.resolve("endpoint.sock").toString())
+        val tools = Recorder()
+        val identify = { ticket: String -> service.takeIf { ticket == service.ticket } }
+        assertEquals(true to "service list", AgentSocket.handle("${service.ticket}\nlist\n", { null }, tools, identify))
+        assertTrue(AgentSocket.handle("${service.ticket}\nsend\nrecipient\nfirst\nsecond", { null }, tools, identify).first)
+        assertEquals(listOf("recipient" to "first\nsecond"), tools.sent)
+        for (verb in listOf("remember", "forget", "service-register")) {
+            assertFalse(AgentSocket.handle("${service.ticket}\n$verb\nproject\ntext", { null }, tools, identify).first)
+        }
+        assertFalse(AgentSocket.handle("guess\nsend\nrecipient\nact", { null }, tools, identify).first)
+        assertTrue(tools.memory.isEmpty())
+        assertTrue(tools.services.isEmpty())
+
+        // Only a tab registers a service.
+        val (tab) = tabs(dir, "a")
+        assertEquals(true to "registration path", AgentSocket.handle("${tab.agentTicket}\nservice-register\nTask scheduler", { tab }, tools, identify))
+        assertEquals(listOf("Task scheduler"), tools.services)
     }
 
     @Test
@@ -152,5 +183,20 @@ class AgentSocketTest {
         val (refused, why) = helper("not-a-ticket", "list")
         assertEquals(1, refused)
         assertTrue("inside one of nop's agent tabs" in why, why)
+
+        val (registered, registrationPath) = helper(me.agentTicket, "service-register", "Task scheduler")
+        assertEquals(0, registered, registrationPath)
+        assertTrue(Path.of(registrationPath.trim()).isAbsolute, registrationPath)
+        val service = AgentServices.read(Path.of(registrationPath.trim()))!!
+        assertEquals(dir.toString(), service.project)
+        assertEquals(AgentSocket.runEnv(me.agentTicket)[AgentSocket.SOCKET_ENV], service.socket)
+        // The bootstrap tab can close: the service's ticket still identifies the service itself.
+        AgentMessages.sessions = { listOf(other) }
+        val (serviceSent, serviceReply) = helper(service.ticket, "send", other.shortId, "service action")
+        assertEquals(0, serviceSent, serviceReply)
+        val serviceMessage = other.inbox.last()
+        assertTrue(serviceMessage.typed.startsWith("[Message via nop from service \"Task scheduler\""))
+        assertFalse("nop-msg send" in serviceMessage.typed)
+        assertFalse(me.shortId in serviceMessage.typed)
     }
 }

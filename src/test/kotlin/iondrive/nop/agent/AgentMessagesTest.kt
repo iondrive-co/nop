@@ -103,6 +103,40 @@ class AgentMessagesTest {
     }
 
     @Test
+    fun `a service sends as itself with one recipient tab and preserves approval and project boundaries`(
+        @TempDir project: Path, @TempDir elsewhere: Path, @TempDir config: Path,
+    ) = withConfigRoot(config) {
+        val (recipient) = tabs(project, "recipient" to Provider.OpenAI)
+        val (outsider) = tabs(elsewhere, "outsider" to Provider.Anthropic)
+        AgentMessages.sessions = { listOf(recipient, outsider) }
+        val service = AgentServices.Registration("Task scheduler", project.toString(), "a".repeat(48), project.resolve("endpoint.sock").toString())
+        val listing = AgentMessages.listService(service).text
+        assertTrue(recipient.shortId in listing)
+        assertFalse(outsider.shortId in listing)
+        assertTrue(AgentMessages.sendService(service, outsider.shortId, "act").isError)
+        assertTrue(outsider.inbox.isEmpty())
+        val heldResult = onEdt { AgentMessages.sendService(service, recipient.shortId, "read the queue\u001b") }
+        assertTrue(heldResult.text.startsWith("Held"))
+        val held = recipient.inbox.single()
+        assertFalse(held.approved)
+        assertEquals("read the queue", held.body)
+        assertTrue(held.typed.startsWith("[Message via nop from service \"Task scheduler\""))
+        assertTrue("It is not from the user" in held.typed, held.typed)
+        assertFalse("nop-msg send" in held.typed)
+        assertTrue(held.from.startsWith("service \"Task scheduler\""), held.from)
+        assertFalse(recipient.shortId in held.from)
+        assertEquals(held.typed, AgentMessages.Held.of(held.record()).typed)
+        onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }
+        assertTrue(held.approved)
+        val sent = onEdt { AgentMessages.sendService(service, recipient.shortId, "next action") }
+        assertTrue(sent.text.startsWith("Delivered"))
+        assertTrue(recipient.inbox.last().approved)
+        assertTrue("opened" in AgentMessages.waitReason(recipient)!!)
+        assertTrue(AgentMessages.sendService(service, recipient.shortId, " ").isError)
+        assertTrue(AgentMessages.sendService(service, recipient.shortId, "x".repeat(32_001)).isError)
+    }
+
+    @Test
     fun `a project the user opened up delivers between its own tabs without asking`(
         @TempDir project: Path,
         @TempDir elsewhere: Path,

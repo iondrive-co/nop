@@ -64,7 +64,7 @@ fun AgentInbox(session: AgentSession, modifier: Modifier = Modifier) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Message from tab ${message.from}",
+                            "Message from ${message.from}",
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f),
                         )
