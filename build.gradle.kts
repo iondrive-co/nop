@@ -64,6 +64,9 @@ tasks.test {
     // Accounts.dataRoot follows XDG_DATA_HOME. Without this, a test that opens an agent tab writes
     // its session log and project memory into the user's real ~/.local/share/nop/agent.
     environment("XDG_DATA_HOME", layout.buildDirectory.dir("test-data-home").get().asFile.absolutePath)
+    // And its config, which is where nop.log is: tests that start sessions and updates log what they
+    // make up, and read in the user's real log those lines pass for things that happened.
+    environment("XDG_CONFIG_HOME", layout.buildDirectory.dir("test-config-home").get().asFile.absolutePath)
 }
 
 // The version nop reports about itself, read at runtime by iondrive.nop.update.BuildInfo. Taken from

@@ -127,6 +127,64 @@ object SelfUpdate {
         return Located.At(Place(image, home, installation.version, system = !Files.isWritable(parent)))
     }
 
+    /**
+     * A copy of a checkout's build installed where launchers look (`installLocalCopy` in
+     * build.gradle.kts), which the user may move onto releases instead. Null for any other nop: a
+     * release, or a build run from inside its checkout, which nothing installs.
+     */
+    internal fun switchable(launcher: Path?, version: Version?): Place? {
+        launcher ?: return null
+        version ?: return null
+        if (Installation.installedFrom(launcher) == null || Installation.checkoutAbove(launcher) != null) return null
+        val real = runCatching { launcher.toRealPath() }.getOrElse { launcher.toAbsolutePath().normalize() }
+        val image = real.parent?.parent ?: return null
+        if (image.parent?.let(Files::isWritable) != true) return null
+        return Place(image, image, version, system = false)
+    }
+
+    /** Whether this nop is such a build: see [switchable]. */
+    val canSwitch: Boolean by lazy { switchable(Restart.launcher(), BuildInfo.version) != null }
+
+    /** Whether this nop updates itself from releases at all. */
+    val updatable: Boolean get() = located is Located.At
+
+    /** The release a switch staged, which the next restart starts. */
+    @Volatile
+    private var switching: Pair<Place, Updater.Image>? = null
+
+    /**
+     * Moves a checkout build installed where launchers look onto releases: stages the latest release
+     * beside it, off the calling thread, and leaves it [Status.Ready] for the next restart, which
+     * points the home at it and starts it ([switchTarget]). The build is kept as `nop.build`.
+     */
+    fun switchToReleases() {
+        val place = switchable(Restart.launcher(), BuildInfo.version) ?: return
+        executor.execute { switchToReleases(place, updater) }
+    }
+
+    internal fun switchToReleases(place: Place, updater: Updater) {
+        status = Status.Checking
+        status = runCatching {
+            val latest = updater.latest()
+            Log.info("update: downloading ${latest.version} to switch ${place.home} from a build to releases")
+            val staged = updater.stage(place.home, latest, listOf(place.image)) { done, total ->
+                status = Status.Downloading(latest.version, done, total)
+            }
+            if (!carries(staged)) {
+                throw UpdateException(
+                    "${staged.version} cannot take over running terminals: quit nop and run " +
+                        "scripts/install-release.sh --replace-build instead",
+                )
+            }
+            switching = place to staged
+            Status.Ready(staged.version, atRestart = true)
+        }.getOrElse { failure ->
+            val reason = if (RuntimeFiles.replaced()) RUNTIME_REPLACED else (failure as? UpdateException)?.message ?: failure.toString()
+            Log.warn("update: $reason")
+            Status.Failed(reason)
+        }
+    }
+
     /** Starts the checks. Called once, by the nop that owns the windows. */
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -178,6 +236,10 @@ object SelfUpdate {
     }
 
     internal fun check(place: Place, updater: Updater) {
+        if (RuntimeFiles.replaced()) {
+            status = Status.Failed(RUNTIME_REPLACED)
+            return
+        }
         status = Status.Checking
         status = runCatching {
             val latest = updater.latest()
@@ -199,17 +261,43 @@ object SelfUpdate {
             Log.info("update: ${staged.version} is staged at ${staged.dir}")
             Status.Ready(staged.version, carries(staged))
         }.getOrElse { failure ->
-            val reason = (failure as? UpdateException)?.message ?: failure.toString()
+            val reason = when {
+                RuntimeFiles.replaced() -> RUNTIME_REPLACED
+                failure is UpdateException -> failure.message ?: failure.toString()
+                else -> failure.toString()
+            }
             Log.warn("update: $reason")
             Status.Failed(reason)
         }
     }
 
+    /** What to say when [RuntimeFiles.replaced]: nothing that starts a program works until a restart. */
+    internal const val RUNTIME_REPLACED =
+        "nop's files were replaced while it runs, so it cannot start the programs an update needs. Restart nop, then check again"
+
+
     /**
      * The launcher a restart should exec instead of this nop's own: a newer version staged beside the
      * install, when its build takes over this nop's handover. Marks it tried. Null for none.
      */
-    fun restartTarget(): Path? = (located as? Located.At)?.place?.let { restartTarget(it, updater) }
+    fun restartTarget(): Path? =
+        (located as? Located.At)?.place?.let { restartTarget(it, updater) }
+            ?: switching?.let { (place, image) -> switchTarget(place, image, updater) }
+
+    /**
+     * The release a switch staged, with the home pointed at it and the build moved aside as
+     * `nop.build`. Done here, as the restart is about to exec it, rather than once the release is up:
+     * a release from before switches existed would not take over a home holding a build itself, and
+     * nothing of this nop's is loaded from its files after this.
+     */
+    internal fun switchTarget(place: Place, image: Updater.Image, updater: Updater): Path? = runCatching {
+        val build = Updater.sibling(place.home, "build")
+        Updater.deleteTree(build)
+        updater.activate(place.home, image.dir, build)
+        updater.mark(image.dir, Updater.TRIED, "from=$build\nfromVersion=${place.version}\n")
+        Log.info("update: restarting into ${image.version}; ${place.home} now starts releases, and the build is $build")
+        image.launcher
+    }.onFailure { Log.error("update: could not switch ${place.home} to ${image.version}", it) }.getOrNull()
 
     internal fun restartTarget(place: Place, updater: Updater): Path? {
         val image = runCatching { candidate(place, updater) }.getOrNull() ?: return null

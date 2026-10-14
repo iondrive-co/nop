@@ -396,7 +396,7 @@ class Updater(
                     else -> "; nop's own launcher starts from here, so it is the update"
                 }
                 iondrive.nop.Log.warn(
-                    "update: the update's launcher ${outcome.why}$blame. It printed:\n" +
+                    "update: started to check it works, the update's launcher ${outcome.why.removePrefix("it ")}$blame. It printed:\n" +
                         outcome.output.ifBlank { "(nothing)" }.take(4000),
                 )
                 throw UpdateException("the update does not start: ${outcome.why}$blame")

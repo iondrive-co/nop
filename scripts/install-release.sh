@@ -111,11 +111,14 @@ fi
 
 # Point the home at it. A build of a checkout goes aside as nop.build, to switch back to; any other
 # home that is a directory of its own goes aside as the version it holds.
+moved=false
 if [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ] && [ -e "$HOME_LINK/.built-from-checkout" ]; then
     rm -rf "$HOME_LINK.build"
     mv "$HOME_LINK" "$HOME_LINK.build"
+    moved=true
     echo "Kept the build that was there as $HOME_LINK.build"
 elif [ -d "$HOME_LINK" ] && [ ! -L "$HOME_LINK" ]; then
+    moved=true
     old="$(unzip -p "$HOME_LINK"/lib/app/nop-*.jar iondrive/nop/update/nop-build.properties 2>/dev/null | sed -n 's/^version=//p' | head -1 || true)"
     aside="$OPT/nop-${old:-previous}"
     [ -e "$aside" ] && aside="$OPT/nop.previous" && rm -rf "$aside"
@@ -125,4 +128,10 @@ fi
 ln -sfn "nop-$version" "$HOME_LINK.link"
 mv -T "$HOME_LINK.link" "$HOME_LINK"
 echo "Installed nop $version: $HOME_LINK -> $target"
-echo "Restart nop (the restart button in its bar) to run it."
+if $moved; then
+    # A JVM finds its own runtime by the path it started from, and that path is now another one.
+    echo "Restart nop now (the restart button in its bar): a nop that was running from $HOME_LINK"
+    echo "cannot start other programs, updates among them, until it restarts."
+else
+    echo "Restart nop (the restart button in its bar) to run it."
+fi

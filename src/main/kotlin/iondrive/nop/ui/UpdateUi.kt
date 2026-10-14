@@ -7,6 +7,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -14,7 +19,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import iondrive.nop.update.RuntimeFiles
 import iondrive.nop.update.SelfUpdate
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.DefaultButton
@@ -67,6 +76,25 @@ internal fun VersionLabel(onClick: () -> Unit, height: Dp) {
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 internal fun UpdateBadge(onRestart: () -> Unit, onDetails: () -> Unit, height: Dp) {
+    // Polled, since nothing in nop changes when its files are replaced from outside it.
+    var replaced by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            replaced = withContext(Dispatchers.IO) { RuntimeFiles.replaced() }
+            delay(30_000)
+        }
+    }
+    if (replaced) {
+        Tooltip(tooltip = { Text("nop's files were replaced while it runs, so it cannot start programs until it restarts.") }) {
+            Row(
+                modifier = Modifier.height(height).clickable(onClick = onRestart).padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Restart nop", color = ChangeColors.MODIFIED, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        return
+    }
     val ready = SelfUpdate.status as? SelfUpdate.Status.Ready ?: return
     Tooltip(tooltip = { Text(updateStatusLine(ready)) }) {
         Row(
@@ -93,7 +121,13 @@ internal fun UpdateDialog(onRestart: (() -> Unit)?, onClose: () -> Unit) {
             Text("$version was installed and did not start, so this is the version before it. nop does not try $version again.", color = ChangeColors.MODIFIED)
         }
         Text(updateStatusLine(status))
-        if (status !is SelfUpdate.Status.Off) {
+        if (status is SelfUpdate.Status.Off && SelfUpdate.canSwitch) {
+            Text(
+                "Or switch it to releases: nop then updates itself from those, and this build is kept as " +
+                    "nop.build beside it, to go back to.",
+            )
+        }
+        if (SelfUpdate.updatable) {
             CheckboxRow(
                 text = "Check for updates and install them at the next restart",
                 checked = SelfUpdate.automatic,
@@ -104,7 +138,10 @@ internal fun UpdateDialog(onRestart: (() -> Unit)?, onClose: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
         ) {
-            if (status !is SelfUpdate.Status.Off) {
+            if (status is SelfUpdate.Status.Off && SelfUpdate.canSwitch) {
+                OutlinedButton(onClick = { SelfUpdate.switchToReleases() }) { Text("Switch to releases") }
+            }
+            if (SelfUpdate.updatable) {
                 OutlinedButton(
                     onClick = { SelfUpdate.checkNow() },
                     enabled = status !is SelfUpdate.Status.Checking && status !is SelfUpdate.Status.Downloading,

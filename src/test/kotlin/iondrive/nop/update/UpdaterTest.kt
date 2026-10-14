@@ -380,6 +380,44 @@ class UpdaterTest {
     }
 
     @Test
+    fun `a checkout's build installed for launchers can be switched to releases`() {
+        val home = install()
+        home.resolve(Installation.BUILT_FROM).writeText("/home/dev/nop\n")
+        publish()
+        val updater = updater()
+        val build = assertNotNull(SelfUpdate.switchable(home.resolve("bin/nop"), Version(1, 0, 0)))
+        try {
+            SelfUpdate.switchToReleases(build, updater)
+            assertEquals(SelfUpdate.Status.Ready(Version(9, 9, 9), atRestart = true), SelfUpdate.status)
+            val staged = updater.images(home).single()
+            assertTrue(Files.isDirectory(home, LinkOption.NOFOLLOW_LINKS), "nothing moves before the restart")
+
+            // The restart points the home at the release and starts it; the build is kept beside it.
+            assertEquals(staged.launcher, SelfUpdate.switchTarget(build, staged, updater))
+            assertTrue(Files.isSymbolicLink(home))
+            assertEquals(staged.dir.toRealPath(), home.toRealPath())
+            assertTrue(tmp.resolve("opt/nop.build").resolve(Installation.BUILT_FROM).exists(), "the build is kept")
+
+            // The release that comes up is an ordinary release install from then on.
+            val release = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(staged.launcher, Version(9, 9, 9), tmp)).place
+            assertEquals(home, release.home)
+            SelfUpdate.markHealthy(release, updater)
+            assertTrue(updater.images(home).single().healthy)
+        } finally {
+            SelfUpdate.status = SelfUpdate.Status.Idle
+        }
+    }
+
+    @Test
+    fun `only a checkout's build installed for launchers is offered the switch`() {
+        val release = install()
+        assertNull(SelfUpdate.switchable(release.resolve("bin/nop"), Version(1, 0, 0)), "a release updates already")
+        tmp.resolve("work/.git").createDirectories().resolve("HEAD").writeText("ref: refs/heads/main\n")
+        val inCheckout = image(tmp.resolve("work/build/app/nop"), "1.0.0")
+        assertNull(SelfUpdate.switchable(inCheckout.resolve("bin/nop"), Version(1, 0, 0)), "a build in its checkout is that checkout's")
+    }
+
+    @Test
     fun `an install is located by its launcher`() {
         val legacy = install()
         val located = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(legacy.resolve("bin/nop"), Version(1, 0, 0), tmp))
@@ -417,6 +455,22 @@ class UpdaterTest {
         assertEquals(LaunchArgs.UpdateProbe, LaunchArgs.parse(arrayOf(UpdateProbe.FLAG)))
         assertIs<LaunchArgs.Invalid>(LaunchArgs.parse(arrayOf(UpdateProbe.FLAG, "/tmp")))
         assertEquals(UpdateProbe.parse(UpdateProbe.answer())?.adopts, Handover.ADOPTS)
+    }
+
+    @Test
+    fun `files put in place of the runtime's are told from it, whatever the path`() {
+        val install = tmp.resolve("opt/nop").createDirectories()
+        val helper = install.resolve("jspawnhelper").also { it.writeText("this runtime's") }
+        val atStart = RuntimeFiles.identity(helper)
+
+        assertEquals(atStart, RuntimeFiles.identity(helper), "unchanged")
+        // Another install moved into place at the same path, as an install script or a build does.
+        val other = tmp.resolve("opt/nop-2").createDirectories()
+        other.resolve("jspawnhelper").writeText("another runtime's")
+        Files.move(install, tmp.resolve("opt/nop.old"))
+        Files.createSymbolicLink(install, other)
+
+        assertFalse(atStart == RuntimeFiles.identity(helper))
     }
 
     @Test

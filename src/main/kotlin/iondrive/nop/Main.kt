@@ -136,6 +136,8 @@ fun main(args: Array<String>) {
     // First thing, before any UI: route uncaught throwables to ~/.config/nop/nop.log. Without this
     // a crash on the AWT thread takes the window down and leaves no trace anywhere findable.
     Log.install(args)
+    // What the runtime on disk is now, to tell later whether it was replaced under this nop.
+    iondrive.nop.update.RuntimeFiles.note()
 
     // A newer version of this install — staged by an earlier run, or already installed under the
     // user's home for a package install this launcher belongs to — starts in place of this one. Only
