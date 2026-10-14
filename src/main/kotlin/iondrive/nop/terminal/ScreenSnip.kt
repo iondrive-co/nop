@@ -60,11 +60,30 @@ internal object ScreenSnip {
                     totalBounds = totalBounds.union(gd.defaultConfiguration.bounds)
                 }
 
-                val robot = java.awt.Robot()
-                val fullDesktop = robot.createScreenCapture(totalBounds)
+                val capture = if (X11ScreenCapture.isXpra()) {
+                    X11ScreenCapture.capture()
+                } else {
+                    null
+                } ?: run {
+                    val robot = java.awt.Robot()
+                    val fullDesktop = robot.createScreenCapture(totalBounds)
+                    if (X11ScreenCapture.isUniformColor(fullDesktop)) {
+                        X11ScreenCapture.capture() ?: CaptureResult(
+                            image = fullDesktop,
+                            bounds = totalBounds,
+                            overlayBounds = devices.map { it.defaultConfiguration.bounds },
+                        )
+                    } else {
+                        CaptureResult(
+                            image = fullDesktop,
+                            bounds = totalBounds,
+                            overlayBounds = devices.map { it.defaultConfiguration.bounds },
+                        )
+                    }
+                }
 
                 SwingUtilities.invokeLater {
-                    showOverlay(owner, devices, totalBounds, fullDesktop, onSelected)
+                    showOverlay(owner, capture.overlayBounds, capture.bounds, capture.image, onSelected)
                 }
             } catch (e: Throwable) {
                 Log.warn("screen snip capture failed: $e")
@@ -75,7 +94,7 @@ internal object ScreenSnip {
 
     private fun showOverlay(
         owner: Window?,
-        devices: Array<GraphicsDevice>,
+        overlayBounds: List<Rectangle>,
         totalBounds: Rectangle,
         fullDesktop: BufferedImage,
         onSelected: (Path) -> Unit,
@@ -145,8 +164,7 @@ internal object ScreenSnip {
             }
         }
 
-        for (gd in devices) {
-            val bounds = gd.defaultConfiguration.bounds
+        for (bounds in overlayBounds) {
             val dialog = JDialog(owner as? Frame)
             dialog.isUndecorated = true
             dialog.isAlwaysOnTop = true

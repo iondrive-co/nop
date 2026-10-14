@@ -24,13 +24,13 @@ import java.nio.file.attribute.PosixFilePermissions
  */
 internal object OwnerOnly {
 
-    private val DIR_PERMISSIONS = PosixFilePermissions.asFileAttribute(
-        setOf(
-            PosixFilePermission.OWNER_READ,
-            PosixFilePermission.OWNER_WRITE,
-            PosixFilePermission.OWNER_EXECUTE,
-        ),
+    private val DIR_PERMISSIONS_SET = setOf(
+        PosixFilePermission.OWNER_READ,
+        PosixFilePermission.OWNER_WRITE,
+        PosixFilePermission.OWNER_EXECUTE,
     )
+
+    private val DIR_PERMISSIONS = PosixFilePermissions.asFileAttribute(DIR_PERMISSIONS_SET)
 
     private val FILE_PERMISSIONS = setOf(
         PosixFilePermission.OWNER_READ,
@@ -74,5 +74,10 @@ internal object OwnerOnly {
     /** Narrows an existing file to owner-only. Used after an atomic rename brings a new one in. */
     fun tighten(file: Path) {
         runCatching { Files.setPosixFilePermissions(file, FILE_PERMISSIONS) }
+    }
+
+    /** Narrows an existing directory to owner-only (mode 700). */
+    fun tightenDirectory(dir: Path) {
+        runCatching { Files.setPosixFilePermissions(dir, DIR_PERMISSIONS_SET) }
     }
 }

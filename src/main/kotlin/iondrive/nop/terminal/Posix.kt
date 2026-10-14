@@ -29,6 +29,7 @@ internal object Posix {
         fun close_range(first: Int, last: Int, flags: Int): Int
         fun sigprocmask(how: Int, set: Pointer, old: Pointer?): Int
         fun execve(path: String, argv: Array<String>, envp: Array<String>): Int
+        fun getuid(): Int
     }
 
     private val c: C by lazy { Native.load("c", C::class.java) }
@@ -55,6 +56,9 @@ internal object Posix {
 
     /** The errno of the last call on this thread. */
     fun errno(): Int = Native.getLastError()
+
+    /** The real user ID of the calling process. */
+    fun getuid(): Int = c.getuid()
 
     fun read(fd: Int, buf: ByteArray, len: Int): Long = c.read(fd, buf, len.toLong())
 

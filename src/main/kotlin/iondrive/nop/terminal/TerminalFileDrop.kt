@@ -1,6 +1,7 @@
 package iondrive.nop.terminal
 
 import iondrive.nop.Log
+import iondrive.nop.agent.OwnerOnly
 import java.awt.Image
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.Transferable
@@ -109,20 +110,43 @@ internal class TerminalFileDrop(private val onPaths: (List<String>) -> Unit) : D
 }
 
 /**
+ * Directory for temporary drops (snipped and pasted images).
+ *
+ * Placed in a private per-user directory ($XDG_RUNTIME_DIR/nop-drops, mode 700, falling back to
+ * /tmp/nop-drops-<uid>) so concurrent users on the same machine cannot collide or be denied
+ * write permissions on a shared directory.
+ */
+internal fun dropsDir(): Path {
+    val runtime = System.getenv("XDG_RUNTIME_DIR")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
+    if (runtime != null && Files.isDirectory(runtime)) {
+        val dir = runtime.resolve("nop-drops")
+        val created = runCatching {
+            OwnerOnly.directory(dir)
+            OwnerOnly.tightenDirectory(dir)
+            dir
+        }.getOrNull()
+        if (created != null && Files.isWritable(created)) return created
+    }
+    val uid = runCatching { Posix.getuid().toString() }.getOrElse { System.getProperty("user.name") }
+    val tmp = Path.of(System.getProperty("java.io.tmpdir"))
+    val fallback = tmp.resolve("nop-drops-$uid")
+    OwnerOnly.directory(fallback)
+    OwnerOnly.tightenDirectory(fallback)
+    return fallback
+}
+
+/**
  * Writes an image out to the temp directory so there is a file path to name, and returns it.
  *
- * Under the system temp directory rather than in the project: a picture dragged in, pasted,
+ * Under a private per-user temp directory rather than in the project: a picture dragged in, pasted,
  * or snipped to be looked at is not part of the repository, and a file nop drops into the
- * working tree is one the user has to notice and delete — possibly after committing it. Named
- * per user: the temp directory is shared, and another user's directory there is not writable.
+ * working tree is one the user has to notice and delete — possibly after committing it.
  */
 internal fun saveImageToTemp(image: Image?): Path? {
     if (image == null) return null
     val rendered = image as? RenderedImage ?: rasterizeImage(image) ?: return null
     return runCatching {
-        val dir = Files.createDirectories(
-            Path.of(System.getProperty("java.io.tmpdir"), "nop-drops-${System.getProperty("user.name")}"),
-        )
+        val dir = dropsDir()
         Files.createTempFile(dir, "image-", ".png").also { file ->
             Files.newOutputStream(file).use { out ->
                 check(ImageIO.write(rendered, "png", out)) { "no PNG writer" }

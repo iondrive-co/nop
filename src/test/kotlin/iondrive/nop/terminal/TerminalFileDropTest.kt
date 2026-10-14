@@ -63,4 +63,14 @@ class TerminalFileDropTest {
 
         java.nio.file.Files.deleteIfExists(path)
     }
+
+    @Test
+    fun `dropsDir returns a private directory with mode 700`() {
+        val dir = dropsDir()
+        org.junit.jupiter.api.Assertions.assertTrue(java.nio.file.Files.isDirectory(dir))
+        org.junit.jupiter.api.Assertions.assertTrue(java.nio.file.Files.isWritable(dir))
+        val perms = java.nio.file.Files.getPosixFilePermissions(dir)
+        val open = perms.filter { it.name.startsWith("GROUP") || it.name.startsWith("OTHERS") }
+        org.junit.jupiter.api.Assertions.assertTrue(open.isEmpty(), "drops directory should be mode 700: $perms")
+    }
 }
