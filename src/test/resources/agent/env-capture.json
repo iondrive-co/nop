@@ -11,7 +11,8 @@
       "model": null,
       "reasoning": null,
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -20,7 +21,8 @@
       "model": null,
       "reasoning": "default",
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -30,6 +32,7 @@
       "reasoning": "low",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "4000"
       }
     },
@@ -40,6 +43,7 @@
       "reasoning": "medium",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "10000"
       }
     },
@@ -50,6 +54,7 @@
       "reasoning": "high",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "21000"
       }
     },
@@ -60,6 +65,7 @@
       "reasoning": "xHigh",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "28000"
       }
     },
@@ -70,6 +76,7 @@
       "reasoning": "Max",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "31999"
       }
     },
@@ -80,6 +87,7 @@
       "reasoning": "Ultracode",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "31999"
       }
     },
@@ -89,7 +97,8 @@
       "model": null,
       "reasoning": "minimal",
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -98,7 +107,8 @@
       "model": "default",
       "reasoning": null,
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -107,7 +117,8 @@
       "model": "default",
       "reasoning": "default",
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -117,6 +128,7 @@
       "reasoning": "low",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "4000"
       }
     },
@@ -127,6 +139,7 @@
       "reasoning": "medium",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "10000"
       }
     },
@@ -137,6 +150,7 @@
       "reasoning": "high",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "21000"
       }
     },
@@ -147,6 +161,7 @@
       "reasoning": "xHigh",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "28000"
       }
     },
@@ -157,6 +172,7 @@
       "reasoning": "Max",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "31999"
       }
     },
@@ -167,6 +183,7 @@
       "reasoning": "Ultracode",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "31999"
       }
     },
@@ -176,7 +193,8 @@
       "model": "default",
       "reasoning": "minimal",
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -185,7 +203,8 @@
       "model": "some-model",
       "reasoning": null,
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -194,7 +213,8 @@
       "model": "some-model",
       "reasoning": "default",
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {
@@ -204,6 +224,7 @@
       "reasoning": "low",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "4000"
       }
     },
@@ -214,6 +235,7 @@
       "reasoning": "medium",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "10000"
       }
     },
@@ -224,6 +246,7 @@
       "reasoning": "high",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "21000"
       }
     },
@@ -234,6 +257,7 @@
       "reasoning": "xHigh",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "28000"
       }
     },
@@ -244,6 +268,7 @@
       "reasoning": "Max",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "31999"
       }
     },
@@ -254,6 +279,7 @@
       "reasoning": "Ultracode",
       "env": {
         "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1",
         "MAX_THINKING_TOKENS": "31999"
       }
     },
@@ -263,7 +289,8 @@
       "model": "some-model",
       "reasoning": "minimal",
       "env": {
-        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main"
+        "CLAUDE_CONFIG_DIR": "/home/dev/.local/share/nop/agent/homes/claude-main",
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"
       }
     },
     {

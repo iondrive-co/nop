@@ -76,7 +76,7 @@ object Handoff {
      * wrong, which a prompt that existed only in a process's arguments would not.
      */
     fun seedPrompt(from: Provider, path: Path): String =
-        "Continue the task handed over from ${from.label}. Read ${path.toAbsolutePath()} in full " +
+        "$SEED_START${from.label}. Read ${path.toAbsolutePath()} in full " +
             "before doing anything else, then carry on from its Remaining Work section."
 
     /**
@@ -291,6 +291,9 @@ object Handoff {
     /** Commands worth listing. A `ls` says nothing; a test run says where the work stood. */
     private val INTERESTING_COMMAND =
         Regex("""\b(pytest|npm|make|cargo|go|yarn|pnpm|gradle|gradlew|mvn|tox|jest|vitest|test)\b""")
+
+    /** How [seedPrompt] begins, up to the provider it names. */
+    internal const val SEED_START = "Continue the task handed over from "
 
     private const val MAX_COMMANDS = 10
     private const val MAX_FAILURES = 5

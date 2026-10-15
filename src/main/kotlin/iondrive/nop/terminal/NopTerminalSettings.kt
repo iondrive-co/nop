@@ -130,6 +130,15 @@ class NopTerminalSettings(
     )
 
     /**
+     * What a message the user sent an agent is painted on in place of the CLI's own background, and
+     * the colour its marks on the scrollbar are drawn in — see [UserMessages]. Amber, so it stands
+     * apart from the grey the CLI gives every prompt, which messages from other agents keep, and from
+     * the blue of a selection. Its text is recoloured to read on it like any other cell's.
+     */
+    val userMessageBackground: Color
+        get() = if (isDark) Color(0x5C4813) else Color(0xFFDB80)
+
+    /**
      * Underline links whenever they're on screen, not just under the pointer (JediTerm's default),
      * so output that contains a URL advertises it as clickable without a hunt.
      */

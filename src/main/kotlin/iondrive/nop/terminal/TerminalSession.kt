@@ -64,6 +64,11 @@ class TerminalSession private constructor(
      * see [handOff]. Null for a terminal that starts its own.
      */
     private val adopted: Adopted? = null,
+    /**
+     * How every prompt nop types into an agent's CLI begins, for an agent's terminal, which paints
+     * the user's own prompts apart from those ([UserMessages]). Null for any other terminal.
+     */
+    private val nopPrompts: List<String>? = null,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(false)
@@ -254,6 +259,7 @@ class TerminalSession private constructor(
                 }
             }
         })
+        nopPrompts?.let { w.userMessages = UserMessages(it) }
         settings = s
         widget = w
         runCatching { attach(w, startProcess()) }.onFailure {
@@ -825,6 +831,8 @@ class TerminalSession private constructor(
             outputTap: ((String) -> Unit)? = null,
             /** The run the last nop handed over, when this one carries it on — see [handOff]. */
             adopted: Adopted? = null,
+            /** How the prompts nop types in begin — see [TerminalSession.nopPrompts]. */
+            nopPrompts: List<String>? = null,
         ): TerminalSession =
             TerminalSession(
                 title = title,
@@ -834,6 +842,7 @@ class TerminalSession private constructor(
                 env = env,
                 outputTap = outputTap,
                 adopted = adopted,
+                nopPrompts = nopPrompts,
             )
 
         /** The PTY master behind [proc], for a process whose master this nop can name. */

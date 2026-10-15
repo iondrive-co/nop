@@ -1174,6 +1174,7 @@ class AgentSession(
             dir = projectDir,
             title = account.name,
             adopted = adoption?.second,
+            nopPrompts = NOP_PROMPTS,
             // Three jobs, one copy of the output, and none of them touches what is drawn. The
             // quota watcher is how nop learns the CLI has hit a wall — it announces that in its own
             // UI and nowhere else — and the screen tail is the fallback a handoff is built from
@@ -1367,5 +1368,12 @@ class AgentSession(
         /** What nop types into a CLI whose wall has lifted. */
         internal const val RESUME_PROMPT: String =
             "Your usage limit has reset. Carry on with what you were doing."
+
+        /**
+         * How each prompt nop types into a CLI, or starts one with, begins: a delivered message, the
+         * prompt that resumes a run, a handover's opening line. The terminal paints every other prompt
+         * the CLI echoes as the user's.
+         */
+        private val NOP_PROMPTS = listOf(AgentMessages.ENVELOPE_START, RESUME_PROMPT, Handoff.SEED_START)
     }
 }

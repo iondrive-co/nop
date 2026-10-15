@@ -2,6 +2,7 @@ package iondrive.nop.terminal
 
 import com.jediterm.terminal.CursorShape
 import com.jediterm.terminal.DefaultTerminalCopyPasteHandler
+import com.jediterm.terminal.TerminalColor
 import com.jediterm.terminal.TerminalCopyPasteHandler
 import com.jediterm.terminal.TextStyle
 import com.jediterm.terminal.model.StyleState
@@ -28,6 +29,7 @@ import java.awt.datatransfer.DataFlavor
 import java.io.File
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.awt.event.HierarchyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.font.FontRenderContext
@@ -40,10 +42,12 @@ import java.awt.image.RenderedImage
 import java.awt.image.renderable.RenderableImage
 import java.text.AttributedCharacterIterator
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JScrollBar
 import javax.swing.SwingUtilities
+import javax.swing.Timer
 import javax.swing.plaf.basic.BasicScrollBarUI
 
 /**
@@ -65,10 +69,36 @@ internal class NopTerminalWidget(
     private var scrollScheduled: Boolean = false
     private var scrollBarRef: JScrollBar? = null
 
+    /**
+     * Set on an agent's terminal: the user's messages are painted apart from the rest (see
+     * [NopTerminalPanel.userMessages]) and marked on the scrollbar, so they can be found again in a
+     * long conversation.
+     */
+    @Volatile
+    var userMessages: UserMessages? = null
+        set(value) {
+            field = value
+            (terminalPanel as NopTerminalPanel).userMessages = value
+            markMessagesSoon()
+        }
+
+    /** Set while a [markTimer] run is on its way, so a burst of output asks for one. */
+    private val marksDue = AtomicBoolean(false)
+
+    /** Leaves a terminal nobody can see alone until it is shown, when the marks are read afresh. */
+    private val markTimer = Timer(MARK_DELAY_MS) { if (isShowing) markMessages() else marksDue.set(false) }
+        .apply { isRepeats = false }
+
     init {
+        (terminalPanel as NopTerminalPanel).cursorRow = { terminal.cursorY - 1 }
+        addHierarchyListener { e ->
+            if (e.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && isShowing) markMessagesSoon()
+        }
+
         // Keep scroll at bottom on buffer updates unless the user has explicitly scrolled up
         terminalTextBuffer.addModelListener {
             settings.nudgeActive()
+            markMessagesSoon()
             if (!userScrolledUp && !scrollScheduled) {
                 scrollScheduled = true
                 SwingUtilities.invokeLater {
@@ -147,6 +177,31 @@ internal class NopTerminalWidget(
         })
     }
 
+    /** Marks the user's messages on the scrollbar [MARK_DELAY_MS] from now, once for all the output that arrives meanwhile. */
+    private fun markMessagesSoon() {
+        if (userMessages == null || !marksDue.compareAndSet(false, true)) return
+        SwingUtilities.invokeLater { markTimer.start() }
+    }
+
+    /** Reads the whole buffer, scrollback and screen, for the user's messages and puts a mark on the scrollbar at each. */
+    internal fun markMessages() {
+        marksDue.set(false)
+        val bar = scrollBarRef as? TerminalScrollBar ?: return
+        val messages = userMessages ?: return bar.setMarks(emptyList(), 0)
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            val rows = UserMessages.rowsOf(buffer, mySettingsProvider.defaultStyle.background)
+            val found = messages.find(rows, rows.top, rows.bottom, terminal.cursorY - 1)
+            bar.setMarks(found.map { it.first - rows.top }, rows.bottom - rows.top)
+        } finally {
+            buffer.unlock()
+        }
+    }
+
+    /** Where the scrollbar marks the user's messages, as [TerminalScrollBar.marks] counts them. */
+    internal val messageMarks: List<Int> get() = (scrollBarRef as? TerminalScrollBar)?.marks.orEmpty()
+
     /** Scrolls the viewport down to the active prompt / live screen output. */
     fun scrollToBottom() {
         userScrolledUp = false
@@ -174,6 +229,11 @@ internal class NopTerminalWidget(
         textBuffer: TerminalTextBuffer,
     ): TerminalPanel =
         NopTerminalPanel(settingsProvider as NopTerminalSettings, textBuffer, styleState)
+
+    private companion object {
+        /** How long output has to pause for before the scrollbar's marks are read again, at most. */
+        const val MARK_DELAY_MS = 400
+    }
 }
 
 /**
@@ -232,13 +292,63 @@ private class NopTerminalPanel(
         }
     }
 
+    /**
+     * Set on an agent's terminal, whose user messages [paintComponent] then paints on
+     * [NopTerminalSettings.userMessageBackground].
+     */
+    var userMessages: UserMessages? = null
+
+    /** The buffer row the cursor is on. The widget sets it, as the one holding the terminal. */
+    var cursorRow: () -> Int = { Int.MIN_VALUE }
+
     override fun paintComponent(g: Graphics) {
         val g2d = g as? Graphics2D ?: run {
             super.paintComponent(g)
             return
         }
-        val wrapper = ContrastAdjustingGraphics2D(g2d, settings)
+        val wrapper = ContrastAdjustingGraphics2D(g2d, settings, fillColor = userMessages?.let { UserRowFill(it)::fill })
         super.paintComponent(wrapper)
+    }
+
+    /**
+     * Swaps the background of the user's messages, one paint's worth.
+     *
+     * Which rows those are is worked out at the first fill that could need it rather than before the
+     * paint, because JediTerm moves the scroll origin on its way in when history grows under a view
+     * scrolled back into it. Only the fill of the whole panel comes before that, and it is in the
+     * terminal's own background; every fill after it is a run of cells, drawn with the buffer locked.
+     */
+    private inner class UserRowFill(private val messages: UserMessages) {
+        private var rows: Array<Color?>? = null
+
+        fun fill(y: Int, color: Color): Color {
+            if (color == settings.bg || myCharSize.height <= 0) return color
+            val replaced = (rows ?: userRows(messages).also { rows = it }).getOrNull(y / myCharSize.height)
+            return if (color == replaced) settings.userMessageBackground else color
+        }
+    }
+
+    /** For each row on screen, the background the CLI drew the user's message on it in, or null for a row without one. */
+    private fun userRows(messages: UserMessages): Array<Color?> {
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            val rows = arrayOfNulls<Color>(buffer.height)
+            val all = UserMessages.rowsOf(buffer, settings.getDefaultStyle().background)
+            val origin = myClientScrollOrigin
+            for (message in messages.find(all, origin, origin + rows.size, cursorRow())) {
+                for (row in message) rows[row - origin] = all.background(row)?.let(::awtBackground)
+            }
+            return rows
+        } finally {
+            buffer.unlock()
+        }
+    }
+
+    /** [color] as JediTerm paints it as a background. */
+    private fun awtBackground(color: TerminalColor): Color {
+        val c = if (color.isIndexed) settings.terminalColorPalette.getBackground(color) else color.toColor()
+        return Color(c.red, c.green, c.blue)
     }
 
     override fun useAlternateScreenBuffer(enabled: Boolean) {
@@ -348,6 +458,11 @@ internal class NopTerminalCopyPasteHandler : DefaultTerminalCopyPasteHandler() {
  * target brush actually differs from what is active. In particular, text drawing calls do not
  * restore [currentColor] after each character cluster, allowing Java 2D's XRender pipeline to
  * batch glyph runs rather than flushing and rebinding pictures per character.
+ *
+ * [fillColor] may swap the colour a rectangle is filled with, given its top edge: JediTerm fills
+ * each run of cells with its background before drawing the text over it, so this is where a row
+ * can be given a background of nop's choosing. Text drawn on one is in the terminal's own colour:
+ * whatever the program chose was chosen for the background it asked for.
  */
 internal open class ContrastAdjustingGraphics2D(
     private val delegate: Graphics2D,
@@ -355,8 +470,12 @@ internal open class ContrastAdjustingGraphics2D(
     internal var currentBg: Color = settings.bg,
     internal var currentColor: Color = delegate.color ?: settings.fg,
     internal var adjustedColor: Color = TerminalContrast.cachedEnsureContrast(currentColor, currentBg),
+    private val fillColor: ((y: Int, color: Color) -> Color)? = null,
 ) : Graphics2D() {
     private var activeBrushColor: Color? = null
+
+    /** Whether [currentBg] is one [fillColor] swapped in. */
+    private var swappedBg = false
 
     private fun ensureBrush(color: Color) {
         if (activeBrushColor != color) {
@@ -366,7 +485,7 @@ internal open class ContrastAdjustingGraphics2D(
     }
 
     private fun updateAdjustedColor() {
-        adjustedColor = TerminalContrast.cachedEnsureContrast(currentColor, currentBg)
+        adjustedColor = TerminalContrast.cachedEnsureContrast(if (swappedBg) settings.fg else currentColor, currentBg)
     }
 
     override fun setColor(c: Color?) {
@@ -379,11 +498,14 @@ internal open class ContrastAdjustingGraphics2D(
     override fun getColor(): Color = currentColor
 
     override fun fillRect(x: Int, y: Int, width: Int, height: Int) {
-        if (width > 0 && height > 0 && currentBg != currentColor) {
-            currentBg = currentColor
+        val fill = fillColor?.invoke(y, currentColor) ?: currentColor
+        val swapped = fill != currentColor
+        if (width > 0 && height > 0 && (currentBg != fill || swappedBg != swapped)) {
+            currentBg = fill
+            swappedBg = swapped
             updateAdjustedColor()
         }
-        ensureBrush(currentColor)
+        ensureBrush(fill)
         delegate.fillRect(x, y, width, height)
     }
 
@@ -428,10 +550,13 @@ internal open class ContrastAdjustingGraphics2D(
     }
 
     override fun create(): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor, adjustedColor)
+        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor, adjustedColor, fillColor)
 
     override fun create(x: Int, y: Int, width: Int, height: Int): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create(x, y, width, height) as Graphics2D, settings, currentBg, currentColor, adjustedColor)
+        ContrastAdjustingGraphics2D(
+            delegate.create(x, y, width, height) as Graphics2D, settings, currentBg, currentColor, adjustedColor,
+            fillColor?.let { fill -> { top: Int, color: Color -> fill(top + y, color) } },
+        )
 
     override fun translate(x: Int, y: Int) = delegate.translate(x, y)
     override fun translate(tx: Double, ty: Double) = delegate.translate(tx, ty)
@@ -471,8 +596,9 @@ internal open class ContrastAdjustingGraphics2D(
         delegate.copyArea(x, y, width, height, dx, dy)
     override fun clearRect(x: Int, y: Int, width: Int, height: Int) {
         val bg = background ?: settings.bg
-        if (bg != currentBg) {
+        if (bg != currentBg || swappedBg) {
             currentBg = bg
+            swappedBg = false
             updateAdjustedColor()
         }
         delegate.clearRect(x, y, width, height)
@@ -588,6 +714,19 @@ private class TerminalScrollBar(private val settings: NopTerminalSettings) : JSc
         return Dimension(WIDTH_PX, height)
     }
 
+    /** Where the user's messages start, as rows from the top of the scrollback, out of [markedRows] rows in all. */
+    var marks: List<Int> = emptyList()
+        private set
+    var markedRows: Int = 0
+        private set
+
+    fun setMarks(marks: List<Int>, rows: Int) {
+        if (marks == this.marks && rows == markedRows) return
+        this.marks = marks
+        markedRows = rows
+        repaint()
+    }
+
     private fun refresh() {
         val model = model ?: return
         val needed = model.maximum - model.minimum > model.extent
@@ -642,7 +781,42 @@ private class TerminalScrollBarUI(private val settings: NopTerminalSettings) : B
         }
     }
 
+    /**
+     * The thumb, then a small square for each of the user's messages, over it so a message the view is
+     * on still shows. The scrollbar spans the same rows the marks count, from the top of the scrollback
+     * to the bottom of the screen, so a mark sits where the thumb would be to show its message.
+     */
+    override fun paint(g: Graphics, c: JComponent) {
+        super.paint(g, c)
+        val bar = scrollbar as? TerminalScrollBar ?: return
+        if (!bar.scrollable || bar.marks.isEmpty() || bar.markedRows <= 0 || trackRect.isEmpty) return
+        val g2 = g.create() as Graphics2D
+        try {
+            val size = trackRect.width - MARK_INSET * 2
+            val fill = settings.userMessageBackground
+            // A pale square needs an edge to show on a pale track; a dark one shows by itself.
+            val edge = if (TerminalContrast.relativeLuminance(settings.bg) < 0.5) null else fill.darker()
+            for (mark in bar.marks) {
+                val centre = trackRect.y + (mark.toLong() * trackRect.height / bar.markedRows).toInt()
+                val top = (centre - size / 2).coerceIn(trackRect.y, trackRect.y + trackRect.height - size)
+                g2.color = fill
+                g2.fillRect(trackRect.x + MARK_INSET, top, size, size)
+                if (edge != null) {
+                    g2.color = edge
+                    g2.drawRect(trackRect.x + MARK_INSET, top, size - 1, size - 1)
+                }
+            }
+        } finally {
+            g2.dispose()
+        }
+    }
+
     /** The text colour, well faded: legible against either background without competing with output. */
     private fun thumbColor(): Color =
         Color(settings.fg.red, settings.fg.green, settings.fg.blue, if (isThumbRollover) 160 else 96)
+
+    private companion object {
+        /** The marks are squares as wide as the bar, less this much each side. */
+        const val MARK_INSET = 1
+    }
 }

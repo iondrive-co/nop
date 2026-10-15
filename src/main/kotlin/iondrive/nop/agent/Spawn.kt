@@ -74,6 +74,11 @@ object Spawn {
 
         val env = mutableMapOf("CLAUDE_CONFIG_DIR" to account.home)
         CLAUDE_THINKING_BUDGETS[account.reasoning]?.let { env["MAX_THINKING_TOKENS"] = it.toString() }
+        // The classic renderer, which prints the conversation into the terminal's scrollback, where nop
+        // can mark the user's messages and scroll to them. The fullscreen one keeps the conversation
+        // inside the CLI, on the alternate screen, scrolled by the CLI itself. This beats a fullscreen
+        // choice saved with `/tui`.
+        env["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"] = "1"
         return AgentCommand(argv, env, sessionId, isResume = resumeId != null)
     }
 
