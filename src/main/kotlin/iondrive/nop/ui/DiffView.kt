@@ -557,7 +557,7 @@ private fun DiffRowsList(
         searchKey = searchKey,
         findTrigger = findTrigger,
         itemRanges = remember(blocks) { blocks.map { it.range } },
-        oldHeader = "HEAD: ${currentFile.name}",
+        oldHeader = "HEAD",
         newHeader = "Current version",
         ignoreWhitespace = ignoreWhitespace,
         onToggleWhitespace = onToggleWhitespace,

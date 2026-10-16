@@ -109,9 +109,10 @@ internal fun ConfirmGitActionDialog(
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
     confirmLabel: String = "Revert",
+    width: Dp = 420.dp,
     body: @Composable () -> Unit,
 ) {
-    DialogFrame(title = title, onClose = onCancel, size = DpSize(420.dp, Dp.Unspecified)) {
+    DialogFrame(title = title, onClose = onCancel, size = DpSize(width, Dp.Unspecified)) {
         Text(title, fontWeight = FontWeight.SemiBold)
         body()
         Row(

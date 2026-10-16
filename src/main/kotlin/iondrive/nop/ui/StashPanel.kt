@@ -33,7 +33,7 @@ fun StashPanel(
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
         if (stashes.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No stashes — use \"Stash\" in the Commit tab to shelve the files you tick there")
+                Text("No stashes — use \"Stash\" in the Commit tab to shelve the files you select there")
             }
             return
         }

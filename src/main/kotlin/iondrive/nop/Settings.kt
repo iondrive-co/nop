@@ -460,6 +460,18 @@ object Settings {
     }
 
     /**
+     * Whether the file-name box at the top of the viewer is folded away. Global, like word wrap: it
+     * is a preference about the viewer, not about a project. Shown unless the user folds it.
+     */
+    fun loadFileNameCollapsed(): Boolean = load()["fileNameCollapsed"]?.lowercase() == "true"
+
+    fun saveFileNameCollapsed(collapsed: Boolean) {
+        val map = load()
+        map["fileNameCollapsed"] = collapsed.toString()
+        save(map)
+    }
+
+    /**
      * Height of the commit-message text area in dp, persisted per-project. Returns null when
      * the user hasn't dragged the handle yet so the caller can fall back to a sensible default.
      */

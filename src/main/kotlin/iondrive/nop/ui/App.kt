@@ -272,6 +272,7 @@ fun App(
     // "+". Deliberately *not* keyed on projectPath — it's a preference about reading code, so it
     // stays put as the user moves between projects — and persisted so it survives a restart.
     var wrapLines by remember { mutableStateOf(Settings.loadWrapLines()) }
+    var fileNameCollapsed by remember { mutableStateOf(Settings.loadFileNameCollapsed()) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -1747,6 +1748,11 @@ fun App(
                                 onToggleWrap = {
                                     wrapLines = !wrapLines
                                     Settings.saveWrapLines(wrapLines)
+                                },
+                                fileNameCollapsed = fileNameCollapsed,
+                                onToggleFileName = {
+                                    fileNameCollapsed = !fileNameCollapsed
+                                    Settings.saveFileNameCollapsed(fileNameCollapsed)
                                 },
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },

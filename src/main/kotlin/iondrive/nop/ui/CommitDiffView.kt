@@ -56,24 +56,27 @@ fun CommitDiffView(
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
     var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
+    // Whether the file is absent from the parent's tree, so this commit is the one that created it.
+    var absentBefore by remember(tab.id) { mutableStateOf(false) }
 
     // reloadKey re-reads both revisions. A commit's content is fixed, so this only matters after
     // the history was rewritten underneath the tab (amend, rebase) — but it also makes "open it
     // again / F5" mean the same thing on every diff surface.
     LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
         try {
-            val (oldText, newText) = withContext(Dispatchers.IO) {
+            val (oldText, newText, created) = withContext(Dispatchers.IO) {
                 val parentRev = "${tab.sha}^"
                 val old = when (tab.file.changeType) {
-                    CommitFileChange.ADDED -> ""
-                    else -> repo.readContentAt(parentRev, tab.file.path) ?: ""
+                    CommitFileChange.ADDED -> null
+                    else -> repo.readContentAt(parentRev, tab.file.path)
                 }
                 val new = when (tab.file.changeType) {
                     CommitFileChange.DELETED -> ""
                     else -> repo.readContentAt(tab.sha, tab.file.path) ?: ""
                 }
-                old to new
+                Triple(old ?: "", new, old == null && tab.file.changeType != CommitFileChange.DELETED)
             }
+            absentBefore = created
             result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText, ignoreWhitespace) }
             error = null
             loading = false
@@ -84,7 +87,10 @@ fun CommitDiffView(
     }
 
     val tokenize = remember(tab.id) { tokenizerForExtension(File(tab.file.path).extension) }
-    CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
+    // A diff opened from a blame line is recorded as a modification whatever the commit did, so the
+    // parent's tree has the last word on whether the file is new here.
+    val fileName = LocalFileNameBadge.current?.let { it.copy(isNew = it.isNew || absentBefore) }
+    CompositionLocalProvider(LocalDiffTokenizer provides tokenize, LocalFileNameBadge provides fileName) {
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
@@ -95,8 +101,8 @@ fun CommitDiffView(
                 onTopLine = onTopLine,
                 searchKey = tab.id,
                 findTrigger = findTrigger,
-                oldHeader = "${tab.sha.take(8)}^: ${tab.file.path}",
-                newHeader = "${tab.sha.take(8)}: ${tab.file.path}",
+                oldHeader = "${tab.sha.take(8)}^",
+                newHeader = tab.sha.take(8),
                 ignoreWhitespace = ignoreWhitespace,
                 onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )
@@ -166,8 +172,8 @@ fun RevisionDiffView(
                 onTopLine = onTopLine,
                 searchKey = tab.id,
                 findTrigger = findTrigger,
-                oldHeader = "${tab.sha.take(8)}: ${tab.file.name}",
-                newHeader = "Working copy: ${tab.file.name}",
+                oldHeader = tab.sha.take(8),
+                newHeader = "Working copy",
                 ignoreWhitespace = ignoreWhitespace,
                 onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )

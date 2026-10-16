@@ -22,12 +22,17 @@ data class PendingCommit(
 @Composable
 fun ConfirmCommitDialog(pending: PendingCommit, returned: Set<String>, onConfirm: () -> Unit, onCancel: () -> Unit) {
     ConfirmGitActionDialog(
-        title = "Commit ${plural(pending.unreviewed.size, "file")} nop ticked?",
+        title = "Commit ${plural(pending.unreviewed.size, "file")} nop selected?",
         confirmLabel = "Commit",
+        // Wide enough for most paths to keep to one line.
+        width = 600.dp,
         onConfirm = onConfirm,
         onCancel = onCancel,
     ) {
-        Text("Returned files left the list and came back. New files appeared while you wrote the message.")
+        Text(
+            "You didn't select these files; nop did. Returned files left the change list and came back. " +
+                "New files appeared while you wrote the message."
+        )
         val shown = pending.unreviewed.take(MaxListedChanges)
         for (path in shown) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

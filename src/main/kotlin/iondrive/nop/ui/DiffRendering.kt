@@ -800,10 +800,12 @@ internal fun DiffHeaderBar(
             )
         }
         Box(Modifier.width(DIVIDER_W).fillMaxHeight().background(border))
+        // The new side's title sits at the far end, beside the controls: the middle of the bar, where
+        // it would otherwise start, is where the file-name box goes (see [FileNameBadge]).
         Row(
             modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
         ) {
             BasicText(
                 text = newTitle,
@@ -1076,18 +1078,22 @@ internal fun DiffListScaffold(
                     onClose = { searchOpen = false },
                 )
             }
+            val headed = oldHeader != null && newHeader != null
             if (oldHeader != null && newHeader != null) {
-                DiffHeaderBar(
-                    oldTitle = oldHeader,
-                    newTitle = newHeader,
-                    oldWidth = oldWidth,
-                    hunkCount = hunks.size,
-                    currentHunk = currentHunkIndex,
-                    onPrevHunk = onPrevHunk,
-                    onNextHunk = onNextHunk,
-                    ignoreWhitespace = ignoreWhitespace,
-                    onToggleWhitespace = onToggleWhitespace,
-                )
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    DiffHeaderBar(
+                        oldTitle = oldHeader,
+                        newTitle = newHeader,
+                        oldWidth = oldWidth,
+                        hunkCount = hunks.size,
+                        currentHunk = currentHunkIndex,
+                        onPrevHunk = onPrevHunk,
+                        onNextHunk = onNextHunk,
+                        ignoreWhitespace = ignoreWhitespace,
+                        onToggleWhitespace = onToggleWhitespace,
+                    )
+                    FileNameBadgeOverlay()
+                }
             }
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 CompositionLocalProvider(
@@ -1105,6 +1111,7 @@ internal fun DiffListScaffold(
                         onRatioChange(((clamped * available + deltaPx) / available).coerceIn(minRatio, maxRatio))
                     },
                 )
+                if (!headed) FileNameBadgeOverlay()
             }
             SideScrollbars(oldWidth, oldScroll, newScroll)
         }

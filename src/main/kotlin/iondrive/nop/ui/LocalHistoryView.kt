@@ -166,8 +166,8 @@ fun LocalDiffView(
                 onTopLine = onTopLine,
                 searchKey = tab.id,
                 findTrigger = findTrigger,
-                oldHeader = "Local history: ${tab.file.name}",
-                newHeader = "Working copy: ${tab.file.name}",
+                oldHeader = "Local history",
+                newHeader = "Working copy",
                 ignoreWhitespace = ignoreWhitespace,
                 onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
             )

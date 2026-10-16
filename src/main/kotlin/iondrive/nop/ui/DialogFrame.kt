@@ -5,8 +5,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.text.LocalTextContextMenu
 import androidx.compose.runtime.Composable
@@ -41,6 +41,7 @@ import org.jetbrains.jewel.intui.standalone.theme.lightThemeDefinition
 import org.jetbrains.jewel.ui.ComponentStyling
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import kotlin.math.abs
 
 /**
  * The window a dialog that may open over a terminal is drawn in: the agent dialogs, adding a
@@ -60,7 +61,8 @@ import java.awt.event.WindowEvent
  * to move it to, and a place above the terminal to stay.
  *
  * A [size] whose height is [Dp.Unspecified][androidx.compose.ui.unit.Dp.Unspecified] fits the window
- * to its content, for a dialog whose length depends on what it lists.
+ * to its content, for a dialog whose length depends on what it lists; its width is then the width of
+ * the content, inside the window's frame.
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -79,23 +81,24 @@ fun DialogFrame(
     // open, and a form that could only be submitted once filled in could never be from the keyboard.
     val currentOnClose by rememberUpdatedState(onClose)
     val currentOnSubmit by rememberUpdatedState(onSubmit)
-    // Compose can size a window to its content itself, but measures that content at an unbounded
-    // width, so text that wraps in the real window would come out a line or two short and cut off
-    // the buttons under it. So the height is fitted here, from the content as laid out at the
-    // window's own width; until then it is a guess.
+    // A fitted dialog is sized and placed while it is still hidden, and only then shown: Compose
+    // packs a window of unspecified size to its content before it is mapped. Resizing a window just
+    // after it is mapped is a race with the window manager — Xpra keeps the size it first saw, or
+    // shows the old frame around the new content — and a lost race leaves the dialog cut off.
     val fitsContent = !size.height.isSpecified
     // Over the window it was opened from, rather than in the middle of the whole desktop: across
     // several monitors, or a remote session whose one screen spans them all, the middle of the
     // desktop can be a monitor nobody is looking at.
     val owner = LocalWindow.current
-    val firstSize = if (fitsContent) DpSize(size.width, 200.dp) else size
     val state = rememberDialogState(
-        position = owner?.let { centredOver(it, firstSize) } ?: WindowPosition(Alignment.Center),
-        size = firstSize,
+        position = if (fitsContent || owner == null) WindowPosition(Alignment.Center) else centredOver(owner, size),
+        size = if (fitsContent) DpSize.Unspecified else size,
     )
+    var placed by remember { mutableStateOf(!fitsContent) }
     DialogWindow(
         onCloseRequest = onClose,
         state = state,
+        visible = placed,
         title = title,
         onPreviewKeyEvent = { event ->
             if (event.type != KeyEventType.KeyDown) return@DialogWindow false
@@ -107,12 +110,15 @@ fun DialogFrame(
         },
     ) {
         var contentHeight by remember { mutableStateOf<Dp?>(null) }
-        // Centred again once, when the fitted height is known; not after, so a dialog the user moved
-        // stays where they put it.
-        var centred by remember { mutableStateOf(false) }
         if (fitsContent) {
-            // The frame's insets are only known once the window manager has put the window up, so
-            // the fit is done again when it opens.
+            // By the time this runs Compose has packed the hidden window, so its size is final.
+            LaunchedEffect(Unit) {
+                if (owner != null) state.position = centredOver(owner, DpSize(window.width.dp, window.height.dp))
+                placed = true
+            }
+            // The pack allowed for frame insets the toolkit guessed; the real ones are known once the
+            // window is up. Fitted again then, and whenever the content changes after that (a list
+            // that loads, an error under a field) — usually by nothing, or a few pixels.
             var opened by remember { mutableStateOf(window.isShowing) }
             DisposableEffect(window) {
                 val listener = object : WindowAdapter() {
@@ -125,12 +131,11 @@ fun DialogFrame(
             }
             LaunchedEffect(contentHeight, opened) {
                 val height = contentHeight ?: return@LaunchedEffect
+                if (!opened) return@LaunchedEffect
                 val insets = window.insets
-                state.size = DpSize(size.width, height + (insets.top + insets.bottom).dp)
-                if (!centred && opened && owner != null) {
-                    state.position = centredOver(owner, state.size)
-                    centred = true
-                }
+                val fitted = height + (insets.top + insets.bottom).dp
+                if (abs((fitted - window.height.dp).value) < 1f) return@LaunchedEffect
+                state.size = DpSize(window.width.dp, fitted)
             }
         }
         val density = LocalDensity.current
@@ -146,12 +151,17 @@ fun DialogFrame(
             // nop's own text-field context menu, the same one the main window provides — see
             // [NopTextContextMenu].
             CompositionLocalProvider(LocalTextContextMenu provides NopTextContextMenu) {
-                Box(Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
+                // Not filling the window until it is placed: Compose packs to the size content takes
+                // at a vast (not unbounded) size, which a filling Box would take all of.
+                Box((if (placed) Modifier.fillMaxSize() else Modifier).background(JewelTheme.globalColors.panelBackground)) {
                     Column(
                         modifier = if (fitsContent) {
-                            // Its whole height, even while the window is still shorter than that.
+                            // A set width rather than the window's: Compose measures content for
+                            // packing at a vast width, where nothing would wrap and the height would
+                            // come out short. And its whole height, even while the window is still
+                            // shorter than that.
                             Modifier
-                                .fillMaxWidth()
+                                .width(size.width)
                                 .wrapContentHeight(Alignment.Top, unbounded = true)
                                 .onSizeChanged { contentHeight = with(density) { it.height.toDp() } }
                         } else {

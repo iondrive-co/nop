@@ -129,6 +129,9 @@ fun TabbedViewerPanel(
     blameEnabled: Boolean = false,
     wrapLines: Boolean = false,
     onToggleWrap: () -> Unit = {},
+    // Whether the file-name box over the view is folded away — see [FileNameBadge].
+    fileNameCollapsed: Boolean = false,
+    onToggleFileName: () -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
     // Ask the app to put up the revision picker for this file; picking one opens a
@@ -146,9 +149,13 @@ fun TabbedViewerPanel(
         editStore.close(tab.id)
     }
 
+    val fileName = selected?.let { fileNameOf(it, repo) }?.let { (path, isNew) ->
+        FileNameBadge(path, isNew, fileNameCollapsed, onToggleFileName)
+    }
+
     // One flag for every view under the strip, so the toggle in the strip means the same thing to a
     // file tab and to either diff — see [LocalWrapLines].
-    CompositionLocalProvider(LocalWrapLines provides wrapLines) {
+    CompositionLocalProvider(LocalWrapLines provides wrapLines, LocalFileNameBadge provides fileName) {
     Column(modifier = Modifier.fillMaxSize()) {
         // One answer per tab to "is this spellcheckable, and as what?", inherited by every text
         // surface underneath — the editor, and both halves of whichever diff is open.
@@ -836,7 +843,8 @@ private fun FileEditView(
                 },
             )
         }
-    Row(modifier = Modifier.weight(1f).fillMaxWidth().background(editorBackground(isDark))) {
+    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+    Row(modifier = Modifier.fillMaxSize().background(editorBackground(isDark))) {
         // IntelliJ-style annotate column, kept to the left of the text and aligned to it by sharing
         // the editor's scrollState + layout. The top padding mirrors the text Box's so line 0 of the
         // gutter sits level with line 0 of the file.
@@ -1013,6 +1021,8 @@ private fun FileEditView(
     }
         FindMarkerScrollbar(scrollState, markerFractions, currentMatch, problemFractions)
     }
+    }
+        FileNameBadgeOverlay()
     }
         // Only claimed when a line actually overruns the pane, so a file that fits keeps the full
         // height — the same rule the diff's side scrollbars follow.
