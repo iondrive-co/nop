@@ -106,6 +106,15 @@ class AgentRun(
      */
     var nativeSessionId: String? by mutableStateOf(command.nativeSessionId)
 
+    /**
+     * The handover prompt the user has open and not yet sent or cancelled: [barDraft] from the
+     * session bar, [exitDraft] from the post-exit panel. Held here rather than in those panels,
+     * which leave the composition whenever another tab is in front and used to take a half-written
+     * prompt with them. Per run, because a prompt names its run's provider and summary path.
+     */
+    var barDraft: HandoverDraft? by mutableStateOf(null)
+    var exitDraft: HandoverDraft? by mutableStateOf(null)
+
     /** Why the run ended, set when it does. Null while it is still going. */
     @Volatile
     var endReason: EndReason? = null

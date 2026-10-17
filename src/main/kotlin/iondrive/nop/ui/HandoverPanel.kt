@@ -18,15 +18,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +42,7 @@ import iondrive.nop.agent.CliTools
 import iondrive.nop.agent.DEFAULT_CHOICE
 import iondrive.nop.agent.HandoverDraft
 import iondrive.nop.agent.UsageReading
+import kotlinx.coroutines.flow.drop
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.DefaultButton
 import org.jetbrains.jewel.ui.component.OutlinedButton
@@ -328,6 +332,9 @@ fun HandoverProviderCard(
  * The CLI submits a prompt it is started with straight away, so this is the only place to add to
  * or change it without interrupting the new agent and typing it in a second time. The run being
  * handed over keeps going until [onConfirm]; its summary is built then.
+ *
+ * Every edit goes to [onEdit] as it is typed, for whoever holds [draft] to keep: this editor is
+ * dropped whenever another tab is in front, and the draft it comes back with is all that survives.
  */
 @Composable
 fun HandoverPromptEditor(
@@ -335,9 +342,16 @@ fun HandoverPromptEditor(
     actionLabel: String,
     onConfirm: (HandoverDraft) -> Unit,
     onCancel: () -> Unit,
+    onEdit: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val state = rememberTextFieldState(draft.prompt)
+    // Keyed on the draft rather than on the slot: another tab's draft can take this editor's place
+    // straight away, and must not inherit this one's text.
+    val state = remember(draft.target, draft.path) { TextFieldState(draft.prompt) }
+    val edit by rememberUpdatedState(onEdit)
+    LaunchedEffect(state) {
+        snapshotFlow { state.text.toString() }.drop(1).collect { edit(it) }
+    }
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),

@@ -58,4 +58,22 @@ class NetworkShareTest {
         assertFalse(NetworkShare.sameHost("192.168.1.98", "192.168.1.99"))
         assertTrue(NetworkShare.sameHost("192.168.1.98", "192.168.1.98"))
     }
+
+    @Test
+    fun `puts a share's request for a password to the user as the share asked it`() {
+        val ask = GioMount.Ask(user = "pat", domain = "HOMENET", needsUser = true, needsDomain = false)
+        val nas = NetworkShare.Location("files", "team", "backups")
+        assertEquals(
+            NetworkShare.PasswordRequest("smb://files/team", asksUser = true, user = "pat", asksDomain = false, domain = "HOMENET", refused = true),
+            NetworkShare.request(nas, GioMount.Outcome.NeedsPassword(ask, refused = true)),
+        )
+        // A user named in the URL is the one to offer.
+        assertEquals("sam", NetworkShare.request(nas.copy(user = "sam"), GioMount.Outcome.NeedsPassword(ask, refused = false)).user)
+    }
+
+    @Test
+    fun `credentials never print their password`() {
+        val text = NetworkShare.Credentials("pat", "HOMENET", "hunter2", remember = true).toString()
+        assertFalse("hunter2" in text, text)
+    }
 }

@@ -10,11 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,7 +56,7 @@ fun AgentExitPanel(
     val handoverAccounts = remember(accounts, session.account) {
         handoverAccountsFor(session.account, accounts)
     }
-    var draft by remember(session.id) { mutableStateOf<HandoverDraft?>(null) }
+    val run = session.run
 
     Column(
         modifier = modifier
@@ -119,7 +116,7 @@ fun AgentExitPanel(
             // id. The same account can still pick the work up from nop's own record, which is what a
             // handover to another provider would be built from anyway.
             if (session.run.conversationMissing) {
-                DefaultButton(onClick = { draft = session.handoverDraft(session.account) }) {
+                DefaultButton(onClick = { run.exitDraft = session.handoverDraft(session.account) }) {
                     Text("Continue on ${session.account.name} from nop's record")
                 }
                 OutlinedButton(onClick = onStartFresh) { Text("New ${session.account.name} session") }
@@ -131,16 +128,17 @@ fun AgentExitPanel(
             }
         }
 
-        val pending = draft
+        val pending = run.exitDraft
         if (pending != null) {
             HandoverPromptEditor(
                 draft = pending,
                 actionLabel = if (pending.target.name == session.account.name) "Continue" else "Switch",
                 onConfirm = { edited ->
-                    draft = null
+                    run.exitDraft = null
                     onSwitch(edited)
                 },
-                onCancel = { draft = null },
+                onCancel = { run.exitDraft = null },
+                onEdit = { text -> run.exitDraft = run.exitDraft?.copy(prompt = text) },
                 modifier = Modifier.padding(top = 4.dp),
             )
         } else if (handoverAccounts.isNotEmpty()) {
@@ -155,7 +153,7 @@ fun AgentExitPanel(
                 readings = readings,
                 modelsFor = modelsFor,
                 actionLabel = "Switch",
-                onHandOver = { target -> draft = session.handoverDraft(target) },
+                onHandOver = { target -> run.exitDraft = session.handoverDraft(target) },
                 onUpdateAccount = onUpdateAccount,
             )
         }

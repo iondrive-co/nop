@@ -362,14 +362,14 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
     val status = Backup.status
     val dir = config.backupDir?.takeIf { it.isNotBlank() }
 
-    // A share is checked when the backup runs, which is where mounting it happens — never on this thread.
+    // A share is checked when the backup runs, which is where mounting it happens — never on this
+    // thread. A new folder is backed up to as soon as it is saved: see [Backup.start].
     fun useShare() {
         val typed = share.text.toString().trim()
         refused = if (NetworkShare.isShare(typed)) null else "Not a share: write it as smb://server/share/folder."
         if (refused == null) {
             typingShare = false
             onChange(config.copy(backupDir = typed))
-            Backup.runNow()
         }
     }
 
@@ -388,7 +388,6 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
                 if (refused == null) {
                     typingShare = false
                     onChange(config.copy(backupDir = picked.toString()))
-                    Backup.runNow()
                 }
             })
             Link("Use a network share", onClick = {
@@ -411,13 +410,22 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
                 Link("Use", onClick = ::useShare)
             }
             Text(
-                "Uses the share's existing mount, or mounts it the way your file manager does. A share that needs " +
-                    "a password must have it remembered there first.",
+                "Uses the share's existing mount, or mounts it the way your file manager does, and asks for " +
+                    "its password if it needs one.",
                 color = AgentMuted,
             )
         }
         refused?.let { Text(it, color = ChangeColors.REMOVED) }
-        if (dir != null) {
+        val waiting = status.password
+        if (dir != null && waiting != null && !status.running) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (waiting.refused) "${waiting.share} did not accept the password." else "Waiting for the password to ${waiting.share}.",
+                    color = ChangeColors.CONFLICT,
+                )
+                Link("Sign in…", onClick = { Backup.askForPassword() })
+            }
+        } else if (dir != null) {
             val line = when {
                 status.running -> "Backing up…"
                 status.lastError != null -> "Last backup failed: ${status.lastError}"

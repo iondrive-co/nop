@@ -67,9 +67,9 @@ fun AgentSessionBar(
     val handoverAccounts = remember(accounts, session.account) {
         handoverAccountsFor(session.account, accounts)
     }
-    var expanded by remember(session.sessionId) { mutableStateOf(false) }
-    // Per run: a prompt drafted for one run names that run's provider and summary path.
-    var draft by remember(session.id) { mutableStateOf<HandoverDraft?>(null) }
+    // Open again on coming back to a tab with a handover prompt still unsent, so it is in view.
+    var expanded by remember(session.sessionId) { mutableStateOf(session.run.barDraft != null) }
+    val run = session.run
     // Reset per run, so the confirmation belongs to the command actually on the clipboard rather
     // than to one copied before a handoff changed which account is running.
     var copied by remember(session.id) { mutableStateOf(false) }
@@ -213,17 +213,18 @@ fun AgentSessionBar(
                 color = AgentMuted,
                 modifier = Modifier.padding(top = 4.dp, bottom = 6.dp),
             )
-            val pending = draft
+            val pending = run.barDraft
             if (pending != null) {
                 HandoverPromptEditor(
                     draft = pending,
                     actionLabel = "Hand over",
                     onConfirm = { edited ->
-                        draft = null
+                        run.barDraft = null
                         expanded = false
                         onHandOver(edited)
                     },
-                    onCancel = { draft = null },
+                    onCancel = { run.barDraft = null },
+                    onEdit = { text -> run.barDraft = run.barDraft?.copy(prompt = text) },
                 )
             } else {
                 HandoverProviderList(
@@ -231,7 +232,7 @@ fun AgentSessionBar(
                     readings = readings,
                     modelsFor = modelsFor,
                     actionLabel = "Hand over",
-                    onHandOver = { target -> draft = session.handoverDraft(target) },
+                    onHandOver = { target -> run.barDraft = session.handoverDraft(target) },
                     onUpdateAccount = onUpdateAccount,
                 )
             }

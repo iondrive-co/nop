@@ -1,13 +1,11 @@
 package iondrive.nop.agent
 
 import iondrive.nop.Log
-import java.io.File
 import java.io.IOException
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.TimeUnit
 
 /**
  * A backup folder on an SMB share, written `smb://host/share/folder` (or `\\host\share\folder`),
@@ -16,9 +14,10 @@ import java.util.concurrent.TimeUnit
  * nop speaks no SMB itself; it goes through a mount the system already knows how to make. A kernel
  * (cifs) mount of the share comes first, since it behaves like a disk: one in `/proc/mounts`, or an
  * fstab entry that systemd automounts on first access. Failing that, the desktop's GVFS mount — the
- * one a file manager makes, with its password from the keyring — is used, and made with `gio mount`
- * when it is not there yet. `gio` is never given a password: a share that needs one it does not
- * already have fails with a message saying how to mount it once by hand.
+ * one a file manager makes, with its password from the keyring — is used, and made through GIO
+ * ([GioMount]) when it is not there yet. A share that wants a password the keyring does not have
+ * fails with [PasswordNeeded], which is how the user comes to be asked for it; their answer comes
+ * back as [Credentials] on the next try.
  *
  * An fstab entry that is neither mounted nor automounted is never used. Its mount point is an empty
  * folder on the local disk, and a backup written there would look like it worked.
@@ -28,6 +27,27 @@ internal object NetworkShare {
     data class Location(val host: String, val share: String, val folder: String, val user: String? = null) {
         /** The share itself, in the form `gio mount` takes. */
         val shareUrl: String get() = "smb://${user?.let { "$it@" } ?: ""}$host/$share"
+    }
+
+    /** A share's request for a password, as it is put to the user. */
+    data class PasswordRequest(
+        /** The share, `smb://host/share`. */
+        val share: String,
+        val asksUser: Boolean,
+        val user: String,
+        val asksDomain: Boolean,
+        val domain: String,
+        /** True when the share turned down the password it was just given. */
+        val refused: Boolean,
+    )
+
+    class PasswordNeeded(val request: PasswordRequest) : IOException(
+        if (request.refused) "${request.share} did not accept that user name and password" else "${request.share} needs a password",
+    )
+
+    /** The user's answer to a [PasswordRequest]. [toString] leaves the password out, so a log line cannot carry it. */
+    class Credentials(val user: String, val domain: String, val password: String, val remember: Boolean) {
+        override fun toString(): String = "Credentials(user=$user, domain=$domain, remember=$remember)"
     }
 
     private const val MOUNT_TIMEOUT_SECONDS = 60L
@@ -55,13 +75,13 @@ internal object NetworkShare {
     /**
      * The local folder [text] is written to: [text] itself when it is a plain path, otherwise the
      * share's mount with its folder under it. Mounts the share through GVFS when [mount] allows and
-     * nothing has it mounted; a restore, which runs as a session starts, passes false so it never
-     * waits on a network.
+     * nothing has it mounted, answering the share with [credentials] if it asks; a restore, which
+     * runs as a session starts, passes false so it never waits on a network.
      */
-    fun resolve(text: String, mount: Boolean = true): Path {
+    fun resolve(text: String, mount: Boolean = true, credentials: Credentials? = null): Path {
         val location = parse(text) ?: return Path.of(text.trim())
         val root = mountedRoot(location)
-            ?: if (mount) gioMount(location) else throw IOException("${location.shareUrl} is not mounted")
+            ?: if (mount) gioMount(location, credentials) else throw IOException("${location.shareUrl} is not mounted")
         if (!Files.isDirectory(root)) throw IOException("${location.shareUrl} is mounted at $root, but it cannot be read")
         return if (location.folder.isEmpty()) root else root.resolve(location.folder)
     }
@@ -130,31 +150,30 @@ internal object NetworkShare {
             ?: runCatching { Path.of("/run/user/${Files.getAttribute(Path.of(System.getProperty("user.home")), "unix:uid")}/gvfs") }.getOrNull())
             ?.takeIf { Files.isDirectory(it) }
 
-    /** Mounts [location]'s share with `gio mount` and returns where GVFS put it. */
-    private fun gioMount(location: Location): Path {
+    /** Mounts [location]'s share through GIO and returns where GVFS put it. */
+    private fun gioMount(location: Location, credentials: Credentials?): Path {
         val gvfs = gvfsRoot() ?: throw IOException(
             "${location.shareUrl} is not mounted, and this desktop has no GVFS to mount it with. " +
                 "Mount the share (for example in /etc/fstab) and choose the folder it is mounted at.",
         )
-        val process = try {
-            ProcessBuilder("gio", "mount", location.shareUrl)
-                .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
-                .redirectErrorStream(true)
-                .start()
-        } catch (e: IOException) {
-            throw IOException("${location.shareUrl} is not mounted, and gio could not be run to mount it: ${e.message}")
+        when (val outcome = GioMount.mount(location.shareUrl, credentials, MOUNT_TIMEOUT_SECONDS * 1000)) {
+            GioMount.Outcome.Mounted -> Unit
+            is GioMount.Outcome.NeedsPassword -> throw PasswordNeeded(request(location, outcome))
+            is GioMount.Outcome.Failed -> throw IOException("could not mount ${location.shareUrl} (${outcome.message})")
         }
-        val finished = process.waitFor(MOUNT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        if (!finished) process.destroyForcibly()
-        val said = runCatching { process.inputStream.bufferedReader().readText() }.getOrDefault("")
-            .lines().map { it.trim() }.filter { it.isNotEmpty() && !it.endsWith(":") }.joinToString(" ")
         fromGvfs(location, gvfs)?.let {
             Log.info("mounted ${location.shareUrl} at $it for the backup")
             return it
         }
-        throw IOException(
-            "could not mount ${location.shareUrl}" + (if (said.isNotEmpty()) " ($said)" else if (!finished) " (timed out)" else "") +
-                ". If it needs a password, open it once in your file manager and let it remember the password.",
-        )
+        throw IOException("mounted ${location.shareUrl}, but GVFS does not show it under $gvfs")
     }
+
+    internal fun request(location: Location, needs: GioMount.Outcome.NeedsPassword): PasswordRequest = PasswordRequest(
+        share = location.shareUrl,
+        asksUser = needs.ask.needsUser,
+        user = location.user ?: needs.ask.user,
+        asksDomain = needs.ask.needsDomain,
+        domain = needs.ask.domain,
+        refused = needs.refused,
+    )
 }

@@ -23,6 +23,7 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * A copy of every agent session in a folder the user chose, kept current while nop runs. The folder
@@ -39,27 +40,42 @@ import java.util.concurrent.atomic.AtomicBoolean
  * copying over it would lose something, so the backed-up version is kept aside under a dated name
  * before the new one takes its place, and so is a log that was rewritten rather than added to.
  *
- * Runs on a thread of its own: every [INTERVAL_MINUTES], shortly after a session's run ends, and when
- * asked from the accounts dialog, which shows [status]. Only a nop that has called [start] backs up
- * or restores anything, which keeps a test JVM away from the user's real folders.
+ * Runs on a thread of its own: every [INTERVAL_MINUTES], shortly after a session's run ends, as soon
+ * as a new folder is chosen, and when asked from the accounts dialog, which shows [status]. A share
+ * that wants a password is asked for one through [passwordPrompt]. Only a nop that has called
+ * [start] backs up or restores anything, which keeps a test JVM away from the user's real folders.
  */
 object Backup {
 
     /** What the last run did, for the accounts dialog. */
-    data class Status(
+    internal data class Status(
         val running: Boolean = false,
         val lastSuccessAt: Long? = null,
         val lastError: String? = null,
         val copiedFiles: Int = 0,
         val copiedBytes: Long = 0,
+        /** What the share asked for, while backing up waits on a password. */
+        val password: NetworkShare.PasswordRequest? = null,
     )
 
     /** How much one run copied. */
     data class Copied(val files: Int, val bytes: Long)
 
     /** Compose state, written from the backup thread the way a tailer writes a run's session id. */
-    var status: Status by mutableStateOf(Status())
+    internal var status: Status by mutableStateOf(Status())
         private set
+
+    /**
+     * The share's request for a password while it is put to the user, or null. Set by a run that
+     * found the share wanting one, unless the user said "not now" to that share; cleared once the
+     * share is mounted. Compose state, like [status].
+     */
+    internal var passwordPrompt: NetworkShare.PasswordRequest? by mutableStateOf(null)
+        private set
+
+    /** The share the user said "not now" to, which runs then stop asking about until they ask. */
+    @Volatile
+    private var declined: String? = null
 
     private const val INTERVAL_MINUTES = 10L
     private const val AFTER_RUN_SECONDS = 30L
@@ -83,10 +99,21 @@ object Backup {
     }
     private val started = AtomicBoolean(false)
     private val soonPending = AtomicBoolean(false)
+    private val folder = AtomicReference<String?>()
 
     /** Starts the timer. Called once, by the nop that owns the windows. */
     fun start() {
         if (!started.compareAndSet(false, true)) return
+        // A folder just chosen is backed up to at once — from here, after agent.json has it, since
+        // a run reads the folder from there and the choice is written on a thread of its own.
+        folder.set(Accounts.load().backupDir)
+        Accounts.addChangeListener { next ->
+            if (folder.getAndSet(next.backupDir) == next.backupDir) return@addChangeListener
+            status = Status()
+            passwordPrompt = null
+            declined = null
+            runNow()
+        }
         executor.scheduleWithFixedDelay({ runConfigured() }, FIRST_RUN_MINUTES, INTERVAL_MINUTES * 60, TimeUnit.SECONDS)
     }
 
@@ -105,6 +132,23 @@ object Backup {
     /** Runs now, off the calling thread. */
     fun runNow() {
         if (started.get()) executor.execute { runConfigured() }
+    }
+
+    /** Runs now with the user's answer to [passwordPrompt], for the share to mount with. */
+    internal fun signIn(credentials: NetworkShare.Credentials) {
+        if (started.get()) executor.execute { runConfigured(credentials) }
+    }
+
+    /** Puts the share's request for a password to the user again, after a "not now". */
+    fun askForPassword() {
+        declined = null
+        passwordPrompt = status.password
+    }
+
+    /** The user's "not now": the share's request is not put to them again until they ask for it. */
+    fun notNow() {
+        declined = passwordPrompt?.share
+        passwordPrompt = null
     }
 
     /**
@@ -147,18 +191,32 @@ object Backup {
         return null
     }
 
-    private fun runConfigured() {
+    private fun runConfigured(credentials: NetworkShare.Credentials? = null) {
         val config = Accounts.load()
         val named = config.backupDir?.takeIf { it.isNotBlank() } ?: return
         status = status.copy(running = true)
-        val result = runCatching { run(config, NetworkShare.resolve(named), Accounts.dataRoot(), Accounts.configFile) }
+        val result = runCatching {
+            val dest = NetworkShare.resolve(named, credentials = credentials)
+            // Mounted: the question is answered, however long the copying that follows takes.
+            status = status.copy(password = null)
+            passwordPrompt = null
+            declined = null
+            run(config, dest, Accounts.dataRoot(), Accounts.configFile)
+        }
         result.onSuccess { copied ->
             status = Status(lastSuccessAt = System.currentTimeMillis(), copiedFiles = copied.files, copiedBytes = copied.bytes)
             if (copied.files > 0) Log.info("backup: ${copied.files} file(s), ${copied.bytes} bytes to $named")
         }
         result.onFailure { e ->
-            status = status.copy(running = false, lastError = e.message ?: e.toString())
-            Log.warn("backup to $named failed: $e")
+            val request = (e as? NetworkShare.PasswordNeeded)?.request
+            val waited = status.password != null
+            status = status.copy(running = false, lastError = e.message ?: e.toString(), password = request)
+            when {
+                request == null -> Log.warn("backup to $named failed: $e")
+                // Once, not every ten minutes for as long as the question stays unanswered.
+                !waited || request.refused -> Log.info("backup to $named waits for the user: ${e.message}")
+            }
+            if (request != null && request.share != declined) passwordPrompt = request
         }
     }
 

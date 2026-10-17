@@ -50,6 +50,7 @@ import iondrive.nop.ui.LocalWindow
 import iondrive.nop.ui.NopTextContextMenu
 import iondrive.nop.ui.ProjectBar
 import iondrive.nop.ui.RestartDialog
+import iondrive.nop.ui.SharePasswordDialog
 import iondrive.nop.ui.TerminalStore
 import iondrive.nop.ui.UiStallWatchdog
 import iondrive.nop.ui.projectAgentNews
@@ -544,7 +545,8 @@ fun main(args: Array<String>) {
         }
 
         val allWindows = workspaces.toList()
-        // The window a restart question is asked over: the one in front, else any that is showing.
+        // The window nop's own questions — a restart, the backup share's password — are asked over: the
+        // one in front, else any that is showing.
         val restartWindow = focusedId.takeIf { id -> allWindows.any { it.id == id && it.open } }
             ?: allWindows.firstOrNull { it.open }?.id
         for (workspace in allWindows) {
@@ -586,6 +588,7 @@ fun main(args: Array<String>) {
                     onUnregister = { windowRefs.remove(workspace.id) },
                     restartAsker = restartAsker.takeIf { workspace.id == restartWindow },
                     restartByUser = restartByUser && workspace.id == restartWindow,
+                    asksForBackup = workspace.id == restartWindow,
                     onRestart = ::restartNow,
                     onRestartRequested = if (Restart.launcher() != null) ::requestRestart else null,
                     onNotRestarting = {
@@ -634,6 +637,8 @@ private fun ApplicationScope.WorkspaceWindow(
     onUnregister: () -> Unit = {},
     restartAsker: String? = null,
     restartByUser: Boolean = false,
+    /** Whether the backup share's request for a password is put to the user over this window. */
+    asksForBackup: Boolean = false,
     onRestart: () -> Unit = {},
     /** The bar's restart button, or null to show none (a nop with no launcher to start again). */
     onRestartRequested: (() -> Unit)? = null,
@@ -941,6 +946,7 @@ private fun ApplicationScope.WorkspaceWindow(
                     update = SelfUpdate.status as? SelfUpdate.Status.Ready,
                 )
             }
+            if (asksForBackup) Backup.passwordPrompt?.let { SharePasswordDialog(it) }
             }
         }
     }
