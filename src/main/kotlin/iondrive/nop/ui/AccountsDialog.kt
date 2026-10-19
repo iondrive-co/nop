@@ -122,6 +122,8 @@ fun AccountsDialog(
                         reading = readings[account.name],
                         models = modelsFor(account),
                         others = draft.accounts.map { it.name }.filterNot { it == account.name },
+                        handoverModels = draft.accounts.firstOrNull { it.name == account.handoverTo }
+                            ?.let(modelsFor).orEmpty(),
                         onChange = { changed ->
                             update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) changed else it }))
                         },
@@ -156,7 +158,9 @@ fun AccountsDialog(
                                         // left pointing at a removed account is a handover that
                                         // silently does not happen at the one moment it was wanted,
                                         // which is worse than never having set it.
-                                        .map { if (it.handoverTo == account.name) it.copy(handoverTo = null) else it },
+                                        .map {
+                                            if (it.handoverTo == account.name) it.copy(handoverTo = null, handoverModel = null) else it
+                                        },
                                 ),
                             )
                         },
@@ -235,6 +239,9 @@ internal const val HANDOVER_ASK: String = "ask me"
 /** The handover picker's choice for staying on the account and resuming it once its window resets. */
 internal const val HANDOVER_RESUME: String = "wait, then resume"
 
+/** The handover model picker's choice for running whatever model the account taking over is set to. */
+internal const val HANDOVER_OWN_MODEL: String = "its own"
+
 /** One account's row: what it runs as, whether it is signed in, and the two things you can do to it. */
 @Composable
 private fun AccountEditor(
@@ -243,6 +250,8 @@ private fun AccountEditor(
     models: List<String>,
     /** The other configured accounts, which are what this one may hand its work to. */
     others: List<String>,
+    /** The models the account this one hands its work to can run, offered for that handover. */
+    handoverModels: List<String>,
     onChange: (Account) -> Unit,
     onLogIn: () -> Unit,
     onLogOut: () -> Unit,
@@ -324,11 +333,21 @@ private fun AccountEditor(
                     onChange(
                         account.copy(
                             handoverTo = it.takeIf { v -> v != HANDOVER_ASK && v != HANDOVER_RESUME },
+                            // A model belongs to the account it was picked for.
+                            handoverModel = account.handoverModel.takeIf { _ -> it == account.handoverTo },
                             resumeAfterReset = it == HANDOVER_RESUME,
                         ),
                     )
                 },
             )
+            if (!account.resumeAfterReset && account.handoverTo in others) {
+                ChoicePicker(
+                    label = "on",
+                    options = (listOf(HANDOVER_OWN_MODEL, DEFAULT_CHOICE) + handoverModels).distinct(),
+                    selected = account.handoverModel ?: HANDOVER_OWN_MODEL,
+                    onSelect = { onChange(account.copy(handoverModel = it.takeIf { v -> v != HANDOVER_OWN_MODEL })) },
+                )
+            }
         }
         Row(
             modifier = Modifier.padding(top = 4.dp),

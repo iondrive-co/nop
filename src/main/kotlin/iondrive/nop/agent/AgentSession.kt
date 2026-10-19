@@ -937,7 +937,7 @@ class AgentSession(
             return
         }
 
-        Log.info("${current.account.name} ran out; handing over to ${target.name}")
+        Log.info("${current.account.name} ran out; handing over to ${target.name} on ${target.model ?: DEFAULT_CHOICE}")
         handOver(target, EndReason.Quota)
         // After the switch, so the note describes a handover that has actually happened — and after
         // [switchTo] has cleared it, which is what stops a previous one hanging over this run.

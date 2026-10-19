@@ -74,6 +74,37 @@ class AccountsTest {
     }
 
     @Test
+    fun `a nomination with a model hands over to that account on that model`() {
+        val claude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "codex", handoverModel = "gpt-6")
+        val codex = Account("codex", Provider.OpenAI, "/h2", model = "gpt-6-mini")
+
+        assertEquals(codex.copy(model = "gpt-6"), listOf(claude, codex).handoverTarget(claude))
+    }
+
+    @Test
+    fun `a nomination on the default model hands over with no model set`() {
+        val claude = Account("claude-main", Provider.Anthropic, "/h", handoverTo = "codex", handoverModel = DEFAULT_CHOICE)
+        val codex = Account("codex", Provider.OpenAI, "/h2", model = "gpt-6-mini")
+
+        assertNull(listOf(claude, codex).handoverTarget(claude)?.model)
+    }
+
+    @Test
+    fun `the model nominated for a handover round-trips through the config file`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val config = AgentConfig(
+            accounts = listOf(
+                Account("claude-main", Provider.Anthropic, "/homes/cw", handoverTo = "codex-main", handoverModel = "gpt-6"),
+                Account("codex-main", Provider.OpenAI, "/homes/cx"),
+            ),
+        )
+
+        Accounts.save(config)
+
+        assertEquals("gpt-6", Accounts.load().accounts.first().handoverModel)
+    }
+
+    @Test
     fun `an account nobody nominated anything for hands over to nobody`() {
         val claude = Account("claude-main", Provider.Anthropic, "/h")
 

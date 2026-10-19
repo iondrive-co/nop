@@ -39,6 +39,12 @@ data class Account(
      */
     val handoverTo: String? = null,
     /**
+     * The model [handoverTo] runs when it takes this one's work on, or null for whatever that
+     * account is set to run. Kept here rather than on the other account because it is a choice about
+     * this handover: the account taking over may be set to a cheaper model for work started on it.
+     */
+    val handoverModel: String? = null,
+    /**
      * Whether to keep this account's work where it is when it runs out: leave the CLI at its wall,
      * and once the window has reset, type a message into it telling it to carry on. Takes the place
      * of [handoverTo], which [handoverTarget] ignores while this is set — the conversation stays
@@ -78,12 +84,16 @@ data class Account(
  * too, since starting the same exhausted account again is the one move that certainly does not
  * help. The settings dialog prevents both, so this is the belt behind that brace — an `agent.json`
  * edited by hand, or written by a version that allowed it, must not be able to wedge a session.
+ *
+ * The account comes back running [Account.handoverModel] when [from] names one.
  */
 fun List<Account>.handoverTarget(from: Account): Account? {
     val currentFrom = firstOrNull { it.name == from.name } ?: from
     if (currentFrom.resumeAfterReset) return null
     val nominated = currentFrom.handoverTo?.takeIf { it != currentFrom.name } ?: return null
-    return firstOrNull { it.name == nominated }
+    val target = firstOrNull { it.name == nominated } ?: return null
+    val model = currentFrom.handoverModel ?: return target
+    return target.copy(model = model.takeIf { it != DEFAULT_CHOICE })
 }
 
 /**
