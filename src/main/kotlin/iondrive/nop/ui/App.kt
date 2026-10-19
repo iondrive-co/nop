@@ -2175,6 +2175,7 @@ fun App(
             readings = agentUsage,
             onClick = { showAccounts = true },
             onHeight = { usageStripHeight = it },
+            backupDir = agentConfig?.backupDir,
             spanWidth = toolRegionWidth,
             modifier = Modifier.align(androidx.compose.ui.Alignment.BottomEnd),
         )

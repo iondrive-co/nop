@@ -13,25 +13,39 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import iondrive.nop.Ago
 import iondrive.nop.agent.Account
+import iondrive.nop.agent.Backup
 import iondrive.nop.agent.PaceSource
 import iondrive.nop.agent.UsageReading
 import iondrive.nop.agent.UsageWindow
+import kotlinx.coroutines.delay
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
@@ -79,6 +93,8 @@ fun UsageIndicator(
     onClick: () -> Unit,
     /** The height this ended up, so whatever is underneath can stop drawing where it sits. */
     onHeight: (Dp) -> Unit,
+    /** Where agent sessions are backed up to, or null when they are not: see [BackupGlyph]. */
+    backupDir: String? = null,
     /**
      * How wide the tool region below is, which is how wide the strip draws. Zero until the region
      * has been measured, and then the strip falls back to a width that fits a few accounts.
@@ -116,7 +132,11 @@ fun UsageIndicator(
         accounts.forEach { account ->
             key(account.name) { UsageChip(account, readings[account.name]) }
         }
-        SettingsGlyph(onClick)
+        // One item, so a wrap never puts the backup's mark on a different row from the gear.
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            backupDir?.takeIf { it.isNotBlank() }?.let { BackupGlyph(it, onClick) }
+            SettingsGlyph(onClick)
+        }
     }
 }
 
@@ -337,6 +357,108 @@ private fun SettingsGlyph(onClick: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("⚙", color = tint)
+        }
+    }
+}
+
+/**
+ * Whether the session backup is working, beside the gear: grey while it is, red with a "!" once it
+ * is not. A backup that has stopped says nothing by itself — it is noticed the day it is needed — so
+ * the place that says so has to be one that is on screen anyway. The accounts dialog has the detail.
+ */
+@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun BackupGlyph(dir: String, onClick: () -> Unit) {
+    // Lateness is a matter of the clock, which no state change reports.
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val health = backupHealth(dir, Backup.status, now)
+    val tint = when {
+        health.failing -> ChangeColors.REMOVED
+        JewelTheme.isDark -> ProjectIconTintDark
+        else -> ProjectIconTintLight
+    }
+    Tooltip(tooltip = { Text(health.line) }) {
+        Row(
+            modifier = Modifier.clickable(onClick = onClick),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Canvas(Modifier.size(14.dp)) { drawBackupIcon(tint, health.failing) }
+        }
+    }
+}
+
+/** What the backup mark says: whether to warn, and the sentence behind it. */
+internal data class BackupHealth(val failing: Boolean, val line: String)
+
+/**
+ * A few missed runs. One late run is a slow share; three is a backup that has stopped, whether it
+ * fails, hangs or never starts.
+ */
+private const val BACKUP_OVERDUE_MS = 3 * Backup.INTERVAL_MINUTES * 60_000
+
+internal fun backupHealth(dir: String, status: Backup.Status, now: Long = System.currentTimeMillis()): BackupHealth {
+    val last = status.lastSuccessAt
+    val lastLine = last?.let { "The last backup that finished was ${Ago.of(it, now)}." } ?: "Nothing has been backed up yet."
+    val waiting = status.password
+    if (waiting != null && !status.running) {
+        val why = if (waiting.refused) "${waiting.share} did not accept the password" else "it is waiting for the password to ${waiting.share}"
+        return BackupHealth(true, "Not backing up to $dir: $why. $lastLine")
+    }
+    if (status.lastError != null && !status.running) {
+        return BackupHealth(true, "The last backup to $dir failed: ${status.lastError}. $lastLine")
+    }
+    val overdue = (last ?: status.since)?.let { now - it > BACKUP_OVERDUE_MS } == true
+    if (overdue) {
+        val doing = if (status.running) "A backup to $dir is still running." else "No backup to $dir has run for a while."
+        return BackupHealth(true, "$doing $lastLine It runs every ${Backup.INTERVAL_MINUTES} minutes.")
+    }
+    return BackupHealth(
+        false,
+        when {
+            status.running -> "Backing up to $dir…"
+            last != null -> "Backed up to $dir ${Ago.of(last, now)}."
+            else -> "Backs up to $dir every ${Backup.INTERVAL_MINUTES} minutes, and after each run ends."
+        },
+    )
+}
+
+/**
+ * A cloud with an arrow going up into it, or a "!" in place of the arrow when the backup is not
+ * working. Drawn on a 16-unit grid scaled to whatever the canvas is.
+ */
+private fun DrawScope.drawBackupIcon(tint: Color, failing: Boolean) {
+    scale(size.minDimension / 16f, pivot = Offset.Zero) {
+        val stroke = Stroke(width = 1.3f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        // Three lobes, each arc running from where it meets the one before to where it meets the next.
+        val cloud = Path().apply {
+            moveTo(11.5f, 13f)
+            lineTo(4.5f, 13f)
+            arcTo(Rect(1.5f, 7f, 7.5f, 13f), 90f, 180f, false)
+            arcTo(Rect(4.5f, 3.5f, 11.5f, 10.5f), 180f, 163.5f, false)
+            arcTo(Rect(8f, 6f, 15f, 13f), 267.6f, 182.4f, false)
+            close()
+        }
+        drawPath(cloud, tint, style = stroke)
+        if (failing) {
+            drawLine(tint, Offset(8f, 6.2f), Offset(8f, 8.6f), strokeWidth = 1.4f, cap = StrokeCap.Round)
+            drawCircle(tint, radius = 0.9f, center = Offset(8f, 11f))
+        } else {
+            drawLine(tint, Offset(8f, 11.2f), Offset(8f, 6.8f), strokeWidth = 1.3f, cap = StrokeCap.Round)
+            drawPath(
+                Path().apply {
+                    moveTo(6.4f, 8.4f)
+                    lineTo(8f, 6.8f)
+                    lineTo(9.6f, 8.4f)
+                },
+                tint,
+                style = stroke,
+            )
         }
     }
 }

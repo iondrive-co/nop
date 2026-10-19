@@ -56,6 +56,11 @@ object Backup {
         val copiedBytes: Long = 0,
         /** What the share asked for, while backing up waits on a password. */
         val password: NetworkShare.PasswordRequest? = null,
+        /**
+         * When backing up to this folder began, for telling a backup that is late from one that has
+         * not had its first chance yet. Null once a run has succeeded, since [lastSuccessAt] says more.
+         */
+        val since: Long? = null,
     )
 
     /** How much one run copied. */
@@ -77,7 +82,7 @@ object Backup {
     @Volatile
     private var declined: String? = null
 
-    private const val INTERVAL_MINUTES = 10L
+    internal const val INTERVAL_MINUTES = 10L
     private const val AFTER_RUN_SECONDS = 30L
     private const val FIRST_RUN_MINUTES = 1L
 
@@ -107,9 +112,10 @@ object Backup {
         // A folder just chosen is backed up to at once — from here, after agent.json has it, since
         // a run reads the folder from there and the choice is written on a thread of its own.
         folder.set(Accounts.load().backupDir)
+        status = Status(since = System.currentTimeMillis())
         Accounts.addChangeListener { next ->
             if (folder.getAndSet(next.backupDir) == next.backupDir) return@addChangeListener
-            status = Status()
+            status = Status(since = System.currentTimeMillis())
             passwordPrompt = null
             declined = null
             runNow()

@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.Density
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.HandoverDraft
 import iondrive.nop.agent.Provider
+import java.awt.EventQueue
 import java.awt.event.KeyEvent as AwtKeyEvent
 import java.nio.file.Path
 import javax.swing.JPanel
@@ -42,23 +43,29 @@ class HandoverPromptEditorTest {
         var shown by mutableStateOf(true)
         private var time = 0L
         private val source = JPanel()
-        private val scene = ImageComposeScene(600, 300, Density(1f)) {
-            IntUiTheme(isDark = false) {
-                if (shown) {
-                    HandoverPromptEditor(
-                        draft = draft,
-                        actionLabel = "Hand over",
-                        onConfirm = {},
-                        onCancel = {},
-                        onEdit = { draft = draft.copy(prompt = it) },
-                    )
+        // Every call into the scene is made on the AWT thread. Compose sends its snapshot apply
+        // notifications there, and a scene driven from another thread can deadlock against them:
+        // each side takes the snapshot observer's lock and the scene's dispatcher lock in the
+        // opposite order.
+        private val scene = onEdt {
+            ImageComposeScene(600, 300, Density(1f)) {
+                IntUiTheme(isDark = false) {
+                    if (shown) {
+                        HandoverPromptEditor(
+                            draft = draft,
+                            actionLabel = "Hand over",
+                            onConfirm = {},
+                            onCancel = {},
+                            onEdit = { draft = draft.copy(prompt = it) },
+                        )
+                    }
                 }
             }
         }
 
         fun settle() = repeat(10) {
             time += 16_000_000
-            scene.render(time)
+            onEdt { scene.render(time) }
             Thread.sleep(5)
         }
 
@@ -68,11 +75,11 @@ class HandoverPromptEditorTest {
          */
         fun focus() {
             val at = Offset(590f, 60f)
-            scene.sendPointerEvent(PointerEventType.Move, at)
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
             settle()
-            scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary)
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary) }
             settle()
-            scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary)
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
             settle()
         }
 
@@ -80,12 +87,18 @@ class HandoverPromptEditorTest {
         fun type(text: String) {
             for (c in text) {
                 val awt = AwtKeyEvent(source, AwtKeyEvent.KEY_TYPED, System.currentTimeMillis(), 0, AwtKeyEvent.VK_UNDEFINED, c)
-                scene.sendKeyEvent(KeyEvent(Key.Unknown, KeyEventType.KeyDown, c.code, nativeEvent = awt))
+                onEdt { scene.sendKeyEvent(KeyEvent(Key.Unknown, KeyEventType.KeyDown, c.code, nativeEvent = awt)) }
             }
             settle()
         }
 
-        override fun close() = scene.close()
+        override fun close() = onEdt { scene.close() }
+
+        private fun <T> onEdt(block: () -> T): T {
+            var result: Result<T>? = null
+            EventQueue.invokeAndWait { result = runCatching(block) }
+            return result!!.getOrThrow()
+        }
     }
 
     @Test
