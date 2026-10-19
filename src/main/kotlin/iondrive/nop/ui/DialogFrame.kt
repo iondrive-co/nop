@@ -42,6 +42,7 @@ import org.jetbrains.jewel.ui.ComponentStyling
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * The window a dialog that may open over a terminal is drawn in: the agent dialogs, adding a
@@ -111,9 +112,16 @@ fun DialogFrame(
     ) {
         var contentHeight by remember { mutableStateOf<Dp?>(null) }
         if (fitsContent) {
-            // By the time this runs Compose has packed the hidden window, so its size is final.
+            // By the time this runs Compose has packed the hidden window, so its size is final. The
+            // window itself is moved, not [state]: the move Compose made when it created the window
+            // is still queued as an event, and delivering it copies the window's location back into
+            // the state — a position put in the state now would be overwritten before it was applied,
+            // leaving the dialog in the middle of the desktop. Moved here, that event reports this.
             LaunchedEffect(Unit) {
-                if (owner != null) state.position = centredOver(owner, DpSize(window.width.dp, window.height.dp))
+                if (owner != null) {
+                    val at = centredOver(owner, DpSize(window.width.dp, window.height.dp))
+                    window.setLocation(at.x.value.roundToInt(), at.y.value.roundToInt())
+                }
                 placed = true
             }
             // The pack allowed for frame insets the toolkit guessed; the real ones are known once the
