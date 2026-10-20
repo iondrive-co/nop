@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ContextMenuArea
 import androidx.compose.foundation.ContextMenuItem
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,12 +17,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -671,370 +674,372 @@ fun ProjectTreePanel(
             Spacer(Modifier.weight(1f))
             headerExtras()
         }
-        LazyTree(
-            tree = tree,
-            treeState = treeState,
-            style = treeStyle,
-            modifier = Modifier.fillMaxSize()
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            if (event.type != PointerEventType.Press) continue
-                            val mods = event.keyboardModifiers
-                            pressCarriedSelectModifier =
-                                mods.isCtrlPressed || mods.isMetaPressed || mods.isShiftPressed
-                            if (event.buttons.isSecondaryPressed) {
-                                selectionBeforeSecondaryPress = selectedFilesOf(treeState.selectedKeys, rootId)
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyTree(
+                tree = tree,
+                treeState = treeState,
+                style = treeStyle,
+                modifier = Modifier.fillMaxSize().padding(end = 8.dp)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.type != PointerEventType.Press) continue
+                                val mods = event.keyboardModifiers
+                                pressCarriedSelectModifier =
+                                    mods.isCtrlPressed || mods.isMetaPressed || mods.isShiftPressed
+                                if (event.buttons.isSecondaryPressed) {
+                                    selectionBeforeSecondaryPress = selectedFilesOf(treeState.selectedKeys, rootId)
+                                }
                             }
                         }
                     }
-                }
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    val copyModifier = event.isCtrlPressed || event.isMetaPressed
-                    when (event.key) {
-                        Key.Delete -> selectedFiles().takeIf { it.isNotEmpty() }
-                            ?.let { onDeleteRequest(it); true } ?: false
-                        Key.C -> if (copyModifier) {
-                            selectedFiles().takeIf { it.isNotEmpty() }?.let { onClipboardCopy(it) }
-                            true
-                        } else false
-                        Key.V -> if (copyModifier) { onPasteRequest(pasteTarget()); true } else false
-                        Key.F2 -> selectedFile()?.let { onRenameRequest(it); true } ?: false
-                        Key.H -> { onHistoryRequest(historyTarget()); true }
-                        Key.B -> { onToggleBlame(); true }
-                        else -> false
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        val copyModifier = event.isCtrlPressed || event.isMetaPressed
+                        when (event.key) {
+                            Key.Delete -> selectedFiles().takeIf { it.isNotEmpty() }
+                                ?.let { onDeleteRequest(it); true } ?: false
+                            Key.C -> if (copyModifier) {
+                                selectedFiles().takeIf { it.isNotEmpty() }?.let { onClipboardCopy(it) }
+                                true
+                            } else false
+                            Key.V -> if (copyModifier) { onPasteRequest(pasteTarget()); true } else false
+                            Key.F2 -> selectedFile()?.let { onRenameRequest(it); true } ?: false
+                            Key.H -> { onHistoryRequest(historyTarget()); true }
+                            Key.B -> { onToggleBlame(); true }
+                            else -> false
+                        }
+                    },
+                onElementClick = { element ->
+                    when (val entry = element.data) {
+                        is TreeEntry.Node -> {
+                            if (entry.canOpen && !pressCarriedSelectModifier) onFileClick(entry.file)
+                        }
+                        is TreeEntry.Ellipsis -> {
+                            expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId
+                        }
+                        is TreeEntry.Collapse -> {
+                            expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId
+                        }
+                        is TreeEntry.Placeholder -> Unit
                     }
                 },
-            onElementClick = { element ->
-                when (val entry = element.data) {
-                    is TreeEntry.Node -> {
-                        if (entry.canOpen && !pressCarriedSelectModifier) onFileClick(entry.file)
-                    }
-                    is TreeEntry.Ellipsis -> {
-                        expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId
-                    }
-                    is TreeEntry.Collapse -> {
-                        expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId
-                    }
-                    is TreeEntry.Placeholder -> Unit
-                }
-            },
-        ) { element ->
-            val isDark = JewelTheme.isDark
-            val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
+            ) { element ->
+                val isDark = JewelTheme.isDark
+                val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
 
-            when (val entry = element.data) {
-                is TreeEntry.Ellipsis -> {
-                    val interactionSource = remember(entry.rangeId) { MutableInteractionSource() }
-                    val isHovered by interactionSource.collectIsHoveredAsState()
-                    val count = entry.hiddenItems.size
-                    val noun = if (entry.isDirectory) {
-                        if (count == 1) "folder" else "folders"
-                    } else {
-                        if (count == 1) "file" else "files"
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(24.dp)
-                            .padding(end = 8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(
-                                if (isHovered) (if (isDark) Color(0x20FFFFFF) else Color(0x10000000)) else Color.Transparent,
-                            )
-                            .hoverable(interactionSource)
-                            .clickable { expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId },
-                    ) {
-                        if (entry.isDirectory) {
-                            Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint.copy(alpha = 0.7f)) }
+                when (val entry = element.data) {
+                    is TreeEntry.Ellipsis -> {
+                        val interactionSource = remember(entry.rangeId) { MutableInteractionSource() }
+                        val isHovered by interactionSource.collectIsHoveredAsState()
+                        val count = entry.hiddenItems.size
+                        val noun = if (entry.isDirectory) {
+                            if (count == 1) "folder" else "folders"
                         } else {
-                            Spacer(Modifier.width(FileRowIndent))
+                            if (count == 1) "file" else "files"
                         }
-                        Text(
-                            text = "··· $count more $noun ···",
-                            fontSize = 11.sp,
-                            fontFamily = NopFonts.Mono,
-                            color = if (isDark) Color(0xFF8B8F99) else Color(0xFF6C707E),
-                        )
-                        if (isHovered) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(24.dp)
+                                .padding(end = 8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(
+                                    if (isHovered) (if (isDark) Color(0x20FFFFFF) else Color(0x10000000)) else Color.Transparent,
+                                )
+                                .hoverable(interactionSource)
+                                .clickable { expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId },
+                        ) {
+                            if (entry.isDirectory) {
+                                Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint.copy(alpha = 0.7f)) }
+                            } else {
+                                Spacer(Modifier.width(FileRowIndent))
+                            }
                             Text(
-                                text = "show",
+                                text = "··· $count more $noun ···",
+                                fontSize = 11.sp,
+                                fontFamily = NopFonts.Mono,
+                                color = if (isDark) Color(0xFF8B8F99) else Color(0xFF6C707E),
+                            )
+                            if (isHovered) {
+                                Text(
+                                    text = "show",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0),
+                                )
+                            }
+                        }
+                    }
+
+                    is TreeEntry.Collapse -> {
+                        val interactionSource = remember(entry.rangeId) { MutableInteractionSource() }
+                        val isHovered by interactionSource.collectIsHoveredAsState()
+                        val noun = if (entry.isDirectory) {
+                            if (entry.count == 1) "folder" else "folders"
+                        } else {
+                            if (entry.count == 1) "file" else "files"
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(22.dp)
+                                .padding(end = 8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(
+                                    if (isHovered) (if (isDark) Color(0x20FFFFFF) else Color(0x10000000)) else Color.Transparent,
+                                )
+                                .hoverable(interactionSource)
+                                .clickable { expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId },
+                        ) {
+                            if (entry.isDirectory) {
+                                Spacer(Modifier.width(16.dp))
+                            } else {
+                                Spacer(Modifier.width(FileRowIndent))
+                            }
+                            Text(
+                                text = "▴ collapse ${entry.count} $noun",
                                 fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
+                                fontFamily = NopFonts.Mono,
                                 color = if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0),
                             )
                         }
                     }
-                }
 
-                is TreeEntry.Collapse -> {
-                    val interactionSource = remember(entry.rangeId) { MutableInteractionSource() }
-                    val isHovered by interactionSource.collectIsHoveredAsState()
-                    val noun = if (entry.isDirectory) {
-                        if (entry.count == 1) "folder" else "folders"
-                    } else {
-                        if (entry.count == 1) "file" else "files"
-                    }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(22.dp)
-                            .padding(end = 8.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(
-                                if (isHovered) (if (isDark) Color(0x20FFFFFF) else Color(0x10000000)) else Color.Transparent,
-                            )
-                            .hoverable(interactionSource)
-                            .clickable { expandedEllipsisKeys = expandedEllipsisKeys - entry.rangeId },
-                    ) {
-                        if (entry.isDirectory) {
-                            Spacer(Modifier.width(16.dp))
-                        } else {
-                            Spacer(Modifier.width(FileRowIndent))
-                        }
-                        Text(
-                            text = "▴ collapse ${entry.count} $noun",
-                            fontSize = 10.sp,
-                            fontFamily = NopFonts.Mono,
-                            color = if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0),
-                        )
-                    }
-                }
-
-                is TreeEntry.Placeholder -> {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().height(22.dp).padding(end = 8.dp),
-                    ) {
-                        Spacer(Modifier.width(FileRowIndent))
-                        Text(
-                            text = entry.message,
-                            fontSize = 11.sp,
-                            fontFamily = NopFonts.Mono,
-                            color = when {
-                                entry.isProblem -> if (isDark) Color(0xFFE5A15C) else Color(0xFFA35A00)
-                                isDark -> Color(0xFF8B8F99)
-                                else -> Color(0xFF6C707E)
-                            },
-                        )
-                    }
-                }
-
-                is TreeEntry.Node -> {
-                    val file: File = entry.file
-                    val isDirectory = entry.isDirectory
-                    val isFile = !isDirectory
-                    val isOpen = isFile && file.absolutePath in openFilePaths
-                    val isActive = isFile && file.absolutePath == effectiveActiveFile?.absolutePath
-                    val isDirty = isFile && file in dirtyFiles
-
-                    val relPath = file.relativePathTo(projectPath)
-                    val kind = when {
-                        relPath == null -> null
-                        isFile -> status.byPath[relPath]
-                        else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
-                    }
-                    val color = kind?.let(ChangeColors::forKind)
-
-                    // High contrast text color: Active is bright white (dark) / deep blue (light)
-                    val labelColor = color ?: when {
-                        isActive -> if (isDark) Color(0xFFFFFFFF) else Color(0xFF0F3E85)
-                        isOpen -> if (isDark) Color(0xFFDFE1E5) else Color(0xFF1F2329)
-                        else -> if (!isDark) ProjectTextLight else null
-                    }
-
-                    ContextMenuArea(items = {
-                        buildList {
-                            if (isOpen) {
-                                add(ContextMenuItem("Close") { onCloseFile(file) })
-                                if (effectiveOpenFiles.size > 1) {
-                                    add(ContextMenuItem("Close Others") { onCloseOtherFiles(file) })
-                                    add(ContextMenuItem("Close All") { onCloseAllFiles() })
-                                }
-                            }
-                            add(ContextMenuItem("New File…") { onNewFile(file) })
-                            add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
-                            add(ContextMenuItem("New Package…") { onNewPackage(file) })
-                            if (entry.canOpen) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
-                            add(ContextMenuItem("Copy") { onClipboardCopy(menuTargetsFor(file, selectionBeforeSecondaryPress)) })
-                            if (canPaste()) {
-                                add(ContextMenuItem("Paste") { onPasteRequest(FileOperations.parentDirFor(file)) })
-                            }
-                            if (file.absolutePath != rootId) {
-                                add(ContextMenuItem("Rename…") { onRenameRequest(file) })
-                            }
-                            if (gitEnabled) {
-                                add(ContextMenuItem("Show History") { onHistoryRequest(file) })
-                                if (entry.canOpen) {
-                                    add(ContextMenuItem("Compare with Revision…") { onCompareWithRevision(file) })
-                                }
-                            }
-                            if (file.absolutePath != rootId) {
-                                val targets = if (pressCarriedSelectModifier) {
-                                    menuTargetsFor(file, selectionBeforeSecondaryPress)
-                                } else {
-                                    listOf(file)
-                                }
-                                if (targets.size > 1) {
-                                    treeState.selectedKeys = targets.mapTo(mutableSetOf()) { it.absolutePath }
-                                }
-                                val label = if (targets.size > 1) "Delete ${targets.size} Items" else "Delete"
-                                add(ContextMenuItem(label) { onDeleteRequest(targets) })
-                            }
-                        }
-                    }) {
-                        val rowCoords = remember(file.absolutePath) { mutableStateOf<LayoutCoordinates?>(null) }
-                        val isDropTarget = isDirectory && dropTargetPath == file.absolutePath &&
-                            draggedFile != null && draggedFile != file
-                        val interactionSource = remember(file.absolutePath) { MutableInteractionSource() }
-                        val isHovered by interactionSource.collectIsHoveredAsState()
-
-                        // Highlight styling: Active file has vivid BLUE background; Open file has neutral GRAY background + border
-                        val rowBackground = when {
-                            isDropTarget -> DropTargetHighlight
-                            isActive -> if (isDark) Color(0xFF2B5282) else Color(0xFFCEE0FD)
-                            isOpen -> if (isDark) Color(0xFF26282D) else Color(0xFFEEF0F4)
-                            else -> Color.Transparent
-                        }
-
-                        val rowBorder = when {
-                            isOpen && !isActive -> BorderStroke(1.dp, if (isDark) Color(0x28FFFFFF) else Color(0x18000000))
-                            else -> null
-                        }
-
+                    is TreeEntry.Placeholder -> {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(end = 4.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                                .then(if (rowBorder != null) Modifier.border(rowBorder, RoundedCornerShape(4.dp)) else Modifier)
-                                .hoverable(interactionSource)
-                                .onGloballyPositioned { coords ->
-                                    rowCoords.value = coords
-                                    if (isDirectory) {
-                                        val bounds = coords.boundsInRoot()
-                                        dirRowRanges[file.absolutePath] = bounds.top..bounds.bottom
-                                    } else {
-                                        dirRowRanges.remove(file.absolutePath)
+                            modifier = Modifier.fillMaxWidth().height(22.dp).padding(end = 8.dp),
+                        ) {
+                            Spacer(Modifier.width(FileRowIndent))
+                            Text(
+                                text = entry.message,
+                                fontSize = 11.sp,
+                                fontFamily = NopFonts.Mono,
+                                color = when {
+                                    entry.isProblem -> if (isDark) Color(0xFFE5A15C) else Color(0xFFA35A00)
+                                    isDark -> Color(0xFF8B8F99)
+                                    else -> Color(0xFF6C707E)
+                                },
+                            )
+                        }
+                    }
+
+                    is TreeEntry.Node -> {
+                        val file: File = entry.file
+                        val isDirectory = entry.isDirectory
+                        val isFile = !isDirectory
+                        val isOpen = isFile && file.absolutePath in openFilePaths
+                        val isActive = isFile && file.absolutePath == effectiveActiveFile?.absolutePath
+                        val isDirty = isFile && file in dirtyFiles
+
+                        val relPath = file.relativePathTo(projectPath)
+                        val kind = when {
+                            relPath == null -> null
+                            isFile -> status.byPath[relPath]
+                            else -> status.changes.firstOrNull { it.path.startsWith("$relPath/") }?.kind
+                        }
+                        val color = kind?.let(ChangeColors::forKind)
+
+                        // High contrast text color: Active is bright white (dark) / deep blue (light)
+                        val labelColor = color ?: when {
+                            isActive -> if (isDark) Color(0xFFFFFFFF) else Color(0xFF0F3E85)
+                            isOpen -> if (isDark) Color(0xFFDFE1E5) else Color(0xFF1F2329)
+                            else -> if (!isDark) ProjectTextLight else null
+                        }
+
+                        ContextMenuArea(items = {
+                            buildList {
+                                if (isOpen) {
+                                    add(ContextMenuItem("Close") { onCloseFile(file) })
+                                    if (effectiveOpenFiles.size > 1) {
+                                        add(ContextMenuItem("Close Others") { onCloseOtherFiles(file) })
+                                        add(ContextMenuItem("Close All") { onCloseAllFiles() })
                                     }
                                 }
-                                .then(
-                                    if (file.absolutePath == rootId) {
-                                        Modifier
+                                add(ContextMenuItem("New File…") { onNewFile(file) })
+                                add(ContextMenuItem("New Directory…") { onNewDirectory(file) })
+                                add(ContextMenuItem("New Package…") { onNewPackage(file) })
+                                if (entry.canOpen) add(ContextMenuItem("Copy File…") { onCopyFile(file) })
+                                add(ContextMenuItem("Copy") { onClipboardCopy(menuTargetsFor(file, selectionBeforeSecondaryPress)) })
+                                if (canPaste()) {
+                                    add(ContextMenuItem("Paste") { onPasteRequest(FileOperations.parentDirFor(file)) })
+                                }
+                                if (file.absolutePath != rootId) {
+                                    add(ContextMenuItem("Rename…") { onRenameRequest(file) })
+                                }
+                                if (gitEnabled) {
+                                    add(ContextMenuItem("Show History") { onHistoryRequest(file) })
+                                    if (entry.canOpen) {
+                                        add(ContextMenuItem("Compare with Revision…") { onCompareWithRevision(file) })
+                                    }
+                                }
+                                if (file.absolutePath != rootId) {
+                                    val targets = if (pressCarriedSelectModifier) {
+                                        menuTargetsFor(file, selectionBeforeSecondaryPress)
                                     } else {
-                                        Modifier.pointerInput(file.absolutePath) {
-                                            detectDragGestures(
-                                                onDragStart = { draggedFile = file },
-                                                onDrag = { change, _ ->
-                                                    change.consume()
-                                                    val coords = rowCoords.value ?: return@detectDragGestures
-                                                    val rootY = coords.localToRoot(change.position).y
-                                                    dropTargetPath = directoryPathAtY(dirRowRanges, rootY)
-                                                        ?.takeIf { it != file.absolutePath }
-                                                },
-                                                onDragEnd = {
-                                                    val target = dropTargetPath
-                                                    val source = draggedFile
-                                                    draggedFile = null
-                                                    dropTargetPath = null
-                                                    if (target != null && source != null) onMoveRequest(source, File(target))
-                                                },
-                                                onDragCancel = {
-                                                    draggedFile = null
-                                                    dropTargetPath = null
-                                                },
-                                            )
+                                        listOf(file)
+                                    }
+                                    if (targets.size > 1) {
+                                        treeState.selectedKeys = targets.mapTo(mutableSetOf()) { it.absolutePath }
+                                    }
+                                    val label = if (targets.size > 1) "Delete ${targets.size} Items" else "Delete"
+                                    add(ContextMenuItem(label) { onDeleteRequest(targets) })
+                                }
+                            }
+                        }) {
+                            val rowCoords = remember(file.absolutePath) { mutableStateOf<LayoutCoordinates?>(null) }
+                            val isDropTarget = isDirectory && dropTargetPath == file.absolutePath &&
+                                draggedFile != null && draggedFile != file
+                            val interactionSource = remember(file.absolutePath) { MutableInteractionSource() }
+                            val isHovered by interactionSource.collectIsHoveredAsState()
+
+                            // Highlight styling: Active file has vivid BLUE background; Open file has neutral GRAY background + border
+                            val rowBackground = when {
+                                isDropTarget -> DropTargetHighlight
+                                isActive -> if (isDark) Color(0xFF2B5282) else Color(0xFFCEE0FD)
+                                isOpen -> if (isDark) Color(0xFF26282D) else Color(0xFFEEF0F4)
+                                else -> Color.Transparent
+                            }
+
+                            val rowBorder = when {
+                                isOpen && !isActive -> BorderStroke(1.dp, if (isDark) Color(0x28FFFFFF) else Color(0x18000000))
+                                else -> null
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(end = 4.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .then(if (rowBorder != null) Modifier.border(rowBorder, RoundedCornerShape(4.dp)) else Modifier)
+                                    .hoverable(interactionSource)
+                                    .onGloballyPositioned { coords ->
+                                        rowCoords.value = coords
+                                        if (isDirectory) {
+                                            val bounds = coords.boundsInRoot()
+                                            dirRowRanges[file.absolutePath] = bounds.top..bounds.bottom
+                                        } else {
+                                            dirRowRanges.remove(file.absolutePath)
                                         }
-                                    },
-                                )
-                                .then(
-                                    if (isOpen) {
-                                        Modifier.pointerInput(file.absolutePath) {
-                                            awaitPointerEventScope {
-                                                while (true) {
-                                                    val event = awaitPointerEvent()
-                                                    if (event.type == PointerEventType.Press && event.buttons.isTertiaryPressed) {
-                                                        onCloseFile(file)
+                                    }
+                                    .then(
+                                        if (file.absolutePath == rootId) {
+                                            Modifier
+                                        } else {
+                                            Modifier.pointerInput(file.absolutePath) {
+                                                detectDragGestures(
+                                                    onDragStart = { draggedFile = file },
+                                                    onDrag = { change, _ ->
+                                                        change.consume()
+                                                        val coords = rowCoords.value ?: return@detectDragGestures
+                                                        val rootY = coords.localToRoot(change.position).y
+                                                        dropTargetPath = directoryPathAtY(dirRowRanges, rootY)
+                                                            ?.takeIf { it != file.absolutePath }
+                                                    },
+                                                    onDragEnd = {
+                                                        val target = dropTargetPath
+                                                        val source = draggedFile
+                                                        draggedFile = null
+                                                        dropTargetPath = null
+                                                        if (target != null && source != null) onMoveRequest(source, File(target))
+                                                    },
+                                                    onDragCancel = {
+                                                        draggedFile = null
+                                                        dropTargetPath = null
+                                                    },
+                                                )
+                                            }
+                                        },
+                                    )
+                                    .then(
+                                        if (isOpen) {
+                                            Modifier.pointerInput(file.absolutePath) {
+                                                awaitPointerEventScope {
+                                                    while (true) {
+                                                        val event = awaitPointerEvent()
+                                                        if (event.type == PointerEventType.Press && event.buttons.isTertiaryPressed) {
+                                                            onCloseFile(file)
+                                                        }
                                                     }
                                                 }
                                             }
+                                        } else {
+                                            Modifier
                                         }
+                                    )
+                                    .alpha(if (draggedFile == file) 0.5f else 1f)
+                                    .background(rowBackground),
+                            ) {
+                                if (isDirectory) {
+                                    Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
+                                } else {
+                                    // Active file gets prominent glowing vertical accent bar
+                                    if (isActive) {
+                                        Box(
+                                            modifier = Modifier
+                                                .width(3.5.dp)
+                                                .height(16.dp)
+                                                .clip(RoundedCornerShape(2.dp))
+                                                .background(if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)),
+                                        )
+                                        Spacer(Modifier.width(FileRowIndent - 3.5.dp))
                                     } else {
-                                        Modifier
+                                        Spacer(Modifier.width(FileRowIndent))
                                     }
-                                )
-                                .alpha(if (draggedFile == file) 0.5f else 1f)
-                                .background(rowBackground),
-                        ) {
-                            if (isDirectory) {
-                                Canvas(Modifier.size(16.dp)) { drawFolderIcon(iconTint) }
-                            } else {
-                                // Active file gets prominent glowing vertical accent bar
-                                if (isActive) {
+                                }
+
+                                if (labelColor != null) {
+                                    Text(
+                                        file.name,
+                                        color = labelColor,
+                                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
+                                } else {
+                                    Text(
+                                        file.name,
+                                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
+                                }
+
+                                // A link the tree has not looked behind yet, or could not: say so, since
+                                // its row cannot be opened and would otherwise look like any other file.
+                                val linkNote = when (entry.link) {
+                                    TreeChild.Link.Pending -> "→ …"
+                                    TreeChild.Link.Broken -> "→ broken link"
+                                    else -> null
+                                }
+                                if (linkNote != null) {
+                                    Text(
+                                        text = linkNote,
+                                        fontSize = 10.sp,
+                                        color = if (isDark) Color(0xFF8B8F99) else Color(0xFF6C707E),
+                                    )
+                                }
+
+                                if (isDirty) {
+                                    Spacer(Modifier.width(4.dp))
                                     Box(
                                         modifier = Modifier
-                                            .width(3.5.dp)
-                                            .height(16.dp)
-                                            .clip(RoundedCornerShape(2.dp))
-                                            .background(if (isDark) Color(0xFF6DA9FF) else Color(0xFF2F6FE0)),
+                                            .size(6.dp)
+                                            .clip(RoundedCornerShape(50))
+                                            .background(ChangeColors.MODIFIED),
                                     )
-                                    Spacer(Modifier.width(FileRowIndent - 3.5.dp))
-                                } else {
-                                    Spacer(Modifier.width(FileRowIndent))
                                 }
-                            }
 
-                            if (labelColor != null) {
-                                Text(
-                                    file.name,
-                                    color = labelColor,
-                                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                                )
-                            } else {
-                                Text(
-                                    file.name,
-                                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
-                                )
-                            }
-
-                            // A link the tree has not looked behind yet, or could not: say so, since
-                            // its row cannot be opened and would otherwise look like any other file.
-                            val linkNote = when (entry.link) {
-                                TreeChild.Link.Pending -> "→ …"
-                                TreeChild.Link.Broken -> "→ broken link"
-                                else -> null
-                            }
-                            if (linkNote != null) {
-                                Text(
-                                    text = linkNote,
-                                    fontSize = 10.sp,
-                                    color = if (isDark) Color(0xFF8B8F99) else Color(0xFF6C707E),
-                                )
-                            }
-
-                            if (isDirty) {
-                                Spacer(Modifier.width(4.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(RoundedCornerShape(50))
-                                        .background(ChangeColors.MODIFIED),
-                                )
-                            }
-
-                            if (isOpen) {
-                                Spacer(Modifier.weight(1f))
-                                Box(modifier = Modifier.size(16.dp), contentAlignment = Alignment.Center) {
-                                    if (isHovered || isActive) {
-                                        CloseButton(isDark = isDark, onClose = { onCloseFile(file) })
+                                if (isOpen) {
+                                    Spacer(Modifier.weight(1f))
+                                    Box(modifier = Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                                        if (isHovered || isActive) {
+                                            CloseButton(isDark = isDark, onClose = { onCloseFile(file) })
+                                        }
                                     }
                                 }
                             }
@@ -1042,6 +1047,11 @@ fun ProjectTreePanel(
                     }
                 }
             }
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(treeState.lazyListState.lazyListState),
+                style = NopScrollbarStyle,
+                modifier = Modifier.align(Alignment.CenterEnd).width(8.dp).fillMaxHeight(),
+            )
         }
     }
 }
