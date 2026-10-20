@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import iondrive.nop.Log
+import iondrive.nop.Settings
 import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -12,11 +13,13 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -39,6 +42,9 @@ import java.util.concurrent.atomic.AtomicReference
  * what a backup is for, cannot reach the copy. A file that has *shrunk* is the one case where
  * copying over it would lose something, so the backed-up version is kept aside under a dated name
  * before the new one takes its place, and so is a log that was rewritten rather than added to.
+ *
+ * What the folder holds is kept in a [BackupRecord] on this machine, so a file unchanged since it
+ * was copied is not looked at in the folder again until the next full check.
  *
  * Runs on a thread of its own: every [INTERVAL_MINUTES], shortly after a session's run ends, as soon
  * as a new folder is chosen, and when asked from the accounts dialog, which shows [status]. A share
@@ -106,6 +112,11 @@ object Backup {
     private val soonPending = AtomicBoolean(false)
     private val folder = AtomicReference<String?>()
 
+    /** What the folder last backed up to holds. Only the backup thread touches it. */
+    private var record: BackupRecord? = null
+
+    private val recordFile: Path get() = Settings.configRoot.resolve("nop").resolve("backup-record")
+
     /** Starts the timer. Called once, by the nop that owns the windows. */
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -135,9 +146,12 @@ object Backup {
         }, AFTER_RUN_SECONDS, TimeUnit.SECONDS)
     }
 
-    /** Runs now, off the calling thread. */
+    /**
+     * Runs now, off the calling thread, looking at every copy in the folder rather than taking the
+     * record's word for the unchanged ones: a run asked for is one the user wants to be able to trust.
+     */
     fun runNow() {
-        if (started.get()) executor.execute { runConfigured() }
+        if (started.get()) executor.execute { runConfigured(fullCheck = true) }
     }
 
     /** Runs now with the user's answer to [passwordPrompt], for the share to mount with. */
@@ -197,7 +211,7 @@ object Backup {
         return null
     }
 
-    private fun runConfigured(credentials: NetworkShare.Credentials? = null) {
+    private fun runConfigured(credentials: NetworkShare.Credentials? = null, fullCheck: Boolean = false) {
         val config = Accounts.load()
         val named = config.backupDir?.takeIf { it.isNotBlank() } ?: return
         status = status.copy(running = true)
@@ -207,7 +221,12 @@ object Backup {
             status = status.copy(password = null)
             passwordPrompt = null
             declined = null
-            run(config, dest, Accounts.dataRoot(), Accounts.configFile)
+            val target = dest.toAbsolutePath().normalize()
+            val known = record?.takeIf { it.dest == target } ?: BackupRecord.load(recordFile, target).also {
+                record = it
+                Log.info("backing up to $named through $target")
+            }
+            run(config, dest, Accounts.dataRoot(), Accounts.configFile, record = known, fullCheck = fullCheck)
         }
         result.onSuccess { copied ->
             status = Status(lastSuccessAt = System.currentTimeMillis(), copiedFiles = copied.files, copiedBytes = copied.bytes)
@@ -259,17 +278,27 @@ object Backup {
         )
     }
 
-    /** One pass over every source into [dest]. */
+    /**
+     * One pass over every source into [dest]. A source that [record] has as already copied is passed
+     * over, unless the record says it is time to look at every copy or [fullCheck] asks for that.
+     */
     internal fun run(
         config: AgentConfig,
         dest: Path,
         dataRoot: Path,
         configFile: Path,
         now: Instant = Instant.now(),
+        record: BackupRecord = BackupRecord.inMemory(dest),
+        fullCheck: Boolean = false,
     ): Copied {
         refusal(dest, config, dataRoot)?.let { throw IOException(it) }
         val target = dest.toAbsolutePath().normalize()
+        require(record.dest == target) { "a record of ${record.dest} used for $target" }
         OwnerOnly.directory(target)
+        // Most runs take the record's word for most files, so a folder that has gone has to be
+        // noticed here rather than taken for one with little to do.
+        if (!Files.isDirectory(target)) throw IOException("$target cannot be reached")
+        val full = record.begin(now, fullCheck)
         var files = 0
         var bytes = 0L
         for ((source, under) in sources(config, dataRoot, configFile)) {
@@ -281,8 +310,13 @@ object Backup {
                     if (!attrs.isRegularFile || name in CREDENTIALS || transient(name)) return FileVisitResult.CONTINUE
                     val relative = source.relativize(file).toString()
                     val into = if (relative.isEmpty()) base else base.resolve(relative)
-                    runCatching { mirror(file, into, now) }
+                    val path = if (relative.isEmpty()) under else "$under/$relative"
+                    val stamp = BackupRecord.Stamp(attrs.size(), attrs.lastModifiedTime().toMillis())
+                    val recorded = record.holds(path, stamp)
+                    if (recorded && !full) return FileVisitResult.CONTINUE
+                    runCatching { mirror(file, into, now, stamp, recorded) }
                         .onSuccess { copied ->
+                            record.note(path, stamp)
                             if (copied > 0) {
                                 files++
                                 bytes += copied
@@ -302,25 +336,29 @@ object Backup {
                 }
             })
         }
+        record.finish(now)
         return Copied(files, bytes)
     }
 
     /**
-     * Brings [into] up to date with [from], returning how many bytes that took (0 when it already
-     * was). Everything nop and the vendors log is append-only JSONL, so a grown log takes only its
-     * new bytes — after checking that its tail still matches, which is what tells growth from a
-     * rewrite that happens to be longer.
+     * Brings [into] up to date with [from], whose size and time are [stamp], returning how many bytes
+     * that took (0 when it already was). [recorded] is the record saying [into] is a copy of [from]
+     * as [stamp] has it. Everything nop and the vendors log is append-only JSONL, so a grown log takes
+     * only its new bytes — after checking that its tail still matches, which is what tells growth
+     * from a rewrite that happens to be longer.
      */
-    private fun mirror(from: Path, into: Path, now: Instant): Long {
-        val size = Files.size(from)
-        val modified = Files.getLastModifiedTime(from)
+    private fun mirror(from: Path, into: Path, now: Instant, stamp: BackupRecord.Stamp, recorded: Boolean): Long {
+        val size = stamp.size
+        val modified = FileTime.fromMillis(stamp.modified)
         val isLog = from.fileName.toString().endsWith(".jsonl")
-        if (Files.exists(into)) {
-            val had = Files.size(into)
-            // A log only grows, so the same size is the same log. Anything else is compared by time
-            // as well, loosely: a share can keep coarser timestamps than the disk it was copied from,
-            // and an exact comparison would copy every file again on every run.
-            if (had == size && (isLog || sameTime(Files.getLastModifiedTime(into).toMillis(), modified.toMillis()))) return 0
+        val there = attributes(into)
+        if (there != null) {
+            val had = there.size()
+            // A log only grows, so the same size is the same log, and the record knows which version
+            // a copy is of. Anything else is compared by time as well, loosely: a share can keep
+            // coarser timestamps than the disk it was copied from, and an exact comparison would copy
+            // every file again on every run.
+            if (had == size && (isLog || recorded || sameTime(there.lastModifiedTime().toMillis(), stamp.modified))) return 0
             if (isLog && size > had && tailMatches(from, into, had)) {
                 val added = append(from, into, had, size)
                 runCatching { Files.setLastModifiedTime(into, modified) }
@@ -337,6 +375,14 @@ object Backup {
         runCatching { Files.setLastModifiedTime(into, modified) }
         return size
     }
+
+    /** [file]'s size and times, in one look, or null when there is no such file. */
+    private fun attributes(file: Path): BasicFileAttributes? =
+        try {
+            Files.readAttributes(file, BasicFileAttributes::class.java)
+        } catch (_: NoSuchFileException) {
+            null
+        }
 
     private fun sameTime(a: Long, b: Long): Boolean = kotlin.math.abs(a - b) <= TIME_SLACK_MS
 

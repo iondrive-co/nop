@@ -15,10 +15,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.awt.ComposeDialog
+import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -35,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import iondrive.nop.agent.Activity
 import kotlinx.coroutines.delay
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.skiko.GraphicsApi
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -69,6 +73,12 @@ internal class AgentStatusColors(isDark: Boolean) {
  */
 private const val PULSE_MS = 8_000L
 
+/** One way of the pulse, from full to [PULSE_DIM] or back. */
+private const val PULSE_HALF_MS = 650
+
+/** The alpha the pulse dims to. */
+private const val PULSE_DIM = 0.35f
+
 /**
  * Whether a mark should be pulsing now: unseen, and within [PULSE_MS] of the state beginning.
  * Recomposes itself false when the time runs out.
@@ -95,6 +105,34 @@ private const val SPIN_STEP_MS = 100L
 /** The same in a window without focus, which the user is not looking at: a turn in five seconds. */
 private const val SPIN_STEP_UNFOCUSED_MS = 500L
 
+/** A focused window that Skia draws in software: a turn in ten seconds. */
+private const val SPIN_STEP_SOFTWARE_MS = 1_000L
+
+/**
+ * How long the working arc holds each position, or null for not turning at all.
+ *
+ * Drawn in software — under Xpra or Xvfb, which have no GL — every step is the whole window
+ * rasterised and sent to the X server, and then encoded again by Xpra, however small the arc. At a
+ * step every 100 ms that measured ten 3440×1378 frames a second, a third of a core in nop and two
+ * thirds more in Xvfb and Xpra. So there the arc steps once a second while the window has focus,
+ * and stands still without it; its shape already says the agent is working.
+ */
+internal fun spinStepMs(focused: Boolean, software: Boolean): Long? = when {
+    !software -> if (focused) SPIN_STEP_MS else SPIN_STEP_UNFOCUSED_MS
+    focused -> SPIN_STEP_SOFTWARE_MS
+    else -> null
+}
+
+/** Whether Skia draws [window] in software, where every frame costs the whole window. */
+private fun softwareRendered(window: java.awt.Window?): Boolean {
+    val api = when (window) {
+        is ComposeWindow -> window.renderApi
+        is ComposeDialog -> window.renderApi
+        else -> return false
+    }
+    return api == GraphicsApi.SOFTWARE_FAST || api == GraphicsApi.SOFTWARE_COMPAT
+}
+
 /**
  * The angle of the working arc, stepped rather than animated.
  *
@@ -105,9 +143,10 @@ private const val SPIN_STEP_UNFOCUSED_MS = 500L
  */
 @Composable
 private fun rememberSpinTurn(): Float {
-    val period = if (LocalWindowInfo.current.isWindowFocused) SPIN_STEP_MS else SPIN_STEP_UNFOCUSED_MS
+    val period = spinStepMs(LocalWindowInfo.current.isWindowFocused, softwareRendered(LocalWindow.current))
     var step by remember { mutableIntStateOf(0) }
     LaunchedEffect(period) {
+        if (period == null) return@LaunchedEffect
         while (true) {
             val now = System.currentTimeMillis()
             step = ((now / period) % SPIN_STEPS).toInt()
@@ -136,15 +175,25 @@ internal fun AgentStatusMark(
 ) {
     val colors = remember(isDark) { AgentStatusColors(isDark) }
     val pulsing = rememberPulsing(unseen && activity != Activity.Ended, since)
-    val pulse = if (pulsing) {
-        val transition = rememberInfiniteTransition(label = "agent-pulse")
-        transition.animateFloat(
-            initialValue = 1f,
-            targetValue = 0.35f,
-            animationSpec = infiniteRepeatable(tween(650, easing = LinearEasing), RepeatMode.Reverse),
-            label = "agent-pulse-alpha",
-        )
-    } else null
+    val pulse = when {
+        !pulsing -> null
+        // A fade is a frame per vsync for the whole [PULSE_MS]; in software each is the whole window.
+        softwareRendered(LocalWindow.current) -> produceState(1f) {
+            while (true) {
+                delay(PULSE_HALF_MS.toLong())
+                value = if (value == 1f) PULSE_DIM else 1f
+            }
+        }
+        else -> {
+            val transition = rememberInfiniteTransition(label = "agent-pulse")
+            transition.animateFloat(
+                initialValue = 1f,
+                targetValue = PULSE_DIM,
+                animationSpec = infiniteRepeatable(tween(PULSE_HALF_MS, easing = LinearEasing), RepeatMode.Reverse),
+                label = "agent-pulse-alpha",
+            )
+        }
+    }
 
     Box(
         modifier = Modifier

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.net.InetAddress
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -57,6 +58,32 @@ class NetworkShareTest {
         assertTrue(NetworkShare.sameHost("ANHUR", "anhur.local"))
         assertFalse(NetworkShare.sameHost("192.168.1.98", "192.168.1.99"))
         assertTrue(NetworkShare.sameHost("192.168.1.98", "192.168.1.98"))
+    }
+
+    @Test
+    fun `a name and an address are one host when the name resolves to it`() {
+        val resolves = { name: String ->
+            if (name == "files") listOf(InetAddress.getByName("192.0.2.7"), InetAddress.getByName("2001:db8::7")) else emptyList()
+        }
+        assertTrue(NetworkShare.sameHost("192.0.2.7", "files", resolves))
+        assertTrue(NetworkShare.sameHost("files", "[2001:db8:0:0:0:0:0:7]", resolves))
+        assertFalse(NetworkShare.sameHost("192.0.2.8", "files", resolves))
+        assertFalse(NetworkShare.sameHost("192.0.2.7", "printer", resolves))
+    }
+
+    @Test
+    fun `uses a mount that names the server by address`() {
+        val files = NetworkShare.Location("files", "team", "backups")
+        val resolves = { name: String -> if (name == "files") listOf(InetAddress.getByName("192.0.2.7")) else emptyList() }
+        val automount = listOf("systemd-1 /mnt/team autofs rw,direct 0 0")
+        val mounted = automount + "//192.0.2.7/team /mnt/team cifs rw,vers=3.1.1 0 0"
+        val fstab = listOf("//192.0.2.7/team /mnt/team cifs credentials=x,x-systemd.automount 0 0")
+
+        assertEquals(Path.of("/mnt/team"), NetworkShare.fromMounts(files, mounted, emptyList(), resolves))
+        assertEquals(Path.of("/mnt/team"), NetworkShare.fromMounts(files, automount, fstab, resolves))
+        assertNull(NetworkShare.fromMounts(files.copy(host = "printer"), mounted, fstab, resolves))
+        // Another share is told apart before any name is looked up.
+        assertNull(NetworkShare.fromMounts(files.copy(share = "media"), mounted, fstab) { error("looked up $it") })
     }
 
     @Test

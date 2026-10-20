@@ -12,6 +12,8 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
 
@@ -37,8 +39,14 @@ class BackupTest {
         fun codexRollout(id: String): Path =
             codex.homePath.resolve(".codex/sessions/2026/09/30/rollout-2026-09-30T10-00-00-$id.jsonl")
 
-        fun run(now: Instant = Instant.now()) = Backup.run(config, dest, data, configFile, now)
+        fun run(
+            now: Instant = Instant.now(),
+            record: BackupRecord = BackupRecord.inMemory(dest),
+            fullCheck: Boolean = false,
+        ) = Backup.run(config, dest, data, configFile, now, record, fullCheck)
     }
+
+    private fun stampOf(file: Path) = BackupRecord.Stamp(Files.size(file), Files.getLastModifiedTime(file).toMillis())
 
     private fun write(file: Path, text: String): Path {
         Files.createDirectories(file.parent)
@@ -158,6 +166,104 @@ class BackupTest {
         val aside = Files.list(sessions).use { files -> files.map { it.fileName.toString() }.toList() }
             .single { it.startsWith("tab-1.before-") }
         assertEquals("{\"type\":\"session_started\"}\n", Files.readString(sessions.resolve(aside)))
+    }
+
+    @Test
+    fun `a file the record has as copied is not looked at in the folder until the next full check`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val record = BackupRecord.inMemory(w.dest)
+        val start = Instant.parse("2026-09-30T10:00:00Z")
+        w.run(start, record)
+        val copy = w.dest.resolve("nop/memory/memory.md")
+        Files.delete(copy)
+
+        // Taken on the record's word: nothing in the folder was looked at, so the loss is not seen yet.
+        assertEquals(Backup.Copied(0, 0), w.run(start.plusSeconds(600), record))
+        assertFalse(Files.exists(copy))
+
+        assertEquals(1, w.run(start.plus(BackupRecord.FULL_CHECK), record).files)
+        assertEquals("# memory\n", Files.readString(copy))
+    }
+
+    @Test
+    fun `a run asked for looks at every copy`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val record = BackupRecord.inMemory(w.dest)
+        w.run(record = record)
+        Files.delete(w.dest.resolve("agent.json"))
+
+        assertEquals(1, w.run(record = record, fullCheck = true).files)
+        assertTrue(Files.isRegularFile(w.dest.resolve("agent.json")))
+    }
+
+    @Test
+    fun `a file changed since the version the record has is copied, even at the same size`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val record = BackupRecord.inMemory(w.dest)
+        w.run(record = record)
+        val memory = w.data.resolve("memory/memory.md")
+        Files.writeString(memory, "# MEMORY\n")
+        Files.setLastModifiedTime(memory, FileTime.from(Files.getLastModifiedTime(memory).toInstant().plusSeconds(60)))
+
+        assertEquals(1, w.run(record = record).files)
+        assertEquals("# MEMORY\n", Files.readString(w.dest.resolve("nop/memory/memory.md")))
+    }
+
+    /** A share that will not take a copy's time leaves each copy dated when it was made. */
+    @Test
+    fun `a copy whose time the folder did not keep is not copied again`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val record = BackupRecord.inMemory(w.dest)
+        w.run(record = record)
+        Files.setLastModifiedTime(w.dest.resolve("nop/memory/memory.md"), FileTime.from(Instant.now().plusSeconds(3600)))
+
+        assertEquals(Backup.Copied(0, 0), w.run(record = record, fullCheck = true))
+        // Without the record, the time is all there is to go on.
+        assertEquals(1, w.run().files)
+    }
+
+    @Test
+    fun `the record outlives a restart, and is only of the folder it describes`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val file = tmp.resolve("state/backup-record")
+        w.run(record = BackupRecord.load(file, w.dest))
+        val log = w.data.resolve("sessions/tab-1.jsonl")
+        Files.writeString(log, "{\"type\":\"run_ended\"}\n", StandardOpenOption.APPEND)
+        Files.delete(w.dest.resolve("nop/memory/memory.md"))
+
+        // Read back, it still says when every copy was last looked at, so this run trusts it.
+        assertEquals(1, w.run(record = BackupRecord.load(file, w.dest)).files)
+        assertFalse(Files.exists(w.dest.resolve("nop/memory/memory.md")))
+
+        val reloaded = BackupRecord.load(file, w.dest)
+        assertTrue(reloaded.holds("nop/sessions/tab-1.jsonl", stampOf(log)))
+        assertTrue(reloaded.holds("agent.json", stampOf(w.configFile)))
+        assertFalse(BackupRecord.load(file, tmp.resolve("elsewhere")).holds("agent.json", stampOf(w.configFile)))
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(file)))
+    }
+
+    @Test
+    fun `a full check forgets the files whose sources have gone`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val record = BackupRecord.inMemory(w.dest)
+        w.run(record = record)
+        val memory = w.data.resolve("memory/memory.md")
+        val stamp = stampOf(memory)
+        Files.delete(memory)
+
+        w.run(record = record, fullCheck = true)
+
+        assertFalse(record.holds("nop/memory/memory.md", stamp))
+        assertTrue(Files.isRegularFile(w.dest.resolve("nop/memory/memory.md")))
+    }
+
+    @Test
+    fun `a folder that cannot be reached fails the run rather than looking like nothing changed`(@TempDir tmp: Path) {
+        val w = populated(tmp)
+        val blocked = write(tmp.resolve("blocked"), "not a folder")
+        assertThrows(IOException::class.java) {
+            Backup.run(w.config, blocked.resolve("backup"), w.data, w.configFile)
+        }
     }
 
     @Test

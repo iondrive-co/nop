@@ -2,6 +2,7 @@ package iondrive.nop.agent
 
 import iondrive.nop.Log
 import java.io.IOException
+import java.net.InetAddress
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -93,41 +94,59 @@ internal object NetworkShare {
     /**
      * Where a kernel mount of [location]'s share is, from the lines of `/proc/mounts` and
      * `/etc/fstab`. An fstab entry counts only when its mount point is an automount already set up.
+     * [addresses] resolves a host name, for a mount that names the server by its address.
      */
-    internal fun fromMounts(location: Location, mounts: List<String>, fstab: List<String>): Path? {
+    internal fun fromMounts(
+        location: Location,
+        mounts: List<String>,
+        fstab: List<String>,
+        addresses: (String) -> List<InetAddress> = ::addressesOf,
+    ): Path? {
         val mounted = mounts.mapNotNull(::entry)
-        mounted.firstOrNull { it.type in SMB_TYPES && matches(location, it.source) }?.let { return Path.of(it.point) }
+        mounted.firstOrNull { it.type in SMB_TYPES && matches(location, it.source, addresses) }?.let { return Path.of(it.point) }
         val automounts = mounted.filter { it.type == "autofs" }.map { it.point }.toSet()
         return fstab.mapNotNull(::entry)
-            .firstOrNull { it.type in SMB_TYPES && it.point in automounts && matches(location, it.source) }
+            .firstOrNull { it.type in SMB_TYPES && it.point in automounts && matches(location, it.source, addresses) }
             ?.let { Path.of(it.point) }
     }
 
     /** The GVFS mount of [location]'s share under [gvfs], named `smb-share:server=host,share=name[,user=…]`. */
-    internal fun fromGvfs(location: Location, gvfs: Path): Path? {
+    internal fun fromGvfs(location: Location, gvfs: Path, addresses: (String) -> List<InetAddress> = ::addressesOf): Path? {
         val names = runCatching { gvfs.toFile().list()?.toList() }.getOrNull() ?: return null
         return names.firstOrNull { name ->
             if (!name.startsWith("smb-share:")) return@firstOrNull false
             val keys = name.removePrefix("smb-share:").split(',').associate { it.substringBefore('=') to it.substringAfter('=', "") }
             val server = keys["server"] ?: return@firstOrNull false
-            sameHost(server, location.host) &&
-                keys["share"].equals(location.share, ignoreCase = true) &&
-                (location.user == null || keys["user"] == null || keys["user"].equals(location.user.substringAfter(';'), ignoreCase = true))
+            keys["share"].equals(location.share, ignoreCase = true) &&
+                (location.user == null || keys["user"] == null || keys["user"].equals(location.user.substringAfter(';'), ignoreCase = true)) &&
+                sameHost(server, location.host, addresses)
         }?.let { gvfs.resolve(it) }
     }
 
     /** True when the mount source `//host/share` is [location]'s share. */
-    private fun matches(location: Location, source: String): Boolean {
+    private fun matches(location: Location, source: String, addresses: (String) -> List<InetAddress>): Boolean {
         val parts = source.replace('\\', '/').trimStart('/').split('/').filter { it.isNotEmpty() }
-        return parts.size >= 2 && sameHost(parts[0], location.host) && parts[1].equals(location.share, ignoreCase = true)
+        // The share first, since telling whether a name is an address's can take a lookup.
+        return parts.size >= 2 && parts[1].equals(location.share, ignoreCase = true) && sameHost(parts[0], location.host, addresses)
     }
 
-    /** `anhur` and `anhur.local` are one machine: a name is compared by its first label, an address whole. */
-    internal fun sameHost(a: String, b: String): Boolean {
+    /**
+     * `nas` and `nas.local` are one machine: a name is compared by its first label, an address whole,
+     * and a name and an address are one machine when [addresses] resolves the name to that address.
+     * An fstab entry often names its server by address, so that mounting never waits on a lookup.
+     */
+    internal fun sameHost(a: String, b: String, addresses: (String) -> List<InetAddress> = ::addressesOf): Boolean {
         if (a.equals(b, ignoreCase = true)) return true
-        if (isAddress(a) || isAddress(b)) return false
-        return a.substringBefore('.').equals(b.substringBefore('.'), ignoreCase = true)
+        val aIsAddress = isAddress(a)
+        if (aIsAddress == isAddress(b)) return !aIsAddress && a.substringBefore('.').equals(b.substringBefore('.'), ignoreCase = true)
+        val (address, name) = if (aIsAddress) a to b else b to a
+        val literal = runCatching { InetAddress.getByName(address.removePrefix("[").removeSuffix("]")) }.getOrNull() ?: return false
+        return literal in addresses(name)
     }
+
+    /** What [name] resolves to here, or nothing when it does not resolve. */
+    private fun addressesOf(name: String): List<InetAddress> =
+        runCatching { InetAddress.getAllByName(name).toList() }.getOrDefault(emptyList())
 
     private fun isAddress(host: String): Boolean = host.all { it.isDigit() || it == '.' } || ':' in host || host.startsWith('[')
 
