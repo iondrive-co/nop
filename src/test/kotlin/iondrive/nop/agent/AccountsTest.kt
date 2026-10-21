@@ -112,7 +112,7 @@ class AccountsTest {
     }
 
     /**
-     * The settings dialog clears a nomination when its target is removed, so this is the belt behind
+     * Removing an account clears every nomination of it, so this is the belt behind
      * that brace: an `agent.json` edited by hand must not be able to arm a handover that cannot
      * happen. Null here puts the choice back in front of the user, where it started.
      */
@@ -147,6 +147,33 @@ class AccountsTest {
         val codex = Account("codex", Provider.OpenAI, "/h2")
 
         assertEquals(codex, listOf(currentClaude, codex).handoverTarget(running))
+    }
+
+    @Test
+    fun `removing an account drops only that account`() {
+        val claude = Account("claude-alpha", Provider.Anthropic, "/h1", model = "opus")
+        val codex = Account("codex-alpha", Provider.OpenAI, "/h2")
+        val config = AgentConfig(accounts = listOf(claude, codex), backupDir = "/backup")
+
+        assertEquals(AgentConfig(accounts = listOf(codex), backupDir = "/backup"), config.withoutAccount("claude-alpha"))
+    }
+
+    @Test
+    fun `removing an account clears every nomination of it`() {
+        val claude = Account("claude-alpha", Provider.Anthropic, "/h1", handoverTo = "codex-alpha", handoverModel = "gpt-6")
+        val bravo = Account("claude-bravo", Provider.Anthropic, "/h2", handoverTo = "claude-alpha")
+        val codex = Account("codex-alpha", Provider.OpenAI, "/h3")
+
+        val left = AgentConfig(accounts = listOf(claude, bravo, codex)).withoutAccount("codex-alpha").accounts
+
+        assertEquals(listOf(claude.copy(handoverTo = null, handoverModel = null), bravo), left)
+    }
+
+    @Test
+    fun `removing an account nop does not have changes nothing`() {
+        val config = AgentConfig(accounts = listOf(Account("claude-alpha", Provider.Anthropic, "/h1")))
+
+        assertEquals(config, config.withoutAccount("claude-bravo"))
     }
 
     @Test

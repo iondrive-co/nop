@@ -176,6 +176,8 @@ fun HandoverProviderCard(
     usage: String = usageDescription(reading),
     /** Lines about the account between its name and its model. */
     details: @Composable () -> Unit = {},
+    /** Drawn at the end of the name's row, after the usage. */
+    headerAction: (@Composable () -> Unit)? = null,
 ) {
     val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
     val cardBackground = if (JewelTheme.isDark) Color(0xFF26282B) else Color(0xFFF7F8FA)
@@ -224,6 +226,7 @@ fun HandoverProviderCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            headerAction?.invoke()
         }
 
         if (!isCliInstalled) {

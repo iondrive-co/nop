@@ -117,7 +117,21 @@ data class AgentConfig(
     val accounts: List<Account> = emptyList(),
     /** The folder agent sessions are backed up to, or null when nothing is. See [Backup]. */
     val backupDir: String? = null,
-)
+) {
+    /**
+     * This config without the account called [name], and without anybody's nomination of it. A
+     * nomination left pointing at a removed account is a handover that silently does not happen at
+     * the one moment it was wanted, which is worse than never having set it.
+     *
+     * Only the entry goes: the account's home, with its sign-in and every conversation it has had,
+     * stays on disk.
+     */
+    fun withoutAccount(name: String): AgentConfig = copy(
+        accounts = accounts
+            .filterNot { it.name == name }
+            .map { if (it.handoverTo == name) it.copy(handoverTo = null, handoverModel = null) else it },
+    )
+}
 
 /**
  * Reads and writes `$XDG_CONFIG_HOME/nop/agent.json`.

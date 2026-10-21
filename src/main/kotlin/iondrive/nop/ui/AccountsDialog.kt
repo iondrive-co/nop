@@ -149,21 +149,7 @@ fun AccountsDialog(
                                 onFailure = { account.name to "Could not move it: ${it.message}" },
                             )
                         },
-                        onRemove = {
-                            update(
-                                draft.copy(
-                                    accounts = draft.accounts
-                                        .filterNot { it.name == account.name }
-                                        // And anybody who was handing their work to it. A nomination
-                                        // left pointing at a removed account is a handover that
-                                        // silently does not happen at the one moment it was wanted,
-                                        // which is worse than never having set it.
-                                        .map {
-                                            if (it.handoverTo == account.name) it.copy(handoverTo = null, handoverModel = null) else it
-                                        },
-                                ),
-                            )
-                        },
+                        onRemove = { update(draft.withoutAccount(account.name)) },
                     )
                     Divider(orientation = Orientation.Horizontal)
                 }

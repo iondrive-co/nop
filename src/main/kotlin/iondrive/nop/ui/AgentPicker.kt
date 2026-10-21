@@ -61,6 +61,8 @@ fun AgentPicker(
     modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
     /** Saves a model picked here as the account's own, as the handover cards do. */
     onUpdateAccount: ((Account) -> Unit)? = null,
+    /** Takes the account out of nop's list, as Settings' Remove does. */
+    onRemoveAccount: ((Account) -> Unit)? = null,
     /** Starts a session on the account, carrying the model picked for it. */
     onLaunch: (Account) -> Unit,
     onReopen: (PastSession) -> Unit,
@@ -112,6 +114,7 @@ fun AgentPicker(
                         },
                         onPicked = { openDropdown = null },
                         onUpdateAccount = onUpdateAccount,
+                        onRemove = onRemoveAccount?.let { remove -> { remove(account) } },
                         onLaunch = onLaunch,
                     )
                 }
@@ -209,10 +212,14 @@ private fun AccountCard(
     onToggleDropdown: () -> Unit,
     onPicked: () -> Unit,
     onUpdateAccount: ((Account) -> Unit)?,
+    onRemove: (() -> Unit)?,
     onLaunch: (Account) -> Unit,
 ) {
     // Follows the account's model when the settings change it, and a pick here saves to it.
     var selected by remember(account.model) { mutableStateOf(account.model ?: DEFAULT_CHOICE) }
+    // Asked once before it happens: this card is clicked to start work, and a Remove taken by a
+    // stray click loses the account's model and handover settings with it.
+    var confirmingRemove by remember { mutableStateOf(false) }
 
     HandoverProviderCard(
         account = account,
@@ -257,6 +264,19 @@ private fun AccountCard(
                     color = ChangeColors.REMOVED,
                 )
             }
+            if (confirmingRemove && onRemove != null) {
+                Text(
+                    "Remove ${account.name} from nop? Its folder, sign-in and conversations stay on disk.",
+                    color = ChangeColors.REMOVED,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Link("Remove", onClick = onRemove)
+                    Link("Keep it", onClick = { confirmingRemove = false })
+                }
+            }
+        },
+        headerAction = onRemove?.takeIf { !confirmingRemove }?.let {
+            { Link("Remove", onClick = { confirmingRemove = true }) }
         },
     )
 }

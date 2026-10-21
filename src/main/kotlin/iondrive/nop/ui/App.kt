@@ -1899,6 +1899,13 @@ fun App(
                                                 scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
                                             }
                                         },
+                                        onRemoveAccount = { removed ->
+                                            agentConfig?.let { current ->
+                                                val next = current.withoutAccount(removed.name)
+                                                agentConfig = next
+                                                scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
+                                            }
+                                        },
                                         onLaunch = { account ->
                                             // HEAD now is what the Diff tab's "session" base means
                                             // for this tab from here on — see AgentSession.
