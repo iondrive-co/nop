@@ -226,7 +226,7 @@ object AgentMessages {
             fromId = caller.shortId,
             fromProject = caller.projectDir,
             body = text,
-            typed = envelope(caller, text, unasked),
+            typed = envelope(caller, text),
             at = System.currentTimeMillis(),
             sender = senderOf(caller),
         )
@@ -252,7 +252,7 @@ object AgentMessages {
             fromId = "service \"${clean(caller.name)}\"",
             fromProject = caller.projectDir,
             body = text,
-            typed = serviceEnvelope(caller, text, unasked),
+            typed = serviceEnvelope(caller, text),
             at = System.currentTimeMillis(),
             sender = senderOf(caller),
         )
@@ -480,21 +480,18 @@ object AgentMessages {
      * header is the whole of what tells an agent this did not come from the user — though the user
      * did choose to let it through, one message at a time or for the whole project.
      */
-    internal fun envelope(from: AgentSession, text: String, unasked: Boolean = false): String = clean(
-        "${ENVELOPE_START}agent \"${from.title}\" (id ${from.shortId}, ${from.account.provider.id}/${from.account.name}, " +
-            "in ${from.projectDir.name}). It is not from the user, " +
-            (if (unasked) "who lets this project's tabs message each other without reading each message first. " else "who read it and chose to deliver it. ") +
-            "To reply, run: nop-msg send ${from.shortId} \"<your reply>\"]",
+    internal fun envelope(from: AgentSession, text: String): String = clean(
+        "${ENVELOPE_START}agent \"${from.title}\" (${from.shortId}, ${from.account.provider.id}/${from.account.name}, " +
+            "in ${from.projectDir.name}), not the user. Reply: nop-msg send ${from.shortId} \"...\"]",
     ) + "\n\n" + clean(text)
 
     /**
-     * As [envelope], from a service: its name and project, and no tab to reply to — a service reads
-     * no prompt, so there is nobody at the other end of a `nop-msg send`.
+     * As [envelope], from a service: its name, and no tab to reply to — a service reads no prompt, so
+     * there is nobody at the other end of a `nop-msg send`. It only reaches its own project's tabs, so
+     * the project goes unsaid.
      */
-    internal fun serviceEnvelope(from: AgentServices.Registration, text: String, unasked: Boolean): String = clean(
-        "${ENVELOPE_START}service \"${from.name}\" (in ${from.projectDir.name}), a program registered with nop for " +
-            "this project rather than an agent tab; it reads no reply. It is not from the user, " +
-            (if (unasked) "who lets this project's messages in without reading each one first.]" else "who read it and chose to deliver it.]"),
+    internal fun serviceEnvelope(from: AgentServices.Registration, text: String): String = clean(
+        "${ENVELOPE_START}service \"${from.name}\", not the user; no reply.]",
     ) + "\n\n" + clean(text)
 
     /**

@@ -89,7 +89,7 @@ class AgentMessagesTest {
         val text = AgentMessages.envelope(from, "Stop running nop --help.")
         assertTrue("\"Pipeline review\"" in text)
         assertTrue("nop-msg send ${from.shortId}" in text, "the reply address is the sender's id")
-        assertTrue("not from the user" in text)
+        assertTrue("not the user" in text)
         assertTrue(text.endsWith("\n\nStop running nop --help."))
     }
 
@@ -144,7 +144,7 @@ class AgentMessagesTest {
         assertFalse(held.approved)
         assertEquals("read the queue", held.body)
         assertTrue(held.typed.startsWith("[Message via nop from service \"Task scheduler\""))
-        assertTrue("It is not from the user" in held.typed, held.typed)
+        assertTrue("not the user" in held.typed, held.typed)
         assertFalse("nop-msg send" in held.typed)
         assertTrue(held.from.startsWith("service \"Task scheduler\""), held.from)
         assertFalse(recipient.shortId in held.from)
@@ -181,7 +181,6 @@ class AgentMessagesTest {
         assertTrue(after.text.startsWith("Delivered"), after.text)
         val held = to.inbox.last()
         assertTrue(held.approved)
-        assertTrue("without reading each message first" in held.typed)
 
         // Another project's tab is held all the same.
         val foreign = onEdt { AgentMessages.send(stranger, to.shortId, "from outside") }
