@@ -275,6 +275,8 @@ fun App(
     var fileNameCollapsed by remember { mutableStateOf(Settings.loadFileNameCollapsed()) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
+    // Explicit refreshes bypass the tree's background pacing; git polls keep that pacing intact.
+    var treeRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
     val tabsState = remember(projectPath) { TabsState() }
     // The working-file line currently at the top of the open diff's viewport, so F4 ("jump to
@@ -405,6 +407,7 @@ fun App(
             // A status reload usually means files appeared / disappeared too (commit, stash, pop)
             // — re-walk the project tree so the sidebar matches the filesystem.
             fsRefreshKey += 1
+            treeRefreshKey += 1
         }
     }
 
@@ -1155,6 +1158,7 @@ fun App(
             // Drop the removed rows from the tree even in a non-git project (reloadStatus is a no-op
             // without a repo), then reload git status for the survivors' colours.
             fsRefreshKey += 1
+            treeRefreshKey += 1
             reloadStatus()
         }
     }
@@ -1337,6 +1341,7 @@ fun App(
     // bumped directly (not only via reloadStatus) so the tree still refreshes in a non-git dir.
     fun afterTreeMutation() {
         fsRefreshKey += 1
+        treeRefreshKey += 1
         refresh()
     }
 
@@ -1641,7 +1646,7 @@ fun App(
                     ProjectTreePanel(
                         projectPath = rootPath,
                         status = status,
-                        refreshKey = fsRefreshKey,
+                        refreshKey = treeRefreshKey,
                         openFiles = openFiles,
                         activeFile = revealFile,
                         dirtyFiles = dirtyFiles,

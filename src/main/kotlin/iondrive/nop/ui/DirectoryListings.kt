@@ -116,6 +116,7 @@ internal class DirectoryListings(
     private val onUi: (() -> Unit) -> Unit = { SwingUtilities.invokeLater(it) },
     private val loadingAfterMs: Long = 300,
     private val notRespondingAfterMs: Long = 2_000,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     sealed interface Listing {
         /** Asked for and not back yet, for long enough to say so. */
@@ -135,6 +136,50 @@ internal class DirectoryListings(
     private val inFlight = ConcurrentHashMap.newKeySet<String>()
     private val askedAgain = ConcurrentHashMap.newKeySet<String>()
     private val resolving = ConcurrentHashMap.newKeySet<String>()
+    private val nextPollAt = mutableMapOf<String, Long>()
+
+    /** One displayed tree. Cached listings may be shared, but each view owns its polling lifetime. */
+    inner class View : AutoCloseable {
+        @Volatile private var visible = emptySet<String>()
+        @Volatile private var closed = false
+
+        fun show(directories: Set<String>) {
+            if (closed) return
+            for (key in directories - visible) nextPollAt.remove(key)
+            visible = directories
+        }
+
+        /** Read cached state only: disk work starts from [poll], after visibility is established. */
+        fun childrenOf(dir: File): Listing? = listings[dir.absolutePath]
+
+        suspend fun awaitListed(dir: File) {
+            // Revealing an open file may need ancestors beyond the current viewport. This is a
+            // one-off navigation read, owned by the view just like its background reads.
+            if (closed) return
+            if (dir.absolutePath !in inFlight &&
+                listings[dir.absolutePath] !is Listing.Ready && listings[dir.absolutePath] !is Listing.Failed
+            ) {
+                request(dir, wanted = { !closed })
+            }
+            snapshotFlow { listings[dir.absolutePath] }.first { it is Listing.Ready || it is Listing.Failed }
+        }
+
+        fun poll(force: Boolean = false) {
+            if (closed) return
+            val now = nowMs()
+            for (key in visible) {
+                if (!force && (key in inFlight || now < (nextPollAt[key] ?: Long.MIN_VALUE))) continue
+                request(File(key), wanted = { key in visible })
+            }
+        }
+
+        override fun close() {
+            closed = true
+            visible = emptySet()
+        }
+    }
+
+    fun view(): View = View()
 
     /**
      * What is known of [dir], asking for it if nothing is. Null means it has been asked for and is
@@ -162,17 +207,18 @@ internal class DirectoryListings(
      * rest. What is on screen stays there until the new listing replaces it. UI thread only.
      */
     fun refresh(keep: Set<String>) {
-        listings.keys.filter { it !in keep }.forEach { listings.remove(it) }
+        val removed = listings.keys.filter { it !in keep }
+        removed.forEach { listings.remove(it) }
         keep.forEach { key ->
             when (listings[key]) {
                 is Listing.Ready, is Listing.Failed -> request(File(key))
                 else -> Unit
             }
         }
-        version += 1
+        if (removed.isNotEmpty()) version += 1
     }
 
-    private fun request(dir: File) {
+    private fun request(dir: File, wanted: () -> Boolean = { true }) {
         val key = dir.absolutePath
         if (!inFlight.add(key)) {
             askedAgain.add(key)
@@ -184,6 +230,11 @@ internal class DirectoryListings(
         }
         val previous = (listings[key] as? Listing.Ready)?.children
         workers.execute {
+            if (!wanted()) {
+                onUi { inFlight.remove(key) }
+                return@execute
+            }
+            val started = nowMs()
             val result = try {
                 Listing.Ready(read(dir, previous))
             } catch (e: IOException) {
@@ -193,23 +244,32 @@ internal class DirectoryListings(
             } catch (e: SecurityException) {
                 Listing.Failed(e.message ?: "not allowed")
             }
+            val costMs = (nowMs() - started).coerceAtLeast(0)
             onUi {
                 inFlight.remove(key)
+                // At least three seconds, three milliseconds per entry, and a hundred times the
+                // read's duration. Large local directories and slow shares each get their own pace.
+                val entries = (result as? Listing.Ready)?.children?.size ?: 0
+                nextPollAt[key] = nowMs() + maxOf(3_000L, entries.toLong() * 3, costMs * 100)
                 publish(key, result)
-                if (result is Listing.Ready) {
+                if (wanted() && result is Listing.Ready) {
                     result.children
                         .filter { it.link == TreeChild.Link.Pending || it.link == TreeChild.Link.Broken }
-                        .forEach { lookBehind(key, it.file) }
+                        .forEach { lookBehind(key, it.file, wanted) }
                 }
-                if (askedAgain.remove(key)) request(dir)
+                if (askedAgain.remove(key) && wanted()) request(dir, wanted)
             }
         }
     }
 
-    private fun lookBehind(dirKey: String, link: File) {
+    private fun lookBehind(dirKey: String, link: File, wanted: () -> Boolean = { true }) {
         val linkKey = link.absolutePath
         if (!resolving.add(linkKey)) return
         workers.execute {
+            if (!wanted()) {
+                onUi { resolving.remove(linkKey) }
+                return@execute
+            }
             val isDirectory = resolve(link)
             onUi {
                 resolving.remove(linkKey)
@@ -239,6 +299,7 @@ internal class DirectoryListings(
     }
 
     private fun publish(key: String, listing: Listing) {
+        if (listings[key] == listing) return
         listings[key] = listing
         version += 1
     }

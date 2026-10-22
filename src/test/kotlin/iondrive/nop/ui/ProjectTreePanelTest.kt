@@ -11,6 +11,15 @@ import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 
 class ProjectTreePanelTest {
+    @Test fun `collapsed ancestors exclude their expanded descendants from polling`(@TempDir tmp: Path) {
+        val root = tmp.toFile().absolutePath
+        val child = tmp.resolve("open").toFile().absolutePath
+        val nested = tmp.resolve("open/nested").toFile().absolutePath
+        val open = setOf(root, tmp.resolve("closed/nested").toFile().absolutePath, child, nested, tmp.resolveSibling("other").toString())
+        assertEquals(setOf(root, child, nested), expandedDirectoriesOnScreen(root, open))
+        assertEquals(emptySet(), expandedDirectoriesOnScreen(root, open - root))
+    }
+
     private fun List<File>.asChildren() = map { TreeChild(it, it.isDirectory) }
 
     // The panel reads listings a worker made; here the disk is read on the spot.

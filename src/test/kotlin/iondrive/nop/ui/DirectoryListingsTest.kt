@@ -11,9 +11,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -151,5 +153,136 @@ class DirectoryListingsTest {
         onUi { listings.refresh(setOf(kept.absolutePath)) }
         assertNull(onUi { listings.peek(closed) })
         assertIs<List<TreeChild>>(onUi { listings.peek(kept) })
+    }
+
+    @Test fun `refreshing unchanged contents does not invalidate the tree`(@TempDir tmp: Path) {
+        tmp.resolve("notes.txt").createFile()
+        val dir = tmp.toFile()
+        val reads = AtomicInteger()
+        val refreshed = CountDownLatch(1)
+        val listings = DirectoryListings(
+            read = { d, previous -> listEntries(d, previous).also { reads.incrementAndGet() } },
+            onUi = { publish -> ui.execute {
+                publish()
+                if (reads.get() >= 2) refreshed.countDown()
+            } },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+        )
+        onUi { listings.childrenOf(dir) }
+        eventually("listed the directory") { listings.child(dir, "notes.txt") != null }
+        val version = onUi { listings.version }
+
+        onUi { listings.refresh(setOf(dir.absolutePath)) }
+        assertTrue(refreshed.await(5, TimeUnit.SECONDS), "the refreshed listing was not published")
+        assertEquals(version, onUi { listings.version })
+
+        onUi { listings.refresh(emptySet()) }
+        assertTrue(onUi { listings.version } > version)
+        assertNull(onUi { listings.peek(dir) })
+    }
+
+    @Test fun `large directories back off without delaying small ones`(@TempDir tmp: Path) {
+        val now = AtomicLong()
+        val completed = AtomicInteger()
+        val large = tmp.resolve("large").toFile()
+        val small = tmp.resolve("small").toFile()
+        val largeReads = AtomicInteger()
+        val smallReads = AtomicInteger()
+        val listings = DirectoryListings(
+            read = { dir, _ ->
+                if (dir == large) {
+                    largeReads.incrementAndGet()
+                    List(5_000) { TreeChild(File(dir, "item-$it.txt"), isDirectory = false) }
+                } else {
+                    smallReads.incrementAndGet()
+                    emptyList()
+                }
+            },
+            onUi = { publish -> ui.execute { publish(); completed.incrementAndGet() } },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+            nowMs = now::get,
+        )
+        val view = listings.view()
+        onUi { view.show(setOf(large.absolutePath, small.absolutePath)); view.poll() }
+        eventually("published both initial reads") { completed.get() == 2 }
+
+        now.set(3_000)
+        onUi { view.poll() }
+        eventually("refreshed the small directory") { completed.get() == 3 }
+        assertEquals(1, largeReads.get())
+        assertEquals(2, smallReads.get())
+
+        now.set(15_000)
+        onUi { view.poll() }
+        eventually("refreshed both after the larger interval") { completed.get() == 5 }
+        assertEquals(2, largeReads.get())
+        assertEquals(3, smallReads.get())
+        onUi { view.poll(force = true) }
+        eventually("honoured an explicit refresh before the next poll was due") { completed.get() == 7 }
+        assertEquals(3, largeReads.get())
+        assertEquals(4, smallReads.get())
+        onUi { view.close() }
+    }
+
+    @Test fun `a slow directory backs off even when it has few entries`(@TempDir tmp: Path) {
+        val now = AtomicLong()
+        val completed = AtomicInteger()
+        val secondRead = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val listings = DirectoryListings(
+            read = { _, _ ->
+                if (reads.incrementAndGet() > 1) secondRead.countDown()
+                now.addAndGet(200)
+                emptyList()
+            },
+            onUi = { publish -> ui.execute { publish(); completed.incrementAndGet() } },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+            nowMs = now::get,
+        )
+        val view = listings.view()
+        onUi { view.show(setOf(tmp.toString())); view.poll() }
+        eventually("published the slow read") { completed.get() == 1 }
+
+        now.set(3_200)
+        onUi { view.poll() }
+        assertFalse(secondRead.await(100, TimeUnit.MILLISECONDS), "a slow read repeated too soon")
+
+        now.set(20_200)
+        onUi { view.poll() }
+        eventually("read again after the cost based delay") { completed.get() == 2 }
+        onUi { view.close() }
+    }
+
+    @Test fun `hiding a view drops follow-up reads and link lookups`(@TempDir tmp: Path) {
+        val started = CountDownLatch(1)
+        val answer = CountDownLatch(1)
+        val completed = CountDownLatch(1)
+        val reads = AtomicInteger()
+        val looks = AtomicInteger()
+        val listings = DirectoryListings(
+            read = { dir, _ ->
+                reads.incrementAndGet()
+                started.countDown()
+                answer.await()
+                listOf(TreeChild(File(dir, "linked"), false, TreeChild.Link.Pending))
+            },
+            resolve = { looks.incrementAndGet(); true },
+            onUi = { publish -> ui.execute { publish(); completed.countDown() } },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+        )
+        val view = listings.view()
+        onUi { view.show(setOf(tmp.toString())); view.poll() }
+        assertTrue(started.await(5, TimeUnit.SECONDS))
+        onUi { view.poll(); view.close() }
+        answer.countDown()
+        assertTrue(completed.await(5, TimeUnit.SECONDS))
+        onUi { view.poll() }
+
+        assertEquals(1, reads.get())
+        assertEquals(0, looks.get())
     }
 }

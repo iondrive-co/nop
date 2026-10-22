@@ -27,7 +27,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -82,7 +85,12 @@ import org.jetbrains.jewel.ui.component.styling.LazyTreeIcons
 import org.jetbrains.jewel.ui.component.styling.LazyTreeStyle
 import org.jetbrains.jewel.ui.component.styling.LocalLazyTreeStyle
 import org.jetbrains.jewel.ui.icon.PathIconKey
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
+import java.awt.Frame
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
+import java.awt.event.WindowStateListener
 import java.io.File
 import java.nio.file.Path
 
@@ -290,8 +298,41 @@ internal fun computeDirectoryEntries(
     return entries
 }
 
+/** A directory can expose children only while it and all its ancestors are expanded. */
+internal fun expandedDirectoriesOnScreen(rootId: String, openIds: Set<String>): Set<String> =
+    openIds.filterTo(mutableSetOf()) { key ->
+        var dir: File? = File(key)
+        while (dir != null && dir.absolutePath in openIds) {
+            if (dir.absolutePath == rootId) return@filterTo true
+            dir = dir.parentFile
+        }
+        false
+    }
+
+@Composable
+private fun treeWindowOnScreen(): Boolean {
+    val window = LocalWindow.current ?: return true
+    fun isOnScreen() = window.isShowing &&
+        (((window as? Frame)?.extendedState ?: 0) and Frame.ICONIFIED) == 0
+    var visible by remember(window) { mutableStateOf(isOnScreen()) }
+    DisposableEffect(window) {
+        val componentListener = object : ComponentAdapter() {
+            override fun componentShown(e: ComponentEvent) { visible = isOnScreen() }
+            override fun componentHidden(e: ComponentEvent) { visible = isOnScreen() }
+        }
+        val stateListener = WindowStateListener { visible = isOnScreen() }
+        window.addComponentListener(componentListener)
+        (window as? Frame)?.addWindowStateListener(stateListener)
+        onDispose {
+            window.removeComponentListener(componentListener)
+            (window as? Frame)?.removeWindowStateListener(stateListener)
+        }
+    }
+    return visible
+}
+
 private fun Path.asFilteredTree(
-    listings: DirectoryListings,
+    listings: DirectoryListings.View,
     openFilePaths: Set<String>,
     expandedEllipsisKeys: Set<String>,
     openDirectoryIds: Set<String> = emptySet(),
@@ -307,11 +348,12 @@ private fun Path.asFilteredTree(
 // and a directory that is not in yet is asked for and drawn as soon as it arrives.
 private fun ChildrenGeneratorScope<TreeEntry>.addChildren(
     dir: File,
-    listings: DirectoryListings,
+    listings: DirectoryListings.View,
     openFilePaths: Set<String>,
     expandedEllipsisKeys: Set<String>,
     openDirectoryIds: Set<String>,
 ) {
+    if (dir.absolutePath !in openDirectoryIds) return
     val children = when (val listing = listings.childrenOf(dir)) {
         null -> return
         is DirectoryListings.Listing.Pending -> {
@@ -509,20 +551,44 @@ fun ProjectTreePanel(
 
     val treeState = rememberTreeState()
     val openDirectoryIds = treeState.openNodes.filterIsInstance<String>().toSet()
+    val rowDirectories = remember(projectPath) { mutableStateMapOf<Any, Set<String>>() }
+    val visibleRowKeys by remember(treeState) {
+        derivedStateOf {
+            val layout = treeState.lazyListState.lazyListState.layoutInfo
+            layout.visibleItemsInfo.filter {
+                it.offset < layout.viewportEndOffset && it.offset + it.size > layout.viewportStartOffset
+            }.map { it.key }.toSet()
+        }
+    }
 
     // What the tree knows of the disk. Read on workers and only ever looked up here — see
     // DirectoryListings for why drawing the tree must never wait on a directory.
     val listings = remember(projectPath) { DirectoryListings.forProject(projectPath) }
+    val listingView = remember(listings) { listings.view() }
     val listingsVersion = listings.version
 
     val tree = remember(projectPath, listingsVersion, openFilePaths, expandedEllipsisKeys, openDirectoryIds) {
-        projectPath.asFilteredTree(listings, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
+        projectPath.asFilteredTree(listingView, openFilePaths, expandedEllipsisKeys, openDirectoryIds)
     }
 
-    // Something on disk may have changed: read the open directories again, and forget the closed
-    // ones so a refresh costs what is on screen and not everything ever expanded.
-    LaunchedEffect(refreshKey, projectPath) {
-        listings.refresh(openDirectoryIds + rootId)
+    val expandedDirectories = remember(rootId, openDirectoryIds) {
+        expandedDirectoriesOnScreen(rootId, openDirectoryIds)
+    }
+    val polledDirectories = if (treeWindowOnScreen()) {
+        visibleRowKeys.flatMap { rowDirectories[it].orEmpty() }
+            .filterTo(mutableSetOf()) { it in expandedDirectories }
+    } else emptySet()
+    SideEffect { listingView.show(polledDirectories) }
+    DisposableEffect(listingView) { onDispose { listingView.close() } }
+
+    // Git status can stay unchanged while directory entries move. Each visible directory decides
+    // when its next read is due; a collapsed ancestor or a project switch stops further reads.
+    LaunchedEffect(refreshKey, listingView) { listingView.poll(force = true) }
+    LaunchedEffect(listingView, polledDirectories) {
+        while (true) {
+            listingView.poll()
+            delay(3_000)
+        }
     }
 
     // Track which files have had their ancestors opened so we don't re-expand folders the user collapsed
@@ -550,6 +616,12 @@ fun ProjectTreePanel(
         }
         if (toOpen.isNotEmpty()) {
             treeState.openNodes(toOpen)
+            withTimeoutOrNull(REVEAL_WAIT_MS) {
+                for (dir in toOpen.asReversed().distinct()) {
+                    listingView.awaitListed(File(dir))
+                    treeState.openNodes(listOf(dir))
+                }
+            }
         }
     }
 
@@ -575,7 +647,7 @@ fun ProjectTreePanel(
         // The rows above the target are only countable once their directories are in. A directory
         // that does not answer in time just means no scroll: the selection is already made.
         withTimeoutOrNull(REVEAL_WAIT_MS) {
-            ancestors.asReversed().forEach { listings.awaitListed(File(it)) }
+            ancestors.asReversed().forEach { listingView.awaitListed(File(it)) }
         }
         val openIds = treeState.openNodes.filterIsInstance<String>().toSet() + rootFile.absolutePath
         val targetIndex = flattenedRowIndexOf(
@@ -726,6 +798,14 @@ fun ProjectTreePanel(
                     }
                 },
             ) { element ->
+                val rowListings = setOfNotNull(
+                    element.parent?.id as? String,
+                    (element.data as? TreeEntry.Node)?.takeIf { it.isDirectory }?.file?.absolutePath,
+                )
+                DisposableEffect(element.id, rowListings) {
+                    rowDirectories[element.id] = rowListings
+                    onDispose { rowDirectories.remove(element.id) }
+                }
                 val isDark = JewelTheme.isDark
                 val iconTint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
 
