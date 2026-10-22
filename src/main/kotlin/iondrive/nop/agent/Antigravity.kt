@@ -31,7 +31,7 @@ import kotlin.concurrent.thread
  *
  * **What it reports about quota.** There is no endpoint. `/usage` is a slash command the CLI
  * expands in print mode, so a reading costs a CLI start of several seconds and is taken by running
- * the account rather than by asking about it. It answers in *remaining* percent across two model
+ * the account rather than by asking about it. It answers in *remaining* percent across several model
  * families, where nop shows spent for the one family the account actually runs.
  *
  * **What it writes about a session.** A JSON transcript per conversation, beside the SQLite
@@ -175,12 +175,16 @@ internal object Antigravity {
         if (!signedIn(account)) return UsageReading.unavailable("not signed in")
         val output = run(account, listOf("-p", "/usage", "--output-format", "text"), USAGE_TIMEOUT)
             ?: return UsageReading.unavailable("could not ask the CLI for usage")
-        val windows = parseUsage(output, account.model)
-        if (windows.isEmpty()) return UsageReading.unavailable("unreadable usage output")
+        val rows = usageRows(output)
+        val family = familyOf(account.model, rows)
+        val own = rows.filter { it.family == family }
+        if (own.isEmpty()) return UsageReading.unavailable("unreadable usage output")
         return UsageReading(
-            session = windows["session"],
-            weekly = windows["weekly"],
+            session = own.lastOrNull { it.slot == SESSION }?.window,
+            weekly = own.lastOrNull { it.slot == WEEKLY }?.window,
             asOf = Instant.now(),
+            pool = own.first().group,
+            others = rows.filter { it.family != family }.map { OtherLimit("${it.group} · ${it.slot}", it.window) },
         )
     }
 
@@ -199,7 +203,8 @@ internal object Antigravity {
     /**
      * Turns `/usage` output into nop's two windows.
      *
-     * The CLI answers one tab-separated row per limit, for both model families:
+     * The CLI answers one tab-separated row per limit, for every model family the account has an
+     * allowance in:
      * ```
      * Gemini Models	Five Hour Limit Remaining	97%	2026-09-17T10:07:01Z
      * Claude and GPT models	Weekly Limit Remaining	100%	2026-09-24T08:10:33Z
@@ -209,33 +214,60 @@ internal object Antigravity {
      * what is *left* where every other reading in nop reports what is spent.
      */
     internal fun parseUsage(output: String, model: String?): Map<String, UsageWindow> {
-        val wanted = familyFor(model)
-        val windows = mutableMapOf<String, UsageWindow>()
-        for (line in output.lineSequence()) {
-            val fields = line.split('\t').map { it.trim() }
-            if (fields.size < 4) continue
-            if (fields[0].lowercase() != wanted) continue
-            val remaining = fields[2].removeSuffix("%").toDoubleOrNull()?.takeIf { fields[2].endsWith("%") }
-                ?: continue
-            val limit = fields[1].lowercase()
-            val window = when {
-                "five hour" in limit -> "session"
-                "weekly" in limit -> "weekly"
-                else -> continue
-            }
-            windows[window] = UsageWindow(
+        val rows = usageRows(output)
+        val family = familyOf(model, rows)
+        return rows.filter { it.family == family }.associate { it.slot to it.window }
+    }
+
+    /** One `/usage` row: whose allowance it is, which window, and how much of it is spent. */
+    internal data class UsageRow(val group: String, val slot: String, val window: UsageWindow) {
+        /** The group as [familyFor] names it. */
+        val family: String get() = group.lowercase()
+    }
+
+    /** Every row of `/usage` output that reads as a five-hour or weekly limit, in the CLI's order. */
+    internal fun usageRows(output: String): List<UsageRow> = output.lineSequence().mapNotNull { line ->
+        val fields = line.split('\t').map { it.trim() }
+        if (fields.size < 4 || fields[0].isEmpty()) return@mapNotNull null
+        val remaining = fields[2].removeSuffix("%").toDoubleOrNull()?.takeIf { fields[2].endsWith("%") }
+            ?: return@mapNotNull null
+        val limit = fields[1].lowercase()
+        val slot = when {
+            "five hour" in limit -> SESSION
+            "weekly" in limit -> WEEKLY
+            else -> return@mapNotNull null
+        }
+        UsageRow(
+            group = fields[0],
+            slot = slot,
+            window = UsageWindow(
                 percent = (100.0 - remaining).coerceIn(0.0, 100.0),
                 resetsAt = runCatching { Instant.parse(fields[3]) }.getOrNull(),
-                length = if (window == "session") Duration.ofHours(5) else Duration.ofDays(7),
-            )
-        }
-        return windows
+                length = if (slot == SESSION) Duration.ofHours(5) else Duration.ofDays(7),
+            ),
+        )
+    }.toList()
+
+    /**
+     * Which of the reported families [model] runs against.
+     *
+     * A model with an allowance of its own is listed under its own name — `gemini-4-argon-medium`
+     * draws on "Gemini 4 Argon", not on "Gemini Models" — so a family whose name the model id starts
+     * with wins, the longest such name if several do. A plan that does not split the model out has
+     * no such row, and the model counts against its broad family, as [familyFor] says.
+     */
+    internal fun familyOf(model: String?, rows: List<UsageRow>): String {
+        val id = model.orEmpty().trim().lowercase().replace('-', ' ')
+        val own = rows.map { it.family }.distinct()
+            .filter { it != GEMINI_FAMILY && it != OTHER_FAMILY && id.startsWith(it) }
+            .maxByOrNull { it.length }
+        return own ?: familyFor(model)
     }
 
     /**
-     * Which of the two limits applies to the model an account runs. Antigravity serves Gemini,
-     * Claude and GPT models against separate allowances, so the account's own model decides which
-     * number describes it. An account on the CLI's default is a Gemini account.
+     * Which of the two broad limits applies to the model an account runs. Antigravity serves
+     * Gemini, Claude and GPT models against separate allowances, so the account's own model decides
+     * which number describes it. An account on the CLI's default is a Gemini account.
      */
     internal fun familyFor(model: String?): String {
         val normalized = model.orEmpty().trim().lowercase()
@@ -353,6 +385,10 @@ internal object Antigravity {
 
     private const val GEMINI_FAMILY = "gemini models"
     private const val OTHER_FAMILY = "claude and gpt models"
+
+    /** The two windows nop knows, as [UsageRow.slot] names them. */
+    private const val SESSION = "session"
+    private const val WEEKLY = "weekly"
 
     /** A `/usage` run is a CLI start and a round trip; several seconds is normal. */
     private val USAGE_TIMEOUT: Duration = Duration.ofSeconds(60)

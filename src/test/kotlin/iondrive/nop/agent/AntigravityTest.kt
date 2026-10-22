@@ -159,6 +159,39 @@ class AntigravityTest {
         assertEquals(60.0, Antigravity.parseUsage(usageOutput, "gpt-oss-120b-medium").getValue("session").percent, 0.001)
     }
 
+    private val ownPoolOutput = usageOutput + "\n" + """
+        Gemini 9 Basalt	Gemini 9 Basalt Weekly Limit	25%	2026-09-25T04:00:00Z
+    """.trimIndent()
+
+    @Test
+    fun `a model with an allowance of its own is measured against that one`() {
+        val windows = Antigravity.parseUsage(ownPoolOutput, "gemini-9-basalt-high")
+
+        assertEquals(75.0, windows.getValue("weekly").percent, 0.001)
+        assertEquals(Instant.parse("2026-09-25T04:00:00Z"), windows.getValue("weekly").resetsAt)
+        // That allowance has no five-hour window, and the broad Gemini one is not borrowed for it.
+        assertNull(windows["session"])
+        assertEquals(3.0, Antigravity.parseUsage(ownPoolOutput, "gemini-3.1-pro-high").getValue("session").percent, 0.001)
+    }
+
+    @Test
+    fun `a model the plan does not split out counts against its broad family`() {
+        assertEquals(3.0, Antigravity.parseUsage(usageOutput, "gemini-9-basalt-high").getValue("session").percent, 0.001)
+    }
+
+    @Test
+    fun `every family's rows are read, in the CLI's order`() {
+        val rows = Antigravity.usageRows(ownPoolOutput)
+
+        assertEquals(
+            listOf("Gemini Models", "Gemini Models", "Claude and GPT models", "Claude and GPT models", "Gemini 9 Basalt"),
+            rows.map { it.group },
+        )
+        assertEquals("gemini 9 basalt", Antigravity.familyOf("gemini-9-basalt-high", rows))
+        assertEquals("gemini models", Antigravity.familyOf(null, rows))
+        assertEquals("claude and gpt models", Antigravity.familyOf("claude-sonnet-4-6", rows))
+    }
+
     @Test
     fun `an account on the CLI's default is a Gemini account`() {
         assertEquals("gemini models", Antigravity.familyFor(null))

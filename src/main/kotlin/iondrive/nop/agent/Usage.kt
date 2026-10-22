@@ -72,6 +72,15 @@ data class UsageWindow(val percent: Double, val resetsAt: Instant?, val length: 
 }
 
 /**
+ * A limit an account has besides the session and weekly windows nop governs it by: another model
+ * family's allowance on an Antigravity account, or a weekly cap on one Claude model.
+ *
+ * Shown, never acted on. None of them is the wall the account's own model runs into, so none of
+ * them decides whether the account is spent.
+ */
+data class OtherLimit(val label: String, val window: UsageWindow)
+
+/**
  * What one account's quota looks like right now.
  *
  * [asOf] is when the reading was *taken*, which for Claude is now and for Codex is whenever that
@@ -98,6 +107,13 @@ data class UsageReading(
     val weeklyPerSession: Double? = null,
     /** Where [weeklyPerSession] came from; null when it is unknown. */
     val paceSource: PaceSource? = null,
+    /**
+     * The allowance [session] and [weekly] belong to, when the provider keeps several and says which
+     * by name — "Gemini 4 Argon"; null when there is only the one.
+     */
+    val pool: String? = null,
+    /** Every other limit the provider reported for the account; see [OtherLimit]. */
+    val others: List<OtherLimit> = emptyList(),
 ) {
     /**
      * The session percent to aim for by the end of this window, in session percent, for the weekly
@@ -407,8 +423,38 @@ object Usage {
                 session = claudeWindow(data["five_hour"], Duration.ofHours(5)),
                 weekly = claudeWindow(data["seven_day"], Duration.ofDays(7)),
                 asOf = Instant.now(),
+                others = claudeOtherLimits(data["limits"]),
             ),
         )
+    }
+
+    /**
+     * The limits in the usage API's `limits` list other than the plain session and weekly ones,
+     * which `five_hour` and `seven_day` already carry: a weekly cap on one model, such as Fable's.
+     * Each is named by what it is scoped to, as the API names it.
+     */
+    internal fun claudeOtherLimits(element: kotlinx.serialization.json.JsonElement?): List<OtherLimit> {
+        val limits = element as? kotlinx.serialization.json.JsonArray ?: return emptyList()
+        return limits.mapNotNull { item ->
+            val limit = item.obj() ?: return@mapNotNull null
+            val kind = limit["kind"].str() ?: return@mapNotNull null
+            if (kind == "session" || kind == "weekly_all") return@mapNotNull null
+            val percent = limit["percent"].double() ?: return@mapNotNull null
+            val scope = limit["scope"].obj()
+            val name = scope?.get("model").obj()?.get("display_name").str()
+                ?: scope?.get("surface").obj()?.get("display_name").str()
+                ?: scope?.get("surface").str()
+                ?: kind.replace('_', ' ')
+            val (span, length) = when (limit["group"].str()) {
+                "session" -> "session" to Duration.ofHours(5)
+                "weekly" -> "weekly" to Duration.ofDays(7)
+                else -> (limit["group"].str() ?: "limit") to null
+            }
+            OtherLimit(
+                "$name · $span",
+                UsageWindow(percent.coerceIn(0.0, 100.0), limit["resets_at"].str()?.let(::parseInstant), length),
+            )
+        }
     }
 
     private fun claudeWindow(

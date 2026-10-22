@@ -62,6 +62,27 @@ class UsageTest {
         assertTrue(Usage.paceEstimateDue(interval, now = start + interval), "the next turn comes once it has passed")
     }
 
+    @Test
+    fun `a Claude cap on one model is read as an extra limit beside the two windows`() {
+        val limits = Json.parseToJsonElement(
+            """[
+              {"kind":"session","group":"session","percent":40,"resets_at":"2026-09-15T10:00:00+00:00","scope":null},
+              {"kind":"weekly_all","group":"weekly","percent":55,"resets_at":"2026-09-18T09:00:00+00:00","scope":null},
+              {"kind":"weekly_scoped","group":"weekly","percent":7,"resets_at":"2026-09-18T09:00:00+00:00",
+               "scope":{"model":{"id":null,"display_name":"Sonata"},"surface":null}}
+            ]""",
+        )
+
+        val others = Usage.claudeOtherLimits(limits)
+
+        // The plain session and weekly entries are the windows the reading already has.
+        assertEquals(listOf("Sonata · weekly"), others.map { it.label })
+        assertEquals(7.0, others.single().window.percent, 0.001)
+        assertEquals(Instant.parse("2026-09-18T09:00:00Z"), others.single().window.resetsAt)
+        assertEquals(Duration.ofDays(7), others.single().window.length)
+        assertTrue(Usage.claudeOtherLimits(null).isEmpty())
+    }
+
     // ── Codex ──
 
     @Test

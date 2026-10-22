@@ -130,7 +130,7 @@ fun UsageIndicator(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         accounts.forEach { account ->
-            key(account.name) { UsageChip(account, readings[account.name]) }
+            key(account.name) { UsageChip(account, readings[account.name], onClick) }
         }
         // One item, so a wrap never puts the backup's mark on a different row from the gear.
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -152,9 +152,18 @@ private val FALLBACK_MAX_WIDTH = 800.dp
 /** Narrower than this and the strip is drawing nothing legible anyway. */
 private val MIN_WIDTH = 120.dp
 
+/**
+ * One account's name and bars. A click lists every limit the account has (see [showLimitsPopup]),
+ * which the two bars leave out: another model family's allowance, a cap on one model.
+ */
 @Composable
-private fun UsageChip(account: Account, reading: UsageReading?) {
+private fun UsageChip(account: Account, reading: UsageReading?, onAccounts: () -> Unit) {
+    val window = LocalWindow.current
+    val isDark = JewelTheme.isDark
     Row(
+        modifier = Modifier.clickable {
+            if (window != null) showLimitsPopup(window, isDark, account, reading, onAccounts) else onAccounts()
+        },
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -488,3 +497,133 @@ internal fun usageLine(reading: UsageReading?): String {
     if (parts.isEmpty()) return reading.note ?: "no usage recorded"
     return parts.joinToString("   ") + (staleLine(reading)?.let { "   ($it)" } ?: "")
 }
+
+/** One row of the limits popup: what the limit is, how much of it is spent, and when it resets. */
+internal data class LimitLine(val label: String, val percent: Double?, val detail: String)
+
+/**
+ * Every limit [reading] knows for [account], in the order the popup lists them: the session and
+ * weekly windows nop governs the account by, then the provider's others. A reading with no windows
+ * is one line saying why.
+ */
+internal fun limitLines(reading: UsageReading?, now: Instant = Instant.now()): List<LimitLine> {
+    if (reading == null) return listOf(LimitLine("Not read yet", null, ""))
+    reading.unavailable?.let { return listOf(LimitLine(it, null, "")) }
+    fun line(label: String, window: UsageWindow) =
+        LimitLine(label, window.percent, window.eta(now)?.let { "resets in $it" } ?: "")
+    val own = reading.pool?.let { "$it · " } ?: ""
+    val lines = buildList {
+        reading.session?.let { add(line("${own}session", it)) }
+        reading.weekly?.let { add(line("${own}weekly", it)) }
+        reading.others.forEach { add(line(it.label, it.window)) }
+    }
+    return lines.ifEmpty { listOf(LimitLine(reading.note ?: "No usage recorded", null, "")) }
+}
+
+/**
+ * The limits popup for one account: a heavyweight Swing popup, like the agent tabs' context menu
+ * ([showTabContextMenu]), because the strip floats over the terminal and a Compose popup is drawn
+ * underneath it. Ends with the way into the accounts dialog, which a click on the strip opens.
+ */
+private fun showLimitsPopup(
+    window: java.awt.Window,
+    isDark: Boolean,
+    account: Account,
+    reading: UsageReading?,
+    onAccounts: () -> Unit,
+) {
+    val mouse = java.awt.MouseInfo.getPointerInfo()?.location ?: return
+    val at = java.awt.Point(mouse)
+    javax.swing.SwingUtilities.convertPointFromScreen(at, window)
+    val menu = limitsPopup(isDark, account, reading, onAccounts)
+    // Above the pointer: the strip sits at the bottom of the window, with no room below it.
+    menu.show(window, at.x, at.y - menu.preferredSize.height)
+}
+
+/** The popup [showLimitsPopup] shows, built but not yet on screen. */
+internal fun limitsPopup(
+    isDark: Boolean,
+    account: Account,
+    reading: UsageReading?,
+    onAccounts: () -> Unit,
+): javax.swing.JPopupMenu {
+    val bg = if (isDark) java.awt.Color(0x2B, 0x2D, 0x30) else java.awt.Color.WHITE
+    val fg = if (isDark) java.awt.Color(0xDF, 0xE1, 0xE5) else java.awt.Color(0x1F, 0x23, 0x29)
+    val muted = if (isDark) java.awt.Color(0x8C, 0x90, 0x97) else java.awt.Color(0x6F, 0x73, 0x7A)
+    val track = if (isDark) java.awt.Color(0x3C, 0x3F, 0x41) else java.awt.Color(0xE3, 0xE5, 0xE9)
+    val borderColor = if (isDark) java.awt.Color(0x43, 0x45, 0x4A) else java.awt.Color(0xD0, 0xD2, 0xD5)
+    val font = java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 12)
+
+    fun label(text: String, color: java.awt.Color, bold: Boolean = false) = javax.swing.JLabel(text).apply {
+        this.font = if (bold) font.deriveFont(java.awt.Font.BOLD) else font
+        foreground = color
+    }
+
+    val grid = javax.swing.JPanel(java.awt.GridBagLayout()).apply {
+        background = bg
+        border = javax.swing.BorderFactory.createEmptyBorder(6, 14, 6, 14)
+    }
+    fun cell(x: Int, y: Int, width: Int = 1) = java.awt.GridBagConstraints().apply {
+        gridx = x
+        gridy = y
+        gridwidth = width
+        anchor = java.awt.GridBagConstraints.WEST
+        insets = java.awt.Insets(3, 0, 3, if (x < 3) 12 else 0)
+    }
+    val title = account.model?.let { "${account.name}  ($it)" } ?: account.name
+    grid.add(label(title, fg, bold = true), cell(0, 0, 4).apply { insets = java.awt.Insets(0, 0, 6, 0) })
+    limitLines(reading).forEachIndexed { i, line ->
+        val y = i + 1
+        grid.add(label(line.label, fg), cell(0, y))
+        val percent = line.percent ?: return@forEachIndexed
+        grid.add(PercentBar(percent, usageColor(percent).toAwt(), track), cell(1, y))
+        grid.add(label("${percent.toInt()}%", fg), cell(2, y).apply { anchor = java.awt.GridBagConstraints.EAST })
+        grid.add(label(line.detail, muted), cell(3, y))
+    }
+    reading?.let(::staleLine)?.let {
+        grid.add(label(it, muted), cell(0, limitLines(reading).size + 1, 4))
+    }
+
+    return javax.swing.JPopupMenu().apply {
+        isLightWeightPopupEnabled = false
+        background = bg
+        border = javax.swing.BorderFactory.createLineBorder(borderColor, 1)
+        add(grid)
+        add(javax.swing.JSeparator().apply { foreground = borderColor; background = bg })
+        add(
+            javax.swing.JMenuItem("Agent accounts…").apply {
+                this.font = font
+                background = bg
+                foreground = fg
+                border = javax.swing.BorderFactory.createEmptyBorder(5, 14, 5, 14)
+                addActionListener { onAccounts() }
+            },
+        )
+    }
+}
+
+/** The strip's bar, for the popup: the spent fraction of a rounded track. */
+private class PercentBar(
+    private val percent: Double,
+    private val fill: java.awt.Color,
+    private val track: java.awt.Color,
+) : javax.swing.JComponent() {
+    init {
+        preferredSize = java.awt.Dimension(80, 8)
+    }
+
+    override fun paintComponent(g: java.awt.Graphics) {
+        val g2 = g.create() as java.awt.Graphics2D
+        g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+        val y = (height - 8) / 2
+        val bar = java.awt.geom.RoundRectangle2D.Float(0f, y.toFloat(), width.toFloat(), 8f, 8f, 8f)
+        g2.color = track
+        g2.fill(bar)
+        g2.clip(java.awt.Rectangle(0, 0, (width * percent / 100.0).toInt().coerceIn(0, width), height))
+        g2.color = fill
+        g2.fill(bar)
+        g2.dispose()
+    }
+}
+
+private fun Color.toAwt() = java.awt.Color(red, green, blue, alpha)
