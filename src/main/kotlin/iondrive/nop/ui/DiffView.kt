@@ -334,24 +334,26 @@ fun DiffView(
             val onLineCountChanged: (() -> Unit)? = edit?.let {
                 { content = computeContent(headText, it.state.text.toString(), ignoreWhitespace) }
             }
-            DiffRowsList(
-                result = result,
-                edit = edit,
-                bufferReset = bufferReset,
-                currentFile = workingFile,
-                onRevertHunk = onRevertHunk,
-                onStructuralEdit = onStructuralEdit,
-                onLineCountChanged = onLineCountChanged,
-                onResolveAt = onResolveAt,
-                onJump = onJump,
-                onTopLine = onTopLine,
-                splitRatio = splitRatio,
-                onSplitRatioChange = onSplitRatioChange,
-                searchKey = tab.id,
-                findTrigger = findTrigger,
-                ignoreWhitespace = ignoreWhitespace,
-                onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
-            )
+            WrapWithinLimits(result.rows) {
+                DiffRowsList(
+                    result = result,
+                    edit = edit,
+                    bufferReset = bufferReset,
+                    currentFile = workingFile,
+                    onRevertHunk = onRevertHunk,
+                    onStructuralEdit = onStructuralEdit,
+                    onLineCountChanged = onLineCountChanged,
+                    onResolveAt = onResolveAt,
+                    onJump = onJump,
+                    onTopLine = onTopLine,
+                    splitRatio = splitRatio,
+                    onSplitRatioChange = onSplitRatioChange,
+                    searchKey = tab.id,
+                    findTrigger = findTrigger,
+                    ignoreWhitespace = ignoreWhitespace,
+                    onToggleWhitespace = { ignoreWhitespace = !ignoreWhitespace },
+                )
+            }
         }
     }
     }
@@ -697,43 +699,45 @@ private fun MergeRowsList(
             diffIndexOfItem.forEachIndexed { item, diffIndex -> if (diffIndex >= 0) arr[diffIndex] = item }
         }
     }
-    DiffListScaffold(
-        rows = diffRows,
-        kinds = kinds,
-        listState = listState,
-        ratio = splitRatio,
-        onRatioChange = onSplitRatioChange,
-        // Conflict control rows mark a region; tint their lane slot with the conflict colour.
-        overrideColor = { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null },
-        searchKey = searchKey,
-        findTrigger = findTrigger,
-        oldHeader = "OURS (current branch)",
-        newHeader = "THEIRS (incoming branch)",
-        ignoreWhitespace = ignoreWhitespace,
-        onToggleWhitespace = onToggleWhitespace,
-        rowLocation = { RowLocation(itemOfDiffIndex.getOrElse(it) { 0 }, 0) },
-    ) { listModifier ->
-        SelectionContainer {
-        LazyColumn(
-            state = listState,
-            modifier = listModifier,
-        ) {
-            itemsIndexed(rows, key = { index, _ -> index }) { index, item ->
-                when (item) {
-                    is MergeRow.Control -> ConflictControlStrip(
-                        enabled = onResolve != null,
-                        onChoose = { choice -> onResolve?.invoke(item.regionId, choice) },
-                    )
-                    is MergeRow.Line -> MergeLineRow(
-                        row = item.row,
-                        rowIndex = diffIndexOfItem.getOrElse(index) { -1 },
-                        currentFile = currentFile,
-                        onResolveAt = onResolveAt,
-                        onJump = onJump,
-                    )
+    WrapWithinLimits(diffRows) {
+        DiffListScaffold(
+            rows = diffRows,
+            kinds = kinds,
+            listState = listState,
+            ratio = splitRatio,
+            onRatioChange = onSplitRatioChange,
+            // Conflict control rows mark a region; tint their lane slot with the conflict colour.
+            overrideColor = { idx -> if (rows[idx] is MergeRow.Control) CONFLICT_MARK else null },
+            searchKey = searchKey,
+            findTrigger = findTrigger,
+            oldHeader = "OURS (current branch)",
+            newHeader = "THEIRS (incoming branch)",
+            ignoreWhitespace = ignoreWhitespace,
+            onToggleWhitespace = onToggleWhitespace,
+            rowLocation = { RowLocation(itemOfDiffIndex.getOrElse(it) { 0 }, 0) },
+        ) { listModifier ->
+            SelectionContainer {
+            LazyColumn(
+                state = listState,
+                modifier = listModifier,
+            ) {
+                itemsIndexed(rows, key = { index, _ -> index }) { index, item ->
+                    when (item) {
+                        is MergeRow.Control -> ConflictControlStrip(
+                            enabled = onResolve != null,
+                            onChoose = { choice -> onResolve?.invoke(item.regionId, choice) },
+                        )
+                        is MergeRow.Line -> MergeLineRow(
+                            row = item.row,
+                            rowIndex = diffIndexOfItem.getOrElse(index) { -1 },
+                            currentFile = currentFile,
+                            onResolveAt = onResolveAt,
+                            onJump = onJump,
+                        )
+                    }
                 }
             }
-        }
+            }
         }
     }
 }

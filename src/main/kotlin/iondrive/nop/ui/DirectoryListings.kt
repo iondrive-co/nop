@@ -37,6 +37,10 @@ data class TreeChild(
     val isDirectory: Boolean,
     val link: Link = Link.None,
 ) {
+    internal val name = file.name
+    internal val sortName = name.lowercase()
+    internal val row by lazy(LazyThreadSafetyMode.PUBLICATION) { TreeEntry.Node(this) }
+
     enum class Link {
         /** Not a symlink. */
         None,
@@ -52,6 +56,32 @@ data class TreeChild(
     }
 }
 
+/** Immutable display order and rows, prepared before a listing reaches the UI. */
+internal class DirectoryChildren private constructor(
+    private val ordered: List<TreeChild>,
+    val directories: List<TreeChild>,
+    val files: List<TreeChild>,
+) : AbstractList<TreeChild>() {
+    override val size: Int get() = ordered.size
+    override fun get(index: Int): TreeChild = ordered[index]
+    val byName = ordered.associateBy { it.name }
+    val rows = ordered.map { it.row }
+
+    companion object {
+        fun prepare(children: List<TreeChild>, previous: DirectoryChildren? = null): DirectoryChildren {
+            if (children is DirectoryChildren) return children
+            if (previous != null && children.size == previous.size &&
+                children.all { previous.byName[it.name] == it }
+            ) return previous
+            val (dirs, files) = children.partition { it.isDirectory }
+            val byName = compareBy<TreeChild> { it.sortName }.thenBy { it.name }
+            val sortedDirs = dirs.sortedWith(byName)
+            val sortedFiles = files.sortedWith(byName)
+            return DirectoryChildren(sortedDirs + sortedFiles, sortedDirs, sortedFiles)
+        }
+    }
+}
+
 /**
  * Lists [dir] without following a symlink. Each entry's attributes are read once, from the entry
  * itself, so a link into a dead mount costs no more than a link anywhere else.
@@ -61,7 +91,7 @@ data class TreeChild(
  * every refresh.
  */
 internal fun listEntries(dir: File, previous: List<TreeChild>? = null): List<TreeChild> {
-    val before = previous.orEmpty().associateBy { it.file.name }
+    val before = (previous as? DirectoryChildren)?.byName ?: previous.orEmpty().associateBy { it.name }
     return Files.newDirectoryStream(dir.toPath()).use { stream ->
         stream.mapNotNull { path ->
             val name = path.fileName.toString()
@@ -72,10 +102,12 @@ internal fun listEntries(dir: File, previous: List<TreeChild>? = null): List<Tre
             } catch (_: IOException) {
                 return@mapNotNull null
             }
+            val old = before[name]
             if (!attrs.isSymbolicLink) {
-                TreeChild(path.toFile(), attrs.isDirectory)
+                old?.takeIf { it.link == TreeChild.Link.None && it.isDirectory == attrs.isDirectory }
+                    ?: TreeChild(path.toFile(), attrs.isDirectory)
             } else {
-                before[name]?.takeIf { it.link != TreeChild.Link.None }
+                old?.takeIf { it.link != TreeChild.Link.None }
                     ?: TreeChild(path.toFile(), isDirectory = false, link = TreeChild.Link.Pending)
             }
         }
@@ -108,7 +140,7 @@ internal fun linkTargetIsDirectory(link: File): Boolean? = try {
  * still being listed is remembered and run once the first is done, and a link already being looked
  * at is not looked at again.
  *
- * All state is changed on the UI thread ([onUi]); the workers only read the disk.
+ * Shared state changes on the UI thread ([onUi]); workers read and prepare immutable listings.
  */
 internal class DirectoryListings(
     private val read: (File, List<TreeChild>?) -> List<TreeChild> = ::listEntries,
@@ -117,12 +149,18 @@ internal class DirectoryListings(
     private val loadingAfterMs: Long = 300,
     private val notRespondingAfterMs: Long = 2_000,
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val maxInactiveChildren: Int = 10_000,
+    private val maxInactiveDirectories: Int = 32,
+    private val scheduleLinkBatch: (() -> Unit) -> Unit = { batch ->
+        timers.schedule({ onUi(batch) }, 25, TimeUnit.MILLISECONDS)
+    },
+    private val onIdle: () -> Unit = {},
 ) {
     sealed interface Listing {
         /** Asked for and not back yet, for long enough to say so. */
         data class Pending(val notResponding: Boolean) : Listing
 
-        data class Ready(val children: List<TreeChild>) : Listing
+        data class Ready(val children: DirectoryChildren) : Listing
 
         data class Failed(val reason: String) : Listing
     }
@@ -137,31 +175,61 @@ internal class DirectoryListings(
     private val askedAgain = ConcurrentHashMap.newKeySet<String>()
     private val resolving = ConcurrentHashMap.newKeySet<String>()
     private val nextPollAt = mutableMapOf<String, Long>()
+    private val retained = mutableMapOf<String, Int>()
+    private val inactive = LinkedHashMap<String, Int>()
+    private var inactiveChildren = 0
+    private val views = mutableSetOf<View>()
+    private var retired = false
+    internal val hasViews: Boolean get() = views.isNotEmpty()
+
+    private data class LinkResult(val child: TreeChild, val isDirectory: Boolean?)
+    private val pendingLinks = mutableMapOf<String, MutableMap<String, LinkResult>>()
+    private val scheduledLinks = mutableSetOf<String>()
+    private val applyingLinks = mutableSetOf<String>()
 
     /** One displayed tree. Cached listings may be shared, but each view owns its polling lifetime. */
     inner class View : AutoCloseable {
         @Volatile private var visible = emptySet<String>()
         @Volatile private var closed = false
+        private var kept = emptySet<String>()
+        private val awaiting = mutableMapOf<String, Int>()
 
-        fun show(directories: Set<String>) {
+        fun show(directories: Set<String>, keep: Set<String> = directories) {
             if (closed) return
+            retain(keep + awaiting.keys)
             for (key in directories - visible) nextPollAt.remove(key)
             visible = directories
         }
 
-        /** Read cached state only: disk work starts from [poll], after visibility is established. */
-        fun childrenOf(dir: File): Listing? = listings[dir.absolutePath]
+        private fun retain(keys: Set<String>) {
+            for (key in keys - kept) pin(key)
+            val released = kept - keys
+            kept = keys
+            for (key in released) unpin(key)
+        }
+
+        /** Read cached state only; drawing never starts disk work. */
+        fun childrenOf(dir: File): Listing? {
+            touch(dir.absolutePath)
+            return listings[dir.absolutePath]
+        }
 
         suspend fun awaitListed(dir: File) {
             // Revealing an open file may need ancestors beyond the current viewport. This is a
             // one-off navigation read, owned by the view just like its background reads.
             if (closed) return
-            if (dir.absolutePath !in inFlight &&
-                listings[dir.absolutePath] !is Listing.Ready && listings[dir.absolutePath] !is Listing.Failed
-            ) {
-                request(dir, wanted = { !closed })
+            val key = dir.absolutePath
+            awaiting[key] = (awaiting[key] ?: 0) + 1
+            retain(kept + key)
+            try {
+                if (key !in inFlight && listings[key] !is Listing.Ready && listings[key] !is Listing.Failed) {
+                    request(dir, wanted = { !closed })
+                }
+                snapshotFlow { listings[key] }.first { it is Listing.Ready || it is Listing.Failed }
+            } finally {
+                val count = awaiting.getValue(key)
+                if (count == 1) awaiting.remove(key) else awaiting[key] = count - 1
             }
-            snapshotFlow { listings[dir.absolutePath] }.first { it is Listing.Ready || it is Listing.Failed }
         }
 
         fun poll(force: Boolean = false) {
@@ -174,12 +242,60 @@ internal class DirectoryListings(
         }
 
         override fun close() {
+            if (closed) return
             closed = true
             visible = emptySet()
+            retain(emptySet())
+            views.remove(this)
+            if (views.isEmpty()) onIdle()
         }
     }
 
-    fun view(): View = View()
+    fun view(): View = View().also { views.add(it) }
+
+    private fun touch(key: String) {
+        val weight = inactive.remove(key) ?: return
+        inactive[key] = weight
+    }
+
+    private fun pin(key: String) {
+        retained[key] = (retained[key] ?: 0) + 1
+        inactiveChildren -= inactive.remove(key) ?: 0
+    }
+
+    private fun unpin(key: String) {
+        val count = retained[key] ?: return
+        if (count > 1) retained[key] = count - 1 else {
+            retained.remove(key)
+            rememberInactive(key)
+        }
+    }
+
+    private fun rememberInactive(key: String) {
+        if (key in retained || key !in listings) return
+        inactiveChildren -= inactive.remove(key) ?: 0
+        val weight = (listings[key] as? Listing.Ready)?.children?.size ?: 0
+        inactive[key] = weight
+        inactiveChildren += weight
+        while (inactive.size > maxInactiveDirectories || inactiveChildren > maxInactiveChildren) {
+            val oldest = inactive.entries.first()
+            val path = oldest.key
+            inactiveChildren -= oldest.value
+            inactive.remove(path)
+            listings.remove(path)
+            nextPollAt.remove(path)
+        }
+    }
+
+    internal fun retire() {
+        check(!hasViews)
+        retired = true
+        listings.clear()
+        inactive.clear()
+        inactiveChildren = 0
+        nextPollAt.clear()
+        pendingLinks.clear()
+    }
 
     /**
      * What is known of [dir], asking for it if nothing is. Null means it has been asked for and is
@@ -187,14 +303,17 @@ internal class DirectoryListings(
      * "loading" row. Never touches the disk, so it is safe to call while drawing.
      */
     fun childrenOf(dir: File): Listing? {
+        touch(dir.absolutePath)
         val listing = listings[dir.absolutePath]
         if (listing == null) request(dir)
         return listing
     }
 
     /** [dir]'s entries if they are in, without asking for them or subscribing to them. */
-    fun peek(dir: File): List<TreeChild>? =
-        (Snapshot.withoutReadObservation { listings[dir.absolutePath] } as? Listing.Ready)?.children
+    fun peek(dir: File): List<TreeChild>? {
+        touch(dir.absolutePath)
+        return (Snapshot.withoutReadObservation { listings[dir.absolutePath] } as? Listing.Ready)?.children
+    }
 
     /** Suspends until [dir] has been listed, or has failed to be. */
     suspend fun awaitListed(dir: File) {
@@ -208,7 +327,11 @@ internal class DirectoryListings(
      */
     fun refresh(keep: Set<String>) {
         val removed = listings.keys.filter { it !in keep }
-        removed.forEach { listings.remove(it) }
+        removed.forEach {
+            listings.remove(it)
+            inactiveChildren -= inactive.remove(it) ?: 0
+            nextPollAt.remove(it)
+        }
         keep.forEach { key ->
             when (listings[key]) {
                 is Listing.Ready, is Listing.Failed -> request(File(key))
@@ -219,6 +342,7 @@ internal class DirectoryListings(
     }
 
     private fun request(dir: File, wanted: () -> Boolean = { true }) {
+        if (retired) return
         val key = dir.absolutePath
         if (!inFlight.add(key)) {
             askedAgain.add(key)
@@ -236,7 +360,7 @@ internal class DirectoryListings(
             }
             val started = nowMs()
             val result = try {
-                Listing.Ready(read(dir, previous))
+                Listing.Ready(DirectoryChildren.prepare(read(dir, previous), previous))
             } catch (e: IOException) {
                 Listing.Failed(reasonFor(e))
             } catch (e: DirectoryIteratorException) {
@@ -247,6 +371,7 @@ internal class DirectoryListings(
             val costMs = (nowMs() - started).coerceAtLeast(0)
             onUi {
                 inFlight.remove(key)
+                if (retired) return@onUi
                 // At least three seconds, three milliseconds per entry, and a hundred times the
                 // read's duration. Large local directories and slow shares each get their own pace.
                 val entries = (result as? Listing.Ready)?.children?.size ?: 0
@@ -255,35 +380,66 @@ internal class DirectoryListings(
                 if (wanted() && result is Listing.Ready) {
                     result.children
                         .filter { it.link == TreeChild.Link.Pending || it.link == TreeChild.Link.Broken }
-                        .forEach { lookBehind(key, it.file, wanted) }
+                        .forEach { lookBehind(key, it, wanted) }
                 }
                 if (askedAgain.remove(key) && wanted()) request(dir, wanted)
             }
         }
     }
 
-    private fun lookBehind(dirKey: String, link: File, wanted: () -> Boolean = { true }) {
-        val linkKey = link.absolutePath
+    private fun lookBehind(dirKey: String, child: TreeChild, wanted: () -> Boolean = { true }) {
+        val linkKey = child.file.absolutePath
         if (!resolving.add(linkKey)) return
         workers.execute {
             if (!wanted()) {
                 onUi { resolving.remove(linkKey) }
                 return@execute
             }
-            val isDirectory = resolve(link)
+            val isDirectory = resolve(child.file)
             onUi {
-                resolving.remove(linkKey)
-                val current = listings[dirKey] as? Listing.Ready ?: return@onUi
-                val updated = current.children.map { child ->
-                    if (child.file != link) {
-                        child
-                    } else if (isDirectory == null) {
-                        child.copy(isDirectory = false, link = TreeChild.Link.Broken)
-                    } else {
-                        child.copy(isDirectory = isDirectory, link = TreeChild.Link.Resolved)
+                if (retired) {
+                    resolving.remove(linkKey)
+                    return@onUi
+                }
+                pendingLinks.getOrPut(dirKey) { mutableMapOf() }[linkKey] = LinkResult(child, isDirectory)
+                scheduleLinks(dirKey)
+            }
+        }
+    }
+
+    private fun scheduleLinks(dirKey: String) {
+        if (dirKey in applyingLinks || !scheduledLinks.add(dirKey)) return
+        scheduleLinkBatch {
+            scheduledLinks.remove(dirKey)
+            val updates = pendingLinks.remove(dirKey) ?: return@scheduleLinkBatch
+            val current = listings[dirKey] as? Listing.Ready
+            if (current == null || retired) {
+                updates.keys.forEach { resolving.remove(it) }
+                return@scheduleLinkBatch
+            }
+            applyingLinks.add(dirKey)
+            workers.execute {
+                val children = current.children.map { child ->
+                    val result = updates[child.file.absolutePath]?.takeIf { it.child === child }
+                    when {
+                        result == null -> child
+                        result.isDirectory == null -> child.copy(isDirectory = false, link = TreeChild.Link.Broken)
+                        else -> child.copy(isDirectory = result.isDirectory, link = TreeChild.Link.Resolved)
                     }
                 }
-                if (updated != current.children) publish(dirKey, Listing.Ready(updated))
+                val prepared = DirectoryChildren.prepare(children, current.children)
+                onUi {
+                    applyingLinks.remove(dirKey)
+                    if (!retired && listings[dirKey] === current) {
+                        publish(dirKey, Listing.Ready(prepared))
+                        updates.keys.forEach { resolving.remove(it) }
+                    } else if (!retired && listings[dirKey] is Listing.Ready) {
+                        pendingLinks.getOrPut(dirKey) { mutableMapOf() }.putAll(updates)
+                    } else {
+                        updates.keys.forEach { resolving.remove(it) }
+                    }
+                    if (dirKey in pendingLinks) scheduleLinks(dirKey)
+                }
             }
         }
     }
@@ -302,6 +458,7 @@ internal class DirectoryListings(
         if (listings[key] == listing) return
         listings[key] = listing
         version += 1
+        rememberInactive(key)
     }
 
     companion object {
@@ -315,19 +472,49 @@ internal class DirectoryListings(
             Thread(r, "project-tree-timers").apply { isDaemon = true }
         }
 
-        private val byProject = ConcurrentHashMap<Path, DirectoryListings>()
+        private val byProject = ProjectDirectoryListings()
 
         /**
-         * The listings for the project at [path]. Kept for as long as nop runs, so coming back to a
-         * project draws the tree it left rather than starting from nothing.
+         * Recent project listings. Active views are retained; inactive projects share a bounded LRU.
          */
         fun forProject(path: Path): DirectoryListings =
-            byProject.getOrPut(path.toAbsolutePath().normalize()) { DirectoryListings() }
+            byProject.forProject(path)
 
         private fun reasonFor(e: Throwable?): String = when (e) {
             is FileSystemException -> e.reason ?: e.javaClass.simpleName
             null -> "unknown error"
             else -> e.message ?: e.javaClass.simpleName
+        }
+    }
+}
+
+/** UI-thread cache: open projects are pinned, with a small working set of inactive projects. */
+internal class ProjectDirectoryListings(private val maxInactiveProjects: Int = 8) {
+    private val projects = LinkedHashMap<Path, DirectoryListings>(16, .75f, true)
+
+    fun forProject(path: Path): DirectoryListings {
+        val key = path.toAbsolutePath().normalize()
+        val listings = projects.getOrPut(key) { DirectoryListings(onIdle = { becameInactive(key) }) }
+        trim()
+        return listings
+    }
+
+    private fun becameInactive(key: Path) {
+        // Closing an active tree makes it the most recently used inactive project.
+        projects[key]
+        trim()
+    }
+
+    private fun trim() {
+        var inactive = projects.values.count { !it.hasViews }
+        val iterator = projects.entries.iterator()
+        while (inactive > maxInactiveProjects && iterator.hasNext()) {
+            val entry = iterator.next()
+            if (!entry.value.hasViews) {
+                iterator.remove()
+                entry.value.retire()
+                inactive--
+            }
         }
     }
 }

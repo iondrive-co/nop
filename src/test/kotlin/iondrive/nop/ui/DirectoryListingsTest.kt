@@ -9,15 +9,19 @@ import java.nio.file.Path
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertNotSame
 import kotlin.test.assertTrue
 import kotlin.test.fail
 
@@ -284,5 +288,176 @@ class DirectoryListingsTest {
 
         assertEquals(1, reads.get())
         assertEquals(0, looks.get())
+    }
+
+    @Test fun `link results publish together without waiting for a stuck link`(@TempDir tmp: Path) {
+        val completed = AtomicInteger()
+        val batch = AtomicReference<(() -> Unit)?>()
+        val listings = DirectoryListings(
+            read = { dir, _ -> listOf("alpha", "bravo", "stuck").map {
+                TreeChild(File(dir, it), false, TreeChild.Link.Pending)
+            } },
+            resolve = { file -> if (file.name == "stuck") never.await(); file.name == "bravo" },
+            onUi = { publish -> ui.execute { publish(); completed.incrementAndGet() } },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+            scheduleLinkBatch = { batch.set(it) },
+        )
+        val dir = tmp.toFile()
+        onUi { listings.childrenOf(dir) }
+        eventually("collected both responsive links") { completed.get() == 3 && batch.get() != null }
+        val version = onUi { listings.version }
+        assertEquals(TreeChild.Link.Pending, listings.child(dir, "alpha")?.link)
+
+        onUi { batch.getAndSet(null)!!.invoke() }
+        eventually("published both responsive links") {
+            listings.child(dir, "alpha")?.link == TreeChild.Link.Resolved &&
+                listings.child(dir, "bravo")?.isDirectory == true
+        }
+        assertEquals(version + 1, onUi { listings.version })
+        assertEquals(TreeChild.Link.Pending, listings.child(dir, "stuck")?.link)
+    }
+
+    @Test fun `a deferred link result cannot restore a removed entry`(@TempDir tmp: Path) {
+        val contents = AtomicReference(listOf(TreeChild(tmp.resolve("link").toFile(), false, TreeChild.Link.Pending)))
+        val completed = AtomicInteger()
+        val batch = AtomicReference<(() -> Unit)?>()
+        val listings = DirectoryListings(
+            read = { _, _ -> contents.get() },
+            resolve = { true },
+            onUi = { publish -> ui.execute { publish(); completed.incrementAndGet() } },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+            scheduleLinkBatch = { batch.set(it) },
+        )
+        val dir = tmp.toFile()
+        onUi { listings.childrenOf(dir) }
+        eventually("queued the link result") { completed.get() == 2 && batch.get() != null }
+        contents.set(listOf(TreeChild(tmp.resolve("new.txt").toFile(), false)))
+        onUi { listings.refresh(setOf(dir.absolutePath)) }
+        eventually("published the replacement listing") { completed.get() == 3 }
+        onUi { batch.getAndSet(null)!!.invoke() }
+        eventually("finished applying the deferred result") { completed.get() == 4 }
+
+        assertEquals(listOf("new.txt"), onUi { listings.peek(dir) }!!.map { it.name })
+    }
+
+    @Test fun `a link batch cannot overwrite a newer directory scan`(@TempDir tmp: Path) {
+        val link = TreeChild(tmp.resolve("link").toFile(), false, TreeChild.Link.Pending)
+        val contents = AtomicReference(listOf(link))
+        val callbacks = LinkedBlockingDeque<() -> Unit>()
+        val batch = AtomicReference<(() -> Unit)?>()
+        val listings = DirectoryListings(
+            read = { _, _ -> contents.get() },
+            resolve = { true },
+            onUi = { callbacks.addLast(it) },
+            loadingAfterMs = 60_000,
+            notRespondingAfterMs = 60_000,
+            scheduleLinkBatch = { batch.set(it) },
+        )
+        fun callback(): () -> Unit = callbacks.poll(5, TimeUnit.SECONDS) ?: fail("no worker result arrived")
+        val dir = tmp.toFile()
+        onUi { listings.childrenOf(dir) }
+        val initialRead = callback()
+        onUi { initialRead() }
+        val resolved = callback()
+        onUi { resolved(); batch.getAndSet(null)!!.invoke() }
+        val staleBatch = callback()
+
+        contents.set(listOf(link, TreeChild(tmp.resolve("added.txt").toFile(), false)))
+        onUi { listings.refresh(setOf(dir.absolutePath)) }
+        val freshRead = callback()
+        onUi { freshRead(); staleBatch(); batch.getAndSet(null)!!.invoke() }
+        val rebasedBatch = callback()
+        onUi { rebasedBatch() }
+
+        assertEquals(setOf("link", "added.txt"), onUi { listings.peek(dir) }!!.map { it.name }.toSet())
+        assertEquals(true, listings.child(dir, "link")?.isDirectory)
+        assertEquals(TreeChild.Link.Resolved, listings.child(dir, "link")?.link)
+    }
+
+    @Test fun `inactive listings are evicted by weight while active views stay pinned`(@TempDir tmp: Path) {
+        val listings = DirectoryListings(
+            read = { dir, _ -> listOf(TreeChild(File(dir, "item.txt"), false)) },
+            onUi = { ui.execute(it) },
+            maxInactiveChildren = 1,
+            maxInactiveDirectories = 1,
+        )
+        val active = tmp.resolve("active").toFile()
+        val older = tmp.resolve("older").toFile()
+        val newer = tmp.resolve("newer").toFile()
+        val firstView = onUi { listings.view().also { it.show(setOf(active.absolutePath)); it.poll() } }
+        val secondView = onUi { listings.view().also { it.show(setOf(active.absolutePath)) } }
+        eventually("listed the active directory") { onUi { listings.peek(active) } != null }
+        onUi { listings.childrenOf(older) }
+        eventually("listed the older directory") { onUi { listings.peek(older) } != null }
+        onUi { listings.childrenOf(newer) }
+        eventually("listed the newer directory") { onUi { listings.peek(newer) } != null }
+
+        assertNull(onUi { listings.peek(older) })
+        assertTrue(onUi { listings.peek(active) } != null)
+        onUi { firstView.close() }
+        assertTrue(onUi { listings.peek(active) } != null, "the second view still needs the listing")
+        onUi { secondView.close() }
+        assertNull(onUi { listings.peek(newer) })
+        assertTrue(onUi { listings.peek(active) } != null)
+    }
+
+    @Test fun `large active listings can exceed the inactive budget but are released on close`(@TempDir tmp: Path) {
+        val listings = DirectoryListings(
+            read = { dir, _ -> List(3) { TreeChild(File(dir, "item-$it.txt"), false) } },
+            onUi = { ui.execute(it) },
+            maxInactiveChildren = 1,
+        )
+        val dir = tmp.toFile()
+        val view = onUi { listings.view().also { it.show(setOf(dir.absolutePath)); it.poll() } }
+        eventually("listed the active directory") { onUi { listings.peek(dir)?.size } == 3 }
+        onUi { view.close() }
+        assertNull(onUi { listings.peek(dir) })
+    }
+
+    @Test fun `retaining an ancestor protects its cache without polling it`(@TempDir tmp: Path) {
+        val root = tmp.toFile()
+        val child = tmp.resolve("child").toFile()
+        val rootReads = AtomicInteger()
+        val listings = DirectoryListings(
+            read = { dir, _ ->
+                if (dir == root) rootReads.incrementAndGet()
+                listOf(TreeChild(File(dir, "item.txt"), false))
+            },
+            onUi = { ui.execute(it) },
+            maxInactiveChildren = 0,
+        )
+        val view = onUi { listings.view().also {
+            it.show(setOf(child.absolutePath), keep = setOf(root.absolutePath, child.absolutePath))
+            listings.childrenOf(root)
+            it.poll()
+        } }
+        eventually("listed the ancestor and visible child") {
+            onUi { listings.peek(root) != null && listings.peek(child) != null }
+        }
+        onUi { view.poll(force = true) }
+        assertEquals(1, rootReads.get())
+        onUi { view.show(emptySet(), keep = setOf(root.absolutePath)) }
+        assertTrue(onUi { listings.peek(root) } != null)
+        // A read already in flight can finish, but its result is subject to the same inactive budget.
+        eventually("released the inactive child") { onUi { listings.peek(child) } == null }
+        onUi { view.close() }
+        assertNull(onUi { listings.peek(root) })
+    }
+
+    @Test fun `project eviction preserves active views and reuses recent inactive projects`(@TempDir tmp: Path) {
+        val projects = ProjectDirectoryListings(maxInactiveProjects = 1)
+        val first = onUi { projects.forProject(tmp.resolve("first")) }
+        val view = onUi { first.view() }
+        val second = onUi { projects.forProject(tmp.resolve("second")) }
+        assertSame(second, onUi { projects.forProject(tmp.resolve("second")) })
+        onUi { projects.forProject(tmp.resolve("third")) }
+        assertSame(first, onUi { projects.forProject(tmp.resolve("first")) })
+        val reopenedSecond = onUi { projects.forProject(tmp.resolve("second")) }
+        assertNotSame(second, reopenedSecond)
+        onUi { view.close() }
+        assertSame(first, onUi { projects.forProject(tmp.resolve("first")) })
+        assertNotSame(reopenedSecond, onUi { projects.forProject(tmp.resolve("second")) })
     }
 }

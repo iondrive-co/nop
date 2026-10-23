@@ -494,7 +494,7 @@ class DiffViewTest {
         for (scale in listOf(1f, 2f)) {
             val density = Density(scale)
             val px = with(density) { diffContentWidth(70_579, 7.74.dp, density).toPx() }
-            assertTrue(px <= MAX_LINE_CELL_PX + 1, "at density $scale got $px px")
+            assertTrue(px <= MAX_CONTENT_PX + 1, "at density $scale got $px px")
         }
     }
 }

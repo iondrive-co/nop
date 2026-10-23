@@ -459,10 +459,6 @@ private fun FileEditView(
     val isDark = JewelTheme.isDark
     val fg = if (isDark) Color(0xFFBCBEC4) else Color(0xFF000000)
     val palette = if (isDark) HighlightPalette.Dark else HighlightPalette.Light
-    // Word wrap, from the toggle in the tab strip. Off, the field is laid out at the width of the
-    // file's longest line and the viewport scrolls sideways over it; on, it takes the pane's width
-    // and the text engine folds what doesn't fit — which is what a multi-line field does by default.
-    val wrap = LocalWrapLines.current
     val hScroll = edit.hScroll
     val editorStyle = remember(fg) {
         TextStyle(
@@ -487,7 +483,13 @@ private fun FileEditView(
     val longestLine by remember(tab.id) {
         derivedStateOf { longestLineLength(edit.state.text.toString()) }
     }
-    val contentWidth = charWidth * longestLine + CARET_MARGIN
+    // Held to what Compose can lay out — see [capContentWidth]. A longer line is clipped there.
+    val contentWidth = density.capContentWidth(charWidth * longestLine + CARET_MARGIN)
+    // Word wrap, from the toggle in the tab strip. Off, the field is laid out at the width of the
+    // file's longest line and the viewport scrolls sideways over it; on, it takes the pane's width
+    // and the text engine folds what doesn't fit — which is what a multi-line field does by default.
+    // Unless a line is too long to fold in reasonable time: see [MAX_WRAP_LINE_CHARS].
+    val wrap = LocalWrapLines.current && wrapsSafely(longestLine)
     val tokenize = remember(tab.id) { tokenizerForExtension(tab.file.extension) }
     // Tokenize once per text change, not on every OutputTransformation invocation. The
     // transformation below is re-applied on each recomposition (every keystroke, every

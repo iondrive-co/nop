@@ -178,16 +178,19 @@ internal fun computeDirectoryEntries(
     minItemsForEllipsis: Int = Int.MAX_VALUE,
     minRunForEllipsis: Int = 3,
 ): List<TreeEntry> {
-    val (dirs, leafFiles) = children.partition { it.isDirectory }
-    val sortedDirs = dirs.sortedBy { it.file.name.lowercase() }
-    val sortedFiles = leafFiles.sortedBy { it.file.name.lowercase() }
+    val prepared = DirectoryChildren.prepare(children)
+    val sortedDirs = prepared.directories
+    val sortedFiles = prepared.files
+    if (sortedDirs.size <= minItemsForEllipsis && sortedFiles.size <= minItemsForEllipsis) {
+        return prepared.rows
+    }
 
     val entries = mutableListOf<TreeEntry>()
 
     // 1. Process Directories
     if (sortedDirs.size <= minItemsForEllipsis) {
         for (d in sortedDirs) {
-            entries.add(TreeEntry.Node(d))
+            entries.add(d.row)
         }
     } else {
         // A directory is forced-visible if it contains an open file, is expanded, or is an open target
@@ -214,7 +217,7 @@ internal fun computeDirectoryEntries(
         var idx = 0
         while (idx < sortedDirs.size) {
             if (idx in visibleDirIndices) {
-                entries.add(TreeEntry.Node(sortedDirs[idx]))
+                entries.add(sortedDirs[idx].row)
                 idx++
             } else {
                 val hiddenRun = mutableListOf<TreeChild>()
@@ -224,13 +227,13 @@ internal fun computeDirectoryEntries(
                 }
                 if (hiddenRun.size < minRunForEllipsis) {
                     for (d in hiddenRun) {
-                        entries.add(TreeEntry.Node(d))
+                        entries.add(d.row)
                     }
                 } else {
                     val rangeId = "ellipsis:dirs:${dir.absolutePath}:${hiddenRun.first().file.name}..${hiddenRun.last().file.name}"
                     if (rangeId in expandedEllipsisKeys) {
                         for (d in hiddenRun) {
-                            entries.add(TreeEntry.Node(d))
+                            entries.add(d.row)
                         }
                         entries.add(TreeEntry.Collapse(dir, rangeId, hiddenRun.size, isDirectory = true))
                     } else {
@@ -244,7 +247,7 @@ internal fun computeDirectoryEntries(
     // 2. Process Files
     if (sortedFiles.size <= minItemsForEllipsis) {
         for (f in sortedFiles) {
-            entries.add(TreeEntry.Node(f))
+            entries.add(f.row)
         }
         return entries
     }
@@ -269,7 +272,7 @@ internal fun computeDirectoryEntries(
     var idx = 0
     while (idx < sortedFiles.size) {
         if (idx in visibleIndices) {
-            entries.add(TreeEntry.Node(sortedFiles[idx]))
+            entries.add(sortedFiles[idx].row)
             idx++
         } else {
             val hiddenRun = mutableListOf<TreeChild>()
@@ -279,13 +282,13 @@ internal fun computeDirectoryEntries(
             }
             if (hiddenRun.size < minRunForEllipsis) {
                 for (f in hiddenRun) {
-                    entries.add(TreeEntry.Node(f))
+                    entries.add(f.row)
                 }
             } else {
                 val rangeId = "ellipsis:files:${dir.absolutePath}:${hiddenRun.first().file.name}..${hiddenRun.last().file.name}"
                 if (rangeId in expandedEllipsisKeys) {
                     for (f in hiddenRun) {
-                        entries.add(TreeEntry.Node(f))
+                        entries.add(f.row)
                     }
                     entries.add(TreeEntry.Collapse(dir, rangeId, hiddenRun.size, isDirectory = false))
                 } else {
@@ -578,7 +581,7 @@ fun ProjectTreePanel(
         visibleRowKeys.flatMap { rowDirectories[it].orEmpty() }
             .filterTo(mutableSetOf()) { it in expandedDirectories }
     } else emptySet()
-    SideEffect { listingView.show(polledDirectories) }
+    SideEffect { listingView.show(polledDirectories, keep = expandedDirectories + rootId) }
     DisposableEffect(listingView) { onDispose { listingView.close() } }
 
     // Git status can stay unchanged while directory entries move. Each visible directory decides

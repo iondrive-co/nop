@@ -210,32 +210,34 @@ internal fun ReadOnlyDiffList(
             .distinctUntilChanged()
             .collect { idx -> onTopLine(newSideLineAt(rowsForTopLine, idx)) }
     }
-    DiffListScaffold(
-        rows = result.rows,
-        kinds = result.rows.map { it.kind },
-        listState = listState,
-        ratio = splitRatio,
-        onRatioChange = onSplitRatioChange,
-        searchKey = searchKey,
-        findTrigger = findTrigger,
-        oldHeader = oldHeader,
-        newHeader = newHeader,
-        ignoreWhitespace = ignoreWhitespace,
-        onToggleWhitespace = onToggleWhitespace,
-    ) { listModifier ->
-        // One SelectionContainer over the whole list so a drag spans rows — the user can select a
-        // multi-line deleted block on the old (left) side and copy it. Gutters and the right column
-        // opt out via DisableSelection (see ReadOnlyDiffHalf) so the copy is clean left-side text.
-        SelectionContainer {
-            LazyColumn(state = listState, modifier = listModifier) {
-                itemsIndexed(result.rows, key = { index, row ->
-                    when {
-                        row.newLineNumber != null -> "n${row.newLineNumber}"
-                        row.oldLineNumber != null -> "o${row.oldLineNumber}"
-                        else -> "x$index"
+    WrapWithinLimits(result.rows) {
+        DiffListScaffold(
+            rows = result.rows,
+            kinds = result.rows.map { it.kind },
+            listState = listState,
+            ratio = splitRatio,
+            onRatioChange = onSplitRatioChange,
+            searchKey = searchKey,
+            findTrigger = findTrigger,
+            oldHeader = oldHeader,
+            newHeader = newHeader,
+            ignoreWhitespace = ignoreWhitespace,
+            onToggleWhitespace = onToggleWhitespace,
+        ) { listModifier ->
+            // One SelectionContainer over the whole list so a drag spans rows — the user can select a
+            // multi-line deleted block on the old (left) side and copy it. Gutters and the right column
+            // opt out via DisableSelection (see ReadOnlyDiffHalf) so the copy is clean left-side text.
+            SelectionContainer {
+                LazyColumn(state = listState, modifier = listModifier) {
+                    itemsIndexed(result.rows, key = { index, row ->
+                        when {
+                            row.newLineNumber != null -> "n${row.newLineNumber}"
+                            row.oldLineNumber != null -> "o${row.oldLineNumber}"
+                            else -> "x$index"
+                        }
+                    }) { index, row ->
+                        ReadOnlyDiffRowView(row, index)
                     }
-                }) { index, row ->
-                    ReadOnlyDiffRowView(row, index)
                 }
             }
         }
