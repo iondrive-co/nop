@@ -301,6 +301,31 @@ class ActivityTest {
         assertEquals(Activity.Asking, tracker.activity(now = 10))
     }
 
+    /**
+     * The prompt can be on screen before the transcript says which call it holds, since the tailer
+     * reads the call on a later pass. What is already on screen counts once the call is known.
+     */
+    @Test
+    fun `a permission prompt drawn before its call is known counts once it is`() {
+        val tracker = ActivityTracker()
+        tracker.onTitle("◐ Claude Code", at = 0)
+        assertFalse(tracker.onOutput("Do you want to proceed? ❯ 1. Yes  2. No\n"))
+
+        tracker.onEvent(started("toolu_321", "Bash"))
+
+        assertTrue(tracker.onOutput("✻"))
+        assertEquals(Activity.Asking, tracker.activity(now = 0))
+    }
+
+    @Test
+    fun `a queued question is found however much output came before it`() {
+        val tracker = ActivityTracker()
+        repeat(200) { tracker.onOutput("✻ Thinking… (${it}s)\n") }
+
+        assertFalse(tracker.onOutput("? 1 question · alt + "))
+        assertTrue(tracker.onOutput("↑ to answer"))
+    }
+
     @Test
     fun `answering a permission prompt returns the tab to working`() {
         val tracker = ActivityTracker()

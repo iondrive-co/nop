@@ -90,4 +90,44 @@ class FileIndexTest {
         val idx = FileIndex.build(project)
         assertEquals(listOf("alias/Main.kt", "src/Main.kt"), idx.files)
     }
+
+    @Test
+    fun `files are listed case-insensitively`() {
+        val idx = FileIndex.of(listOf("b.txt", "a/c.txt", "B/d.txt", "A.txt"))
+        assertEquals(listOf("A.txt", "a/c.txt", "b.txt", "B/d.txt"), idx.files)
+    }
+
+    /** The index rebuild takes its file list from the symbol walk, so the two must agree exactly. */
+    @Test
+    fun `the symbol walk lists the same files as the file index`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project")
+        val elsewhere = tmp.resolve("share")
+        Files.createDirectories(elsewhere.resolve("bulk"))
+        Files.writeString(elsewhere.resolve("bulk/big.json"), "")
+        Files.createDirectories(project.resolve("src/main/kotlin/app"))
+        Files.writeString(project.resolve("src/main/kotlin/app/Main.kt"), "fun main() {}\n")
+        Files.createDirectories(project.resolve("src/main/java/app"))
+        Files.writeString(project.resolve("src/main/java/app/Tool.java"), "class Tool {}\n")
+        Files.createDirectories(project.resolve("roles/web/tasks"))
+        Files.writeString(project.resolve("roles/web/tasks/main.yml"), "- name: hello\n")
+        Files.createDirectories(project.resolve(".claude"))
+        Files.writeString(project.resolve(".claude/settings.json"), "{}")
+        Files.createDirectories(project.resolve("node_modules/dep"))
+        Files.writeString(project.resolve("node_modules/dep/index.js"), "")
+        Files.writeString(project.resolve("README.md"), "")
+        Files.createSymbolicLink(project.resolve("data"), elsewhere.resolve("bulk"))
+        Files.createSymbolicLink(project.resolve("alias"), project.resolve("src/main/kotlin"))
+
+        val walked = mutableListOf<String>()
+        Indexer.build(project, files = walked)
+
+        assertEquals(FileIndex.build(project).files, FileIndex.of(walked).files)
+        assertEquals(
+            listOf(
+                ".claude/settings.json", "alias/app/Main.kt", "README.md", "roles/web/tasks/main.yml",
+                "src/main/java/app/Tool.java", "src/main/kotlin/app/Main.kt",
+            ),
+            FileIndex.of(walked).files,
+        )
+    }
 }

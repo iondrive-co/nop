@@ -22,9 +22,18 @@ class FileIndex(val files: List<String> = emptyList()) {
             if (!rootFile.isDirectory) return FileIndex()
             val out = ArrayList<String>()
             walk(rootFile, rootFile, out)
-            out.sortBy { it.lowercase() }
-            return FileIndex(out)
+            return of(out)
         }
+
+        /**
+         * The index of [paths] — project-relative, as [build] or [Indexer.build]'s file list gives
+         * them — in the order the search dialog lists them: case-insensitive.
+         *
+         * Compared in place rather than by a lower-cased copy of each path: a sort keyed on
+         * `lowercase()` makes two copies per comparison, which on a project of a hundred thousand
+         * files is several million strings and most of the time an index rebuild takes.
+         */
+        fun of(paths: Collection<String>): FileIndex = FileIndex(paths.sortedWith(String.CASE_INSENSITIVE_ORDER))
 
         private fun walk(root: File, dir: File, out: MutableList<String>) {
             val children = dir.listFiles() ?: return

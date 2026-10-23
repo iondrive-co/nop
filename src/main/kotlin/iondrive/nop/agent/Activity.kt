@@ -210,6 +210,13 @@ class ActivityTracker {
     private var asyncQuestion = false
     private val recentOutput = StringBuilder()
 
+    /**
+     * Whether [PERMISSION_PROMPT] has yet to be looked for in the whole of [recentOutput]. It is only
+     * looked for while a call is open, so the text that was already there when one opened has not
+     * been read for it.
+     */
+    private var promptUnread = false
+
     fun onTitle(text: String, at: Long) {
         // The same title again is not news, and must not restart the wait for stillness — Claude
         // Code rewrites a stopped title now and then without anything having changed.
@@ -228,14 +235,20 @@ class ActivityTracker {
             recentOutput.delete(0, recentOutput.length - RECENT_OUTPUT_WINDOW)
         }
         if (hasQueuedQuestion) return false
+        // Every pass leaves the window holding no question (finding one sets the flag, and clearing
+        // the flag clears the window), so only a match the new text completes can be news: one that
+        // starts at most [LOOKBACK] before it. Searching all of it again on every frame a TUI
+        // redraws is what this saves.
+        val from = (recentOutput.length - clean.length - LOOKBACK).coerceAtLeast(0)
         // A permission prompt only ever holds a tool call, so outside one the same words are the
         // agent talking about a prompt, not showing one.
-        if (QUEUED_QUESTION.containsMatchIn(recentOutput) ||
-            (open.isNotEmpty() && PERMISSION_PROMPT.containsMatchIn(recentOutput))
+        if (QUEUED_QUESTION.find(recentOutput, from) != null ||
+            (open.isNotEmpty() && PERMISSION_PROMPT.find(recentOutput, if (promptUnread) 0 else from) != null)
         ) {
             hasQueuedQuestion = true
             return true
         }
+        if (open.isNotEmpty()) promptUnread = false
         return false
     }
 
@@ -262,6 +275,7 @@ class ActivityTracker {
             }
             is AgentEvent.ToolStarted -> {
                 open[event.callId] = event.tool
+                promptUnread = true
                 if (event.tool == ASYNC_QUESTION_TOOL) asyncQuestion = true
             }
             is AgentEvent.ToolFinished -> {
@@ -286,6 +300,7 @@ class ActivityTracker {
     fun restore(from: Snapshot, now: Long) {
         open.clear()
         open.putAll(from.openCalls)
+        promptUnread = true
         asyncQuestion = from.asyncQuestion
         from.title?.let { onTitle(it, now) }
     }
@@ -348,5 +363,8 @@ class ActivityTracker {
         )
 
         private const val RECENT_OUTPUT_WINDOW = 4096
+
+        /** How far before the newest output a question may start: room for a prompt and its answers. */
+        private const val LOOKBACK = 512
     }
 }

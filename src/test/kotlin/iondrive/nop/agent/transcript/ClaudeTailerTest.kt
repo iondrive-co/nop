@@ -226,6 +226,32 @@ class ClaudeTailerTest {
         assertEquals("second", tailer.nativeSessionId(), "the new id is what a native reopen resumes")
     }
 
+    /** The directory is listed again only when its mtime moves, which filing a new session does. */
+    @Test
+    fun `a fresh start filed after the directory was last listed is still followed`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val config = tmp.resolve("config")
+        val dir = slugDir(config, project)
+        val startedAt = System.currentTimeMillis()
+        val first = dir.resolve("first.jsonl")
+        Files.writeString(first, "{}\n")
+        Files.setLastModifiedTime(first, FileTime.fromMillis(startedAt))
+        // Long enough ago that the listing below is kept rather than taken again on the next pass.
+        Files.setLastModifiedTime(dir, FileTime.fromMillis(startedAt - 60_000))
+
+        val tailer = ClaudeTailer(config)
+        val run = RunContext(project, config, "first", startedAt)
+        assertEquals(first, tailer.locate(run))
+        assertNull(tailer.switched(run, first))
+        assertNull(tailer.switched(run, first))
+
+        val second = dir.resolve("second.jsonl")
+        Files.writeString(second, prompt())
+        Files.setLastModifiedTime(second, FileTime.fromMillis(startedAt + 5_000))
+
+        assertEquals(second, tailer.switched(run, first))
+    }
+
     /**
      * The other thing that puts a newer transcript in this directory: a second agent tab on the same
      * project. It looks identical to a `/clear` on disk — a file that appeared after this run

@@ -5,6 +5,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
@@ -130,7 +134,7 @@ fun UsageIndicator(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         accounts.forEach { account ->
-            key(account.name) { UsageChip(account, readings[account.name], onClick) }
+            key(account.name) { UsageChip(account, readings[account.name]) }
         }
         // One item, so a wrap never puts the backup's mark on a different row from the gear.
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -153,17 +157,14 @@ private val FALLBACK_MAX_WIDTH = 800.dp
 private val MIN_WIDTH = 120.dp
 
 /**
- * One account's name and bars. A click lists every limit the account has (see [showLimitsPopup]),
+ * One account's name and bars. Hovering it lists every limit the account has (see [LimitsList]),
  * which the two bars leave out: another model family's allowance, a cap on one model.
  */
+@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun UsageChip(account: Account, reading: UsageReading?, onAccounts: () -> Unit) {
-    val window = LocalWindow.current
-    val isDark = JewelTheme.isDark
+private fun UsageChip(account: Account, reading: UsageReading?) {
+    Tooltip(tooltip = { LimitsList(account, reading) }) {
     Row(
-        modifier = Modifier.clickable {
-            if (window != null) showLimitsPopup(window, isDark, account, reading, onAccounts) else onAccounts()
-        },
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -193,12 +194,13 @@ private fun UsageChip(account: Account, reading: UsageReading?, onAccounts: () -
             else -> {
                 // Session first, week second. A window the account does not have — a weekly-only
                 // plan such as Codex's Business Pro Lite has no session one — takes no space; the
-                // tooltip says which window a lone bar is.
-                UsageBar("session", reading.session, reading.weeklyPace(), reading.paceSource)
-                UsageBar("week", reading.weekly)
-                if (reading.note != null) StaleMark(reading)
+                // chip's tooltip says which window a lone bar is.
+                UsageBar("session", reading.session, reading.weeklyPace(), hover = false)
+                UsageBar("week", reading.weekly, hover = false)
+                if (reading.note != null) Text(staleAge(reading), color = AgentMuted, maxLines = 1)
             }
         }
+    }
     }
 }
 
@@ -225,6 +227,8 @@ internal fun UsageBar(
     window: UsageWindow?,
     weeklyPace: Double? = null,
     paceSource: PaceSource? = null,
+    /** Whether the bar has a tooltip of its own; off where whatever holds it has one that says more. */
+    hover: Boolean = true,
 ) {
     val track = if (JewelTheme.isDark) Color(0xFF3C3F41) else Color(0xFFE3E5E9)
     // Nothing, not an empty track: an empty track is what 0% looks like, and a plan with no such
@@ -235,7 +239,7 @@ internal fun UsageBar(
     val marker = with(LocalDensity.current) { MARKER_WIDTH.toPx() }
     val paceColor = if (JewelTheme.isDark) PACE_MARKER_DARK else PACE_MARKER_LIGHT
     val paceWidth = with(LocalDensity.current) { PACE_MARKER_WIDTH.toPx() }
-    Tooltip(tooltip = { Text(tooltipLine(label, window, weeklyPace, paceSource)) }) {
+    val bar = @Composable {
         Canvas(modifier = Modifier.size(BAR_WIDTH, BAR_HEIGHT)) {
             drawTrack(track)
             val width = (size.width * (window.percent / 100.0)).toFloat().coerceIn(0f, size.width)
@@ -273,23 +277,11 @@ internal fun UsageBar(
             }
         }
     }
+    if (hover) Tooltip(tooltip = { Text(tooltipLine(label, window, weeklyPace, paceSource)) }) { bar() } else bar()
 }
 
 private fun DrawScope.drawTrack(color: Color) {
     drawRoundRect(color = color, cornerRadius = CornerRadius(size.height / 2, size.height / 2))
-}
-
-/**
- * How old the bars beside it are, for a reading the provider did not refresh — see
- * [UsageReading.note]. The bars look the same fresh or stale, and a stale 4% and a live 4% are
- * different facts.
- */
-@OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
-@Composable
-private fun StaleMark(reading: UsageReading) {
-    Tooltip(tooltip = { Text(staleLine(reading) ?: "") }) {
-        Text(staleAge(reading), color = AgentMuted, maxLines = 1)
-    }
 }
 
 /** "12m old", or "old" when the reading does not say when it was taken. */
@@ -316,14 +308,17 @@ internal fun tooltipLine(
     paceSource: PaceSource? = null,
 ): String {
     val eta = window.eta()?.let { ", resets in $it" } ?: ""
-    val pace = when {
-        weeklyPace == null -> ""
-        paceSource == null -> ", weekly pace not known yet"
-        paceSource == PaceSource.Transcripts ->
-            ", aim for ~${Math.round(weeklyPace)}% for the week (estimated from transcripts)"
-        else -> ", aim for ${Math.round(weeklyPace)}% for the week"
-    }
+    val pace = paceNote(weeklyPace, paceSource)?.let { ", $it" } ?: ""
     return "${window.percent.toInt()}% of the $label window$eta$pace"
+}
+
+/** What the session bar's grey line means, or null when there is none. */
+internal fun paceNote(weeklyPace: Double?, paceSource: PaceSource?): String? = when {
+    weeklyPace == null -> null
+    paceSource == null -> "weekly pace not known yet"
+    paceSource == PaceSource.Transcripts ->
+        "aim for ~${Math.round(weeklyPace)}% for the week (estimated from transcripts)"
+    else -> "aim for ${Math.round(weeklyPace)}% for the week"
 }
 
 /**
@@ -498,19 +493,19 @@ internal fun usageLine(reading: UsageReading?): String {
     return parts.joinToString("   ") + (staleLine(reading)?.let { "   ($it)" } ?: "")
 }
 
-/** One row of the limits popup: what the limit is, how much of it is spent, and when it resets. */
-internal data class LimitLine(val label: String, val percent: Double?, val detail: String)
+/** One row of the limits list: what the limit is, its window, and when it resets. */
+internal data class LimitLine(val label: String, val window: UsageWindow?, val detail: String)
 
 /**
- * Every limit [reading] knows for [account], in the order the popup lists them: the session and
- * weekly windows nop governs the account by, then the provider's others. A reading with no windows
- * is one line saying why.
+ * Every limit [reading] knows, in the order [LimitsList] shows them: the session and weekly windows
+ * nop governs the account by, then the provider's others. A reading with no windows is one line
+ * saying why.
  */
 internal fun limitLines(reading: UsageReading?, now: Instant = Instant.now()): List<LimitLine> {
     if (reading == null) return listOf(LimitLine("Not read yet", null, ""))
     reading.unavailable?.let { return listOf(LimitLine(it, null, "")) }
     fun line(label: String, window: UsageWindow) =
-        LimitLine(label, window.percent, window.eta(now)?.let { "resets in $it" } ?: "")
+        LimitLine(label, window, window.eta(now)?.let { "resets in $it" } ?: "")
     val own = reading.pool?.let { "$it · " } ?: ""
     val lines = buildList {
         reading.session?.let { add(line("${own}session", it)) }
@@ -521,109 +516,43 @@ internal fun limitLines(reading: UsageReading?, now: Instant = Instant.now()): L
 }
 
 /**
- * The limits popup for one account: a heavyweight Swing popup, like the agent tabs' context menu
- * ([showTabContextMenu]), because the strip floats over the terminal and a Compose popup is drawn
- * underneath it. Ends with the way into the accounts dialog, which a click on the strip opens.
+ * The chip's tooltip: every limit of the account, a column each for name, bar, percent and reset so
+ * the rows line up, then what the grey line means and how old a stale reading is.
  */
-private fun showLimitsPopup(
-    window: java.awt.Window,
-    isDark: Boolean,
-    account: Account,
-    reading: UsageReading?,
-    onAccounts: () -> Unit,
-) {
-    val mouse = java.awt.MouseInfo.getPointerInfo()?.location ?: return
-    val at = java.awt.Point(mouse)
-    javax.swing.SwingUtilities.convertPointFromScreen(at, window)
-    val menu = limitsPopup(isDark, account, reading, onAccounts)
-    // Above the pointer: the strip sits at the bottom of the window, with no room below it.
-    menu.show(window, at.x, at.y - menu.preferredSize.height)
-}
-
-/** The popup [showLimitsPopup] shows, built but not yet on screen. */
-internal fun limitsPopup(
-    isDark: Boolean,
-    account: Account,
-    reading: UsageReading?,
-    onAccounts: () -> Unit,
-): javax.swing.JPopupMenu {
-    val bg = if (isDark) java.awt.Color(0x2B, 0x2D, 0x30) else java.awt.Color.WHITE
-    val fg = if (isDark) java.awt.Color(0xDF, 0xE1, 0xE5) else java.awt.Color(0x1F, 0x23, 0x29)
-    val muted = if (isDark) java.awt.Color(0x8C, 0x90, 0x97) else java.awt.Color(0x6F, 0x73, 0x7A)
-    val track = if (isDark) java.awt.Color(0x3C, 0x3F, 0x41) else java.awt.Color(0xE3, 0xE5, 0xE9)
-    val borderColor = if (isDark) java.awt.Color(0x43, 0x45, 0x4A) else java.awt.Color(0xD0, 0xD2, 0xD5)
-    val font = java.awt.Font(java.awt.Font.SANS_SERIF, java.awt.Font.PLAIN, 12)
-
-    fun label(text: String, color: java.awt.Color, bold: Boolean = false) = javax.swing.JLabel(text).apply {
-        this.font = if (bold) font.deriveFont(java.awt.Font.BOLD) else font
-        foreground = color
-    }
-
-    val grid = javax.swing.JPanel(java.awt.GridBagLayout()).apply {
-        background = bg
-        border = javax.swing.BorderFactory.createEmptyBorder(6, 14, 6, 14)
-    }
-    fun cell(x: Int, y: Int, width: Int = 1) = java.awt.GridBagConstraints().apply {
-        gridx = x
-        gridy = y
-        gridwidth = width
-        anchor = java.awt.GridBagConstraints.WEST
-        insets = java.awt.Insets(3, 0, 3, if (x < 3) 12 else 0)
-    }
-    val title = account.model?.let { "${account.name}  ($it)" } ?: account.name
-    grid.add(label(title, fg, bold = true), cell(0, 0, 4).apply { insets = java.awt.Insets(0, 0, 6, 0) })
-    limitLines(reading).forEachIndexed { i, line ->
-        val y = i + 1
-        grid.add(label(line.label, fg), cell(0, y))
-        val percent = line.percent ?: return@forEachIndexed
-        grid.add(PercentBar(percent, usageColor(percent).toAwt(), track), cell(1, y))
-        grid.add(label("${percent.toInt()}%", fg), cell(2, y).apply { anchor = java.awt.GridBagConstraints.EAST })
-        grid.add(label(line.detail, muted), cell(3, y))
-    }
-    reading?.let(::staleLine)?.let {
-        grid.add(label(it, muted), cell(0, limitLines(reading).size + 1, 4))
-    }
-
-    return javax.swing.JPopupMenu().apply {
-        isLightWeightPopupEnabled = false
-        background = bg
-        border = javax.swing.BorderFactory.createLineBorder(borderColor, 1)
-        add(grid)
-        add(javax.swing.JSeparator().apply { foreground = borderColor; background = bg })
-        add(
-            javax.swing.JMenuItem("Agent accounts…").apply {
-                this.font = font
-                background = bg
-                foreground = fg
-                border = javax.swing.BorderFactory.createEmptyBorder(5, 14, 5, 14)
-                addActionListener { onAccounts() }
-            },
-        )
+@Composable
+private fun LimitsList(account: Account, reading: UsageReading?) {
+    val lines = limitLines(reading)
+    val pace = reading?.weeklyPace()
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(account.model?.let { "${account.name}  ($it)" } ?: account.name, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) { lines.forEach { Text(it.label) } }
+            if (lines.any { it.window != null }) {
+                Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
+                    lines.forEach { line ->
+                        Box(Modifier.height(textLineHeight()), contentAlignment = Alignment.Center) {
+                            val session = line.window != null && line.window === reading?.session
+                            UsageBar(line.label, line.window, if (session) pace else null, hover = false)
+                        }
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP), horizontalAlignment = Alignment.End) {
+                    lines.forEach { Text(it.window?.let { w -> "${w.percent.toInt()}%" } ?: "") }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) {
+                    lines.forEach { Text(it.detail, color = AgentMuted) }
+                }
+            }
+        }
+        if (reading?.session != null) paceNote(pace, reading.paceSource)?.let { Text("Session: $it", color = AgentMuted) }
+        reading?.let(::staleLine)?.let { Text(it, color = AgentMuted) }
     }
 }
 
-/** The strip's bar, for the popup: the spent fraction of a rounded track. */
-private class PercentBar(
-    private val percent: Double,
-    private val fill: java.awt.Color,
-    private val track: java.awt.Color,
-) : javax.swing.JComponent() {
-    init {
-        preferredSize = java.awt.Dimension(80, 8)
-    }
+private val ROW_GAP = 3.dp
 
-    override fun paintComponent(g: java.awt.Graphics) {
-        val g2 = g.create() as java.awt.Graphics2D
-        g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
-        val y = (height - 8) / 2
-        val bar = java.awt.geom.RoundRectangle2D.Float(0f, y.toFloat(), width.toFloat(), 8f, 8f, 8f)
-        g2.color = track
-        g2.fill(bar)
-        g2.clip(java.awt.Rectangle(0, 0, (width * percent / 100.0).toInt().coerceIn(0, width), height))
-        g2.color = fill
-        g2.fill(bar)
-        g2.dispose()
-    }
+/** The height of one line of tooltip text, so a bar sits level with the text beside it. */
+@Composable
+private fun textLineHeight(): Dp = with(LocalDensity.current) {
+    JewelTheme.defaultTextStyle.lineHeight.takeIf { it.isSp }?.toDp() ?: 16.dp
 }
-
-private fun Color.toAwt() = java.awt.Color(red, green, blue, alpha)

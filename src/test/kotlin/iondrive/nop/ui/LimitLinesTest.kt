@@ -13,22 +13,25 @@ class LimitLinesTest {
 
     @Test
     fun `the account's own windows come first, named by their pool, then every other limit`() {
+        val weekly = UsageWindow(30.0, now.plus(Duration.ofDays(3)), Duration.ofDays(7))
+        val gemini = UsageWindow(4.0, now.plus(Duration.ofMinutes(90)))
+        val geminiWeek = UsageWindow(19.0, null)
         val reading = UsageReading(
             session = null,
-            weekly = UsageWindow(30.0, now.plus(Duration.ofDays(3)), Duration.ofDays(7)),
+            weekly = weekly,
             asOf = now,
             pool = "Gemini 9 Basalt",
             others = listOf(
-                OtherLimit("Gemini Models · session", UsageWindow(4.0, now.plus(Duration.ofMinutes(90)))),
-                OtherLimit("Gemini Models · weekly", UsageWindow(19.0, null)),
+                OtherLimit("Gemini Models · session", gemini),
+                OtherLimit("Gemini Models · weekly", geminiWeek),
             ),
         )
 
         assertEquals(
             listOf(
-                LimitLine("Gemini 9 Basalt · weekly", 30.0, "resets in 3d"),
-                LimitLine("Gemini Models · session", 4.0, "resets in 1h 30m"),
-                LimitLine("Gemini Models · weekly", 19.0, ""),
+                LimitLine("Gemini 9 Basalt · weekly", weekly, "resets in 3d"),
+                LimitLine("Gemini Models · session", gemini, "resets in 1h 30m"),
+                LimitLine("Gemini Models · weekly", geminiWeek, ""),
             ),
             limitLines(reading, now),
         )

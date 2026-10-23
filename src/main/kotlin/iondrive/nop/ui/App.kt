@@ -564,9 +564,11 @@ fun App(
         // it is current as of cacheStamp. An unusable cache gives nothing to reuse.
         val buildStarted = System.currentTimeMillis()
         val previousSymbols = symbolIndex.takeIf { symbolCacheUsable }
-        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath, previousSymbols, cacheStamp) }
+        // The symbol walk lists every file as it goes, which is the file index: one walk, not two.
+        val walked = ArrayList<String>()
+        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath, previousSymbols, cacheStamp, walked) }
         symbolIndex = freshSymbols
-        val freshFiles = withContext(Dispatchers.IO) { FileIndex.build(rootPath) }
+        val freshFiles = withContext(Dispatchers.Default) { FileIndex.of(walked) }
         fileIndex = freshFiles
         withContext(Dispatchers.IO) {
             SymbolIndex.save(indexFile, freshSymbols)

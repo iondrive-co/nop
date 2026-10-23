@@ -1,5 +1,7 @@
 package iondrive.nop.ui
 
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import iondrive.nop.diff.DiffRow
 import iondrive.nop.diff.RowKind
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -478,5 +480,21 @@ class DiffViewTest {
     fun `maxDiffLineLength is zero for an empty diff`() {
         assertEquals(0, maxDiffLineLength(emptyList(), DiffSide.OLD))
         assertEquals(0, maxDiffLineLength(emptyList(), DiffSide.NEW))
+    }
+
+    @Test
+    fun `diffContentWidth is the longest line plus its end pad`() {
+        assertEquals(10.dp * 7 + LINE_END_PAD, diffContentWidth(10, 7.dp, Density(1f)))
+    }
+
+    @Test
+    fun `diffContentWidth stays measurable for a 70k-character line`() {
+        // docs/IDEAS.md in hermes had a 70579-char line: at 7.74px a char that asked Compose for a
+        // 546566px cell, which it cannot represent, and nop died on launch restoring the tab.
+        for (scale in listOf(1f, 2f)) {
+            val density = Density(scale)
+            val px = with(density) { diffContentWidth(70_579, 7.74.dp, density).toPx() }
+            assertTrue(px <= MAX_LINE_CELL_PX + 1, "at density $scale got $px px")
+        }
     }
 }

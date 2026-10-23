@@ -53,27 +53,35 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
      */
     fun feed(text: String) = synchronized(this) {
         if (fired || text.isEmpty()) return
-        tail.append(stripAnsi(text))
+        val clean = stripAnsi(text)
+        tail.append(clean)
         if (tail.length > WINDOW) tail.delete(0, tail.length - WINDOW)
 
-        // Nothing below can match a window that does not hold one of [ANCHORS], and this is the
-        // path every chunk of output from every agent takes. Without it each read copies the whole
-        // window out of the builder and runs two thirty-branch alternations over all of it, so the
-        // cost is set by the window size and the read rate rather than by how much text arrived:
-        // profiled with nine agents running it was a third of nop's CPU, almost all of it spent
-        // deciding that ordinary output is ordinary. Scanning for plain words touches each
-        // character once and allocates nothing.
-        if (!tail.holdsAnAnchor()) return
+        // Every feed leaves the window holding no match — it fired, it was cleared, or it was
+        // looked at and found to hold none — so a match can only be one the new text completes,
+        // which ends inside it and starts at most [LOOKBACK] before it. Searching from there rather
+        // than from the top is what keeps an anchor word sitting in the window (a project whose
+        // output is full of "limit") from costing both full alternations over all of it again on
+        // every frame the TUI redraws until the word scrolls out.
+        val from = (tail.length - clean.length - LOOKBACK).coerceAtLeast(0)
+
+        // Nothing below can match text that does not hold one of [ANCHORS], and this is the path
+        // every chunk of output from every agent takes. Without it each read runs two thirty-branch
+        // alternations, almost all of it spent deciding that ordinary output is ordinary. Scanning
+        // for plain words touches each character once and allocates nothing.
+        if (!tail.holdsAnAnchor(from)) return
 
         val window = tail.toString()
         // Overload first, and deliberately. "The model is at capacity" matches several of the quota
         // patterns below but means the opposite thing: it is transient, the CLI retries by itself,
         // and killing a working session over it would be the worst bug this feature could have.
-        if (OVERLOAD.containsMatchIn(window)) {
+        // Searching only the new part loses nothing here either: an overload already in the window
+        // would have cleared it when it arrived.
+        if (OVERLOAD.find(window, from) != null) {
             tail.setLength(0)
             return
         }
-        val match = QUOTA.find(window) ?: return
+        val match = QUOTA.find(window, from) ?: return
         fired = true
         val line = lineAround(window, match.range.first)
         onHit(
@@ -110,9 +118,10 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
     }
 
     /**
-     * Whether the window holds any word that [OVERLOAD] or [QUOTA] would need in order to match.
+     * Whether the window, from [from] on, holds any word that [OVERLOAD] or [QUOTA] would need in
+     * order to match there.
      *
-     * Every branch of both patterns contains at least one of [ANCHORS], so a window with none of
+     * Every branch of both patterns contains at least one of [ANCHORS], so text with none of
      * them cannot match either — which is the overwhelming majority of terminal output. Kept
      * honest by `every phrase the watcher fires on carries an anchor`, which feeds one line per
      * branch through [feed] and would fail the moment a pattern gained a word this does not know.
@@ -121,8 +130,8 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
      * the window, because allocating a copy of the window per read is among the costs this exists
      * to remove. [ANCHOR_STARTS] makes the common character a single array lookup.
      */
-    private fun StringBuilder.holdsAnAnchor(): Boolean {
-        for (i in 0 until length) {
+    private fun StringBuilder.holdsAnAnchor(from: Int): Boolean {
+        for (i in from until length) {
             val c = this[i]
             // One array lookup per character, and nothing else: [BY_FIRST] is indexed by the raw
             // character and holds both cases, so the scan never has to case-fold. Folding here
@@ -173,6 +182,13 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
     companion object {
         /** How much recent output is kept. A limit message and its context fit in far less. */
         private const val WINDOW = 4096
+
+        /**
+         * How far before the newest text a match may start. The longest phrase is under forty
+         * characters as the vendors write it; the rest is room for the whitespace `\s+` allows and
+         * for what a `.*` pattern spans on its line.
+         */
+        private const val LOOKBACK = 512
 
         /**
          * One word from every branch of [OVERLOAD] and [QUOTA], lower-cased.

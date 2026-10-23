@@ -85,6 +85,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -280,9 +281,21 @@ internal fun rememberDiffSideScroll(rows: List<DiffRow>, side: DiffSide): DiffSi
         val sample = measurer.measure("0".repeat(ADVANCE_SAMPLE), DIFF_TEXT_STYLE).size.width
         with(density) { (sample / ADVANCE_SAMPLE.toFloat()).toDp() }
     }
-    val contentWidth = remember(longest, charWidth) { charWidth * longest + LINE_END_PAD }
+    val contentWidth = remember(longest, charWidth, density) { diffContentWidth(longest, charWidth, density) }
     return remember(state, contentWidth, charWidth) { DiffSideScroll(state, contentWidth, charWidth) }
 }
+
+/**
+ * The widest a line cell may be, in px. Compose packs a measurement's constraints into one Long, and
+ * a row's small height leaves the width 18 bits, so a cell past 262142px throws from measure — a
+ * 70k-character line in a diff did, on every launch that restored its tab. Past this, a line is
+ * clipped instead of scrolling to its end.
+ */
+internal const val MAX_LINE_CELL_PX = 200_000f
+
+/** Width of a line cell holding [longest] characters of [charWidth], capped at [MAX_LINE_CELL_PX]. */
+internal fun diffContentWidth(longest: Int, charWidth: Dp, density: Density): Dp =
+    with(density) { minOf(charWidth * longest + LINE_END_PAD, MAX_LINE_CELL_PX.toDp()) }
 
 /** Longest line of [side], in characters — the monospace stand-in for "widest". */
 internal fun maxDiffLineLength(rows: List<DiffRow>, side: DiffSide): Int {

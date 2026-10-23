@@ -38,13 +38,22 @@ object Indexer {
      * it. A file declaring nothing is parsed every time, which for a `package-info.java` is nothing.
      * What this cannot see is a file replaced in place by one with an older mtime (`cp -p` over it);
      * that keeps its old entries until it is next touched.
+     *
+     * Given [files], it also collects the project-relative path of every file the walk reaches —
+     * the same list [FileIndex.build] walks the tree for, so a caller that wants both pays for one
+     * walk instead of two. On a large project the walk is half of what a rebuild costs.
      */
-    fun build(projectRoot: Path, previous: SymbolIndex? = null, since: Long = 0L): SymbolIndex {
+    fun build(
+        projectRoot: Path,
+        previous: SymbolIndex? = null,
+        since: Long = 0L,
+        files: MutableList<String>? = null,
+    ): SymbolIndex {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return SymbolIndex()
         val out = mutableListOf<IndexEntry>()
         val javaFiles = mutableListOf<File>()
-        walk(rootFile, rootFile, out, javaFiles)
+        walk(rootFile, rootFile, "", out, javaFiles, files)
         val known = if (previous != null && since > 0L) javaEntriesByFile(previous) else emptyMap()
         val reused = mutableListOf<IndexEntry>()
         val toParse = javaFiles.filter { file ->
@@ -148,16 +157,30 @@ object Indexer {
         return count != cachedFileCount
     }
 
-    private fun walk(root: File, dir: File, out: MutableList<IndexEntry>, javaFiles: MutableList<File>) {
-        val files = dir.listFiles() ?: return
-        for (f in files) {
+    /**
+     * [prefix] is [dir]'s path relative to [root] with a trailing `/`, or empty for the root itself.
+     * Children come from `listFiles` on a normalised root, so a child's relative path is the prefix
+     * and its name — the answer [relPath] would give, without two path normalisations per file.
+     */
+    private fun walk(
+        root: File,
+        dir: File,
+        prefix: String,
+        out: MutableList<IndexEntry>,
+        javaFiles: MutableList<File>,
+        files: MutableList<String>?,
+    ) {
+        val children = dir.listFiles() ?: return
+        for (f in children) {
             if (f.name in IGNORED_DIR_NAMES) continue
             if (ProjectWalk.leavesProject(root, f)) continue
+            val rel = prefix + f.name
             if (f.isDirectory) {
                 indexDirectory(root, f, out)
-                walk(root, f, out, javaFiles)
+                walk(root, f, "$rel/", out, javaFiles, files)
             } else if (f.isFile) {
-                if (f.extension.equals("java", ignoreCase = true)) javaFiles += f else indexFile(root, f, out)
+                files?.add(rel)
+                if (f.extension.equals("java", ignoreCase = true)) javaFiles += f else indexFile(f, rel, out)
             }
         }
     }
@@ -176,8 +199,7 @@ object Indexer {
 
     // ---- file-shaped definitions --------------------------------------------------------------
 
-    private fun indexFile(root: File, file: File, out: MutableList<IndexEntry>) {
-        val rel = relPath(root, file)
+    private fun indexFile(file: File, rel: String, out: MutableList<IndexEntry>) {
         val parts = rel.split('/')
         val parent = parts.getOrNull(parts.size - 2)
         val ext = file.extension.lowercase()

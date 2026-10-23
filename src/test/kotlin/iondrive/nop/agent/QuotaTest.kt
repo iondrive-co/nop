@@ -107,6 +107,34 @@ class QuotaTest {
         assertEquals(1, hits.size)
     }
 
+    /**
+     * The anchor words turn up in ordinary output, and one already in the window must not hide a
+     * wall that arrives after it, however many redraws later and however it is split.
+     */
+    @Test
+    fun `a wall after ordinary output that mentions a limit still fires`() {
+        val (watcher, hits) = watch()
+
+        watcher.feed("raised the connection limit to 64\n")
+        repeat(100) { watcher.feed("✻ Thinking… (${it}s · ↓ 1.2k tokens)") }
+        assertEquals(0, hits.size)
+        watcher.feed("You've hit your ")
+        watcher.feed("usage limit · resets 8pm\n")
+
+        assertEquals(1, hits.size)
+        assertEquals("usage limit", hits.single().kind)
+    }
+
+    @Test
+    fun `an overload split across reads still stands the watcher down`() {
+        val (watcher, hits) = watch()
+
+        watcher.feed("The selected model is at ")
+        watcher.feed("capacity. You've hit your usage limit\n")
+
+        assertEquals(0, hits.size)
+    }
+
     @Test
     fun `colour codes between the words do not hide the message`() {
         val hit = fire("[1m[31mYou've hit your usage limit[0m for Claude Opus.\n")

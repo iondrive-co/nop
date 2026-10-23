@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
@@ -108,40 +109,60 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
     override fun switched(run: RunContext, current: Path): Path? {
         val dir = projectDir(run)
         rememberWhatWasAlreadyThere(dir)
-        val already = alreadyThere.orEmpty()
         val currentStamp = modified(current)
         val candidate = runCatching {
-            Files.list(dir).use { stream ->
-                stream.toList().asSequence()
-                    // Name first, and the name read once. Every rule that can be settled without
-                    // touching the filesystem is settled before anything is stat'ed: on a project
-                    // with any history behind it nearly every transcript in the directory was
-                    // already there when this run started, and this runs on every pass of the
-                    // tailer for every live session. Read the other way round — as it was — each
-                    // pass stat'ed every file in the directory two or three times over and rebuilt
-                    // its session id as many times again, which made this the single largest source
-                    // of allocation events in the process while accounting for almost none of its
-                    // bytes.
-                    .mapNotNull { path ->
-                        val name = path.fileName.toString()
-                        if (!name.endsWith(".jsonl")) return@mapNotNull null
-                        val id = name.removeSuffix(".jsonl")
-                        val mine = path != current && id !in already && id !in left && !run.foreign(id)
-                        if (mine) path else null
-                    }
-                    // One stat each, carried through to the comparison: `modified` was called twice
-                    // in the filter and once more for every comparison `max` made.
-                    .map { path -> path to modified(path) }
-                    .filter { (_, stamp) -> stamp > currentStamp && stamp >= run.startedAt }
-                    // Last, because it is the one rule that opens the file.
-                    .filter { (path, _) -> entrypoint(path) == INTERACTIVE }
-                    .maxByOrNull { (_, stamp) -> stamp }
-                    ?.first
-            }
+            filedSinceStart(dir).asSequence()
+                // Every rule that can be settled without touching the filesystem is settled before
+                // anything is stat'ed, because this runs on every pass of the tailer for every live
+                // session.
+                .filter { path ->
+                    val id = path.sessionId()
+                    path != current && id !in left && !run.foreign(id)
+                }
+                // One stat each, carried through to the comparison rather than redone for every
+                // pair `max` looks at.
+                .map { path -> path to modified(path) }
+                .filter { (_, stamp) -> stamp > currentStamp && stamp >= run.startedAt }
+                // Last, because it is the one rule that opens the file.
+                .filter { (path, _) -> entrypoint(path) == INTERACTIVE }
+                .maxByOrNull { (_, stamp) -> stamp }
+                ?.first
         }.getOrNull() ?: return null
         left += current.sessionId()
         currentSessionId = candidate.sessionId()
         return candidate
+    }
+
+    /** What [filedSinceStart] last found, and the directory's mtime it found it at (null: list again). */
+    private var listed: List<Path> = emptyList()
+    private var listedAt: FileTime? = null
+
+    /**
+     * The transcripts in [dir] that were not [alreadyThere] — the only ones [switched] could move to.
+     *
+     * The directory is listed again only when its own mtime has moved. Filing a new session, which
+     * is all a `/clear` does to the directory, moves it; appending to a transcript does not. A
+     * project with any history behind it holds hundreds of past sessions, and listing them on every
+     * pass of every live tab's tailer, four times a second each, costs more than all the rest of
+     * following the transcripts.
+     *
+     * A listing made within [SETTLE_MS] of the directory's last change is not kept: a file created
+     * in the same clock tick as that change would leave the mtime where it was, and be missed until
+     * the next one.
+     */
+    private fun filedSinceStart(dir: Path): List<Path> {
+        val stamp = Files.getLastModifiedTime(dir)
+        if (stamp == listedAt) return listed
+        val already = alreadyThere.orEmpty()
+        val listedMs = System.currentTimeMillis()
+        listed = Files.list(dir).use { stream ->
+            stream.toList().filter { path ->
+                val name = path.fileName.toString()
+                name.endsWith(".jsonl") && name.removeSuffix(".jsonl") !in already
+            }
+        }
+        listedAt = stamp.takeIf { listedMs - it.toMillis() > SETTLE_MS }
+        return listed
     }
 
     /**
@@ -330,6 +351,9 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
 
         /** The [entrypoint] of a session typed into the TUI — the only kind nop runs. */
         const val INTERACTIVE = "cli"
+
+        /** How long after a directory changes before a listing of it is trusted to stay current. */
+        private const val SETTLE_MS = 1_000L
 
         /** How far into a transcript [entrypoint] looks. The field is on the third to fifth record. */
         private const val ENTRYPOINT_WITHIN = 50
