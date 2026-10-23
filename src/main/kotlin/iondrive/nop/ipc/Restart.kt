@@ -25,6 +25,29 @@ object Restart {
             ?.takeIf { Files.isExecutable(it) }
 
     /**
+     * The launcher of the release installed under the user's home — `~/.local/opt/nop/bin/nop`, or
+     * under `$NOP_OPT_DIR`, as scripts/install-release.sh lays it out — for a restart that moves a nop
+     * run from a checkout's build back onto releases. Returns why not instead when there is none
+     * there, or what is there is itself a build: restarting into that would not leave the build.
+     */
+    fun releaseLauncher(
+        userHome: Path = Paths.get(System.getProperty("user.home")),
+        optDir: String? = System.getenv("NOP_OPT_DIR"),
+    ): Result<Path> {
+        val home = (optDir?.takeIf { it.isNotBlank() }?.let { Paths.get(it) } ?: userHome.resolve(".local/opt")).resolve("nop")
+        val launcher = home.resolve("bin").resolve("nop")
+        return when {
+            !Files.isExecutable(launcher) -> Result.failure(
+                IllegalStateException("no release is installed at $home; install one with scripts/install-release.sh"),
+            )
+            iondrive.nop.update.Installation.isOwnBuild(launcher) -> Result.failure(
+                IllegalStateException("$home holds a build from a checkout, not a release; scripts/install-release.sh --replace-build installs one"),
+            )
+            else -> Result.success(launcher)
+        }
+    }
+
+    /**
      * Starts [launcher] once this process has exited. Throws when it cannot be started, in which case
      * the caller should not quit either.
      */

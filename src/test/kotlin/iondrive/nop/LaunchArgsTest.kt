@@ -58,6 +58,14 @@ class LaunchArgsTest {
     }
 
     @Test
+    fun `restart into the release is restart with release, and release means nothing without restart`(@TempDir tmp: Path) {
+        assertEquals(LaunchArgs.RestartIntoRelease, LaunchArgs.parse(arrayOf("--restart", "--release")))
+        assertEquals(LaunchArgs.RestartIntoRelease, LaunchArgs.parse(arrayOf("--release", "--restart")))
+        assertTrue(LaunchArgs.parse(arrayOf("--release")) is LaunchArgs.Invalid)
+        assertTrue(LaunchArgs.parse(arrayOf("--restart", "--release", tmp.toString())) is LaunchArgs.Invalid)
+    }
+
+    @Test
     fun `the start a restart execs names its handover and nothing else`(@TempDir tmp: Path) {
         val manifest = tmp.resolve("manifest.json")
         val flag = iondrive.nop.ipc.Handover.ADOPT_FLAG

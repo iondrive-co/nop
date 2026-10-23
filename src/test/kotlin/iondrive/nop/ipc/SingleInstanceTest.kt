@@ -188,6 +188,40 @@ class SingleInstanceTest {
     }
 
     @Test
+    fun `a restart into the release reaches its own handler, not the ordinary restart's`(@TempDir tmp: Path) {
+        val ordinary = LinkedBlockingQueue<String>()
+        val release = LinkedBlockingQueue<String>()
+        val handle = SingleInstance.bind(
+            configRoot = tmp,
+            onOpen = {},
+            onFocus = {},
+            onRestart = { asker -> ordinary.add(asker ?: "(none)"); null },
+            onRestartIntoRelease = { asker -> release.add(asker ?: "(none)"); null },
+        ) ?: error("bind failed")
+        try {
+            assertEquals(SingleInstance.RestartReply.Asked, SingleInstance.requestRestart(tmp, "tab-2", intoRelease = true))
+            assertEquals("tab-2", release.poll(2, TimeUnit.SECONDS))
+            assertEquals(null, ordinary.poll(200, TimeUnit.MILLISECONDS))
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun `a primary with no release to restart into says why`(@TempDir tmp: Path) {
+        val handle = SingleInstance.bind(tmp, onOpen = {}, onFocus = {}, onRestartIntoRelease = { "no release is installed" })
+            ?: error("bind failed")
+        try {
+            assertEquals(
+                SingleInstance.RestartReply.Refused("no release is installed"),
+                SingleInstance.requestRestart(tmp, null, intoRelease = true),
+            )
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
     fun `a primary that cannot restart says why`(@TempDir tmp: Path) {
         val handle = SingleInstance.bind(tmp, onOpen = {}, onFocus = {}, onRestart = { "not from its launcher" })
             ?: error("bind failed")

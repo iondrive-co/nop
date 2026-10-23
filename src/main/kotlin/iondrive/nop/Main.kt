@@ -16,8 +16,10 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -30,6 +32,7 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.window.ApplicationScope
+import androidx.compose.ui.window.LocalWindowExceptionHandlerFactory
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
@@ -43,6 +46,11 @@ import iondrive.nop.git.RepoWatcher
 import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.ipc.SingleInstance
+import iondrive.nop.recovery.BrokenWindow
+import iondrive.nop.recovery.LaunchJournal
+import iondrive.nop.recovery.LocalWindowId
+import iondrive.nop.recovery.WindowRecovery
+import iondrive.nop.recovery.recoverFromLastLaunch
 import iondrive.nop.spell.Dictionary
 import iondrive.nop.ui.App
 import iondrive.nop.ui.DoubleShiftDetector
@@ -93,7 +101,7 @@ private const val PROJECT_GIT_POLL_MS = 3000L
 // How long nop has to have been up, windows and all, before a newly installed version counts as working.
 private const val HEALTHY_AFTER_MS = 10_000L
 
-@OptIn(FlowPreview::class)
+@OptIn(FlowPreview::class, ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
     // Before anything that can reach a running nop, or even write to its log: a launch that was
     // only asking what nop takes must not be one that restarts it. See [LaunchArgs].
@@ -115,6 +123,7 @@ fun main(args: Array<String>) {
         // Allowed from inside an agent's session, since it is what an agent should do instead of
         // starting a nop itself. It asks, and starts nothing.
         LaunchArgs.Restart -> exitProcess(requestRestart())
+        LaunchArgs.RestartIntoRelease -> exitProcess(requestRestart(intoRelease = true))
         is LaunchArgs.Invalid -> {
             System.err.println("nop: ${launch.why}\n\n${LaunchArgs.USAGE}")
             exitProcess(2)
@@ -177,6 +186,13 @@ fun main(args: Array<String>) {
     val startup = resolveStartup(argPaths.firstOrNull())
     if (startup.workspaces.isEmpty()) exitProcess(0)
 
+    // What nop held back from drawing last time, and whether the last launch died on its way up —
+    // in which case what it had on screen is held back too, rather than drawn again to the same end.
+    // Before any window opens, so a tab that kills nop at startup does it once. See [LaunchJournal].
+    recoverFromLastLaunch()
+    // Set when a window's recovery restarts nop: that restart is not an ordinary end. See [WindowRecovery].
+    var restartingToRecover = false
+
     // The tabs the last nop handed over go back into their projects before any window opens, and
     // their terminals are read from now on: a program writing to a PTY nobody reads stops when it
     // fills, and the project it is in may not be on screen for hours.
@@ -222,6 +238,9 @@ fun main(args: Array<String>) {
         var restartAsker by remember { mutableStateOf<String?>(null) }
         // The same question, asked by the user from the bar's restart button: see [requestRestart].
         var restartByUser by remember { mutableStateOf(false) }
+        // Where a restart the user agrees to goes: null for the launcher this nop started from, else the
+        // release `nop --restart --release` named — see [Restart.releaseLauncher].
+        var restartInto by remember { mutableStateOf<Path?>(null) }
 
         fun bumpRecent(path: Path) {
             val norm = path.toAbsolutePath().normalize()
@@ -354,7 +373,8 @@ fun main(args: Array<String>) {
         fun restartNow() {
             restartAsker = null
             restartByUser = false
-            val launcher = Restart.launcher() ?: return
+            val launcher = restartInto ?: Restart.launcher() ?: return
+            restartInto = null
             Settings.saveWorkspaces(workspaces.toList())
             RestartInPlace.prepare(launcher)
             exitApplication()
@@ -438,6 +458,20 @@ fun main(args: Array<String>) {
                     // fresh code runs instead of this stale process lingering in the background.
                     SwingUtilities.invokeLater { exitApplication() }
                 },
+                onRestartIntoRelease = { asker ->
+                    Restart.releaseLauncher().fold(
+                        onSuccess = { release ->
+                            Log.info("restart into the release at $release asked${asker?.let { " by agent session $it" } ?: ""}")
+                            SwingUtilities.invokeLater {
+                                restartInto = release
+                                restartAsker = asker.orEmpty()
+                                raiseWindow(focusedId)
+                            }
+                            null
+                        },
+                        onFailure = { it.message },
+                    )
+                },
                 onRestart = { asker ->
                     if (Restart.launcher() == null) {
                         "this nop was not started from its launcher, so it has nothing to start again"
@@ -479,7 +513,21 @@ fun main(args: Array<String>) {
         // that it works, so the install's launchers move to it. See [SelfUpdate.markHealthy].
         LaunchedEffect(Unit) {
             delay(HEALTHY_AFTER_MS)
-            withContext(Dispatchers.IO) { SelfUpdate.markHealthy() }
+            withContext(Dispatchers.IO) {
+                LaunchJournal.up()
+                SelfUpdate.markHealthy()
+            }
+        }
+        // The last resort for a window that keeps failing with nothing on screen to blame: restart in
+        // place, if that loses nothing — the same test as the bar's restart button skipping its question.
+        SideEffect {
+            WindowRecovery.restart = restart@{
+                if (Restart.launcher() == null || !Handover.supported || RestartInPlace.runsThatStop().isNotEmpty()) return@restart false
+                restartingToRecover = true
+                LaunchJournal.recovering()
+                SwingUtilities.invokeLater { restartNow() }
+                true
+            }
         }
 
         // Per-project "has uncommitted changes" flags backing the dirty dot on each project tab,
@@ -552,54 +600,77 @@ fun main(args: Array<String>) {
         for (workspace in allWindows) {
             if (!workspace.open) continue
             // Keyed on the window's identity so its state — geometry, key triggers, the App under it
-            // — belongs to that window and isn't re-seated onto another when the list changes.
-            key(workspace.id) {
-                WorkspaceWindow(
-                    workspace = workspace,
-                    windows = allWindows,
-                    dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
-                    repoWatcher = repoWatcher,
-                    onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
-                    recentProjects = recentProjects.toList(),
-                    darkMode = darkMode,
-                    onFocused = { focusedId = workspace.id },
-                    onSelectTab = { tab -> mutate(workspace.id) { it.copy(active = tab) } },
-                    onCloseTab = { tab -> closeTab(workspace.id, tab) },
-                    onNewTab = { newTab(workspace.id) },
-                    onRenameTab = { tab, name -> renameTab(workspace.id, tab, name) },
-                    onOpenProject = { path -> openProject(workspace.id, path) },
-                    onRevealProject = { path -> revealProject(workspace.id, path) },
-                    onOpenOther = {
-                        pickProjectDir(initial = workspace.activeTab?.path?.toFile())
-                            ?.let { openProject(workspace.id, it) }
-                    },
-                    onReorder = { tabs -> mutate(workspace.id) { it.copy(tabs = tabs) } },
-                    onNewWindow = { name -> newWindow(name, workspace.id) },
-                    onRenameWindow = { name -> renameWindow(workspace.id, name) },
-                    onRenameOtherWindow = ::renameWindow,
-                    onShowWindow = ::showWindow,
-                    onDiscardWindow = ::discardWindow,
-                    onMoveToWindow = ::moveTab,
-                    onMoveToNewWindow = { tab, name -> moveTab(tab, newWindow(name, workspace.id)) },
-                    onGeometry = { geometry -> mutate(workspace.id) { it.copy(geometry = geometry) } },
-                    onToggleTheme = { darkMode = !darkMode },
-                    onCloseWindow = { closeWindow(workspace.id) },
-                    onRegister = { w -> windowRefs[workspace.id] = w },
-                    onUnregister = { windowRefs.remove(workspace.id) },
-                    restartAsker = restartAsker.takeIf { workspace.id == restartWindow },
-                    restartByUser = restartByUser && workspace.id == restartWindow,
-                    asksForBackup = workspace.id == restartWindow,
-                    onRestart = ::restartNow,
-                    onRestartRequested = if (Restart.launcher() != null) ::requestRestart else null,
-                    onNotRestarting = {
-                        restartAsker = null
-                        restartByUser = false
-                    },
-                )
+            // — belongs to that window and isn't re-seated onto another when the list changes. And on
+            // its generation, which [WindowRecovery] bumps to throw a failed window away and open it
+            // again, fresh: Compose cannot recover a window whose drawing threw, only replace it.
+            key(workspace.id, WindowRecovery.generation(workspace.id)) {
+                val onFailure = remember { WindowRecovery.handlerFactory(workspace.id) }
+                CompositionLocalProvider(
+                    LocalWindowExceptionHandlerFactory provides onFailure,
+                    LocalWindowId provides workspace.id,
+                ) {
+                    val broken = WindowRecovery.brokenReason(workspace.id)
+                    if (broken != null) {
+                        BrokenWindow(
+                            name = workspace.name,
+                            reason = broken,
+                            onRetry = { WindowRecovery.retry(workspace.id) },
+                            onClose = { closeWindow(workspace.id) },
+                        )
+                    } else {
+                        WorkspaceWindow(
+                            workspace = workspace,
+                            windows = allWindows,
+                            dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
+                            repoWatcher = repoWatcher,
+                            onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
+                            recentProjects = recentProjects.toList(),
+                            darkMode = darkMode,
+                            onFocused = { focusedId = workspace.id },
+                            onSelectTab = { tab -> mutate(workspace.id) { it.copy(active = tab) } },
+                            onCloseTab = { tab -> closeTab(workspace.id, tab) },
+                            onNewTab = { newTab(workspace.id) },
+                            onRenameTab = { tab, name -> renameTab(workspace.id, tab, name) },
+                            onOpenProject = { path -> openProject(workspace.id, path) },
+                            onRevealProject = { path -> revealProject(workspace.id, path) },
+                            onOpenOther = {
+                                pickProjectDir(initial = workspace.activeTab?.path?.toFile())
+                                    ?.let { openProject(workspace.id, it) }
+                            },
+                            onReorder = { tabs -> mutate(workspace.id) { it.copy(tabs = tabs) } },
+                            onNewWindow = { name -> newWindow(name, workspace.id) },
+                            onRenameWindow = { name -> renameWindow(workspace.id, name) },
+                            onRenameOtherWindow = ::renameWindow,
+                            onShowWindow = ::showWindow,
+                            onDiscardWindow = ::discardWindow,
+                            onMoveToWindow = ::moveTab,
+                            onMoveToNewWindow = { tab, name -> moveTab(tab, newWindow(name, workspace.id)) },
+                            onGeometry = { geometry -> mutate(workspace.id) { it.copy(geometry = geometry) } },
+                            onToggleTheme = { darkMode = !darkMode },
+                            onCloseWindow = { closeWindow(workspace.id) },
+                            onRegister = { w -> windowRefs[workspace.id] = w },
+                            onUnregister = { windowRefs.remove(workspace.id) },
+                            restartAsker = restartAsker.takeIf { workspace.id == restartWindow },
+                            restartInto = restartInto,
+                            restartByUser = restartByUser && workspace.id == restartWindow,
+                            asksForBackup = workspace.id == restartWindow,
+                            onRestart = ::restartNow,
+                            onRestartRequested = if (Restart.launcher() != null) ::requestRestart else null,
+                            onNotRestarting = {
+                                restartAsker = null
+                                restartByUser = false
+                                restartInto = null
+                            },
+                        )
+                    }
+                }
             }
         }
     }
     // The windows are down. A restart replaces the process here; anything else is nop quitting.
+    // Either way this launch ended rather than died — unless it is restarting to recover a window,
+    // which the next launch has to know about to not do the same again.
+    if (!restartingToRecover) LaunchJournal.stopped()
     if (RestartInPlace.pending != null) RestartInPlace.carryOut()
     exitProcess(0)
 }
@@ -636,6 +707,8 @@ private fun ApplicationScope.WorkspaceWindow(
     onRegister: (androidx.compose.ui.awt.ComposeWindow) -> Unit = {},
     onUnregister: () -> Unit = {},
     restartAsker: String? = null,
+    /** Where the restart [restartAsker] asks for goes, when not to the build on disk — see [Restart.releaseLauncher]. */
+    restartInto: Path? = null,
     restartByUser: Boolean = false,
     /** Whether the backup share's request for a password is put to the user over this window. */
     asksForBackup: Boolean = false,
@@ -944,6 +1017,7 @@ private fun ApplicationScope.WorkspaceWindow(
                     onRestart = onRestart,
                     onCancel = onNotRestarting,
                     update = SelfUpdate.status as? SelfUpdate.Status.Ready,
+                    into = restartInto?.let { "the release installed at ${it.parent?.parent}" } ?: "the build now on disk",
                 )
             }
             if (asksForBackup) Backup.passwordPrompt?.let { SharePasswordDialog(it) }
@@ -956,12 +1030,13 @@ private fun ApplicationScope.WorkspaceWindow(
  * `nop --restart`: ask the running nop to restart, and say what came of asking. Starts nothing, and
  * writes nothing to nop's log, whatever the answer. Returns the exit status.
  */
-private fun requestRestart(): Int =
-    when (val reply = SingleInstance.requestRestart(Settings.configRoot, System.getenv(SingleInstance.INSIDE_AGENT_ENV))) {
+private fun requestRestart(intoRelease: Boolean = false): Int =
+    when (val reply = SingleInstance.requestRestart(Settings.configRoot, System.getenv(SingleInstance.INSIDE_AGENT_ENV), intoRelease)) {
         SingleInstance.RestartReply.Asked -> {
+            val into = if (intoRelease) "the release installed under ~/.local/opt/nop" else "the build now on disk"
             println(
                 "nop: asked the running nop to restart. It asks the user first and restarts only if " +
-                    "they agree, starting the build now on disk; until then nothing changes.",
+                    "they agree, starting $into; until then nothing changes.",
             )
             0
         }

@@ -41,6 +41,8 @@ fun RestartDialog(
     onCancel: () -> Unit,
     /** An update downloaded in the background, which the restart may start — see [SelfUpdate]. */
     update: SelfUpdate.Status.Ready? = null,
+    /** What nop starts again from: the build on disk, or the release `nop --restart --release` named. */
+    into: String = "the build now on disk",
 ) {
     DialogFrame(title = "Restart nop?", onClose = onCancel, size = DpSize(460.dp, Dp.Unspecified)) {
         if (!byUser) {
@@ -51,12 +53,12 @@ fun RestartDialog(
         }
         if (carriesOver) {
             Text(
-                "nop starts again from the build now on disk and puts every window back. The agents " +
+                "nop starts again from $into and puts every window back. The agents " +
                     "and terminals in them keep running through it, mid-turn or not.",
             )
         } else {
             Text(
-                "Every agent tab and terminal stops, and nop starts again from the build now on disk. " +
+                "Every agent tab and terminal stops, and nop starts again from $into. " +
                     "It puts every tab back, and each agent carries on from its own transcript.",
             )
             if (working.isNotEmpty()) {

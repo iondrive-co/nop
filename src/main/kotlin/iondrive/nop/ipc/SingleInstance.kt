@@ -26,6 +26,10 @@ import java.security.SecureRandom
  *   `<token> QUIT`              primary shuts down (used when a newer build is taking over)
  *   `<token> RESTART [<asker>]` primary asks the user, and if they agree starts its successor and
  *                               quits; `<asker>` is the agent tab that asked (`nop --restart`)
+ *   `<token> RESTART-RELEASE [<asker>]`
+ *                               the same, but the successor is the release installed under the
+ *                               user's home rather than the build it started from
+ *                               (`nop --restart --release`)
  *
  * Server replies `OK\n` for handled lines, `ERR <reason>\n` otherwise, then closes the socket.
  * The token guards against random localhost processes triggering arbitrary file opens.
@@ -138,7 +142,7 @@ object SingleInstance {
      * Never takes over or starts anything itself, whatever build either side is: the restart, if the
      * user agrees to one, is the primary's to do.
      */
-    fun requestRestart(configRoot: Path, asker: String?): RestartReply {
+    fun requestRestart(configRoot: Path, asker: String?, intoRelease: Boolean = false): RestartReply {
         if (!isRunning(configRoot)) return RestartReply.NotRunning
         val info = readSidecar(configRoot.resolve(SIDECAR_RELATIVE)) ?: return RestartReply.NotRunning
         val reply = try {
@@ -147,7 +151,8 @@ object SingleInstance {
                 sock.soTimeout = READ_TIMEOUT_MS
                 val out = PrintWriter(sock.getOutputStream().writer(StandardCharsets.UTF_8), true)
                 val `in` = BufferedReader(InputStreamReader(sock.getInputStream(), StandardCharsets.UTF_8))
-                out.println(listOfNotNull(info.token, "RESTART", asker?.takeIf { it.isNotBlank() && ' ' !in it }).joinToString(" "))
+                val verb = if (intoRelease) "RESTART-RELEASE" else "RESTART"
+                out.println(listOfNotNull(info.token, verb, asker?.takeIf { it.isNotBlank() && ' ' !in it }).joinToString(" "))
                 `in`.readLine().orEmpty()
             }
         } catch (_: IOException) {
@@ -156,6 +161,9 @@ object SingleInstance {
         return when {
             reply.startsWith("OK") -> RestartReply.Asked
             // What a nop built before this verb existed answers.
+            reply == "ERR bad verb" && intoRelease -> RestartReply.Refused(
+                "the running nop is older than `nop --restart --release`; restart it once with its restart button, then run this again",
+            )
             reply == "ERR bad verb" -> RestartReply.Refused("the running nop is older than `nop --restart`; ask the user to restart it")
             else -> RestartReply.Refused(reply.removePrefix("ERR").trim().ifEmpty { "no answer from the running nop" })
         }
@@ -220,6 +228,7 @@ object SingleInstance {
         onFocus: () -> Unit,
         onQuit: () -> Unit = {},
         onRestart: (asker: String?) -> String? = { "this nop cannot restart itself" },
+        onRestartIntoRelease: (asker: String?) -> String? = { "this nop cannot restart into a release" },
     ): Handle? {
         val server = try {
             ServerSocket(0, 50, InetAddress.getByName(LOOPBACK))
@@ -246,7 +255,7 @@ object SingleInstance {
                 } catch (_: IOException) {
                     return@Thread
                 }
-                handleConnection(client, token, onOpen, onFocus, onQuit, onRestart)
+                handleConnection(client, token, onOpen, onFocus, onQuit, onRestart, onRestartIntoRelease)
             }
         }, "nop-single-instance").apply {
             isDaemon = true
@@ -263,7 +272,8 @@ object SingleInstance {
         onFocus: () -> Unit,
         onQuit: () -> Unit = {},
         onRestart: (asker: String?) -> String? = { "this nop cannot restart itself" },
-    ) = handleConnection(client, token, onOpen, onFocus, onQuit, onRestart)
+        onRestartIntoRelease: (asker: String?) -> String? = { "this nop cannot restart into a release" },
+    ) = handleConnection(client, token, onOpen, onFocus, onQuit, onRestart, onRestartIntoRelease)
 
     private fun handleConnection(
         client: Socket,
@@ -272,6 +282,7 @@ object SingleInstance {
         onFocus: () -> Unit,
         onQuit: () -> Unit,
         onRestart: (asker: String?) -> String?,
+        onRestartIntoRelease: (asker: String?) -> String?,
     ) {
         client.use { sock ->
             sock.soTimeout = READ_TIMEOUT_MS
@@ -305,9 +316,10 @@ object SingleInstance {
                             writer.println("OK")
                             onQuit()
                         }
-                        "RESTART" -> {
+                        "RESTART", "RESTART-RELEASE" -> {
                             // Null is "the user is being asked"; anything else is why they won't be.
-                            val refused = onRestart(parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() })
+                            val asker = parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() }
+                            val refused = if (parts[1] == "RESTART") onRestart(asker) else onRestartIntoRelease(asker)
                             writer.println(if (refused == null) "OK" else "ERR $refused")
                         }
                         else -> writer.println("ERR bad verb")

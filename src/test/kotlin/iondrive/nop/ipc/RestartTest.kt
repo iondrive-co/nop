@@ -44,4 +44,23 @@ class RestartTest {
 
         assertEquals(mapOf("PATH" to "/usr/bin", "DISPLAY" to ":0"), Restart.successorEnvironment(own))
     }
+
+    @Test
+    fun `the release to restart into is the launcher under the opt dir, and only a release`(@TempDir tmp: Path) {
+        val opt = tmp.resolve("opt")
+        val missing = Restart.releaseLauncher(tmp, opt.toString())
+        assertTrue(missing.isFailure, "nothing installed is nothing to restart into")
+
+        val image = Files.createDirectories(opt.resolve("nop-1.3.8").resolve("bin"))
+        Files.writeString(image.resolve("nop"), "#!/bin/sh\n")
+        Files.setPosixFilePermissions(image.resolve("nop"), PosixFilePermissions.fromString("rwx------"))
+        Files.createSymbolicLink(opt.resolve("nop"), opt.resolve("nop-1.3.8"))
+        assertEquals(opt.resolve("nop").resolve("bin").resolve("nop"), Restart.releaseLauncher(tmp, opt.toString()).getOrThrow())
+        // Without NOP_OPT_DIR it is ~/.local/opt.
+        assertTrue(Restart.releaseLauncher(tmp, null).isFailure)
+
+        // A build copied there by installLocalCopy is not a release: restarting into it leaves nothing.
+        Files.writeString(opt.resolve("nop-1.3.8").resolve(".built-from-checkout"), "/somewhere\n")
+        assertTrue(Restart.releaseLauncher(tmp, opt.toString()).isFailure)
+    }
 }

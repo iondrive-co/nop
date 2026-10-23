@@ -65,6 +65,7 @@ import iondrive.nop.lang.JavaDeclKind
 import iondrive.nop.lang.JavaParse
 import iondrive.nop.lang.JavaSymbols
 import iondrive.nop.lang.JavaProblem
+import iondrive.nop.recovery.Quarantine
 import iondrive.nop.spell.Typo
 import iondrive.nop.spell.findTypos
 import kotlinx.coroutines.Dispatchers
@@ -145,9 +146,14 @@ fun TabbedViewerPanel(
 
     // Closing a tab flushes its edit buffer. Shared by the close button (onClose) and the
     // "Close Other Tabs" context-menu action so both paths tear a tab down the same way.
+    // A tab held back and then closed is let go too: opened again, it is given another chance.
     fun cleanUp(tab: Tab) {
         editStore.close(tab.id)
+        Quarantine.release(tab.recoveryKey)
     }
+
+    // If this window fails, its unsaved edits are written before it is rebuilt — see [WindowRecovery].
+    RescueEditsOnFailure(editStore)
 
     val fileName = selected?.let { fileNameOf(it, repo) }?.let { (path, isNew) ->
         FileNameBadge(path, isNew, fileNameCollapsed, onToggleFileName)
@@ -161,6 +167,12 @@ fun TabbedViewerPanel(
         // surface underneath — the editor, and both halves of whichever diff is open.
         CompositionLocalProvider(LocalSpellcheckExtension provides spellcheckExtensionOf(selected)) {
         Box(modifier = Modifier.fillMaxSize()) {
+            // A tab whose drawing once took its window down is held back until the user asks for it
+            // again; any other is reported as on screen first, so it is the one held back if it does.
+            // See [iondrive.nop.recovery.Quarantine].
+            val heldBack = selected?.let { Quarantine.entry(it.recoveryKey) }
+            if (selected != null && heldBack != null) QuarantinedTabView(selected, heldBack) else {
+            selected?.let { ReportShowing(it) }
             when (val current = selected) {
                 is Tab.FileView -> {
                     val pendingLine = tabsState.pendingJumpLine(current.id)
@@ -259,6 +271,7 @@ fun TabbedViewerPanel(
                 ) {
                     Text("Click a file in the tree, or a change in the commit panel, to view it here")
                 }
+            }
             }
         }
         }

@@ -32,6 +32,13 @@ sealed interface LaunchArgs {
     data object Restart : LaunchArgs
 
     /**
+     * Ask the running nop to restart, as [Restart] does, but into the release installed under the
+     * user's home rather than the build it was started from: how a nop run from a checkout goes back
+     * onto releases without ending the agents and terminals in it. See [iondrive.nop.ipc.Restart.releaseLauncher].
+     */
+    data object RestartIntoRelease : LaunchArgs
+
+    /**
      * The start a restart makes in place of the nop before it, in the same process: take up the
      * terminals that nop left at [manifest] (see [Handover]). Not in the usage, since only nop runs it,
      * and nothing else may share its line.
@@ -56,10 +63,12 @@ sealed interface LaunchArgs {
             val projects = mutableListOf<Path>()
             var options = true
             var restart = false
+            var release = false
             for (arg in args) {
                 when {
                     options && arg == "--" -> options = false
                     options && arg == "--restart" -> restart = true
+                    options && arg == "--release" -> release = true
                     options && arg.startsWith("-") && arg != "-" -> return Invalid("unknown option: $arg")
                     arg.isBlank() -> return Invalid("an empty argument, where a project directory was expected")
                     else -> {
@@ -73,6 +82,8 @@ sealed interface LaunchArgs {
                     }
                 }
             }
+            if (release && !restart) return Invalid("--release goes with --restart")
+            if (restart && release) return if (args.size == 2) RestartIntoRelease else Invalid("--restart --release takes nothing else")
             if (restart) return if (args.size == 1) Restart else Invalid("--restart takes nothing else")
             return Open(projects)
         }
@@ -87,6 +98,10 @@ sealed interface LaunchArgs {
             |  --restart    ask the running nop to restart; it asks the user first, then restarts in
             |               place into the build now on disk, every window back and the agents and
             |               terminals in them still running
+            |  --restart --release
+            |               the same, but into the release installed under ~/.local/opt/nop instead
+            |               of the build now on disk: how a nop run from a checkout goes back to
+            |               releases without ending its agents and terminals
             |
             |NOP_WM_CLASS, if set, is the X11 window class of nop's windows, which docks group windows by.
             |Set it for a second nop, such as one run as another user, so its windows get their own icon.
