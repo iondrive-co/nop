@@ -365,14 +365,13 @@ object Usage {
      * The models the picker should offer for [account], asked of whoever can answer.
      *
      * Claude's come from the Models API over the account's own token; Antigravity's from `agy
-     * models`, which is a CLI start and so costs seconds rather than milliseconds. Codex can be
-     * asked neither way and answers empty — "nothing was discovered", which is what leaves the
-     * picker on [Provider.fallbackModels] rather than overwriting it with a copy of itself.
+     * models`; Codex's from its app-server `model/list`. Both CLI queries run under the account's
+     * own home, so their catalogs follow the same configuration as an interactive session.
      */
     fun discoverModels(account: Account): List<String> {
         UsageFixture.file?.let { return UsageFixture.models(it, account) }
         // Kept for the life of nop once found, so a project switch does not ask again: another HTTPS
-        // GET for Claude, another CLI start for Antigravity.
+        // GET for Claude, another CLI start for Codex or Antigravity.
         val key = gateKey(account)
         discovered[key]?.let { return it }
         val now = Instant.now()
@@ -382,7 +381,7 @@ object Usage {
         val found = when (account.provider) {
             Provider.Anthropic -> discoverClaudeModels(account)
             Provider.Antigravity -> Antigravity.models(account)
-            Provider.OpenAI -> emptyList()
+            Provider.OpenAI -> CodexModels.discover(account)
         }
         if (found.isNotEmpty()) discovered[key] = found
         return found

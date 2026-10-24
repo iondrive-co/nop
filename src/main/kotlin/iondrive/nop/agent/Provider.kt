@@ -74,17 +74,12 @@ enum class Provider(
         }
 
     /**
-     * Models to offer when the live list can't be fetched. Claude's real list comes from the
-     * Anthropic Models API using the account's own token, and Antigravity's from `agy models` run
-     * as the account (see `Usage.discoverModels`), so neither is hardcoded here to go stale; Codex
-     * has neither an endpoint nor a subcommand, so its short list is.
+     * Models to offer before discovery succeeds. Each CLI's catalog is discovered per account
+     * (see [Usage.discoverModels]); the default and any configured model remain selectable while
+     * that catalog is unavailable.
      */
     val fallbackModels: List<String>
-        get() = when (this) {
-            Anthropic -> emptyList()
-            OpenAI -> listOf("gpt-5.5", "gpt-5.5-codex", "gpt-5.3-codex")
-            Antigravity -> emptyList()
-        }
+        get() = emptyList()
 
     companion object {
         fun byId(id: String?): Provider? = entries.firstOrNull { it.id == id }
