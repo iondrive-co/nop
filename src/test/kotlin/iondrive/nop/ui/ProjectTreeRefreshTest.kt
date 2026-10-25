@@ -34,17 +34,28 @@ import kotlin.test.fail
 
 class ProjectTreeRefreshTest {
     @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class)
-    private class Panel(initialRoot: Path, openFiles: List<File> = emptyList()) : AutoCloseable {
+    private class Panel(
+        initialRoot: Path,
+        openFiles: List<File> = emptyList(),
+        revealFile: File? = null,
+    ) : AutoCloseable {
         var root by mutableStateOf(initialRoot)
+        var tabId by mutableStateOf(0L)
+        var activeFile by mutableStateOf(revealFile)
+        var filesRestored by mutableStateOf(true)
+        private val states = mutableMapOf<Pair<Path, Long>, ProjectTreeState>()
         // Scene operations share the AWT thread with Compose's snapshot notifications.
         private val scene = onEdt {
             ImageComposeScene(600, 500, Density(1f)) {
                 IntUiTheme(isDark = false) {
-                    key(root) {
+                    key(root, tabId) {
                         ProjectTreePanel(
                             projectPath = root,
+                            viewState = states.getOrPut(root to tabId) { ProjectTreeState() },
+                            filesRestored = filesRestored,
                             status = GitStatus.EMPTY,
-                            openFiles = openFiles,
+                            openFiles = openFiles.filter { it.toPath().startsWith(root) },
+                            revealFile = activeFile?.takeIf { it.toPath().startsWith(root) },
                             onFileClick = {},
                         )
                     }
@@ -64,7 +75,11 @@ class ProjectTreeRefreshTest {
             DirectoryListings.forProject(project).peek(dir.toFile()).orEmpty().map { it.file.name }.toSet()
         }
 
-        fun collapse(name: String) {
+        fun expand(name: String) = setExpanded(name, Key.DirectionRight)
+
+        fun collapse(name: String) = setExpanded(name, Key.DirectionLeft)
+
+        private fun setExpanded(name: String, direction: Key) {
             val at = onEdt {
                 fun find(node: SemanticsNode): SemanticsNode? =
                     node.takeIf { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == name } == true }
@@ -77,8 +92,8 @@ class ProjectTreeRefreshTest {
             renderFor(30)
             onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
             renderFor(30)
-            onEdt { scene.sendKeyEvent(KeyEvent(Key.DirectionLeft, KeyEventType.KeyDown)) }
-            onEdt { scene.sendKeyEvent(KeyEvent(Key.DirectionLeft, KeyEventType.KeyUp)) }
+            onEdt { scene.sendKeyEvent(KeyEvent(direction, KeyEventType.KeyDown)) }
+            onEdt { scene.sendKeyEvent(KeyEvent(direction, KeyEventType.KeyUp)) }
             renderFor(100)
         }
 
@@ -163,6 +178,89 @@ class ProjectTreeRefreshTest {
 
             panel.root = first
             panel.awaitNames("hidden.txt")
+        }
+    }
+
+    @Test fun `switching projects preserves manually expanded directories`(@TempDir tmp: Path) {
+        val first = tmp.resolve("first").createDirectories()
+        val second = tmp.resolve("second").createDirectories()
+        first.resolve("folder/nested").createDirectories().resolve("detail.txt").createFile()
+        second.resolve("other").createDirectories().resolve("second.txt").createFile()
+        Panel(first).use { panel ->
+            panel.awaitNames("folder", absent = setOf("nested", "detail.txt"))
+            panel.expand("folder")
+            panel.awaitNames("nested")
+            panel.expand("nested")
+            panel.awaitNames("detail.txt")
+
+            panel.root = second
+            panel.awaitNames("other", absent = setOf("second.txt"))
+            panel.expand("other")
+            panel.awaitNames("second.txt")
+
+            panel.root = first
+            panel.awaitNames("detail.txt", absent = setOf("other"))
+            panel.root = second
+            panel.awaitNames("second.txt", absent = setOf("folder"))
+        }
+    }
+
+    @Test fun `switching projects preserves collapsed ancestors of an open file`(@TempDir tmp: Path) {
+        val first = tmp.resolve("first").createDirectories()
+        val second = tmp.resolve("second").createDirectories()
+        val anchor = first.resolve("parent/nested").createDirectories().resolve("anchor.txt").createFile()
+        second.resolve("second.txt").createFile()
+        Panel(first, openFiles = listOf(anchor.toFile()), revealFile = anchor.toFile()).use { panel ->
+            panel.awaitNames("anchor.txt")
+            panel.collapse("parent")
+            panel.awaitNames("parent", absent = setOf("anchor.txt"))
+
+            panel.root = second
+            panel.awaitNames("second.txt")
+            panel.filesRestored = false
+            panel.activeFile = null
+            panel.root = first
+            panel.renderFor(200)
+            panel.activeFile = anchor.toFile()
+            panel.filesRestored = true
+            panel.renderFor(500)
+            panel.awaitNames("parent", absent = setOf("nested", "anchor.txt"))
+            panel.expand("parent")
+            panel.awaitNames("anchor.txt")
+        }
+    }
+
+    @Test fun `tabs on the same project keep independent expansions`(@TempDir tmp: Path) {
+        tmp.resolve("folder").createDirectories().resolve("detail.txt").createFile()
+        Panel(tmp).use { panel ->
+            panel.awaitNames("folder", absent = setOf("detail.txt"))
+            panel.expand("folder")
+            panel.awaitNames("detail.txt")
+
+            panel.tabId = 1L
+            panel.renderFor(200)
+            panel.awaitNames("folder", absent = setOf("detail.txt"))
+
+            panel.tabId = 0L
+            panel.awaitNames("detail.txt")
+        }
+    }
+
+    @Test fun `a collapsed project root stays collapsed after switching projects`(@TempDir tmp: Path) {
+        val first = tmp.resolve("first").createDirectories()
+        val second = tmp.resolve("second").createDirectories()
+        first.resolve("first.txt").createFile()
+        second.resolve("second.txt").createFile()
+        Panel(first).use { panel ->
+            panel.awaitNames("first.txt")
+            panel.collapse("first")
+            panel.awaitNames("first", absent = setOf("first.txt"))
+
+            panel.root = second
+            panel.awaitNames("second.txt")
+            panel.root = first
+            panel.renderFor(200)
+            panel.awaitNames("first", absent = setOf("first.txt"))
         }
     }
 

@@ -57,6 +57,7 @@ import iondrive.nop.ui.DoubleShiftDetector
 import iondrive.nop.ui.LocalWindow
 import iondrive.nop.ui.NopTextContextMenu
 import iondrive.nop.ui.ProjectBar
+import iondrive.nop.ui.ProjectTreeState
 import iondrive.nop.ui.RestartDialog
 import iondrive.nop.ui.SharePasswordDialog
 import iondrive.nop.ui.TerminalStore
@@ -593,6 +594,10 @@ fun main(args: Array<String>) {
         }
 
         val allWindows = workspaces.toList()
+        val projectTreeStates = remember { mutableMapOf<Long, ProjectTreeState>() }
+        SideEffect {
+            projectTreeStates.keys.retainAll(allWindows.flatMap { it.tabs }.map { it.id }.toSet())
+        }
         // The window nop's own questions — a restart, the backup share's password — are asked over: the
         // one in front, else any that is showing.
         val restartWindow = focusedId.takeIf { id -> allWindows.any { it.id == id && it.open } }
@@ -621,6 +626,7 @@ fun main(args: Array<String>) {
                         WorkspaceWindow(
                             workspace = workspace,
                             windows = allWindows,
+                            projectTreeStates = projectTreeStates,
                             dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
                             repoWatcher = repoWatcher,
                             onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
@@ -680,6 +686,7 @@ fun main(args: Array<String>) {
 private fun ApplicationScope.WorkspaceWindow(
     workspace: Workspace,
     windows: List<Workspace>,
+    projectTreeStates: MutableMap<Long, ProjectTreeState>,
     dirtyProjects: Set<Path>,
     repoWatcher: RepoWatcher,
     onProjectDirty: (Path, Boolean) -> Unit,
@@ -963,13 +970,12 @@ private fun ApplicationScope.WorkspaceWindow(
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (activeTab != null && activeProject != null) {
-                        // Key the workspace on the active tab: each App owns per-project state (git
-                        // repo, tabs, indexes) behind remember(projectPath), so re-keying on a tab
-                        // switch tears the old tab's state down and builds the new one's — including
-                        // between two tabs that happen to be on the same project.
+                        // Recreate each tab's workers and project resources when it becomes active.
+                        // Its tree layout belongs to the tab and survives outside that composition.
                         key(activeTab.id) {
                             App(
                                 projectPath = activeProject,
+                                projectTreeState = projectTreeStates.getOrPut(activeTab.id) { ProjectTreeState() },
                                 repoWatcher = repoWatcher,
                                 onDirtyChange = { dirty -> onProjectDirty(activeProject, dirty) },
                                 recentProjects = recentProjects,

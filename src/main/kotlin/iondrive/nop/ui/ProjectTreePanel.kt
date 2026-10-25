@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -73,10 +74,11 @@ import iondrive.nop.git.GitStatus
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.InternalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.foundation.lazy.SelectableLazyListState
 import org.jetbrains.jewel.foundation.lazy.tree.ChildrenGeneratorScope
 import org.jetbrains.jewel.foundation.lazy.tree.Tree
 import org.jetbrains.jewel.foundation.lazy.tree.buildTree
-import org.jetbrains.jewel.foundation.lazy.tree.rememberTreeState
+import org.jetbrains.jewel.foundation.lazy.tree.TreeState
 import org.jetbrains.jewel.ui.component.IconButton
 import org.jetbrains.jewel.ui.component.LazyTree
 import org.jetbrains.jewel.ui.component.Text
@@ -491,6 +493,16 @@ private fun File.relativePathTo(repoRoot: Path): String? = runCatching {
         .toString().replace(File.separatorChar, '/')
 }.getOrNull()?.takeIf { !it.startsWith("..") }
 
+/** View state owned by a project tab, so leaving its composition keeps the user's tree layout. */
+@OptIn(ExperimentalJewelApi::class, InternalJewelApi::class)
+class ProjectTreeState {
+    val treeState = TreeState(SelectableLazyListState(LazyListState()))
+    var expandedEllipsisKeys by mutableStateOf<Set<String>>(emptySet())
+    val revealedFilePaths = mutableSetOf<String>()
+    var rootInitialized = false
+    var lastRevealFile: File? = null
+}
+
 @OptIn(
     ExperimentalJewelApi::class,
     InternalJewelApi::class,
@@ -533,6 +545,8 @@ fun ProjectTreePanel(
     // tabs, not for a tree showing one project's files.
     projectLabel: @Composable () -> Unit = { Text("Project") },
     headerExtras: @Composable () -> Unit = {},
+    viewState: ProjectTreeState = remember(projectPath) { ProjectTreeState() },
+    filesRestored: Boolean = true,
 ) {
     val rootId = remember(projectPath) { projectPath.toFile().absolutePath }
 
@@ -550,9 +564,9 @@ fun ProjectTreePanel(
     val openFilePaths = remember(effectiveOpenFiles) { effectiveOpenFiles.map { it.absolutePath }.toSet() }
 
     // User-expanded directory/file ellipsis blocks
-    var expandedEllipsisKeys by remember(projectPath) { mutableStateOf<Set<String>>(emptySet()) }
+    var expandedEllipsisKeys by viewState::expandedEllipsisKeys
 
-    val treeState = rememberTreeState()
+    val treeState = viewState.treeState
     val openDirectoryIds = treeState.openNodes.filterIsInstance<String>().toSet()
     val rowDirectories = remember(projectPath) { mutableStateMapOf<Any, Set<String>>() }
     val visibleRowKeys by remember(treeState) {
@@ -595,10 +609,13 @@ fun ProjectTreePanel(
     }
 
     // Track which files have had their ancestors opened so we don't re-expand folders the user collapsed
-    val revealedFilePaths = remember(projectPath) { mutableSetOf<String>() }
+    val revealedFilePaths = viewState.revealedFilePaths
 
     LaunchedEffect(rootId) {
-        treeState.openNodes(listOf(rootId))
+        if (!viewState.rootInitialized) {
+            treeState.openNodes(listOf(rootId))
+            viewState.rootInitialized = true
+        }
     }
 
     // Expand ancestor folders for open files on initial load or when a newly opened file appears
@@ -671,8 +688,13 @@ fun ProjectTreePanel(
         }
     }
 
-    LaunchedEffect(revealFile, projectPath) {
-        revealFile?.let { revealInTree(it) }
+    LaunchedEffect(revealFile, projectPath, filesRestored) {
+        // An empty file strip while it loads is not a change of the user's active file.
+        if (!filesRestored) return@LaunchedEffect
+        if (revealFile != viewState.lastRevealFile) {
+            viewState.lastRevealFile = revealFile
+            revealFile?.let { revealInTree(it) }
+        }
     }
 
     LaunchedEffect(revealRequest, projectPath) {

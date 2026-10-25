@@ -169,6 +169,7 @@ fun App(
     renameSymbolTrigger: Int = 0,
     navigateBackTrigger: Int = 0,
     navigateForwardTrigger: Int = 0,
+    projectTreeState: ProjectTreeState = remember(projectPath) { ProjectTreeState() },
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -1647,6 +1648,8 @@ fun App(
                 first = {
                     ProjectTreePanel(
                         projectPath = rootPath,
+                        viewState = projectTreeState,
+                        filesRestored = tabsRestored,
                         status = status,
                         refreshKey = treeRefreshKey,
                         openFiles = openFiles,
