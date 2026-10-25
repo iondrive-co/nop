@@ -163,7 +163,7 @@ private val MIN_WIDTH = 120.dp
 @OptIn(ExperimentalJewelApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun UsageChip(account: Account, reading: UsageReading?) {
-    Tooltip(tooltip = { LimitsList(account, reading) }) {
+    TerminalTooltip(tooltip = { LimitsList(account, reading) }) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -355,7 +355,7 @@ private val PACE_MARKER_WIDTH = 2.dp
 @Composable
 private fun SettingsGlyph(onClick: () -> Unit) {
     val tint = if (JewelTheme.isDark) ProjectIconTintDark else ProjectIconTintLight
-    Tooltip(tooltip = { Text("Agent accounts") }) {
+    TerminalTooltip(tooltip = { Text("Agent accounts") }) {
         Row(
             modifier = Modifier.clickable(onClick = onClick),
             verticalAlignment = Alignment.CenterVertically,
@@ -387,7 +387,7 @@ private fun BackupGlyph(dir: String, onClick: () -> Unit) {
         JewelTheme.isDark -> ProjectIconTintDark
         else -> ProjectIconTintLight
     }
-    Tooltip(tooltip = { Text(health.line) }) {
+    TerminalTooltip(tooltip = { Text(health.line) }) {
         Row(
             modifier = Modifier.clickable(onClick = onClick),
             verticalAlignment = Alignment.CenterVertically,
