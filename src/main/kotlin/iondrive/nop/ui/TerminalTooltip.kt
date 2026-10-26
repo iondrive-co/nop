@@ -15,6 +15,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.awt.ComposeDialog
+import androidx.compose.ui.awt.SwingDialog
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -22,18 +24,15 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogWindow
-import androidx.compose.ui.window.DialogModalityType
-import androidx.compose.ui.window.WindowDecoration
-import androidx.compose.ui.window.rememberDialogState
 import kotlinx.coroutines.delay
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import java.awt.Dimension
+import java.awt.Dialog
 import java.awt.Point
 import java.awt.Rectangle
 import java.awt.Toolkit
+import java.awt.Window
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.WindowAdapter
@@ -80,19 +79,18 @@ internal fun TerminalTooltip(tooltip: @Composable () -> Unit, content: @Composab
     ) { content() }
 
     if (shown && owner?.isShowing == true) {
-        var placed by remember { mutableStateOf(false) }
-        val state = rememberDialogState(size = DpSize.Unspecified)
-        DialogWindow(
-            onCloseRequest = { shown = false },
-            state = state,
-            visible = placed,
-            decoration = WindowDecoration.Undecorated(),
-            modalityType = DialogModalityType.Modeless,
-            resizable = false,
-            focusable = false,
-        ) {
-            // Fit and position while hidden so the first visible frame contains every row.
-            LaunchedEffect(anchor) {
+        SwingDialog(
+            create = {
+                ComposeDialog(owner, Dialog.ModalityType.MODELESS).apply {
+                    isUndecorated = true
+                    type = Window.Type.POPUP
+                    isResizable = false
+                    focusableWindowState = false
+                    isAutoRequestFocus = false
+                }
+            },
+            dispose = { it.dispose() },
+            update = { popup ->
                 val config = owner.graphicsConfiguration
                 val screen = Rectangle(config.bounds)
                 val insets = Toolkit.getDefaultToolkit().getScreenInsets(config)
@@ -106,9 +104,17 @@ internal fun TerminalTooltip(tooltip: @Composable () -> Unit, content: @Composab
                     (anchor.width / density).roundToInt(),
                     (anchor.height / density).roundToInt(),
                 )
-                window.setLocation(terminalTooltipPosition(bounds, window.size, screen))
-                placed = true
-            }
+                // Give Compose measurement bounds, then fit and place before the native window
+                // is mapped. A popup has no dialog positioning state or window-manager centring.
+                if (!popup.isDisplayable) {
+                    popup.preferredSize = screen.size
+                    popup.pack()
+                    popup.preferredSize = null
+                }
+                popup.pack()
+                popup.location = terminalTooltipPosition(bounds, popup.size, screen)
+            },
+        ) {
             Box(
                 Modifier.background(JewelTheme.globalColors.panelBackground)
                     .border(1.dp, if (JewelTheme.isDark) Color(0xFF55585E) else Color(0xFFB8BBC2))
