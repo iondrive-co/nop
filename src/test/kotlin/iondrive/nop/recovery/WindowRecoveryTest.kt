@@ -34,6 +34,8 @@ class WindowRecoveryTest {
 
     @AfterEach
     fun restore() {
+        // Finish queued writes before JUnit removes their temporary directory.
+        WindowRecovery.flushShowing()
         Quarantine.clearForTest()
         WindowRecovery.resetForTest()
         WindowRecovery.clock = System::currentTimeMillis

@@ -149,7 +149,7 @@ class HostileContentTest {
             while (System.currentTimeMillis() < until) {
                 time += 16_000_000
                 val started = System.nanoTime()
-                scene.render(time)
+                scene.render(time).close()
                 slowest = maxOf(slowest, (System.nanoTime() - started) / 1_000_000)
                 Thread.sleep(20)
             }

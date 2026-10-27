@@ -1,5 +1,8 @@
 package iondrive.nop.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.InternalComposeUiApi
@@ -14,13 +17,35 @@ import iondrive.nop.agent.Account
 import iondrive.nop.agent.Provider
 import java.awt.EventQueue
 import java.nio.file.Path
+import java.nio.file.Files
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.io.TempDir
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** An account is removed from the picker only once the user has said so twice. */
+/** Account choices reach both saved settings and the session being started. */
 class AgentPickerTest {
+    @TempDir
+    lateinit var home: Path
+    private lateinit var originalHome: String
+
+    @BeforeEach
+    fun installStubClis() {
+        originalHome = System.getProperty("user.home")
+        val bin = Files.createDirectories(home.resolve(".local/bin"))
+        Provider.entries.forEach {
+            Files.writeString(bin.resolve(it.binary), "#!/bin/sh\nexit 0\n").toFile().setExecutable(true)
+        }
+        System.setProperty("user.home", home.toString())
+    }
+
+    @AfterEach
+    fun restoreHome() {
+        System.setProperty("user.home", originalHome)
+    }
 
     private val accounts = listOf(
         Account("claude-alpha", Provider.Anthropic, "/home/dev/.accounts/claude-alpha"),
@@ -28,20 +53,42 @@ class AgentPickerTest {
     )
 
     @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class)
-    private class Picker(accounts: List<Account>) : AutoCloseable {
+    private class Picker(
+        initialAccounts: List<Account>,
+        handover: Boolean = false,
+        persist: Boolean = true,
+        width: Int = 700,
+    ) : AutoCloseable {
+        private var accounts by mutableStateOf(initialAccounts)
         val removed = mutableListOf<String>()
+        val updated = mutableListOf<Account>()
+        val launched = mutableListOf<Account>()
         private var time = 0L
         // Every call into the scene is made on the AWT thread: see HandoverPromptEditorTest.
         private val scene = onEdt {
-            ImageComposeScene(700, 600, Density(1f)) {
+            ImageComposeScene(width, 600, Density(1f)) {
                 IntUiTheme(isDark = false) {
-                    AgentPicker(
+                    val update: (Account) -> Unit = { changed ->
+                        updated += changed
+                        if (persist) accounts = accounts.map { if (it.name == changed.name) changed else it }
+                    }
+                    if (handover) {
+                        HandoverProviderList(
+                            accounts = accounts,
+                            readings = emptyMap(),
+                            modelsFor = { listOf("code-model") },
+                            onHandOver = { launched += it },
+                            onUpdateAccount = update,
+                        )
+                    } else AgentPicker(
                         accounts = accounts,
                         readings = emptyMap(),
                         sessions = emptyList(),
                         projectDir = Path.of("/home/dev/project"),
+                        modelsFor = { listOf("code-model") },
+                        onUpdateAccount = update,
                         onRemoveAccount = { removed += it.name },
-                        onLaunch = {},
+                        onLaunch = { launched += it },
                         onReopen = {},
                         onSettings = {},
                     )
@@ -51,7 +98,7 @@ class AgentPickerTest {
 
         fun settle() = repeat(10) {
             time += 16_000_000
-            onEdt { scene.render(time) }
+            onEdt { scene.render(time).close() }
             Thread.sleep(5)
         }
 
@@ -76,6 +123,15 @@ class AgentPickerTest {
             settle()
             onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
             settle()
+        }
+
+        fun snapshot(path: Path) {
+            Files.createDirectories(path.parent)
+            onEdt {
+                scene.render(time).use { image ->
+                    checkNotNull(image.encodeToData()).use { data -> Files.write(path, data.bytes) }
+                }
+            }
         }
 
         override fun close() = onEdt { scene.close() }
@@ -127,4 +183,74 @@ class AgentPickerTest {
             assertEquals(2, picker.nodes("Remove").size, "both cards offer Remove again")
         }
     }
+    @Test
+    fun `reasoning and model choices are saved together and used by Start`() {
+        Picker(listOf(accounts.first())).use { picker ->
+            picker.settle()
+            picker.click(picker.nodes("default")[1])
+            picker.click(picker.nodes("high").single())
+            assertEquals("high", picker.updated.last().reasoning)
+
+            picker.click(picker.nodes("default").single())
+            picker.click(picker.nodes("code-model").single())
+            assertEquals("high", picker.updated.last().reasoning)
+            assertEquals("code-model", picker.updated.last().model)
+            picker.click(picker.nodes("Start").single())
+            assertEquals(picker.updated.last(), picker.launched.single())
+        }
+    }
+
+    @Test
+    fun `default clears an existing reasoning override`() {
+        Picker(listOf(accounts.first().copy(reasoning = "high"))).use { picker ->
+            picker.settle()
+            picker.click(picker.nodes("high").single())
+            picker.click(picker.nodes("default").last())
+            picker.click(picker.nodes("Start").single())
+            assertEquals(null, picker.updated.last().reasoning)
+            assertEquals(null, picker.launched.single().reasoning)
+        }
+    }
+
+    @Test
+    fun `reasoning options follow the selected provider and only one list is open`() {
+        Picker(accounts).use { picker ->
+            picker.settle()
+            picker.click(picker.nodes("default")[1])
+            assertTrue(picker.shows("Ultracode"))
+            picker.click(picker.nodes("default")[4])
+            assertTrue(!picker.shows("Ultracode"))
+            assertTrue(picker.shows("minimal"))
+            picker.click(picker.nodes("medium").single())
+            assertEquals("codex-alpha", picker.updated.single().name)
+            assertEquals("medium", picker.updated.single().reasoning)
+        }
+    }
+
+    @Test
+    fun `handover keeps both choices without saving settings`() {
+        Picker(listOf(accounts.first()), handover = true, persist = false).use { picker ->
+            picker.settle()
+            picker.click(picker.nodes("default")[1])
+            picker.click(picker.nodes("high").single())
+            picker.click(picker.nodes("default").single())
+            picker.click(picker.nodes("code-model").single())
+            picker.click(picker.nodes("Hand over").single())
+            assertEquals("high", picker.launched.single().reasoning)
+            assertEquals("code-model", picker.launched.single().model)
+        }
+    }
+
+    @Test
+    fun `choices and Start fit a narrow picker`() {
+        Picker(listOf(accounts.first()), width = 350).use { picker ->
+            picker.settle()
+            for (label in listOf("Model:", "Reasoning:", "Start")) {
+                val bounds = picker.nodes(label).single().boundsInRoot
+                assertTrue(bounds.left >= 0 && bounds.right <= 350, "$label must fit the picker")
+            }
+            picker.snapshot(Path.of("build/test-screenshots/agent-picker-reasoning.png"))
+        }
+    }
+
 }

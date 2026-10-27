@@ -9,6 +9,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,6 +42,7 @@ import iondrive.nop.agent.Account
 import iondrive.nop.agent.CliTools
 import iondrive.nop.agent.DEFAULT_CHOICE
 import iondrive.nop.agent.HandoverDraft
+import iondrive.nop.agent.Provider
 import iondrive.nop.agent.UsageReading
 import kotlinx.coroutines.flow.drop
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -97,7 +99,7 @@ fun usageDescription(reading: UsageReading?): String {
  * The structured list of available providers for handover.
  *
  * Replaces the cramped flow of buttons with individual provider cards, each with its quota reading,
- * CLI status, a model selection dropdown, and an action button to start the handover with that model.
+ * CLI status, model and reasoning dropdowns, and an action button to start the handover.
  */
 @Composable
 fun HandoverProviderList(
@@ -114,7 +116,12 @@ fun HandoverProviderList(
             accounts.forEach { put(it.name, it.model ?: DEFAULT_CHOICE) }
         }
     }
-    var openDropdownAccount by remember { mutableStateOf<String?>(null) }
+    val selectedReasoning = remember(accounts) {
+        mutableStateMapOf<String, String>().apply {
+            accounts.forEach { put(it.name, it.reasoning ?: DEFAULT_CHOICE) }
+        }
+    }
+    var openDropdown by remember { mutableStateOf<Pair<String, AgentChoice>?>(null) }
 
     Column(
         modifier = modifier
@@ -128,6 +135,11 @@ fun HandoverProviderList(
                 // Not remembered: the live list can arrive after the panel is drawn.
                 val availableModels = modelOptionsFor(account, modelsFor(account))
                 val currentModel = selectedModels[account.name] ?: account.model ?: DEFAULT_CHOICE
+                val currentReasoning = selectedReasoning[account.name] ?: account.reasoning ?: DEFAULT_CHOICE
+                val target = account.copy(
+                    model = currentModel.takeIf { it != DEFAULT_CHOICE },
+                    reasoning = currentReasoning.takeIf { it != DEFAULT_CHOICE },
+                )
                 HandoverProviderCard(
                     account = account,
                     reading = readings[account.name],
@@ -135,29 +147,35 @@ fun HandoverProviderList(
                     selectedModel = currentModel,
                     onSelectModel = { chosen ->
                         selectedModels[account.name] = chosen
-                        openDropdownAccount = null
-                        val updated = account.copy(model = chosen.takeIf { it != DEFAULT_CHOICE })
+                        openDropdown = null
+                        val updated = target.copy(model = chosen.takeIf { it != DEFAULT_CHOICE })
                         onUpdateAccount?.invoke(updated)
                     },
-                    isDropdownOpen = openDropdownAccount == account.name,
-                    onToggleDropdown = {
-                        openDropdownAccount = if (openDropdownAccount == account.name) null else account.name
+                    selectedReasoning = currentReasoning,
+                    onSelectReasoning = { chosen ->
+                        selectedReasoning[account.name] = chosen
+                        openDropdown = null
+                        onUpdateAccount?.invoke(target.copy(reasoning = chosen.takeIf { it != DEFAULT_CHOICE }))
+                    },
+                    openDropdown = openDropdown?.takeIf { it.first == account.name }?.second,
+                    onToggleDropdown = { choice ->
+                        val next = account.name to choice
+                        openDropdown = if (openDropdown == next) null else next
                     },
                     actionLabel = actionLabel,
-                    onAction = {
-                        val target = account.copy(model = currentModel.takeIf { it != DEFAULT_CHOICE })
-                        onHandOver(target)
-                    },
+                    onAction = { onHandOver(target) },
                 )
             }
         }
     }
 }
 
+enum class AgentChoice { Model, Reasoning }
+
 /**
  * One provider card in the handover panel.
  *
- * Shows the account name, vendor name, usage, a model dropdown picker, and the start/handover button.
+ * Shows the account, usage, model and reasoning dropdowns, and the start/handover button.
  * The new-session picker uses it too, with its fuller usage line in [details].
  */
 @Composable
@@ -167,14 +185,16 @@ fun HandoverProviderCard(
     models: List<String>,
     selectedModel: String,
     onSelectModel: (String) -> Unit,
-    isDropdownOpen: Boolean,
-    onToggleDropdown: () -> Unit,
+    selectedReasoning: String,
+    onSelectReasoning: (String) -> Unit,
+    openDropdown: AgentChoice?,
+    onToggleDropdown: (AgentChoice) -> Unit,
     actionLabel: String,
     onAction: () -> Unit,
     modifier: Modifier = Modifier,
     /** The usage beside the name, or empty for none. */
     usage: String = usageDescription(reading),
-    /** Lines about the account between its name and its model. */
+    /** Lines about the account between its name and its choices. */
     details: @Composable () -> Unit = {},
     /** Drawn at the end of the name's row, after the usage. */
     headerAction: (@Composable () -> Unit)? = null,
@@ -184,6 +204,7 @@ fun HandoverProviderCard(
     val tint = if (JewelTheme.isDark) ProjectIconTintDark else ProjectIconTintLight
     val cli = CliTools.locate(account.provider)
     val isCliInstalled = cli != null
+    val reasoningInModel = account.provider == Provider.Antigravity && selectedModel != DEFAULT_CHOICE
 
     Column(
         modifier = modifier
@@ -239,33 +260,34 @@ fun HandoverProviderCard(
         }
         details()
 
-        Row(
+        FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f, fill = false),
-            ) {
-                Text("Model:", color = AgentMuted)
-                OutlinedButton(
-                    onClick = onToggleDropdown,
-                    enabled = isCliInstalled,
+            AgentChoice.entries.forEach { choice ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    Text("${choice.name}:", color = AgentMuted)
+                    OutlinedButton(
+                        onClick = { onToggleDropdown(choice) },
+                        enabled = isCliInstalled && (choice != AgentChoice.Reasoning || !reasoningInModel),
                     ) {
-                        Text(
-                            selectedModel,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.widthIn(max = 160.dp),
-                        )
-                        Canvas(Modifier.size(9.dp)) {
-                            drawDisclosure(tint, collapsed = false)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (choice == AgentChoice.Model) selectedModel else selectedReasoning,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 160.dp),
+                            )
+                            Canvas(Modifier.size(9.dp)) {
+                                drawDisclosure(tint, collapsed = false)
+                            }
                         }
                     }
                 }
@@ -278,7 +300,18 @@ fun HandoverProviderCard(
             }
         }
 
-        if (isDropdownOpen) {
+        if (reasoningInModel) {
+            Text("This model includes its reasoning level.", color = AgentMuted)
+        }
+
+        if (openDropdown != null && (openDropdown != AgentChoice.Reasoning || !reasoningInModel)) {
+            val options = if (openDropdown == AgentChoice.Model) {
+                models
+            } else {
+                (listOf(DEFAULT_CHOICE, selectedReasoning) + account.provider.reasoningLevels).distinct()
+            }
+            val selected = if (openDropdown == AgentChoice.Model) selectedModel else selectedReasoning
+            val onSelect = if (openDropdown == AgentChoice.Model) onSelectModel else onSelectReasoning
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -290,11 +323,11 @@ fun HandoverProviderCard(
                     .padding(4.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                models.forEach { option ->
+                options.forEach { option ->
                     key(option) {
                         val interaction = remember { MutableInteractionSource() }
                         val hovered by interaction.collectIsHoveredAsState()
-                        val isSelected = option == selectedModel
+                        val isSelected = option == selected
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -305,7 +338,7 @@ fun HandoverProviderCard(
                                     else Color.Transparent,
                                 )
                                 .clickable {
-                                    onSelectModel(option)
+                                    onSelect(option)
                                 }
                                 .padding(horizontal = 8.dp, vertical = 5.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),

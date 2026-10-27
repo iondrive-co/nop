@@ -59,11 +59,11 @@ fun AgentPicker(
     /** Where launching or resuming from here runs the CLI — this project's repository root. */
     projectDir: Path,
     modelsFor: (Account) -> List<String> = { it.provider.fallbackModels },
-    /** Saves a model picked here as the account's own, as the handover cards do. */
+    /** Saves model and reasoning choices as the account's own, as the handover cards do. */
     onUpdateAccount: ((Account) -> Unit)? = null,
     /** Takes the account out of nop's list, as Settings' Remove does. */
     onRemoveAccount: ((Account) -> Unit)? = null,
-    /** Starts a session on the account, carrying the model picked for it. */
+    /** Starts a session carrying the model and reasoning picked for the account. */
     onLaunch: (Account) -> Unit,
     onReopen: (PastSession) -> Unit,
     onSettings: () -> Unit,
@@ -93,8 +93,8 @@ fun AgentPicker(
             )
         }
 
-        // One model list open at a time, as in the handover panel.
-        var openDropdown by remember { mutableStateOf<String?>(null) }
+        // One choice list open at a time, as in the handover panel.
+        var openDropdown by remember { mutableStateOf<Pair<String, AgentChoice>?>(null) }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             accounts.forEach { account ->
                 key(account.name) {
@@ -108,9 +108,10 @@ fun AgentPicker(
                         // itself, so a nomination naming one that has since been removed says nothing
                         // here — exactly as it will do nothing when the wall is hit.
                         handsOverTo = accounts.handoverTarget(account)?.name,
-                        dropdownOpen = openDropdown == account.name,
-                        onToggleDropdown = {
-                            openDropdown = if (openDropdown == account.name) null else account.name
+                        openDropdown = openDropdown?.takeIf { it.first == account.name }?.second,
+                        onToggleDropdown = { choice ->
+                            val next = account.name to choice
+                            openDropdown = if (openDropdown == next) null else next
                         },
                         onPicked = { openDropdown = null },
                         onUpdateAccount = onUpdateAccount,
@@ -198,8 +199,7 @@ private fun PastSessionRow(past: PastSession, onReopen: () -> Unit) {
 }
 
 /**
- * One launchable account, as the same card a handover offers it on: the model is chosen here, with
- * the account's own as the default, and Start opens the session on it.
+ * One launchable account with model and reasoning choices, initially set to its saved settings.
  */
 @Composable
 private fun AccountCard(
@@ -208,15 +208,20 @@ private fun AccountCard(
     models: List<String>,
     /** Who takes over when this one runs out, or null when the choice is left to the user. */
     handsOverTo: String?,
-    dropdownOpen: Boolean,
-    onToggleDropdown: () -> Unit,
+    openDropdown: AgentChoice?,
+    onToggleDropdown: (AgentChoice) -> Unit,
     onPicked: () -> Unit,
     onUpdateAccount: ((Account) -> Unit)?,
     onRemove: (() -> Unit)?,
     onLaunch: (Account) -> Unit,
 ) {
-    // Follows the account's model when the settings change it, and a pick here saves to it.
+    // Follow settings changes while retaining choices when no persistence callback is supplied.
     var selected by remember(account.model) { mutableStateOf(account.model ?: DEFAULT_CHOICE) }
+    var reasoning by remember(account.reasoning) { mutableStateOf(account.reasoning ?: DEFAULT_CHOICE) }
+    val chosenAccount = account.copy(
+        model = selected.takeIf { it != DEFAULT_CHOICE },
+        reasoning = reasoning.takeIf { it != DEFAULT_CHOICE },
+    )
     // Asked once before it happens: this card is clicked to start work, and a Remove taken by a
     // stray click loses the account's model and handover settings with it.
     var confirmingRemove by remember { mutableStateOf(false) }
@@ -229,23 +234,23 @@ private fun AccountCard(
         onSelectModel = { chosen ->
             selected = chosen
             onPicked()
-            onUpdateAccount?.invoke(account.copy(model = chosen.takeIf { it != DEFAULT_CHOICE }))
+            onUpdateAccount?.invoke(chosenAccount.copy(model = chosen.takeIf { it != DEFAULT_CHOICE }))
         },
-        isDropdownOpen = dropdownOpen,
+        selectedReasoning = reasoning,
+        onSelectReasoning = { chosen ->
+            reasoning = chosen
+            onPicked()
+            onUpdateAccount?.invoke(chosenAccount.copy(reasoning = chosen.takeIf { it != DEFAULT_CHOICE }))
+        },
+        openDropdown = openDropdown,
         onToggleDropdown = onToggleDropdown,
         actionLabel = "Start",
-        onAction = { onLaunch(account.copy(model = selected.takeIf { it != DEFAULT_CHOICE })) },
+        onAction = { onLaunch(chosenAccount) },
         usage = "",
         details = {
             // The same numbers as the corner strip, spelled out: choosing which account to spend the
             // next hour on is exactly the decision this card is asking about.
-            Text(
-                listOfNotNull(
-                    account.reasoning?.takeIf { it != DEFAULT_CHOICE }?.let { "$it thinking" },
-                    usageLine(reading),
-                ).joinToString("   "),
-                color = AgentMuted,
-            )
+            Text(usageLine(reading), color = AgentMuted)
             // And where the hour after that comes from, when it has been decided in advance. Only
             // when it has: a line on every card saying nobody is nominated would be the settings
             // dialog's list printed into the picker, where the answer is almost always "nobody".
