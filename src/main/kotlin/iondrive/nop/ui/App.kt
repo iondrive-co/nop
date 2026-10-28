@@ -2308,22 +2308,28 @@ fun App(
         }
 
         when (val entry = pendingEntry) {
-            is TreeEntryDialog.NewFile -> NewEntryDialog(
-                title = "New File",
-                description = "Create a file in ${relativeLabel(entry.parentDir)} — use / to nest in subfolders",
-                onSubmit = { name ->
-                    runCatching { FileOperations.createFile(entry.parentDir, name) }.fold(
-                        onSuccess = { created ->
-                            pendingEntry = null
-                            afterTreeMutation()
-                            tabsState.open(Tab.FileView(created))
-                            null
-                        },
-                        onFailure = { it.message ?: "Could not create file" },
-                    )
-                },
-                onCancel = { pendingEntry = null },
-            )
+            is TreeEntryDialog.NewFile -> {
+                val defaultExtension = remember(rootPath, fileIndex, fsRefreshKey) {
+                    FileOperations.defaultFileExtension(rootPath.toFile(), fileIndex.files)
+                }
+                NewEntryDialog(
+                    title = "New File",
+                    description = "Create a file in ${relativeLabel(entry.parentDir)} — use / to nest in subfolders" +
+                        if (defaultExtension != null) ". Names without an extension use .$defaultExtension" else "",
+                    onSubmit = { name ->
+                        runCatching { FileOperations.createFile(entry.parentDir, name, defaultExtension) }.fold(
+                            onSuccess = { created ->
+                                pendingEntry = null
+                                afterTreeMutation()
+                                tabsState.open(Tab.FileView(created))
+                                null
+                            },
+                            onFailure = { it.message ?: "Could not create file" },
+                        )
+                    },
+                    onCancel = { pendingEntry = null },
+                )
+            }
             is TreeEntryDialog.NewDirectory -> NewEntryDialog(
                 title = "New Directory",
                 description = "Create a directory in ${relativeLabel(entry.parentDir)} — use / to nest",

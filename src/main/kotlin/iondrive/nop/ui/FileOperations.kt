@@ -22,12 +22,24 @@ object FileOperations {
     fun parentDirFor(target: File): File =
         if (target.isDirectory) target else (target.parentFile ?: target.absoluteFile.parentFile)
 
+    /** Java sources or a conventional Java project layout give extensionless new files a default. */
+    internal fun defaultFileExtension(projectRoot: File, projectFiles: List<String>): String? =
+        if (projectFiles.any { it.endsWith(".java", ignoreCase = true) } ||
+            File(projectRoot, "pom.xml").isFile ||
+            File(projectRoot, "src/main/java").isDirectory ||
+            File(projectRoot, "src/test/java").isDirectory
+        ) "java" else null
+
     /**
      * Create an empty file under [parentDir]. [rawName] may contain '/' to create intermediate
-     * directories first (e.g. "sub/dir/Main.kt").
+     * directories first (e.g. "sub/dir/Main.kt"). [defaultExtension] applies only when the final
+     * name contains no dot, preserving explicit extensions and dotfiles.
      */
-    fun createFile(parentDir: File, rawName: String): File {
-        val target = resolve(parentDir, splitPath(rawName, "file name"))
+    fun createFile(parentDir: File, rawName: String, defaultExtension: String? = null): File {
+        val requested = resolve(parentDir, splitPath(rawName, "file name"))
+        val target = if (defaultExtension != null && '.' !in requested.name) {
+            File(requested.parentFile, "${requested.name}.$defaultExtension")
+        } else requested
         if (target.exists()) throw IOException("\"${target.name}\" already exists")
         target.parentFile?.mkdirs()
         if (!target.createNewFile()) throw IOException("Could not create \"${target.name}\"")

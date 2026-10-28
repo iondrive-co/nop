@@ -1,5 +1,6 @@
 package iondrive.nop.ui
 
+import iondrive.nop.index.FileIndex
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
@@ -35,6 +36,49 @@ class FileOperationsTest {
         val created = FileOperations.createFile(tmp.toFile(), "sub/dir/Main.kt")
         assertTrue(created.isFile)
         assertTrue(tmp.resolve("sub/dir").toFile().isDirectory)
+    }
+
+    @Test fun `Java project defaults new files to java including nested names`(@TempDir tmp: Path) {
+        tmp.resolve("src/Example.java").also { it.parent.createDirectories() }.createFile()
+        val extension = FileOperations.defaultFileExtension(tmp.toFile(), FileIndex.build(tmp).files)
+        val created = FileOperations.createFile(tmp.toFile(), " com.example/Widget ", extension)
+        assertEquals(tmp.resolve("com.example/Widget.java").toFile(), created)
+        assertEquals("", created.readText())
+    }
+
+    @Test fun `empty Java project layouts default new files to java`(@TempDir tmp: Path) {
+        for (layout in listOf("pom.xml", "src/main/java", "src/test/java")) {
+            val root = tmp.resolve(layout.replace('/', '-')).createDirectories()
+            val marker = root.resolve(layout)
+            if (layout.endsWith(".xml")) marker.createFile() else marker.createDirectories()
+            val extension = FileOperations.defaultFileExtension(root.toFile(), emptyList())
+            val created = FileOperations.createFile(root.toFile(), "Widget", extension)
+            assertEquals(root.resolve("Widget.java").toFile(), created)
+        }
+    }
+
+    @Test fun `Java default preserves explicit extensions and dotfiles`(@TempDir tmp: Path) {
+        for (name in listOf("Widget.java", "notes.txt", ".gitignore", "Widget.")) {
+            assertEquals(tmp.resolve(name).toFile(), FileOperations.createFile(tmp.toFile(), name, "java"))
+        }
+    }
+
+    @Test fun `non Java project keeps extensionless names`(@TempDir tmp: Path) {
+        tmp.resolve("build.gradle.kts").createFile()
+        tmp.resolve("Main.kt").createFile()
+        val extension = FileOperations.defaultFileExtension(tmp.toFile(), FileIndex.build(tmp).files)
+        assertNull(extension)
+        assertEquals(tmp.resolve("notes").toFile(), FileOperations.createFile(tmp.toFile(), "notes", extension))
+    }
+
+    @Test fun `Java default checks collisions and validates paths before adding extension`(@TempDir tmp: Path) {
+        tmp.resolve("Widget.java").createFile().writeText("existing")
+        assertThrows<IOException> { FileOperations.createFile(tmp.toFile(), "Widget", "java") }
+        assertEquals("existing", tmp.resolve("Widget.java").toFile().readText())
+        for (name in listOf("   ", "folder/", "folder/..", "../escape", "folder//Widget")) {
+            assertThrows<IllegalArgumentException> { FileOperations.createFile(tmp.toFile(), name, "java") }
+        }
+        assertFalse(tmp.resolve("folder").toFile().exists())
     }
 
     @Test fun `createFile rejects an existing file`(@TempDir tmp: Path) {
