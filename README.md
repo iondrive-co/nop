@@ -68,7 +68,14 @@ In a terminal, a launcher run or an agent session:
 
 ## Troubleshooting
 
-Java dependency lookup uses `.nop/classpath.txt` at the project root: one JAR or compiled-classes
+Gradle Java projects import their dependencies automatically using the project's Gradle wrapper
+(or `gradle` on PATH when there is no wrapper). nop reads the resolved compile classpath and source
+folders for each Java source set, including subprojects, transitive dependencies and `compileOnly`
+annotations. Main and test diagnostics use their own classpaths. Import runs in the background;
+Java editors show its progress or failure. Build-script changes trigger another import; F5 forces a
+refresh. This resolves dependencies without running the project's compilation tasks.
+
+Additional dependencies can be listed in `.nop/classpath.txt` at the project root: one JAR or compiled-classes
 directory per line, with paths absolute or relative to that root. `lib/*` includes JARs directly in
 `lib`. Matching `-sources.jar` files are opened when available beside the binary or in its Maven/Gradle
 cache location. JDK sources use a matching JDK's `src.zip` when available. Classes without sources open

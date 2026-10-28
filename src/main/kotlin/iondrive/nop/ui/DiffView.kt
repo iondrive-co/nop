@@ -278,6 +278,9 @@ fun DiffView(
     Column(modifier = Modifier.fillMaxSize()) {
     // The working side of a diff is an editor like any other, and stops reaching disk the same way.
     if (edit != null) SaveStatusStrip(edit, onSaved = savedCallback)
+    javaDiagnostics.status?.let {
+        Text(it, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+    }
     javaDiagnostics.result?.let { analysis ->
         analysis.failure?.let {
             Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))

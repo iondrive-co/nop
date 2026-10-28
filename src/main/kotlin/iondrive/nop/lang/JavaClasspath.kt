@@ -5,7 +5,10 @@ import java.io.IOException
 
 /** The dependency paths shared by compiler diagnostics and library navigation. */
 object JavaClasspath {
-    fun read(root: File): List<File> {
+    fun read(root: File, gradle: GradleJavaModel? = null, file: File? = null): List<File> =
+        (gradle?.classpath(file).orEmpty() + manual(root)).distinct()
+
+    private fun manual(root: File): List<File> {
         val config = File(root, ".nop/classpath.txt")
         if (!config.exists()) return emptyList()
         return config.readLines().flatMap { raw ->

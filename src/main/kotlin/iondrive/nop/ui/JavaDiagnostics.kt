@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import java.io.File
 
-internal data class JavaDiagnostics(val text: String? = null, val result: JavaAnalysisResult? = null)
+internal data class JavaDiagnostics(val text: String? = null, val result: JavaAnalysisResult? = null, val status: String? = null)
 
 private val javaAnalysisDispatcher = Dispatchers.Default.limitedParallelism(1)
 
@@ -33,7 +33,7 @@ internal fun rememberJavaDiagnostics(
 ): JavaDiagnostics {
     var diagnostics by remember(file) { mutableStateOf(JavaDiagnostics()) }
     LaunchedEffect(file, edit, project) {
-        if (edit == null || !file.extension.equals("java", ignoreCase = true)) return@LaunchedEffect
+        if (edit == null || !file.extension.equals("java", ignoreCase = true) || project.dependencyStatus != null) return@LaunchedEffect
         var immediate = true
         snapshotFlow {
             edit.state.text.toString() to store.snapshot()
@@ -43,10 +43,12 @@ internal fun rememberJavaDiagnostics(
             .distinctUntilChanged()
             .collectLatest { (text, buffers) ->
                 val result = withContext(javaAnalysisDispatcher) {
-                    JavaAnalysis.analyze(text, file, project.root, project.files, buffers)
+                    JavaAnalysis.analyze(text, file, project.root, project.files, buffers, project.gradle)
                 }
                 if (edit.state.text.toString() == text) diagnostics = JavaDiagnostics(text, result)
             }
     }
+    if (edit != null && file.extension.equals("java", ignoreCase = true) && project.dependencyStatus != null)
+        return JavaDiagnostics(status = project.dependencyStatus)
     return diagnostics.takeIf { it.text == edit?.state?.text?.toString() } ?: JavaDiagnostics()
 }

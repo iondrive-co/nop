@@ -2,6 +2,7 @@ package iondrive.nop.index
 
 import iondrive.nop.lang.JavaClassDeclaration
 import iondrive.nop.lang.JavaClasspath
+import iondrive.nop.lang.GradleJavaModel
 import iondrive.nop.lang.JavaHeader
 import java.io.DataInputStream
 import java.io.File
@@ -155,8 +156,9 @@ class JavaLibraryIndex private constructor(
             previous: JavaLibraryIndex? = null,
             includeJdk: Boolean = true,
             jdkSourceArchives: List<File> = defaultJdkSources(),
+            gradle: GradleJavaModel? = null,
         ): JavaLibraryIndex {
-            val classpath = JavaClasspath.read(projectRoot)
+            val classpath = JavaClasspath.read(projectRoot, gradle)
             val sourceArchives = classpath.filter { it.isFile }.associateWith(::sourceArchives)
             val directoryClasses = classpath.filter { it.isDirectory }.associateWith { directory ->
                 Files.walk(directory.toPath()).use { files ->

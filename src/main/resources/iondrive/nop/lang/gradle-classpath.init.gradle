@@ -1,0 +1,39 @@
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.tasks.SourceSetContainer
+
+// Attach only to the requested build, not to its buildSrc or included builds.
+gradle.projectsEvaluated {
+    def root = gradle.rootProject
+    if (root.projectDir.canonicalFile != new File(System.getProperty('nop.gradle.root')).canonicalFile) return
+    root.tasks.register('nopExportJavaModel') {
+        doLast {
+            def projects = root.allprojects.sort { it.path }
+            def sourceSets = projects.collectMany { p ->
+                def sets = p.extensions.findByType(SourceSetContainer)
+                sets == null ? [] : sets.collect { s -> [project: p, sourceSet: s] }
+            }
+            def model = sourceSets.collect { entry ->
+                def p = entry.project
+                def s = entry.sourceSet
+                def files = s.compileClasspath.files
+                def configuration = p.configurations.findByName(s.compileClasspathConfigurationName)
+                def dependencies = configuration == null ? [] : configuration.incoming.resolutionResult.allComponents.collect { component ->
+                    def id = component.id
+                    id instanceof ProjectComponentIdentifier && (id.build == configuration.incoming.resolutionResult.root.id.build) ? root.findProject(id.projectPath) : null
+                }.findAll { it != null && it != p }
+                def related = sourceSets.findAll { other ->
+                    (dependencies.contains(other.project) && other.sourceSet.name == 'main') ||
+                        other.sourceSet.output.classesDirs.files.any { files.contains(it) }
+                }
+                [projectDir: p.projectDir.absolutePath, name: s.name,
+                 sourceRoots: s.allJava.srcDirs.collect { it.absolutePath },
+                 classpath: files.collect { it.absolutePath },
+                 dependencySources: related.collectMany { it.sourceSet.allJava.srcDirs.collect { dir -> dir.absolutePath } }.unique()]
+            }
+            def inputs = projects.collect { it.buildFile.absolutePath }
+            def output = new File(System.getProperty('nop.gradle.output'))
+            output.setText(JsonOutput.toJson([sourceSets: model, inputs: inputs]), 'UTF-8')
+        }
+    }
+}

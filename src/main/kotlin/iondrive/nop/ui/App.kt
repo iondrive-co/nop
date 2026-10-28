@@ -62,6 +62,8 @@ import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JavaLibraryIndex
 import iondrive.nop.index.SymbolIndex
+import iondrive.nop.lang.GradleClasspath
+import iondrive.nop.lang.GradleJavaModel
 import iondrive.nop.lang.JavaAnalysisProject
 import iondrive.nop.lang.JavaParse
 import iondrive.nop.lang.JavaRename
@@ -278,6 +280,7 @@ fun App(
     var fileNameCollapsed by remember { mutableStateOf(Settings.loadFileNameCollapsed()) }
     // Bumped on every refresh to force the project tree to rescan from disk
     var fsRefreshKey by remember(projectPath) { mutableStateOf(0) }
+    var gradleRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Explicit refreshes bypass the tree's background pacing; git polls keep that pacing intact.
     var treeRefreshKey by remember(projectPath) { mutableStateOf(0) }
     // Re-key on projectPath so switching projects drops the old project's open tabs and edit state.
@@ -423,6 +426,7 @@ fun App(
 
     fun refresh() {
         if (refreshing) return
+        if (repo == null) fsRefreshKey += 1
         scope.launch {
             refreshing = true
             try {
@@ -442,6 +446,7 @@ fun App(
     LaunchedEffect(refreshTrigger) {
         if (refreshTrigger <= refreshBaseline) return@LaunchedEffect
         tabsState.selectedId?.let { tabsState.requestReload(it) }
+        gradleRefreshKey += 1
         refresh()
     }
 
@@ -498,16 +503,31 @@ fun App(
     var javaLibraries by remember(rootPath) { mutableStateOf(JavaLibraryIndex.empty(libraryCache)) }
     var librariesLoading by remember(rootPath) { mutableStateOf(false) }
     var libraryError by remember(rootPath) { mutableStateOf<String?>(null) }
-    LaunchedEffect(rootPath, fileIndex, fsRefreshKey) {
+    val gradleImporter = remember(rootPath) { GradleClasspath(rootPath.toFile(), Settings.projectDataDir(rootPath).resolve("gradle")) }
+    var gradleModel by remember(rootPath) { mutableStateOf<GradleJavaModel?>(null) }
+    var gradleStatus by remember(rootPath) {
+        mutableStateOf(if (GradleClasspath.isGradleProject(rootPath.toFile())) "Importing Gradle dependencies…" else null)
+    }
+    LaunchedEffect(rootPath, fileIndex, fsRefreshKey, gradleRefreshKey) {
         val hasJava = fileIndex.files.any { it.endsWith(".java", ignoreCase = true) } || withContext(Dispatchers.IO) {
-            rootPath.resolve(".nop/classpath.txt").toFile().isFile
+            rootPath.resolve(".nop/classpath.txt").toFile().isFile || GradleClasspath.isGradleProject(rootPath.toFile())
         }
         if (!hasJava) return@LaunchedEffect
         librariesLoading = true
         try {
+            gradleStatus = if (GradleClasspath.isGradleProject(rootPath.toFile())) "Importing Gradle dependencies…" else null
+            try {
+                gradleModel = gradleImporter.load(fileIndex.files, gradleRefreshKey)
+                gradleStatus = null
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                gradleStatus = "${error.message ?: "Gradle import failed"} — press F5 to retry"
+                Log.error("Gradle classpath import failed", error)
+            }
             val previous = javaLibraries
             javaLibraries = withContext(Dispatchers.IO) {
-                JavaLibraryIndex.build(rootPath.toFile(), libraryCache, previous)
+                JavaLibraryIndex.build(rootPath.toFile(), libraryCache, previous, gradle = gradleModel)
             }
             libraryError = null
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -1768,7 +1788,7 @@ fun App(
                                 repo = repo,
                                 editStore = editStore,
                                 localHistory = localHistory,
-                                javaProject = JavaAnalysisProject(rootPath.toFile(), fileIndex.files, fsRefreshKey),
+                                javaProject = JavaAnalysisProject(rootPath.toFile(), fileIndex.files, fsRefreshKey, gradleModel, gradleStatus),
                                 onFileSaved = ::refresh,
                                 onResolveAt = { currentFile, text, offset ->
                                     JumpResolver.resolve(
@@ -2087,7 +2107,10 @@ fun App(
                                         onMessageHeightChange = { commitMessageHeight = it },
                                         stashInFlight = stashInFlight,
                                         refreshing = refreshing,
-                                        onRefresh = ::refresh,
+                                        onRefresh = {
+                                            gradleRefreshKey += 1
+                                            refresh()
+                                        },
                                         // Reuse list = remembered commit/stash messages plus the
                                         // descriptions of stashes currently on the shelf (so externally
                                         // created or pre-existing stashes show up too). "(no message)"
@@ -2503,7 +2526,7 @@ fun App(
         if (fileSearchOpen) {
             FileSearchDialog(
                 files = remember(fileIndex, javaLibraries) { fileIndex.files + javaLibraries.searchPaths },
-                status = libraryError ?: if (librariesLoading) "Indexing library classes…" else null,
+                status = gradleStatus ?: libraryError ?: if (librariesLoading) "Indexing library classes…" else null,
                 accessCounts = accessFreq.value.counts,
                 onPick = { relPath ->
                     fileSearchOpen = false

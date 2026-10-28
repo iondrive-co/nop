@@ -830,6 +830,9 @@ private fun FileEditView(
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
             )
         } else SaveStatusStrip(edit, onSaved = savedCallback)
+        javaDiagnostics.status?.let {
+            Text(it, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+        }
         javaDiagnostics.result?.failure?.let {
             Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
         }

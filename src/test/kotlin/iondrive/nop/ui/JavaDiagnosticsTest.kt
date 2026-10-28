@@ -1,5 +1,8 @@
 package iondrive.nop.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.InternalComposeUiApi
@@ -13,6 +16,8 @@ import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.FileChange
 import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
+import iondrive.nop.lang.GradleJavaModel
+import iondrive.nop.lang.GradleJavaSourceSet
 import iondrive.nop.lang.JavaAnalysisProject
 import iondrive.nop.lang.JavaDeclKind
 import iondrive.nop.lang.JavaParse
@@ -31,6 +36,23 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class JavaDiagnosticsTest {
+    @Test fun `dependency import status suppresses unresolved errors until the model is ready`(@TempDir root: Path) {
+        val file = root.resolve("Widget.java").toFile().apply { writeText("class Widget { MissingType value; }") }
+        Viewer(root, Tab.FileView(file), initialStatus = "Importing Gradle dependencies…").use { viewer ->
+            viewer.await { viewer.shows("Importing Gradle dependencies…") }
+            assertTrue(!viewer.hasProblemBar())
+            viewer.snapshot(Path.of("build/verification/gradle-import-status.png"))
+            val model = GradleJavaModel(listOf(GradleJavaSourceSet(root.toString(), "main", listOf(root.toString()), emptyList())))
+            viewer.project(JavaAnalysisProject(root.toFile(), gradle = model))
+            viewer.await { viewer.shows("cannot find symbol") }
+            viewer.project(JavaAnalysisProject(root.toFile(), gradle = model, dependencyStatus = "Gradle import failed — press F5 to retry"))
+            viewer.await { viewer.shows("Gradle import failed") && !viewer.hasProblemBar() }
+            viewer.project(JavaAnalysisProject(root.toFile(), gradle = model))
+            viewer.replace(file, "class Widget { String value; }")
+            viewer.await { !viewer.shows("Gradle import failed") && !viewer.hasProblemBar() }
+        }
+    }
+
     @Test fun `compiler errors appear and clear for unsaved editor text`(@TempDir root: Path) {
         val file = root.resolve("Widget.java").toFile().apply { writeText("class Widget { MissingType value; }") }
         Viewer(root, Tab.FileView(file)).use { viewer ->
@@ -89,7 +111,8 @@ class JavaDiagnosticsTest {
     }
 
     @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class)
-    private class Viewer(root: Path, tab: Tab, repo: GitRepo? = null) : AutoCloseable {
+    private class Viewer(root: Path, tab: Tab, repo: GitRepo? = null, initialStatus: String? = null) : AutoCloseable {
+        private var project by mutableStateOf(JavaAnalysisProject(root.toFile(), dependencyStatus = initialStatus))
         val store = FileEditStore()
         private var time = 0L
         private val scene = onEdt {
@@ -97,7 +120,7 @@ class JavaDiagnosticsTest {
             ImageComposeScene(1100, 550, Density(1f)) {
                 IntUiTheme(isDark = false) {
                     TabbedViewerPanel(tabs, repo, store, LocalHistory(root.resolve("history")),
-                        javaProject = JavaAnalysisProject(root.toFile()))
+                        javaProject = project)
                 }
             }
         }
@@ -112,6 +135,8 @@ class JavaDiagnosticsTest {
             } while (System.nanoTime() < deadline)
             assertTrue(condition(), "Expected editor state did not arrive; visible text: ${texts()}")
         }
+
+        fun project(value: JavaAnalysisProject) = onEdt { project = value }
 
         fun replace(file: java.io.File, text: String) = onEdt {
             store.edit(Tab.FileView(file)).state.edit { replace(0, length, text) }

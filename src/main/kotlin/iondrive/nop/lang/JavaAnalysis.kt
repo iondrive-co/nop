@@ -15,7 +15,13 @@ import javax.tools.ToolProvider
 
 data class JavaAnalysisResult(val problems: List<JavaProblem>, val failure: String? = null)
 
-data class JavaAnalysisProject(val root: File, val files: List<String> = emptyList(), val revision: Int = 0)
+data class JavaAnalysisProject(
+    val root: File,
+    val files: List<String> = emptyList(),
+    val revision: Int = 0,
+    val gradle: GradleJavaModel? = null,
+    val dependencyStatus: String? = null,
+)
 
 /** Compiler checks for an editor buffer. The project-wide index continues to use the cheaper parse. */
 object JavaAnalysis {
@@ -25,22 +31,25 @@ object JavaAnalysis {
         projectRoot: File = file.absoluteFile.parentFile,
         projectFiles: List<String> = emptyList(),
         openBuffers: Map<File, String> = emptyMap(),
+        gradle: GradleJavaModel? = null,
     ): JavaAnalysisResult {
         val compiler = ToolProvider.getSystemJavaCompiler()
             ?: return JavaAnalysisResult(emptyList(), "Java compiler unavailable — Java analysis is off")
         return runCatching {
             val root = projectRoot.absoluteFile.normalize()
             val source = BufferSource(file, text)
+            val gradleSources = gradle?.sourceSet(file)?.sources()
             val buffers = openBuffers.filterKeys {
                 it.extension.equals("java", ignoreCase = true) &&
-                    it.absoluteFile.normalize().toPath().startsWith(root.toPath())
+                    it.absoluteFile.normalize().toPath().startsWith(root.toPath()) &&
+                    (gradleSources == null || gradleSources.any { dir -> it.toPath().toAbsolutePath().normalize().startsWith(dir.toPath()) })
             }
                 .mapKeys { it.key.absoluteFile.normalize() } + (file.absoluteFile.normalize() to text)
-            val sources = sourceRoots(root, projectFiles, buffers)
+            val sources = gradleSources ?: sourceRoots(root, projectFiles, buffers)
             val collector = DiagnosticCollector<JavaFileObject>()
             compiler.getStandardFileManager(collector, null, Charsets.UTF_8).use { standard ->
                 // nop's own implementation dependencies must never become project dependencies.
-                standard.setLocation(StandardLocation.CLASS_PATH, JavaClasspath.read(root))
+                standard.setLocation(StandardLocation.CLASS_PATH, JavaClasspath.read(root, gradle, file))
                 standard.setLocation(StandardLocation.SOURCE_PATH, sources)
                 standard.setLocation(StandardLocation.ANNOTATION_PROCESSOR_PATH, emptyList())
                 val manager = BufferFileManager(standard, buffers.map { BufferSource(it.key, it.value) })

@@ -56,6 +56,7 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    systemProperty("nop.test.gradleHome", gradle.gradleHomeDir!!.absolutePath)
     maxHeapSize = "512m"
     // Software rendering allocates native memory outside the heap; return freed allocations regularly.
     jvmArgs("-XX:TrimNativeHeapInterval=60000")
