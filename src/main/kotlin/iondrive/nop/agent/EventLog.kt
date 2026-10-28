@@ -275,6 +275,19 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
     /** Everything written so far, in order. Unreadable lines are skipped rather than fatal. */
     fun events(): List<AgentEvent> = read(file)
 
+    /** A fallback for a restored tab whose CLI supplies no session title. */
+    fun firstPromptTitle(): String? = runCatching {
+        Files.newBufferedReader(file).use { reader ->
+            reader.lineSequence().take(HEAD_LINES).firstNotNullOfOrNull { line ->
+                if ("\"user_message\"" !in line) return@firstNotNullOfOrNull null
+                val event = runCatching {
+                    JSON.decodeFromString(AgentEvent.serializer(), line)
+                }.getOrNull() as? AgentEvent.UserMessage
+                event?.text?.let(SessionTitle::fromPrompt)
+            }
+        }
+    }.getOrNull()
+
     @Synchronized
     override fun close() {
         runCatching { writer?.close() }
@@ -425,7 +438,8 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                                 if (event.transcriptPath == null) lastSpawn = event
                             }
                             is AgentEvent.SessionTitled -> titled = event.title
-                            is AgentEvent.UserMessage -> firstPrompt = firstPrompt ?: event.text
+                            is AgentEvent.UserMessage ->
+                                firstPrompt = firstPrompt ?: SessionTitle.fromPrompt(event.text)
                             else -> Unit
                         }
                     }
@@ -439,7 +453,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 ?: (if (lastRun?.provider == Provider.Antigravity.id && lastRun.nativeSessionId != null && (lastRun.home ?: storeOf(lastRun)) != null) {
                     Antigravity.conversationTitle(Path.of(lastRun.home ?: storeOf(lastRun)), lastRun.nativeSessionId)
                 } else null)
-                ?: firstPrompt?.firstLine()
+                ?: firstPrompt
                 ?: "Untitled session"
 
             return PastSession(
@@ -624,8 +638,5 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             }.getOrNull() ?: return false
             return began >= at
         }
-
-        private fun String.firstLine(): String =
-            lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(120) ?: "Untitled session"
     }
 }

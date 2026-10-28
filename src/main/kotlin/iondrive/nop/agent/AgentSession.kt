@@ -342,11 +342,14 @@ class AgentSession(
      * guess, and it answers the wrong question — which quota is being spent, not which piece of work the
      * tab is doing — while the settings dialog and the picker both already say it.
      *
-     * Two better names replace it. The CLI writes a title into its own transcript a turn or two in
-     * ("AWS support"), and the user can right-click the tab and say so themselves. A tab put back
-     * from the state file starts under whichever of those it had earned by the time nop exited.
+     * The first request supplies a fallback until the CLI writes its own title. The user can
+     * right-click the tab to name it themselves. A restored tab keeps the name it already earned.
      */
-    var title: String by mutableStateOf(restoredTitle?.takeIf { it.isNotBlank() } ?: DEFAULT_TITLE)
+    var title: String by mutableStateOf(
+        restoredTitle?.takeIf { it.isNotBlank() && (titleByUser || it != DEFAULT_TITLE) }
+            ?: (if (log.hadHistory) log.firstPromptTitle() else null)
+            ?: DEFAULT_TITLE,
+    )
         private set
 
     /**
@@ -356,6 +359,16 @@ class AgentSession(
      * the other side of a restart, which is why it is written to the state file beside the name.
      */
     private var titleIsUsers by mutableStateOf(titleByUser)
+
+    /** A request names an untitled tab; explicit names and handovers retain their own titles. */
+    internal fun titleFromPrompt(
+        text: String,
+        fromHandoff: Boolean = run.seededFromHandoff,
+        at: Long = System.currentTimeMillis(),
+    ) {
+        if (title != DEFAULT_TITLE || titleIsUsers || fromHandoff) return
+        SessionTitle.fromPrompt(text)?.let { titleFromTranscript(it, fromHandoff, at) }
+    }
 
     /** Renames the tab. A blank name is ignored: the user who cleared the field meant to cancel. */
     fun rename(name: String) {
@@ -1274,6 +1287,9 @@ class AgentSession(
                 // which of three open tabs this is than the account does.
                 if (event is AgentEvent.SessionTitled) {
                     titleFromTranscript(event.title, seededFromHandoff, event.at)
+                }
+                if (event is AgentEvent.UserMessage) {
+                    titleFromPrompt(event.text, seededFromHandoff, event.at)
                 }
                 if (event is AgentEvent.UserMessage && event.at >= startedAt - 5000) {
                     newRun.userPromptSubmitted = true

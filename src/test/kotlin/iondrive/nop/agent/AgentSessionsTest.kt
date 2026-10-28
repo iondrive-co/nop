@@ -71,6 +71,65 @@ class AgentSessionsTest {
     }
 
     @Test
+    fun `the first request names a Codex tab and later requests keep its name`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+        session.titleFromPrompt("<environment_context>\n<shell>sh</shell>\n</environment_context>")
+        assertEquals("Agent", session.title)
+
+        session.titleFromPrompt("  Add a search box\nwith keyboard support", at = 123)
+        session.titleFromPrompt("Now change the colours")
+
+        assertEquals("Add a search box", session.title)
+        assertEquals(
+            listOf(AgentEvent.SessionTitled("Add a search box", 123)),
+            session.log.events().filterIsInstance<AgentEvent.SessionTitled>(),
+        )
+    }
+
+    @Test
+    fun `a request fallback yields to the CLI title and respects manual names`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+        session.titleFromPrompt("Add a search box")
+        session.titleFromTranscript("Search interface")
+        assertEquals("Search interface", session.title)
+
+        session.rename("Agent")
+        session.titleFromPrompt("Another request")
+        assertEquals("Agent", session.title)
+    }
+
+    @Test
+    fun `a handover prompt does not name an unnamed tab`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+        session.titleFromPrompt("Continue the handover", fromHandoff = true)
+
+        assertEquals("Agent", session.title)
+        assertTrue(session.log.events().filterIsInstance<AgentEvent.SessionTitled>().isEmpty())
+    }
+
+    @Test
+    fun `restoring an unnamed Codex tab recovers the request from its log`(@TempDir tmp: Path) {
+        val state = sessions()
+        val codex = account("codex", Provider.OpenAI)
+        val original = state.open(tmp.toFile(), codex)
+        original.log.append(AgentEvent.UserMessage("<environment_context>\n</environment_context>", 1))
+        original.log.append(AgentEvent.UserMessage("Add a search box", 2))
+        state.disposeAll()
+
+        val row = Settings.OpenAgent(
+            sessionId = original.sessionId, title = "Agent", account = codex.name,
+            provider = codex.provider.id, nativeSessionId = "sample-conversation", titleIsUsers = false,
+        )
+        val restored = sessions()
+        restored.restore(listOf(row), tmp.toFile(), listOf(codex))
+        assertEquals("Add a search box", restored.sessions.single().title)
+
+        val manual = sessions()
+        manual.restore(listOf(row.copy(titleIsUsers = true)), tmp.toFile(), listOf(codex))
+        assertEquals("Agent", manual.sessions.single().title)
+    }
+
+    @Test
     fun `switching provider does not overwrite a name already earned`(@TempDir tmp: Path) {
         val session = sessions().open(tmp.toFile(), account("claude-main"))
         session.titleFromTranscript("AWS support")

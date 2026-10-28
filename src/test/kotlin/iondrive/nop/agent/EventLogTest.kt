@@ -281,6 +281,38 @@ class EventLogTest {
     }
 
     @Test
+    fun `injected context does not name a saved session`(@TempDir tmp: Path) {
+        val written = session(
+            "context-first", tmp.toString(), null,
+            "<environment_context>\n<cwd>/workspace/sample</cwd>\n</environment_context>",
+        )
+        written.append(AgentEvent.UserMessage("  Add a search box\nwith keyboard support", now()))
+        written.append(AgentEvent.UserMessage("Another request", now()))
+
+        assertEquals("Add a search box", EventLog.sessions(tmp).single { it.sessionId == "context-first" }.title)
+        assertEquals("Add a search box", written.firstPromptTitle())
+    }
+
+    @Test
+    fun `a request attached to context names the session`(@TempDir tmp: Path) {
+        val written = session(
+            "context-prefix", tmp.toString(), null,
+            "<environment_context>\n<shell>sh</shell>\n</environment_context>\n\nAdd a search box",
+        )
+
+        assertEquals("Add a search box", EventLog.sessions(tmp).single { it.sessionId == "context-prefix" }.title)
+        assertEquals("Add a search box", written.firstPromptTitle())
+    }
+
+    @Test
+    fun `context without a request leaves a session untitled`(@TempDir tmp: Path) {
+        val written = session("context-only", tmp.toString(), null, "<environment_context>\n</environment_context>")
+
+        assertEquals("Untitled session", EventLog.sessions(tmp).single { it.sessionId == "context-only" }.title)
+        assertNull(written.firstPromptTitle())
+    }
+
+    @Test
     fun `a session that produced nothing at all still has a label`(@TempDir tmp: Path) {
         session("silent", tmp.toString(), null, null)
 
