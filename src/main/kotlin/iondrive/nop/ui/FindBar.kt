@@ -70,7 +70,7 @@ internal val FIND_MARK = Color(0xFFD9A441)
 internal val FIND_ACTIVE_MARK = Color(0xFFFF7A1A)
 
 /**
- * The lane colour for a syntax error, picked to sit clearly apart from the amber find marks — a
+ * The lane colour for a compiler error, picked to sit clearly apart from the amber find marks — a
  * stripe here means "this file is broken here", which is a different question from "this is what you
  * searched for". Fixed across themes for the same reason the pair above is.
  */
@@ -125,7 +125,7 @@ internal fun BoxScope.FindMarkerScrollbar(
     fractions: List<Float>,
     current: Int,
     /**
-     * Where the file's syntax errors sit down the document, 0..1 — drawn in the error colour beside
+     * Where the file's compiler errors sit down the document, 0..1 — drawn in the error colour beside
      * the find marks. This is what makes a broken line below the fold visible: without it, the only
      * evidence of an error twelve screens down is that the file doesn't compile.
      */

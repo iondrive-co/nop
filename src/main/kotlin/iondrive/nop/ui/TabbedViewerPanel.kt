@@ -60,6 +60,7 @@ import iondrive.nop.git.GitRepo
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JumpTarget
+import iondrive.nop.lang.JavaAnalysisProject
 import iondrive.nop.lang.JavaDecl
 import iondrive.nop.lang.JavaDeclKind
 import iondrive.nop.lang.JavaParse
@@ -141,6 +142,7 @@ fun TabbedViewerPanel(
     // Ask the app to open this file's git log. It opens as a tab in the tool panel on the right
     // rather than here, so the log sits beside the diff it sends you to instead of replacing it.
     onShowHistory: (File) -> Unit = {},
+    javaProject: JavaAnalysisProject? = null,
 ) {
     val selected = tabsState.selectedTab
 
@@ -201,6 +203,7 @@ fun TabbedViewerPanel(
                         onShowHistory = { onShowHistory(current.file) },
                         onCompareWithRevision = { onCompareWithRevision(current.file) },
                         gitTracked = gitTracked,
+                        javaProject = javaProject,
                         // A blame line resolves to the commit that last touched it; open that
                         // commit's diff for this file so the user can read the change in full.
                         onOpenBlameCommit = { sha ->
@@ -231,6 +234,7 @@ fun TabbedViewerPanel(
                     reloadKey = tabsState.reloadKey(current.id),
                     findTrigger = findInFileTrigger,
                     saveTrigger = saveTrigger,
+                    javaProject = javaProject,
                 )
                 is Tab.LocalHistory -> LocalHistoryView(
                     history = localHistory,
@@ -341,6 +345,7 @@ private fun FileEditView(
     onShowHistory: () -> Unit = {},
     onCompareWithRevision: () -> Unit = {},
     gitTracked: Boolean = false,
+    javaProject: JavaAnalysisProject? = null,
     modifier: Modifier = Modifier,
 ) {
     val edit = remember(tab.id) {
@@ -559,23 +564,22 @@ private fun FileEditView(
             }
     }
 
-    // Java syntax errors in this file, from a real parse rather than the regex the highlighter uses.
-    // Same shape as the spellcheck effect above and for the same reason: parsing is far too much
-    // work to put on the keystroke path, so it runs on a background dispatcher once typing settles
-    // and publishes its answer as state for the squiggle layer and the problem bar to read.
-    //
-    // Parse-only, so this sees exactly the errors that need no classpath — a missing brace, a stray
-    // token, an unclosed string. It will never claim a symbol doesn't resolve, because without the
-    // project's dependencies it has no way to know, and a file underlined end to end because its
-    // imports weren't on a classpath is worse than no analysis at all.
-    var javaProblems by remember(tab.id) { mutableStateOf<List<JavaProblem>>(emptyList()) }
+    // Syntax diagnostics and declaration highlighting stay available while compiler analysis runs.
+    var javaSyntaxProblems by remember(tab.id) { mutableStateOf<List<JavaProblem>>(emptyList()) }
+    val javaDiagnostics = rememberJavaDiagnostics(
+        tab.file, edit, store,
+        javaProject ?: JavaAnalysisProject(repo?.rootDir?.toFile() ?: tab.file.absoluteFile.parentFile),
+    )
+    val javaProblems by rememberUpdatedState(
+        javaDiagnostics.result?.takeIf { it.failure == null }?.problems ?: javaSyntaxProblems,
+    )
     // The same parse names the file's types, which the subtype gutter marks.
     var javaTypes by remember(tab.id) { mutableStateOf<List<JavaDecl>>(emptyList()) }
     var javaHighlight by remember(tab.id) { mutableStateOf<Pair<String, List<Token>>?>(null) }
     val isJava = remember(tab.id) { tab.file.extension.equals("java", ignoreCase = true) }
     LaunchedEffect(tab.id, isJava) {
         if (!isJava) {
-            javaProblems = emptyList()
+            javaSyntaxProblems = emptyList()
             javaTypes = emptyList()
             javaHighlight = null
             return@LaunchedEffect
@@ -596,7 +600,7 @@ private fun FileEditView(
                         )
                     }
                 }
-                javaProblems = parsed?.first ?: emptyList()
+                javaSyntaxProblems = parsed?.first ?: emptyList()
                 // A parse that failed outright keeps the last types, so the arrows don't blink off
                 // while a half-typed edit is in the buffer.
                 if (parsed != null) javaTypes = parsed.second
@@ -661,7 +665,7 @@ private fun FileEditView(
         }
     }
 
-    // Where the file's syntax errors sit down the document, measured the same way [markerFractions]
+    // Where the file's compiler errors sit down the document, measured the same way [markerFractions]
     // measures find hits, so the two lanes line up with each other and with the thumb.
     val problemFractions by remember(tab.id) {
         derivedStateOf {
@@ -819,6 +823,9 @@ private fun FileEditView(
 
     Column(modifier = modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
         SaveStatusStrip(edit, onSaved = savedCallback)
+        javaDiagnostics.result?.failure?.let {
+            Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+        }
         JavaProblemBar(
             problems = javaProblems,
             onGoTo = { offset -> searchScope.launch { revealOffset(offset) } },
@@ -1008,7 +1015,7 @@ private fun FileEditView(
             },
         )
         }
-        // Wavy underlines: red under syntax-error ranges (the highlighters' own, plus javac's for a
+        // Wavy underlines: red under error ranges (the highlighters' own, plus javac's for a
         // Java file), and the
         // spellchecker's colour under misspelled words. Aligned to the text the same way BlameGutter
         // is: layout positions are in document space, shifted up by the scroll offset. Sized to the

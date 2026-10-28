@@ -143,7 +143,8 @@ compose.desktop {
             // it. That gap cost real time on 2026-10-02: a ~265 MiB/s allocation rate had to be
             // chased by reading histograms and guessing at call sites, and the first two guesses
             // were wrong. Costs ~2 MB in the jlinked image.
-            modules("java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
+            // Analyzed projects can use every Java SE API, including modules nop itself never loads.
+            modules("java.se", "java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
             packageName = "nop"
             packageVersion = "1.4.3"
             description = "Desktop editor and change reviewer"

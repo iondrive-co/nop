@@ -48,23 +48,23 @@ Open several projects in one window, each with its own file tree and editor tabs
 - Shift-Shift to search for file
 - F4 from a diff to open the file
 - F5 reload git status / re-read active tab from disk
-- `Alt F7` list usages
+- `Alt F7` list references to the open Java class, or to the selected name
 - `Shift F6` rename
 - `Ctrl+Alt+Left` previous file
 
 When a file or directory is selected:
-	- `Delete` — remove it from disk
-	- `Ctrl C` — copy to clipboard
-	- `Ctrl V` — paste the clipboard into the selected directory, or beside the selected file.
-	- `F2` — rename
-	- `H` — open a git history tab
-	- `B` — toggle the git blame column in the editor
+    - `Delete` — remove it from disk
+    - `Ctrl C` — copy to clipboard
+    - `Ctrl V` — paste the clipboard into the selected directory, or beside the selected file.
+    - `F2` — rename
+    - `H` — open a git history tab
+    - `B` — toggle the git blame column in the editor
 
 In a terminal, a launcher run or an agent session:
-	- `Shift Enter` — insert a newline
-	- `Ctrl C` — copy selection or interupt run if nothing selected
-	- `Ctrl Shift V` or `Shift Insert` — paste (text, copied files, or clipboard images as paths)
-	- `Ctrl Shift S` — select an area of the screen to show the agent directly
+    - `Shift Enter` — insert a newline
+    - `Ctrl C` — copy selection or interupt run if nothing selected
+    - `Ctrl Shift V` or `Shift Insert` — paste (text, copied files, or clipboard images as paths)
+    - `Ctrl Shift S` — select an area of the screen to show the agent directly
 
 ## Troubleshooting
 

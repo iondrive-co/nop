@@ -17,7 +17,7 @@ import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 
 /**
- * One line under the tab strip naming the first syntax error in a Java file, and how many follow.
+ * One line under the tab strip naming the first compiler error in a Java file, and how many follow.
  *
  * A squiggle alone is only half the feature: it says *where* without saying *what*, and it says
  * nothing at all about an error below the fold. The marker lane on the scrollbar answers the second

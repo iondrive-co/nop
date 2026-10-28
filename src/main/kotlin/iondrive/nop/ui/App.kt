@@ -61,6 +61,7 @@ import iondrive.nop.index.FileIndex
 import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.SymbolIndex
+import iondrive.nop.lang.JavaAnalysisProject
 import iondrive.nop.lang.JavaParse
 import iondrive.nop.lang.JavaRename
 import iondrive.nop.lang.JavaUsages
@@ -1420,19 +1421,6 @@ fun App(
 
     // ---- Java: find usages and rename ---------------------------------------------------------
 
-    /** The active tab's Java editor, or null when the front tab isn't one. */
-    fun activeJavaEditor(): Triple<File, String, FileEdit>? {
-        val tab = tabsState.selectedTab as? Tab.FileView ?: return null
-        if (!tab.file.extension.equals("java", ignoreCase = true)) return null
-        val edit = editStore.peek(tab.id) ?: return null
-        val rel = runCatching {
-            rootPath.toAbsolutePath().normalize()
-                .relativize(tab.file.toPath().toAbsolutePath().normalize())
-                .toString().replace(File.separatorChar, '/')
-        }.getOrNull()?.takeIf { it.isNotEmpty() && !it.startsWith("..") } ?: return null
-        return Triple(tab.file, rel, edit)
-    }
-
     /**
      * Writes out every buffer with unsaved work before a project-wide read.
      *
@@ -1457,15 +1445,15 @@ fun App(
     }
 
     /**
-     * Resolves what the caret is on and finds every usage of it.
+     * Resolves a selected name or the file's class for Find References, and the caret for Rename.
      *
      * Returns null having already set [usagesView] to something explaining why, so both callers —
      * the panel and the rename dialog — get the same diagnosis for the same non-answer.
      */
-    suspend fun resolveUsagesAtCaret(): Pair<UsageResult, Triple<File, String, FileEdit>>? {
-        val active = activeJavaEditor()
+    suspend fun resolveUsagesAtCaret(defaultToClass: Boolean = false): Pair<UsageResult, Triple<File, String, FileEdit>>? {
+        val active = javaEditorFor(tabsState.selectedTab, rootPath, editStore)
         if (active == null) {
-            usagesView = UsagesView(message = "Open a Java file and put the caret on a name first")
+            usagesView = UsagesView(message = "Open a Java source file or a diff of one first")
             return null
         }
         if (!JavaParse.available) {
@@ -1479,19 +1467,23 @@ fun App(
             return null
         }
         val text = edit.state.text.toString()
-        val caret = edit.state.selection.start
+        val selection = edit.state.selection
         val target = withContext(Dispatchers.Default) {
-            JavaParse.parse(text, file.name)?.let { JavaUsages.targetAt(it, caret) }
+            JavaParse.parse(text, file.name)?.let {
+                if (defaultToClass) {
+                    JavaUsages.targetForReferences(it, file.name, selection.start, selection.end)
+                } else JavaUsages.targetAt(it, selection.start)
+            }
         }
         if (target == null) {
             usagesView = UsagesView(
-                message = "No Java declaration under the caret — nop can only search for something it " +
-                    "can see declared or imported here",
+                message = if (defaultToClass && selection.collapsed) "No class declaration found in ${file.name}"
+                    else "No Java declaration found for this name — select a declared or imported name",
             )
             return null
         }
         usagesView = UsagesView(title = target.description, searching = true)
-        val result = JavaUsages.find(rootPath.toFile(), fileIndex.files, target, rel)
+        val result = JavaUsages.find(rootPath.toFile(), (fileIndex.files + rel).distinct(), target, rel)
         usagesView = UsagesView(title = target.description, result = result)
         return result to active
     }
@@ -1544,7 +1536,7 @@ fun App(
     LaunchedEffect(findUsagesTrigger) {
         if (findUsagesTrigger <= findUsagesBaseline) return@LaunchedEffect
         showTool(ToolTab.Usages)
-        resolveUsagesAtCaret()
+        resolveUsagesAtCaret(defaultToClass = true)
     }
 
     // Shift+F6. Shares every step with Alt+F7 up to the point the answer arrives, then puts it in
@@ -1730,6 +1722,7 @@ fun App(
                                 repo = repo,
                                 editStore = editStore,
                                 localHistory = localHistory,
+                                javaProject = JavaAnalysisProject(rootPath.toFile(), fileIndex.files, fsRefreshKey),
                                 onFileSaved = ::refresh,
                                 onResolveAt = { currentFile, text, offset ->
                                     JumpResolver.resolve(

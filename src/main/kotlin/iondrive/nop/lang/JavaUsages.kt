@@ -118,6 +118,27 @@ object JavaUsages {
     /** Enough to fill a results panel; beyond this the answer is "narrow your search", not a list. */
     const val MAX_USAGES = 2000
 
+    /** A selection names a symbol; without one, Find References means the file's primary type. */
+    fun targetForReferences(
+        parsed: ParsedJava,
+        fileName: String,
+        selectionStart: Int,
+        selectionEnd: Int,
+    ): UsageTarget? {
+        if (selectionStart != selectionEnd) {
+            val start = minOf(selectionStart, selectionEnd).coerceIn(0, parsed.text.length)
+            val end = maxOf(selectionStart, selectionEnd).coerceIn(start, parsed.text.length)
+            val nameStart = (start until end).firstOrNull { !parsed.text[it].isWhitespace() } ?: return null
+            return targetAt(parsed, nameStart)
+        }
+        val types = JavaSymbols.declarations(parsed).filter {
+            it.kind == JavaDeclKind.TYPE && it.owner == parsed.packageName
+        }
+        val primary = types.firstOrNull { it.name == fileName.substringBeforeLast('.') }
+            ?: types.firstOrNull() ?: return null
+        return fromDecl(primary, parsed)
+    }
+
     /**
      * What the caret at [offset] is on, or null when it is on nothing nameable.
      *

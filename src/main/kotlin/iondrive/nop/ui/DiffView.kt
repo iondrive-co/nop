@@ -77,6 +77,7 @@ import iondrive.nop.diff.DiffComputer
 import iondrive.nop.diff.DiffResult
 import iondrive.nop.diff.DiffRow
 import iondrive.nop.diff.RowKind
+import iondrive.nop.lang.JavaAnalysisProject
 import iondrive.nop.git.ChangeKind
 import iondrive.nop.git.GitRepo
 import iondrive.nop.index.JumpTarget
@@ -139,6 +140,7 @@ fun DiffView(
     reloadKey: Int = 0,
     findTrigger: Int = 0,
     saveTrigger: Int = 0,
+    javaProject: JavaAnalysisProject? = null,
 ) {
     val workingFile = remember(tab.id) { File(tab.repoRoot, tab.change.path) }
     // Resolve a per-file FileEdit via FileEditStore — same instance an open Tab.FileView would
@@ -149,6 +151,10 @@ fun DiffView(
     val edit = remember(tab.id, reloadKey) {
         if (workingFile.isFile) editStore.edit(Tab.FileView(workingFile)) else null
     }
+    val javaDiagnostics = rememberJavaDiagnostics(
+        workingFile, edit, editStore,
+        javaProject ?: JavaAnalysisProject(repo.rootDir.toFile(), revision = reloadKey),
+    )
 
     var loading by remember(tab.id) { mutableStateOf(true) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
@@ -272,6 +278,16 @@ fun DiffView(
     Column(modifier = Modifier.fillMaxSize()) {
     // The working side of a diff is an editor like any other, and stops reaching disk the same way.
     if (edit != null) SaveStatusStrip(edit, onSaved = savedCallback)
+    javaDiagnostics.result?.let { analysis ->
+        analysis.failure?.let {
+            Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+        }
+        JavaProblemBar(
+            problems = analysis.problems,
+            onGoTo = { offset -> onJump(workingFile, lineNumberAt(edit?.state?.text?.toString() ?: "", offset)) },
+            lineOf = { offset -> lineNumberAt(edit?.state?.text?.toString() ?: "", offset) },
+        )
+    }
     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
     when {
         loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
@@ -1131,7 +1147,27 @@ private fun EditableBlockHalf(
     // and then follows the field: typing a newline in here makes the block one buffer line longer,
     // and the write-back has to replace that many lines, not the count the last diff reported.
     var owned by remember(state) { mutableStateOf(rows.size) }
+    var blockFocused by remember(state) { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
+
+    // File-level commands read the shared buffer's selection, while each editable diff block has
+    // a field of its own. Carry the focused block's offsets into that common coordinate space.
+    LaunchedEffect(state, startLine) {
+        snapshotFlow {
+            if (blockFocused) state.selection to offsetOfLineCol(fullState.text.toString(), startLine - 1, 0)
+            else null
+        }.collect { selected ->
+            if (selected != null) {
+                val (range, base) = selected
+                fullState.edit {
+                    selection = TextRange(
+                        (base + range.start).coerceIn(0, length),
+                        (base + range.end).coerceIn(0, length),
+                    )
+                }
+            }
+        }
+    }
 
     // Re-read this block's lines out of the shared buffer. Runs when the block first appears, when
     // a re-diff re-pairs it over a different number of lines, and when something outside the blocks
@@ -1278,6 +1314,7 @@ private fun EditableBlockHalf(
                     // Tell the list which block the caret is in, so a re-diff can't dissolve this
                     // one underneath it — see [diffBlocks]' splitAtLine.
                     .onFocusChanged {
+                        blockFocused = it.isFocused
                         if (it.isFocused) editor.onFocusGained(startLine)
                         editorFocus?.focused = it.isFocused
                     }

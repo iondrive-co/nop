@@ -88,6 +88,31 @@ class JavaUsagesTest {
 
     // ---- finding usages -----------------------------------------------------------------------
 
+    @Test fun `no selection targets the file's class regardless of caret position`() {
+        val source = "package example; class Helper {} public class Widget { int value; class Nested {} }"
+        val parsed = parse(source, "Widget.java")
+        for (caret in listOf(0, source.indexOf("value"), source.length)) {
+            assertEquals(UsageTarget.Type("Widget", "example.Widget", "example"),
+                JavaUsages.targetForReferences(parsed, "Widget.java", caret, caret))
+        }
+    }
+
+    @Test fun `selected names target their symbol including reversed selections`() {
+        val source = "class Widget { private int value; }"
+        val start = source.indexOf("value")
+        val parsed = parse(source, "Widget.java")
+        val wanted = UsageTarget.Member("value", "Widget", JavaDeclKind.FIELD, true)
+        assertEquals(wanted, JavaUsages.targetForReferences(parsed, "Widget.java", start, start + 5))
+        assertEquals(wanted, JavaUsages.targetForReferences(parsed, "Widget.java", start + 5, start))
+    }
+
+    @Test fun `class reference search defaults to a top level type when filename differs`() {
+        val parsed = parse("package example; interface Service { class Nested {} }", "Other.java")
+        assertEquals(UsageTarget.Type("Service", "example.Service", "example"),
+            JavaUsages.targetForReferences(parsed, "Other.java", 0, 0))
+        assertNull(JavaUsages.targetForReferences(parse("package example;", "package-info.java"), "package-info.java", 0, 0))
+    }
+
     private fun find(root: Path, target: UsageTarget, origin: String?): UsageResult = runBlocking {
         val files = root.toFile().walkTopDown().filter { it.isFile }
             .map { it.relativeTo(root.toFile()).path.replace(File.separatorChar, '/') }.toList()

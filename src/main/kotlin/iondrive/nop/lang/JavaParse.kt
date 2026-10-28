@@ -71,7 +71,7 @@ object JavaParse {
             ) as JavacTask
             val unit = task.parse().firstOrNull() ?: return@runCatching null
             val positions = Trees.instance(task).sourcePositions
-            ParsedJava(unit, positions, collector.problems(text), text)
+            ParsedJava(unit, positions, problems(collector, text), text)
         }.getOrElse { t ->
             // A parser that throws must cost one file's analysis, never the editor. The same
             // argument tokenizerForExtension makes for highlighting: errors as well as exceptions,
@@ -82,9 +82,14 @@ object JavaParse {
     }
 
     /** Diagnostics as text offsets, anchored to something the editor can actually draw under. */
-    private fun DiagnosticCollector<JavaFileObject>.problems(text: String): List<JavaProblem> =
-        diagnostics.mapNotNull { d ->
+    internal fun problems(
+        collector: DiagnosticCollector<JavaFileObject>,
+        text: String,
+        source: URI? = null,
+    ): List<JavaProblem> =
+        collector.diagnostics.mapNotNull { d ->
             if (d.kind != Diagnostic.Kind.ERROR) return@mapNotNull null
+            if (source != null && d.source?.toUri()?.normalize() != source.normalize()) return@mapNotNull null
             val rawStart = d.startPosition
             val rawEnd = d.endPosition
             val start = when {

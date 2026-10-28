@@ -55,7 +55,7 @@ fun UsagesPanel(view: UsagesView, onPick: (path: String, line: Int) -> Unit) {
                 StatusText("Searching…")
             }
             result == null -> StatusText(
-                "Put the caret on a name in a Java file and press Alt+F7 to find its usages",
+                "Press Alt+F7 in a Java file to find references to its class, or select a name to search for that symbol",
             )
             else -> {
                 Text(
