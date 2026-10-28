@@ -45,6 +45,7 @@ data class SavedTab(
     val sha: String? = null,
     val changeType: String? = null,
     val collapsed: Boolean = false,
+    val sourceLabel: String? = null,
 )
 
 /**
@@ -61,6 +62,7 @@ data class TabsSnapshot(
 
 object TabsPersistence {
     private const val KIND_FILE = "file"
+    private const val KIND_LIBRARY = "library"
     private const val KIND_COMMITDIFF = "commitdiff"
     private const val KIND_LOCALHISTORY = "localhistory"
     private const val KIND_LOCALDIFF = "localdiff"
@@ -103,7 +105,10 @@ object TabsPersistence {
     private fun encodeTab(tab: Tab, selectedId: String?): String {
         val selected = if (tab.id == selectedId) "1" else "0"
         val (kind, file) = when (tab) {
-            is Tab.FileView -> KIND_FILE to tab.file
+            is Tab.FileView -> if (tab.readOnly) {
+                return listOf(KIND_LIBRARY, tab.file.absolutePath, selected,
+                    tab.sourceLabel.orEmpty().replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')).joinToString("\t")
+            } else KIND_FILE to tab.file
             is Tab.LocalHistory -> KIND_LOCALHISTORY to tab.file
             // The timestamp *is* the revision's name in local history, so it restores by lookup.
             is Tab.LocalDiff -> return listOf(
@@ -140,6 +145,7 @@ object TabsPersistence {
             val selected = parts.getOrNull(2) == "1"
             when (kind) {
                 KIND_FILE, KIND_LOCALHISTORY -> out += SavedTab(kind, path, selected)
+                KIND_LIBRARY -> out += SavedTab(kind, path, selected, sourceLabel = parts.getOrNull(3))
                 // The timestamp rides in the sha column; a row without one names no revision.
                 KIND_LOCALDIFF -> {
                     val stamp = parts.getOrNull(3)?.takeIf { it.toLongOrNull() != null } ?: continue
@@ -203,6 +209,7 @@ object TabsPersistence {
             }
             val tab: Tab = when (s.kind) {
                 KIND_FILE -> Tab.FileView(File(s.path).takeIf { it.isFile } ?: continue)
+                KIND_LIBRARY -> Tab.FileView(File(s.path).takeIf { it.isFile } ?: continue, readOnly = true, sourceLabel = s.sourceLabel)
                 // Local history needs no repo — it's nop's own record, and it's the only history an
                 // uncommitted (or untracked) file has.
                 KIND_LOCALHISTORY -> Tab.LocalHistory(File(s.path).takeIf { it.exists() } ?: continue)

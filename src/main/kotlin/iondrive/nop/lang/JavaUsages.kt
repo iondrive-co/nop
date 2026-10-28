@@ -131,11 +131,9 @@ object JavaUsages {
             val nameStart = (start until end).firstOrNull { !parsed.text[it].isWhitespace() } ?: return null
             return targetAt(parsed, nameStart)
         }
-        val types = JavaSymbols.declarations(parsed).filter {
-            it.kind == JavaDeclKind.TYPE && it.owner == parsed.packageName
-        }
+        val types = JavaSymbols.declarations(parsed).filter { it.kind == JavaDeclKind.TYPE }
         val primary = types.firstOrNull { it.name == fileName.substringBeforeLast('.') }
-            ?: types.firstOrNull() ?: return null
+            ?: types.firstOrNull { it.owner == parsed.packageName } ?: return null
         return fromDecl(primary, parsed)
     }
 

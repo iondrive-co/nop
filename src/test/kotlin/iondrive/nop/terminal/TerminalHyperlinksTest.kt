@@ -1,11 +1,14 @@
 package iondrive.nop.terminal
 
 import com.jediterm.terminal.HyperlinkStyle
+import com.jediterm.terminal.ArrayTerminalDataStream
 import com.jediterm.terminal.TerminalColor
 import com.jediterm.terminal.TextStyle
+import com.jediterm.terminal.emulator.JediEmulator
 import com.jediterm.terminal.ui.hyperlinks.LinkInfoEx
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.awt.Color
@@ -105,6 +108,132 @@ class TerminalHyperlinksTest {
         actions.first().actionPerformed(null)
         assertEquals(listOf("https://nop.test/x"), opened)
         assertTrue(actions.all { it.isEnabled(null) })
+    }
+
+    private fun linkedWidget(width: Int, opened: MutableList<String>, height: Int = 24): NopTerminalWidget {
+        val settings = NopTerminalSettings(Color.WHITE, Color.BLACK, Color.BLUE)
+        return NopTerminalWidget(width, height, settings).also {
+            it.addAsyncHyperlinkFilter(
+                CellStylePreservingLinks(
+                    it.terminalTextBuffer, UrlHyperlinkFilter { url -> opened += url },
+                    settings.hyperlinkColor, settings.hyperlinkHighlightingMode,
+                ),
+            )
+        }
+    }
+
+    private val longUrl = "https://auth.example.test/authorize?client_id=demo&code_challenge=" +
+        "abcdefghij".repeat(9) + "&redirect_uri=http%3A%2F%2Flocalhost%3A4567%2Fcallback"
+
+    private fun feed(widget: NopTerminalWidget, output: String) {
+        val emulator = JediEmulator(ArrayTerminalDataStream(output.toCharArray()), widget.terminal)
+        while (emulator.hasNext()) emulator.next()
+    }
+
+    private fun assertLinkedRows(widget: NopTerminalWidget, rows: List<String>, opened: MutableList<String>) {
+        val info = (widget.terminalTextBuffer.getLine(0).getStyleAt(2) as HyperlinkStyle).linkInfo
+        rows.forEachIndexed { row, text ->
+            for (column in 2 until text.length) {
+                val style = widget.terminalTextBuffer.getLine(row).getStyleAt(column)
+                assertTrue(style is HyperlinkStyle, "row $row column $column is linked")
+                assertSame(info, (style as HyperlinkStyle).linkInfo)
+            }
+            info.navigate()
+        }
+        assertEquals(List(rows.size) { longUrl }, opened)
+    }
+
+    @Test
+    fun `indented agent wraps link every row to the complete url`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(64, opened)
+        // An agent reserves two columns at each side and draws each row separately.
+        val rows = longUrl.chunked(60).map { "  $it" }
+        rows.forEachIndexed { row, text ->
+            widget.terminal.cursorPosition(1, row + 1)
+            widget.terminal.writeCharacters(text)
+        }
+        assertLinkedRows(widget, rows, opened)
+        assertTrue(widget.terminalTextBuffer.getLine(1).getStyleAt(0) !is HyperlinkStyle)
+    }
+
+    @Test
+    fun `soft wrapped urls skip continuation indentation`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(64, opened)
+        val rows = longUrl.chunked(62).map { "  $it" }
+        // Filled rows autowrap; indentation is still output by the agent on each new row.
+        rows.forEach { widget.terminal.writeCharacters(it) }
+        assertLinkedRows(widget, rows, opened)
+    }
+
+    @Test
+    fun `plain terminal autowrap preserves the complete url`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(64, opened)
+        feed(widget, longUrl)
+        longUrl.indices.forEach { offset ->
+            val style = widget.terminalTextBuffer.getLine(offset / 64).getStyleAt(offset % 64)
+            assertTrue(style is HyperlinkStyle, "URL cell $offset is linked")
+            (style as HyperlinkStyle).linkInfo.navigate()
+        }
+        assertEquals(List(longUrl.length) { longUrl }, opened)
+    }
+
+    @Test
+    fun `padded agent rows preserve the full link across scrollback and screen`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(64, opened, height = 3)
+        val rows = longUrl.chunked(60).map { "  $it" }
+        feed(widget, rows.joinToString("\r\n") { it.padEnd(64) })
+        val buffer = widget.terminalTextBuffer
+        val top = -buffer.historyLinesCount
+        assertTrue(top < 0, "the URL starts in scrollback")
+        val info = (buffer.getLine(top).getStyleAt(2) as HyperlinkStyle).linkInfo
+        rows.forEachIndexed { row, text ->
+            for (column in 2 until text.length) {
+                val style = buffer.getLine(top + row).getStyleAt(column)
+                assertTrue(style is HyperlinkStyle, "row $row column $column is linked")
+                assertSame(info, (style as HyperlinkStyle).linkInfo)
+            }
+        }
+        info.navigate()
+        assertEquals(listOf(longUrl), opened)
+    }
+
+    @Test
+    fun `short lines and separate urls do not join across newlines`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(64, opened)
+        val first = "https://example.test/" + "x".repeat(41)
+        widget.terminal.writeCharacters(first)
+        widget.terminal.cursorPosition(1, 2)
+        widget.terminal.writeCharacters("  https://other.test/docs")
+        widget.terminal.cursorPosition(1, 3)
+        widget.terminal.writeCharacters("  Continue here")
+        (widget.terminalTextBuffer.getLine(0).getStyleAt(0) as HyperlinkStyle).linkInfo.navigate()
+        (widget.terminalTextBuffer.getLine(1).getStyleAt(2) as HyperlinkStyle).linkInfo.navigate()
+        assertEquals(listOf(first, "https://other.test/docs"), opened)
+        assertTrue(widget.terminalTextBuffer.getLine(2).getStyleAt(2) !is HyperlinkStyle)
+    }
+
+    @Test
+    fun `redrawing a continuation updates every row and keeps its background`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(64, opened)
+        val rows = longUrl.chunked(60).map { "  $it" }
+        rows.forEachIndexed { row, text ->
+            widget.terminal.cursorPosition(1, row + 1)
+            widget.terminal.writeCharacters(text)
+        }
+        widget.terminal.cursorPosition(1, rows.size)
+        widget.terminal.characterAttributes(TextStyle(null, selected))
+        widget.terminal.writeCharacters(rows.last().replace("callback", "complete") + " then continue")
+        val style = widget.terminalTextBuffer.getLine(rows.lastIndex).getStyleAt(2)
+        assertEquals(selected, style!!.background)
+        (widget.terminalTextBuffer.getLine(0).getStyleAt(2) as HyperlinkStyle).linkInfo.navigate()
+        assertEquals(listOf(longUrl.replace("callback", "complete")), opened)
+        assertTrue(widget.terminalTextBuffer.getLine(rows.lastIndex).getStyleAt(rows.last().length + 1) !is HyperlinkStyle)
     }
 
     private val selected = TerminalColor.rgb(0x26, 0x4f, 0x78)

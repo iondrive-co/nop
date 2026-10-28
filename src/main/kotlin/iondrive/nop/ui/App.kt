@@ -60,6 +60,7 @@ import iondrive.nop.index.AccessFrequency
 import iondrive.nop.index.FileIndex
 import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
+import iondrive.nop.index.JavaLibraryIndex
 import iondrive.nop.index.SymbolIndex
 import iondrive.nop.lang.JavaAnalysisProject
 import iondrive.nop.lang.JavaParse
@@ -493,6 +494,50 @@ fun App(
     // under ~/.config/nop/projects/<slug>/ so the project tree stays free of derived files.
     var symbolIndex by remember(rootPath) { mutableStateOf(SymbolIndex()) }
     var fileIndex by remember(rootPath) { mutableStateOf(FileIndex()) }
+    val libraryCache = remember(rootPath) { Settings.projectDataDir(rootPath).resolve("java-libraries") }
+    var javaLibraries by remember(rootPath) { mutableStateOf(JavaLibraryIndex.empty(libraryCache)) }
+    var librariesLoading by remember(rootPath) { mutableStateOf(false) }
+    var libraryError by remember(rootPath) { mutableStateOf<String?>(null) }
+    LaunchedEffect(rootPath, fileIndex, fsRefreshKey) {
+        val hasJava = fileIndex.files.any { it.endsWith(".java", ignoreCase = true) } || withContext(Dispatchers.IO) {
+            rootPath.resolve(".nop/classpath.txt").toFile().isFile
+        }
+        if (!hasJava) return@LaunchedEffect
+        librariesLoading = true
+        try {
+            val previous = javaLibraries
+            javaLibraries = withContext(Dispatchers.IO) {
+                JavaLibraryIndex.build(rootPath.toFile(), libraryCache, previous)
+            }
+            libraryError = null
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            libraryError = "Library lookup unavailable: ${error.message}"
+            Log.error("Java library indexing failed", error)
+        } finally {
+            librariesLoading = false
+        }
+    }
+
+    fun openSource(file: File, line: Int? = null) {
+        val libraries = javaLibraries
+        scope.launch {
+            try {
+                val document = withContext(Dispatchers.IO) { libraries.materialize(file) }
+                val tab = if (document == null) Tab.FileView(file)
+                    else Tab.FileView(document.file, readOnly = true, sourceLabel = document.label)
+                val destination = document?.line ?: line
+                if (destination == null) tabsState.open(tab) else tabsState.openAt(tab, destination)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                libraryError = "Could not open library class: ${error.message}"
+                gitOpError = GitOpError("Could not open library class", error.message ?: error.javaClass.simpleName)
+                Log.error("Could not open Java library class", error)
+            }
+        }
+    }
     // How often each file has been opened, so the double-shift box can surface the most-used files
     // in its top slots. Counts every genuine open (tree click, search jump, double-shift pick) via
     // TabsState.onFileOpened; session restore opts out. Loaded per project, persisted on each open.
@@ -1451,7 +1496,7 @@ fun App(
      * the panel and the rename dialog — get the same diagnosis for the same non-answer.
      */
     suspend fun resolveUsagesAtCaret(defaultToClass: Boolean = false): Pair<UsageResult, Triple<File, String, FileEdit>>? {
-        val active = javaEditorFor(tabsState.selectedTab, rootPath, editStore)
+        val active = javaEditorFor(tabsState.selectedTab, rootPath, editStore, allowReadOnly = defaultToClass)
         if (active == null) {
             usagesView = UsagesView(message = "Open a Java source file or a diff of one first")
             return null
@@ -1483,7 +1528,8 @@ fun App(
             return null
         }
         usagesView = UsagesView(title = target.description, searching = true)
-        val result = JavaUsages.find(rootPath.toFile(), (fileIndex.files + rel).distinct(), target, rel)
+        val paths = if (rel.isEmpty()) fileIndex.files else (fileIndex.files + rel).distinct()
+        val result = JavaUsages.find(rootPath.toFile(), paths, target, rel.ifEmpty { null })
         usagesView = UsagesView(title = target.description, result = result)
         return result to active
     }
@@ -1732,10 +1778,11 @@ fun App(
                                         text,
                                         offset,
                                         fileIndex,
+                                        javaLibraries,
                                     )
                                 },
                                 onJump = { file, line ->
-                                    tabsState.openAt(Tab.FileView(file), line)
+                                    openSource(file, line)
                                 },
                                 onSubtypes = { fqn ->
                                     symbolIndex.subtypesOf(fqn).map {
@@ -2455,10 +2502,17 @@ fun App(
 
         if (fileSearchOpen) {
             FileSearchDialog(
-                files = fileIndex.files,
+                files = remember(fileIndex, javaLibraries) { fileIndex.files + javaLibraries.searchPaths },
+                status = libraryError ?: if (librariesLoading) "Indexing library classes…" else null,
                 accessCounts = accessFreq.value.counts,
                 onPick = { relPath ->
                     fileSearchOpen = false
+                    if (relPath !in fileIndex.files) {
+                        javaLibraries.searchTarget(relPath)?.let {
+                            openSource(it.file, it.line)
+                            return@FileSearchDialog
+                        }
+                    }
                     // The open itself is recorded via TabsState.onFileOpened (see above).
                     val absolute = File(rootPath.toFile(), relPath)
                     if (absolute.isFile) tabsState.open(Tab.FileView(absolute))

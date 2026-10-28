@@ -78,7 +78,7 @@ internal fun fileNameOf(tab: Tab, repo: GitRepo?): Pair<String, Boolean>? {
     fun pathOf(file: File): String =
         repo?.let { repoRelativePath(it, file) } ?: ShortPath.of(file.toPath(), max = Int.MAX_VALUE)
     return when (tab) {
-        is Tab.FileView -> pathOf(tab.file) to false
+        is Tab.FileView -> (tab.sourceLabel ?: pathOf(tab.file)) to false
         is Tab.Diff -> tab.change.path to (tab.change.kind == ChangeKind.ADDED || tab.change.kind == ChangeKind.UNTRACKED)
         is Tab.CommitDiff -> tab.file.path to (tab.file.changeType == CommitFileChange.ADDED)
         is Tab.RevisionDiff -> pathOf(tab.file) to false

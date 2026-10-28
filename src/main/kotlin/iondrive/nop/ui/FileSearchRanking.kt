@@ -73,7 +73,7 @@ object FileSearchRanking {
                 name == q -> 1000
                 name.startsWith(q) -> 800
                 name.contains(q) -> 500
-                full.contains(q) -> 200
+                full.contains(q) || ('.' in q && full.replace('/', '.').contains(q)) -> 200
                 else -> 0
             }
             if (score > 0) scored += f to score

@@ -14,7 +14,7 @@ sealed class Tab {
     abstract val id: String
     abstract val title: String
 
-    data class FileView(val file: File) : Tab() {
+    data class FileView(val file: File, val readOnly: Boolean = false, val sourceLabel: String? = null) : Tab() {
         override val id: String get() = "file:${file.absolutePath}"
         override val title: String get() = file.name
     }
@@ -564,4 +564,3 @@ internal fun canRestoreTab(tab: Tab): Boolean = when (tab) {
 }
 
 private const val MAX_NAV_HISTORY = 100
-

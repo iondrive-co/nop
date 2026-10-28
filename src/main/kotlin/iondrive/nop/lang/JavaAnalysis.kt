@@ -3,7 +3,6 @@ package iondrive.nop.lang
 import com.sun.source.util.JavacTask
 import iondrive.nop.Log
 import java.io.File
-import java.io.IOException
 import javax.tools.DiagnosticCollector
 import javax.tools.ForwardingJavaFileManager
 import javax.tools.JavaFileManager.Location
@@ -41,7 +40,7 @@ object JavaAnalysis {
             val collector = DiagnosticCollector<JavaFileObject>()
             compiler.getStandardFileManager(collector, null, Charsets.UTF_8).use { standard ->
                 // nop's own implementation dependencies must never become project dependencies.
-                standard.setLocation(StandardLocation.CLASS_PATH, classpath(root))
+                standard.setLocation(StandardLocation.CLASS_PATH, JavaClasspath.read(root))
                 standard.setLocation(StandardLocation.SOURCE_PATH, sources)
                 standard.setLocation(StandardLocation.ANNOTATION_PROCESSOR_PATH, emptyList())
                 val manager = BufferFileManager(standard, buffers.map { BufferSource(it.key, it.value) })
@@ -57,27 +56,6 @@ object JavaAnalysis {
             Log.error("Java analysis failed for ${file.name}", error)
             JavaAnalysisResult(emptyList(), "Java analysis failed: ${error.message ?: error.javaClass.simpleName}")
         }
-    }
-
-    /** Explicit dependency paths, one per line; no build invocation or dependency download. */
-    private fun classpath(root: File): List<File> {
-        val config = File(root, ".nop/classpath.txt")
-        if (!config.exists()) return emptyList()
-        return config.readLines().flatMap { raw ->
-            val line = raw.trim()
-            if (line.isEmpty() || line.startsWith('#')) return@flatMap emptyList()
-            val wildcard = line.endsWith("/*") || line.endsWith("\\*")
-            val path = if (wildcard) line.dropLast(2) else line
-            val entry = File(path).let { if (it.isAbsolute) it else File(root, path) }.normalize()
-            if (wildcard) {
-                if (!entry.isDirectory) throw IOException("Classpath directory does not exist: $line")
-                entry.listFiles()?.filter { it.isFile && it.extension.equals("jar", ignoreCase = true) }
-                    ?.sortedBy { it.name } ?: throw IOException("Cannot read classpath directory: $line")
-            } else {
-                if (!entry.exists()) throw IOException("Classpath entry does not exist: $line")
-                listOf(entry)
-            }
-        }.distinct()
     }
 
     private fun sourceRoots(root: File, paths: List<String>, buffers: Map<File, String>): List<File> {

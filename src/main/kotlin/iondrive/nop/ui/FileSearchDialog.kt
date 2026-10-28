@@ -52,6 +52,7 @@ fun FileSearchDialog(
     onPick: (String) -> Unit,
     onDismiss: () -> Unit,
     accessCounts: Map<String, Int> = emptyMap(),
+    status: String? = null,
 ) {
     val state = rememberTextFieldState()
     val focusRequester = remember { FocusRequester() }
@@ -86,7 +87,7 @@ fun FileSearchDialog(
 
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
-    DialogFrame(title = "Find file", onClose = onDismiss, size = DpSize(560.dp, 480.dp)) {
+    DialogFrame(title = "Find file or class", onClose = onDismiss, size = DpSize(560.dp, 480.dp)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -116,6 +117,7 @@ fun FileSearchDialog(
                 state = state,
                 modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
             )
+            status?.let { Text(it) }
             if (results.isEmpty()) {
                 val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
                 Text(

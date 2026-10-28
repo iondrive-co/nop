@@ -45,7 +45,7 @@ Open several projects in one window, each with its own file tree and editor tabs
 - Ctrl F search within current file
 - Ctrl R to find and replace within current file
 - Ctrl Shift F to search across all files
-- Shift-Shift to search for file
+- Shift-Shift to search for a file or Java class, including dependencies and JDK classes
 - F4 from a diff to open the file
 - F5 reload git status / re-read active tab from disk
 - `Alt F7` list references to the open Java class, or to the selected name
@@ -67,5 +67,11 @@ In a terminal, a launcher run or an agent session:
     - `Ctrl Shift S` — select an area of the screen to show the agent directly
 
 ## Troubleshooting
+
+Java dependency lookup uses `.nop/classpath.txt` at the project root: one JAR or compiled-classes
+directory per line, with paths absolute or relative to that root. `lib/*` includes JARs directly in
+`lib`. Matching `-sources.jar` files are opened when available beside the binary or in its Maven/Gradle
+cache location. JDK sources use a matching JDK's `src.zip` when available. Classes without sources open
+as read-only API declarations. Press F5 after changing the classpath or dependency artifacts.
 
 Check `$XDG_CONFIG_HOME/nop/nop.log` (default `~/.config/nop/nop.log`), and file an issue if necessary.

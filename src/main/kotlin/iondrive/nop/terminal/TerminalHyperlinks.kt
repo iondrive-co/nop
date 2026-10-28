@@ -66,6 +66,9 @@ class UrlHyperlinkFilter(private val openUrl: (String) -> Unit = ::openUrlInBrow
          */
         private val URL = Regex("""https?://[^\s<>"'`\\^{}|]+""", RegexOption.IGNORE_CASE)
 
+        internal fun endsInUrl(text: CharSequence): Boolean =
+            URL.findAll(text).lastOrNull()?.range?.last == text.length - 1
+
         /** Sentence punctuation that follows a URL far more often than it ends one. */
         private const val TRAILING = ".,;:!?"
 
@@ -131,18 +134,30 @@ internal class CellStylePreservingLinks(
 
     override fun apply(lineInfo: AsyncHyperlinkFilter.LineInfo): CompletableFuture<LinkResult?> {
         val text = lineInfo.line ?: return CompletableFuture.completedFuture(null)
-        val result = links.apply(text) ?: return CompletableFuture.completedFuture(null)
-        val lines = linesOf(lineInfo) ?: return CompletableFuture.completedFuture(result)
+        val originalLines = linesOf(lineInfo) ?: return CompletableFuture.completedFuture(links.apply(text))
         buffer.lock()
         try {
             val width = buffer.width
             // Same staleness check JediTerm makes before it writes: the lines must still spell [text].
-            if (joined(lines, width) != text) return CompletableFuture.completedFuture(null)
+            if (joined(originalLines, width) != text) return CompletableFuture.completedFuture(null)
+            val lines = surroundingRows(originalLines, width)
+            if (!text.contains("http", true) && lines.none { it.text.contains("http", true) }) {
+                return CompletableFuture.completedFuture(null)
+            }
+            val mapped = LinkRows(lines, width)
+            val result = links.apply(mapped.text) ?: return CompletableFuture.completedFuture(null)
             for (item in result.items) {
-                lines.forEachIndexed { i, line ->
-                    val from = maxOf(item.startOffset, i * width) - i * width
-                    val to = minOf(item.endOffset, (i + 1) * width) - i * width
-                    if (from < to) writeLink(line, from, to, item.linkInfo)
+                // Skipped indentation and line breaks have no URL cells. Every remaining span
+                // shares the same LinkInfo, including the Open/Copy callbacks for the full URL.
+                var start = item.startOffset
+                while (start < item.endOffset) {
+                    val cell = mapped.cells[start]
+                    var end = start + 1
+                    while (end < item.endOffset && mapped.cells[end] == cell + end - start &&
+                        mapped.cells[end] / width == cell / width
+                    ) end++
+                    writeLink(lines[cell / width], cell % width, cell % width + end - start, item.linkInfo)
+                    start = end
                 }
             }
         } finally {
@@ -150,6 +165,26 @@ internal class CellStylePreservingLinks(
         }
         // Null: the links are in place, and a result would have JediTerm flatten them again.
         return CompletableFuture.completedFuture(null)
+    }
+
+    /** Include agent-drawn wraps, which use cursor moves/newlines rather than terminal autowrap. */
+    private fun surroundingRows(original: List<TerminalLine>, width: Int): List<TerminalLine> {
+        var first = buffer.findScreenLineIndex(original.first())
+        if (first < 0) {
+            val historyIndex = buffer.historyLinesStorage.indexOf(original.first())
+            if (historyIndex < 0) return original
+            first = historyIndex - buffer.historyLinesCount
+        }
+        var last = first + original.size - 1
+        // Bound work on each terminal write, including output containing very long unbroken tokens.
+        val limit = 64
+        while (first > -buffer.historyLinesCount && last - first < limit &&
+            wrapsInto(buffer.getLine(first - 1), buffer.getLine(first), width)
+        ) first--
+        while (last + 1 < buffer.screenLinesCount && last - first < limit &&
+            wrapsInto(buffer.getLine(last), buffer.getLine(last + 1), width)
+        ) last++
+        return (first..last).map { buffer.getLine(it) }
     }
 
     private fun writeLink(line: TerminalLine, from: Int, to: Int, info: LinkInfo) {
@@ -206,6 +241,49 @@ internal class CellStylePreservingLinks(
             val field = linesField ?: return null
             if (!field.declaringClass.isInstance(lineInfo)) return null
             return runCatching { field.get(lineInfo) as List<TerminalLine> }.getOrNull()
+        }
+    }
+}
+
+/** A terminal wrap, or an indented continuation after a row reaching the agent's right gutter. */
+private fun wrapsInto(previous: TerminalLine, next: TerminalLine, width: Int): Boolean {
+    if (previous.isWrapped) return true
+    val end = previous.text.trimEnd(' ').length
+    val text = next.text
+    return end >= width - 3 && text.startsWith(' ') && text.isNotBlank()
+}
+
+/** URL text with display-only wrapping removed, and a map back to the actual terminal cells. */
+private class LinkRows(lines: List<TerminalLine>, width: Int) {
+    val cells = ArrayList<Int>()
+    val text = buildString {
+        lines.forEachIndexed { row, line ->
+            val raw = line.text.take(width)
+            var from = 0
+            if (row > 0) {
+                val previous = lines[row - 1]
+                val indent = raw.takeWhile { it == ' ' }.length
+                val body = raw.substring(indent)
+                val previousEnd = indexOfLast { it != ' ' } + 1
+                val continuation = wrapsInto(previous, line, width) &&
+                    UrlHyperlinkFilter.endsInUrl(subSequence(0, previousEnd)) && body.isNotEmpty() &&
+                    !body.startsWith("http://", true) && !body.startsWith("https://", true)
+                if (continuation) {
+                    setLength(previousEnd)
+                    cells.subList(previousEnd, cells.size).clear()
+                    from = indent
+                } else if (previous.isWrapped) {
+                    // JediTerm pads short soft-wrapped rows to the terminal width.
+                    repeat(maxOf(0, width - previous.text.length)) { append(' '); cells += -1 }
+                } else {
+                    append('\n')
+                    cells += -1
+                }
+            }
+            for (column in from until raw.length) {
+                append(raw[column])
+                cells += row * width + column
+            }
         }
     }
 }

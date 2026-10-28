@@ -14,6 +14,18 @@ import java.nio.file.Path
 
 class TabsPersistenceTest {
 
+    @Test
+    fun `library tabs retain read only state and source origin after restore`(@TempDir tmp: Path) {
+        val file = tmp.resolve("cache/GadgetWriter.java").toFile().apply { parentFile.mkdirs(); writeText("class GadgetWriter {}") }
+        val original = Tab.FileView(file, readOnly = true, sourceLabel = "toolkit.jar!/example/library/GadgetWriter.class")
+        val target = tmp.resolve("tabs.tsv")
+        TabsPersistence.save(target, snapshotOf(listOf(original), original.id))
+        val state = TabsState()
+        TabsPersistence.restore(state, TabsPersistence.load(target), repoRoot = null)
+        assertEquals(listOf<Tab>(original), state.tabs)
+        assertEquals(original.id, state.selectedId)
+    }
+
     /** The snapshot a session that never touched groups produces: everything in the default one. */
     private fun snapshotOf(tabs: List<Tab>, selectedId: String? = null): TabsSnapshot {
         val group = TabGroup(id = 0L, name = TabGroups.DEFAULT_NAME)

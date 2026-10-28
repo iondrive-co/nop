@@ -16,6 +16,22 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class JavaEditorTest {
+    @Test fun `library source supports references but cannot be a rename editor`(@TempDir root: Path) {
+        val project = root.resolve("project").toFile().apply { mkdirs() }
+        val file = root.resolve("cache/Inner.java").toFile().apply {
+            parentFile.mkdirs()
+            writeText("package example; public class Outer { public static class Inner {} }")
+        }
+        val tab = Tab.FileView(file, readOnly = true, sourceLabel = "toolkit.jar!/example/Outer.java")
+        val store = FileEditStore()
+        assertNull(javaEditorFor(tab, project.toPath(), store))
+        val active = assertNotNull(javaEditorFor(tab, project.toPath(), store, allowReadOnly = true))
+        assertEquals("", active.second)
+        val parsed = assertNotNull(JavaParse.parse(active.third.state.text.toString(), file.name))
+        assertEquals(UsageTarget.Type("Inner", "example.Outer.Inner", "example"),
+            JavaUsages.targetForReferences(parsed, file.name, 0, 0))
+        assertTrue(active.third.readOnly)
+    }
     @Test fun `a Java source tab initializes its buffer for analysis`(@TempDir root: Path) {
         val file = root.resolve("Widget.java").toFile().apply { writeText("class Widget {}") }
         val store = FileEditStore()

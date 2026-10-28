@@ -182,7 +182,7 @@ fun TabbedViewerPanel(
                     // A file git knows about is one whose log and revisions the right-click menu can
                     // offer; anything outside the repo (or a project with no repo at all) gets the
                     // local-history entry alone.
-                    val gitTracked = repo != null && repoRelativePath(repo, current.file) != null
+                    val gitTracked = !current.readOnly && repo != null && repoRelativePath(repo, current.file) != null
                     FileEditView(
                         tab = current,
                         store = editStore,
@@ -411,7 +411,7 @@ private fun FileEditView(
     // because there's nothing to replace yet. Baselined for the same reason as the find trigger.
     val replaceTriggerBaseline = remember(tab.id) { replaceInFileTrigger }
     LaunchedEffect(replaceInFileTrigger) {
-        if (replaceInFileTrigger > replaceTriggerBaseline) {
+        if (!tab.readOnly && replaceInFileTrigger > replaceTriggerBaseline) {
             val wasOpen = searchOpen
             searchOpen = true
             replaceOpen = true
@@ -457,7 +457,7 @@ private fun FileEditView(
                 // by nop itself — adopting an externally-changed file — must never be written back,
                 // or we'd revert a checkout/pull/merge the user did outside nop. save() is also a
                 // compare-and-swap as a second line of defence. Only refresh git status on a real write.
-                if (edit.hasUserEdit && text != edit.savedText) {
+                if (!tab.readOnly && edit.hasUserEdit && text != edit.savedText) {
                     if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
                 }
             }
@@ -469,7 +469,7 @@ private fun FileEditView(
     // stuck on an external change, since save() clears the block itself once disk agrees again.
     val saveTriggerBaseline = remember(tab.id) { saveTrigger }
     LaunchedEffect(saveTrigger) {
-        if (saveTrigger > saveTriggerBaseline) {
+        if (!tab.readOnly && saveTrigger > saveTriggerBaseline) {
             if (withContext(Dispatchers.IO) { edit.save() } is SaveResult.Saved) savedCallback()
         }
     }
@@ -567,7 +567,7 @@ private fun FileEditView(
     // Syntax diagnostics and declaration highlighting stay available while compiler analysis runs.
     var javaSyntaxProblems by remember(tab.id) { mutableStateOf<List<JavaProblem>>(emptyList()) }
     val javaDiagnostics = rememberJavaDiagnostics(
-        tab.file, edit, store,
+        tab.file, if (tab.readOnly) null else edit, store,
         javaProject ?: JavaAnalysisProject(repo?.rootDir?.toFile() ?: tab.file.absoluteFile.parentFile),
     )
     val javaProblems by rememberUpdatedState(
@@ -576,7 +576,7 @@ private fun FileEditView(
     // The same parse names the file's types, which the subtype gutter marks.
     var javaTypes by remember(tab.id) { mutableStateOf<List<JavaDecl>>(emptyList()) }
     var javaHighlight by remember(tab.id) { mutableStateOf<Pair<String, List<Token>>?>(null) }
-    val isJava = remember(tab.id) { tab.file.extension.equals("java", ignoreCase = true) }
+    val isJava = remember(tab.id, tab.readOnly) { !tab.readOnly && tab.file.extension.equals("java", ignoreCase = true) }
     LaunchedEffect(tab.id, isJava) {
         if (!isJava) {
             javaSyntaxProblems = emptyList()
@@ -760,6 +760,7 @@ private fun FileEditView(
     // repeated Enter walks the file. The replaced hit has gone by the time this coroutine runs, so
     // the *same* index now addresses the following match (and wraps past the end).
     fun replaceCurrent() {
+        if (tab.readOnly) return
         val m = matches.getOrNull(currentMatch) ?: return
         edit.markUserEdit()
         replaceMatches(edit.state, listOf(m), replaceState.text.toString())
@@ -774,6 +775,7 @@ private fun FileEditView(
     // than a burst of them. Deliberately computed from the matches on screen: what the "n of m"
     // chip says is what gets replaced.
     fun replaceAll() {
+        if (tab.readOnly) return
         if (matches.isEmpty()) return
         edit.markUserEdit()
         replaceMatches(edit.state, matches, replaceState.text.toString())
@@ -822,7 +824,12 @@ private fun FileEditView(
     }
 
     Column(modifier = modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
-        SaveStatusStrip(edit, onSaved = savedCallback)
+        if (tab.readOnly) {
+            Text(
+                if (tab.sourceLabel?.endsWith(".class") == true) "Compiled declaration (read-only)" else "Library source (read-only)",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            )
+        } else SaveStatusStrip(edit, onSaved = savedCallback)
         javaDiagnostics.result?.failure?.let {
             Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
         }
@@ -853,7 +860,7 @@ private fun FileEditView(
                     }
                 },
                 onClose = { searchOpen = false },
-                replace = if (replaceOpen) {
+                replace = if (replaceOpen && !tab.readOnly) {
                     ReplaceFields(
                         state = replaceState,
                         focusRequester = replaceFocusRequester,
@@ -923,7 +930,7 @@ private fun FileEditView(
         // not the caret, because a right-click in Compose's text field doesn't move the caret and
         // an entry that silently accepted some *other* word would be worse than no entry at all.
         ContextMenuDataProvider(items = {
-            spellingMenuItems(
+            if (tab.readOnly) emptyList() else spellingMenuItems(
                 typo = rightClickOffset?.let { offset ->
                     typos.firstOrNull { offset in it.range.first..(it.range.last + 1) }
                 },
@@ -941,6 +948,7 @@ private fun FileEditView(
         }) {
         BasicTextField(
             state = edit.state,
+            readOnly = tab.readOnly,
             // Runs only for genuine user input (typing, paste, IME) — never for programmatic
             // state.edit {} updates — so it's the precise signal that the buffer now holds a user
             // edit worth saving. Reconcile/adopt mutate the buffer without tripping this.

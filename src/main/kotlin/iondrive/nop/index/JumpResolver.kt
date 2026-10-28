@@ -75,8 +75,13 @@ object JumpResolver {
         text: String,
         offset: Int,
         fileIndex: FileIndex? = null,
+        libraries: JavaLibraryIndex? = null,
     ): JumpTarget? {
         val word = wordAt(text, offset)
+        val library = if (currentFile?.extension.equals("java", ignoreCase = true)) libraries?.resolve(text, offset) else null
+        if (library != null && libraries != null && libraries.isExplicit(text, offset, library) &&
+            index.lookup(library.name).none { it.kind == SymbolKind.JAVA_TYPE && it.fqn == library.fqn }
+        ) return libraries.target(library)
         val wordRange = wordRangeAt(text, offset)
         // A `name.ext` reference (e.g. `import_playbook: site.yml`) names a file, not a bare symbol.
         // Resolve it as a path first so it lands on that file rather than a same-named role/symbol.
@@ -187,7 +192,7 @@ object JumpResolver {
         if (fileIndex != null) {
             resolveFile(fileIndex, projectRoot, text, offset)?.let { return it }
         }
-        return null
+        return library?.let { libraries?.target(it) }
     }
 
     private fun commonPathSegments(path1: String, path2: String): Int {

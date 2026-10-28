@@ -64,7 +64,7 @@ sealed interface SaveBlock {
  * version an outside writer puts there while the file is open — so nop keeps its own record of the
  * content independently of git. See [LocalHistory].
  */
-class FileEdit(initialText: String, val file: File, private val history: LocalHistory? = null) {
+class FileEdit(initialText: String, val file: File, private val history: LocalHistory? = null, val readOnly: Boolean = false) {
     val state: TextFieldState = TextFieldState(initialText)
 
     /**
@@ -131,6 +131,7 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
 
     /** Record that the user changed the buffer via the editor. Call on the UI thread. */
     fun markUserEdit() {
+        if (readOnly) return
         userEditLatch = true
     }
 
@@ -148,6 +149,7 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
      *    buffer alone and report it, so the caller can reconcile instead of reverting the file.
      */
     fun save(): SaveResult {
+        if (readOnly) return SaveResult.Failed("Library files are read-only")
         val text = state.text.toString()
         val disk = runCatching { file.readText() }.getOrNull()
         if (text == disk) {
@@ -202,6 +204,7 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
      * good, silently. A failure is now just another [SaveBlock] the user can see and retry.
      */
     private fun writeBuffer(text: String): SaveResult {
+        if (readOnly) return SaveResult.Failed("Library files are read-only")
         // Snapshot the version about to be replaced before replacing it, then the one that lands.
         // Offering the baseline on every save is what puts the file's *pre-edit* state in local
         // history without a hook on the first keystroke: it stores something only the first time
@@ -331,7 +334,7 @@ class FileEditStore(private val history: LocalHistory? = null) {
 
     fun edit(tab: Tab.FileView, fallbackText: (() -> String)? = null): FileEdit = edits.getOrPut(tab.id) {
         val text = runCatching { tab.file.readText() }.getOrNull() ?: fallbackText?.invoke() ?: ""
-        FileEdit(text, tab.file, history)
+        FileEdit(text, tab.file, history, readOnly = tab.readOnly)
     }
 
     fun peek(id: String): FileEdit? = edits[id]
