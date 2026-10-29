@@ -313,6 +313,38 @@ class EventLogTest {
     }
 
     @Test
+    fun `a delayed request replaces an injected automatic title in the picker`(@TempDir tmp: Path) {
+        val injected = "# AGENTS.md instructions for /workspace/editor"
+        val written = session("delayed-request", tmp.toString(), injected, null)
+        repeat(240) { written.append(AgentEvent.ScreenTail("Waiting for input $it", now())) }
+        written.append(AgentEvent.UserMessage("$injected\n<INSTRUCTIONS>\nFollow the style guide.\n</INSTRUCTIONS>", now()))
+        written.append(AgentEvent.UserMessage("<environment_context>\n</environment_context>", now()))
+        written.append(AgentEvent.UserMessage("<image name=[Image #1]>\n</image>\nFix toolbar spacing", now()))
+
+        assertEquals("Fix toolbar spacing", EventLog.sessions(tmp).single { it.sessionId == "delayed-request" }.title)
+        assertEquals("Fix toolbar spacing", written.firstPromptTitle())
+
+        written.append(AgentEvent.SessionTitled("Toolbar alignment", now()))
+        assertEquals("Toolbar alignment", EventLog.sessions(tmp).single { it.sessionId == "delayed-request" }.title)
+    }
+
+    @Test
+    fun `an explicitly chosen title is kept even if it resembles injected context`(@TempDir tmp: Path) {
+        val written = session("manual-context-title", tmp.toString(), null, "Fix toolbar spacing")
+        val chosen = "# AGENTS.md instructions for the editor"
+        written.append(AgentEvent.SessionTitled(chosen, now(), byUser = true))
+
+        assertEquals(chosen, EventLog.sessions(tmp).single { it.sessionId == "manual-context-title" }.title)
+    }
+
+    @Test
+    fun `an explicit default label in a log without rename metadata is preserved`(@TempDir tmp: Path) {
+        session("legacy-manual-title", tmp.toString(), "Agent", "Fix toolbar spacing")
+
+        assertEquals("Agent", EventLog.sessions(tmp).single { it.sessionId == "legacy-manual-title" }.title)
+    }
+
+    @Test
     fun `a session that produced nothing at all still has a label`(@TempDir tmp: Path) {
         session("silent", tmp.toString(), null, null)
 

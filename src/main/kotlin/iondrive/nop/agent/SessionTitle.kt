@@ -4,11 +4,27 @@ package iondrive.nop.agent
 internal object SessionTitle {
     fun fromPrompt(text: String): String? {
         var prompt = text.trimStart()
-        while (prompt.startsWith("<environment_context>")) {
-            val end = prompt.indexOf("</environment_context>")
+        while (true) {
+            val closing = contextClosingTag(prompt) ?: break
+            val end = prompt.indexOf(closing)
             if (end < 0) return null
-            prompt = prompt.substring(end + "</environment_context>".length).trimStart()
+            prompt = prompt.substring(end + closing.length).trimStart()
         }
         return prompt.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(120)
+    }
+
+    /** Default labels and truncated context blocks do not describe the work. */
+    fun isPlaceholder(title: String): Boolean = title.trim().let {
+        it.isEmpty() || it == "Agent" || it == "Untitled session" || isInjected(it)
+    }
+
+    fun isInjected(title: String): Boolean = contextClosingTag(title.trimStart()) != null
+
+    private fun contextClosingTag(text: String): String? = when {
+        text.startsWith("# AGENTS.md instructions for ") || text.startsWith("<INSTRUCTIONS>") ->
+            "</INSTRUCTIONS>"
+        text.startsWith("<environment_context>") -> "</environment_context>"
+        text.startsWith("<image>") || text.startsWith("<image ") -> "</image>"
+        else -> null
     }
 }

@@ -73,10 +73,11 @@ class AgentSessionsTest {
     @Test
     fun `the first request names a Codex tab and later requests keep its name`(@TempDir tmp: Path) {
         val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+        session.titleFromPrompt("# AGENTS.md instructions for /workspace/editor\n<INSTRUCTIONS>\nUse the style guide.\n</INSTRUCTIONS>")
         session.titleFromPrompt("<environment_context>\n<shell>sh</shell>\n</environment_context>")
         assertEquals("Agent", session.title)
 
-        session.titleFromPrompt("  Add a search box\nwith keyboard support", at = 123)
+        session.titleFromPrompt("<image name=[Image #1]>\n</image>\n  Add a search box\nwith keyboard support", at = 123)
         session.titleFromPrompt("Now change the colours")
 
         assertEquals("Add a search box", session.title)
@@ -127,6 +128,31 @@ class AgentSessionsTest {
         val manual = sessions()
         manual.restore(listOf(row.copy(titleIsUsers = true)), tmp.toFile(), listOf(codex))
         assertEquals("Agent", manual.sessions.single().title)
+    }
+
+    @Test
+    fun `restoring an automatically injected title recovers a delayed request`(@TempDir tmp: Path) {
+        val state = sessions()
+        val codex = account("codex", Provider.OpenAI)
+        val original = state.open(tmp.toFile(), codex)
+        val injected = "# AGENTS.md instructions for /workspace/editor"
+        original.log.append(AgentEvent.SessionTitled(injected, 1))
+        repeat(240) { original.log.append(AgentEvent.ScreenTail("Waiting for input", 2)) }
+        original.log.append(AgentEvent.UserMessage("$injected\n<INSTRUCTIONS>\nUse the style guide.\n</INSTRUCTIONS>", 3))
+        original.log.append(AgentEvent.UserMessage("Fix toolbar spacing", 4))
+        state.disposeAll()
+
+        val row = Settings.OpenAgent(
+            sessionId = original.sessionId, title = injected, account = codex.name,
+            provider = codex.provider.id, nativeSessionId = "example-conversation", titleIsUsers = false,
+        )
+        val restored = sessions()
+        restored.restore(listOf(row), tmp.toFile(), listOf(codex))
+        assertEquals("Fix toolbar spacing", restored.sessions.single().title)
+
+        val manual = sessions()
+        manual.restore(listOf(row.copy(titleIsUsers = true)), tmp.toFile(), listOf(codex))
+        assertEquals(injected, manual.sessions.single().title)
     }
 
     @Test

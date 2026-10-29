@@ -346,7 +346,9 @@ class AgentSession(
      * right-click the tab to name it themselves. A restored tab keeps the name it already earned.
      */
     var title: String by mutableStateOf(
-        restoredTitle?.takeIf { it.isNotBlank() && (titleByUser || it != DEFAULT_TITLE) }
+        restoredTitle?.takeIf {
+            it.isNotBlank() && (titleByUser || !SessionTitle.isPlaceholder(it))
+        }
             ?: (if (log.hadHistory) log.firstPromptTitle() else null)
             ?: DEFAULT_TITLE,
     )
@@ -366,7 +368,7 @@ class AgentSession(
         fromHandoff: Boolean = run.seededFromHandoff,
         at: Long = System.currentTimeMillis(),
     ) {
-        if (title != DEFAULT_TITLE || titleIsUsers || fromHandoff) return
+        if (titleIsUsers || fromHandoff || !SessionTitle.isPlaceholder(title)) return
         SessionTitle.fromPrompt(text)?.let { titleFromTranscript(it, fromHandoff, at) }
     }
 
@@ -376,7 +378,7 @@ class AgentSession(
         if (trimmed.isEmpty()) return
         title = trimmed
         titleIsUsers = true
-        log.append(AgentEvent.SessionTitled(trimmed, System.currentTimeMillis()))
+        log.append(AgentEvent.SessionTitled(trimmed, System.currentTimeMillis(), byUser = true))
     }
 
     /**
@@ -393,7 +395,7 @@ class AgentSession(
         if (titleIsUsers) return
         if (fromHandoff) return
         val trimmed = name.trim()
-        if (trimmed.isNotEmpty()) {
+        if (!SessionTitle.isPlaceholder(trimmed)) {
             title = trimmed
             log.append(AgentEvent.SessionTitled(trimmed, at))
         }

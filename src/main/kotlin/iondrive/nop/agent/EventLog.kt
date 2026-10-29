@@ -143,9 +143,9 @@ sealed interface AgentEvent {
         override val at: Long,
     ) : AgentEvent
 
-    /** A title the CLI gave the session itself — what the picker calls it next time. */
+    /** A session label from the CLI, the request fallback, or an explicit user rename. */
     @Serializable @SerialName("session_titled")
-    data class SessionTitled(val title: String, override val at: Long) : AgentEvent
+    data class SessionTitled(val title: String, override val at: Long, val byUser: Boolean = false) : AgentEvent
 }
 
 /** One earlier session, as the picker lists it. */
@@ -278,7 +278,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
     /** A fallback for a restored tab whose CLI supplies no session title. */
     fun firstPromptTitle(): String? = runCatching {
         Files.newBufferedReader(file).use { reader ->
-            reader.lineSequence().take(HEAD_LINES).firstNotNullOfOrNull { line ->
+            reader.lineSequence().firstNotNullOfOrNull { line ->
                 if ("\"user_message\"" !in line) return@firstNotNullOfOrNull null
                 val event = runCatching {
                     JSON.decodeFromString(AgentEvent.serializer(), line)
@@ -297,7 +297,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-        /** How far into a log [sessions] looks for the pieces that label it. */
+        /** Maximum transcript prefix searched for its first timestamp. */
         private const val HEAD_LINES = 200
 
         fun sessionsDir(): Path = Accounts.dataRoot().resolve("sessions")
@@ -318,9 +318,9 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
          * The sessions this project has had, most recently active first.
          *
          * Each log is read once, streaming, keeping only what a row needs: the label comes from the
-         * head — a title, or failing that the first thing the user typed, both written early — and
-         * the account to resume from comes from the last run anywhere in the file. That second part
-         * cannot be taken from the head: after a provider switch the run at the top of the log is
+         * latest title, or failing that the first request, and the account to resume from comes
+         * from the last run anywhere in the file. That cannot be taken from the head: after a
+         * provider switch the run at the top of the log is
          * the one that ran out, so a row built from it would offer to reopen the account that
          * already failed. The project is the last one the log names, for the same reason: a tab
          * sent to another project carries on in this log, and filed under the project it began in
@@ -416,15 +416,14 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
 
             val read = runCatching {
                 Files.newBufferedReader(file).use { reader ->
-                    var index = 0
                     for (line in reader.lineSequence()) {
-                        index += 1
                         if (line.isBlank()) continue
-                        // Cheap pre-filter: past the head only run and placement records still
-                        // matter, and decoding a whole session's turns to find them would make
-                        // drawing the picker cost reading every log in full.
-                        val inHead = index <= HEAD_LINES
-                        if (!inHead && "\"run_started\"" !in line && "\"session_started\"" !in line) continue
+                        // Decode only records the row needs. Startup output can put the first
+                        // request anywhere in the log, and a title can arrive on any later turn.
+                        if ("\"run_started\"" !in line && "\"session_started\"" !in line &&
+                            "\"session_titled\"" !in line &&
+                            (firstPrompt != null || "\"user_message\"" !in line)
+                        ) continue
                         val event = runCatching {
                             JSON.decodeFromString(AgentEvent.serializer(), line)
                         }.getOrNull() ?: continue
@@ -437,7 +436,9 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                                 lastRun = event
                                 if (event.transcriptPath == null) lastSpawn = event
                             }
-                            is AgentEvent.SessionTitled -> titled = event.title
+                            is AgentEvent.SessionTitled -> {
+                                if (event.byUser || !SessionTitle.isInjected(event.title)) titled = event.title
+                            }
                             is AgentEvent.UserMessage ->
                                 firstPrompt = firstPrompt ?: SessionTitle.fromPrompt(event.text)
                             else -> Unit
