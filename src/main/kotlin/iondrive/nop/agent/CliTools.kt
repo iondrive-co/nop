@@ -6,10 +6,9 @@ import java.nio.file.Path
 /**
  * Finds the vendor CLI binaries, and says how to install one that is missing.
  *
- * nop does not install them behind the user's back. claude and codex are npm packages that pull a
- * few hundred megabytes and occasionally prompt; doing that silently from a click labelled "launch"
- * is the wrong trade. [installCommand] hands back the command instead, which the picker offers to
- * run in a terminal where the user can watch it.
+ * Missing tools are installed explicitly: [installCommand] hands back the command, which the picker
+ * offers to run in a terminal where the user can watch it. [CliUpdates] keeps installed Codex and
+ * Claude Code binaries current through their own update commands.
  *
  * `agy` has no such command. It is a signed 200 MB binary served from Google's own release service,
  * one manifest per platform naming the build, its URL and its checksum — a downloader, not a

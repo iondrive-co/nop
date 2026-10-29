@@ -41,6 +41,7 @@ import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.Backup
+import iondrive.nop.agent.CliUpdates
 import iondrive.nop.git.ProjectGitPoller
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.ipc.Handover
@@ -179,6 +180,8 @@ fun main(args: Array<String>) {
 
     // And keeps itself up to date, when it is a release install — see [SelfUpdate].
     SelfUpdate.start()
+
+    CliUpdates.start()
 
     // The other way the UI thread fails without a trace: not by throwing, but by stopping. Only the
     // nop that owns the windows has a UI thread worth watching.
