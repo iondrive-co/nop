@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -22,6 +23,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import iondrive.nop.agent.ConversationSummary
@@ -93,6 +98,10 @@ internal fun AgentSummaryView(state: ConversationSummaryState, log: Path) {
 
 @Composable
 private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSummaryState) {
+    val isDark = JewelTheme.isDark
+    val userAccent = if (isDark) Color(0xFF98B7DF) else Color(0xFF4B6E9E)
+    val incomingAccent = if (isDark) Color(0xFFC0A5D8) else Color(0xFF7C6199)
+    val replyAccent = if (isDark) Color(0xFF95BDB0) else Color(0xFF476F64)
     val scroll = rememberLazyListState(state.scrollIndex, state.scrollOffset)
     val revision = state.revision
     DisposableEffect(scroll) {
@@ -112,8 +121,27 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
                 items(snapshot.messages) { message ->
-                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(message.speaker, fontWeight = FontWeight.SemiBold, color = AgentMuted)
+                    val accent = when {
+                        message.assistant -> replyAccent
+                        message.speaker == "You" -> userAccent
+                        else -> incomingAccent
+                    }
+                    Column(
+                        Modifier.fillMaxWidth()
+                            .background(accent.copy(alpha = if (isDark) 0.09f else 0.055f), RoundedCornerShape(6.dp))
+                            .drawBehind {
+                                drawLine(
+                                    color = accent.copy(alpha = 0.45f),
+                                    start = Offset(0f, 8.dp.toPx()),
+                                    end = Offset(0f, size.height - 8.dp.toPx()),
+                                    strokeWidth = 2.dp.toPx(),
+                                    cap = StrokeCap.Round,
+                                )
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(message.speaker, fontWeight = FontWeight.SemiBold, color = accent)
                         if (message.assistant) MarkdownContent(message.text) else Text(message.text)
                     }
                 }

@@ -38,12 +38,16 @@ class AgentSummaryViewTest {
     }
 
     @OptIn(InternalComposeUiApi::class, ExperimentalComposeUiApi::class)
-    private class Reader(val log: Path, val state: ConversationSummaryState = ConversationSummaryState()) : AutoCloseable {
+    private class Reader(
+        val log: Path,
+        val state: ConversationSummaryState = ConversationSummaryState(),
+        private val dark: Boolean = false,
+    ) : AutoCloseable {
         var visible by mutableStateOf(true)
         private var time = 0L
         private val scene = onEdt {
             ImageComposeScene(900, 650, Density(1f)) {
-                IntUiTheme(isDark = false) {
+                IntUiTheme(isDark = dark) {
                     if (visible) AgentSummaryView(state, log)
                 }
             }
@@ -76,7 +80,7 @@ class AgentSummaryViewTest {
         }
 
         fun screenshot() {
-            val file = Path.of("build/test-screenshots/agent-summary.png")
+            val file = Path.of("build/test-screenshots/agent-summary${if (dark) "-dark" else ""}.png")
             Files.createDirectories(file.parent)
             onEdt {
                 scene.render(time).use { image ->
@@ -118,6 +122,10 @@ class AgentSummaryViewTest {
             reader.screenshot()
             reader.refresh()
             assertTrue(reader.shows("The final checks passed."))
+        }
+        Reader(log, dark = true).use { reader ->
+            reader.settle()
+            reader.screenshot()
         }
     }
 
