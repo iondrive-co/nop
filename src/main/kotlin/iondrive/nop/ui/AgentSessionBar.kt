@@ -30,6 +30,7 @@ import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.OutlinedButton
+import org.jetbrains.jewel.ui.component.CheckboxRow
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.Tooltip
 
@@ -144,6 +145,13 @@ fun AgentSessionBar(
                     "Snip area",
                     color = AgentMuted,
                     modifier = Modifier.clickable { session.session.snipArea() },
+                )
+            }
+            Tooltip(tooltip = { Text("Read a snapshot of prompts and replies, without tools or thinking") }) {
+                CheckboxRow(
+                    text = "Summary",
+                    checked = session.summary.shown,
+                    onCheckedChange = { session.summary.toggle() },
                 )
             }
             if (handoverAccounts.isNotEmpty()) {

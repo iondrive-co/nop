@@ -247,6 +247,8 @@ class AgentSession(
     /** The id other agents address this tab by: the start of [sessionId], which names its log files too. */
     val shortId: String get() = sessionId.take(8)
 
+    val summary = ConversationSummaryState()
+
     /**
      * Messages other agents have sent this tab, waiting for the user to deliver or discard them —
      * see [AgentMessages]. Compose state: the tab's inbox and its mark in the strip are drawn from it.

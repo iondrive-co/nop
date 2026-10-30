@@ -109,9 +109,6 @@ fun MarkdownPreview(
     modifier: Modifier = Modifier,
     scroll: ScrollState = rememberScrollState(),
 ) {
-    // Re-parse only when the text changes. The AST is cheap to walk so we don't memoize past this.
-    val document = remember(text) { MARKDOWN_PARSER.parse(text) }
-    val colors = if (JewelTheme.isDark) MdColors.Dark else MdColors.Light
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -124,9 +121,17 @@ fun MarkdownPreview(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            RenderChildren(document, colors)
+            MarkdownContent(text)
         }
     }
+}
+
+/** Markdown without its own scrolling surface, for a message inside a conversation list. */
+@Composable
+internal fun MarkdownContent(text: String) {
+    val document = remember(text) { MARKDOWN_PARSER.parse(text) }
+    val colors = if (JewelTheme.isDark) MdColors.Dark else MdColors.Light
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { RenderChildren(document, colors) }
 }
 
 @Composable

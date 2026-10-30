@@ -209,15 +209,22 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
     private fun user(record: JsonObject, at: Long): List<AgentEvent> {
         val content = record["message"].obj()?.get("content")
 
-        // A plain string is the user typing. A list is the CLI handing tool results back to the
-        // model, which is the only other thing that wears the `user` role.
+        // User prompts can be strings or text/image blocks; tool results also wear the user role.
         content.str()?.let { text ->
             return if (text.isBlank()) emptyList() else listOf(AgentEvent.UserMessage(text, at))
         }
 
         val blocks = content.arr() ?: return emptyList()
+        val prompt = blocks.mapNotNull { element ->
+            val block = element.obj() ?: return@mapNotNull null
+            when (block["type"].str()) {
+                "text" -> block["text"].str()
+                "image" -> "[Image]"
+                else -> null
+            }
+        }.joinToString("\n").takeIf { it.isNotBlank() }
         val toolResult = record["toolUseResult"].obj()
-        return blocks.mapNotNull { element ->
+        val results = blocks.mapNotNull { element ->
             val block = element.obj() ?: return@mapNotNull null
             if (block["type"].str() != "tool_result") return@mapNotNull null
             val callId = block["tool_use_id"].str() ?: return@mapNotNull null
@@ -233,6 +240,7 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
                 at = at,
             )
         }
+        return listOfNotNull(prompt?.let { AgentEvent.UserMessage(it, at) }) + results
     }
 
     private fun assistant(record: JsonObject, at: Long): List<AgentEvent> {

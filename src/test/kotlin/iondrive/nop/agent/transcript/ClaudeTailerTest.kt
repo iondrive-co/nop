@@ -51,6 +51,20 @@ class ClaudeTailerTest {
     }
 
     @Test
+    fun `text and image blocks are a prompt and tool results stay separate`() {
+        val tailer = ClaudeTailer(Path.of("/nowhere"))
+        val prompt = tailer.parse(
+            """{"type":"user","message":{"content":[{"type":"text","text":"What does this show?"},{"type":"image","source":{"type":"base64","data":"sample"}}]}}""",
+        ).filterIsInstance<AgentEvent.UserMessage>().single()
+        assertEquals("What does this show?\n[Image]", prompt.text)
+        val result = tailer.parse(
+            """{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read-1","content":"file contents"}]}}""",
+        )
+        assertTrue(result.none { it is AgentEvent.UserMessage })
+        assertEquals("read-1", result.filterIsInstance<AgentEvent.ToolFinished>().single().callId)
+    }
+
+    @Test
     fun `an assistant turn carries its blocks, usage, stop reason and model`() {
         val turn = parseAll().filterIsInstance<AgentEvent.AssistantMessage>().first()
 
