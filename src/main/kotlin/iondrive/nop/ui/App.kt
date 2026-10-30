@@ -203,6 +203,10 @@ fun App(
     var commitSelection by remember(projectPath) {
         mutableStateOf(lastLoaded?.let { CommitSelection.loaded(it.status.changes.map { c -> c.path }.toSet()) } ?: CommitSelection())
     }
+    var commitRowSelection by remember(projectPath) { mutableStateOf(CommitRowSelection()) }
+    LaunchedEffect(status.changes) {
+        commitRowSelection = commitRowSelection.reconcile(status.changes.map { it.path }.toSet())
+    }
     // Whether the commit message is not blank. Held here because the status loaders below read it,
     // and the message state itself is declared after them.
     var commitMessageWriting by remember(projectPath) { mutableStateOf(false) }
@@ -2085,12 +2089,11 @@ fun App(
                                         returnedPaths = commitSelection.returned,
                                         arrivedPaths = commitSelection.arrived,
                                         onToggle = { path -> commitSelection = commitSelection.toggle(path) },
-                                        onTickOnly = { paths -> commitSelection = commitSelection.tickOnly(paths) },
-                                        activePath = when (val t = tabsState.selectedTab) {
-                                            is Tab.Diff -> t.change.path
-                                            is Tab.FileView -> repo?.let { repoRelativePath(it, t.file) }
-                                            else -> null
+                                        highlightedPaths = commitRowSelection.paths,
+                                        onSelect = { path, order, toggle, range ->
+                                            commitRowSelection = commitRowSelection.click(path, order, toggle, range)
                                         },
+                                        onTickOnly = { paths -> commitSelection = commitSelection.tickOnly(paths) },
                                         onChangeClick = { change ->
                                             if (repo != null) {
                                                 commitSelection = commitSelection.acknowledge(change.path)

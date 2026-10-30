@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.rememberTextFieldState
@@ -40,7 +41,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isMetaPressed
+import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -73,6 +81,8 @@ fun CommitPanel(
     // It looks exactly like "no repository" otherwise, and on a big checkout that walk takes a minute.
     loading: Boolean = false,
     onToggle: (String) -> Unit,
+    highlightedPaths: Set<String>,
+    onSelect: (path: String, order: List<String>, toggle: Boolean, range: Boolean) -> Unit,
     // Ticks exactly these paths: every change for "All", none for "None".
     onTickOnly: (Set<String>) -> Unit,
     onChangeClick: (FileChange) -> Unit,
@@ -86,9 +96,6 @@ fun CommitPanel(
     stashInFlight: Boolean = false,
     refreshing: Boolean = false,
     onRefresh: () -> Unit = {},
-    // The change whose diff is the editor's selected tab, drawn highlighted so the list shows which
-    // file the user is looking at, as the project tree does for the active file.
-    activePath: String? = null,
     // Rows nop ticked by itself, marked "returned" or "new". See [CommitSelection].
     returnedPaths: Set<String> = emptySet(),
     arrivedPaths: Set<String> = emptySet(),
@@ -283,6 +290,7 @@ fun CommitPanel(
         // docs) so a review reads by concern instead of one long mixed list. [GroupColumnGrid]
         // handles the packing; all this needs to supply is the width that covers the longest name.
         val groups = remember(status.changes) { PathGrouping.group(status.changes) { it.path } }
+        val orderedPaths = remember(groups) { groups.flatMap { it.paths } }
         if (groups.isNotEmpty()) {
             val measurer = rememberTextMeasurer()
             val labelStyle = JewelTheme.defaultTextStyle
@@ -308,10 +316,11 @@ fun CommitPanel(
                         ChangeRows(
                             group = group,
                             selectedPaths = selectedPaths,
-                            activePath = activePath,
+                            highlightedPaths = highlightedPaths,
                             returnedPaths = returnedPaths,
                             arrivedPaths = arrivedPaths,
                             onToggle = onToggle,
+                            onSelect = { path, toggle, range -> onSelect(path, orderedPaths, toggle, range) },
                             onChangeClick = onChangeClick,
                             onRevert = onRevert,
                         )
@@ -335,10 +344,11 @@ private const val MEASURED_LABELS = 64
 private fun ChangeRows(
     group: PathGroup<FileChange>,
     selectedPaths: Set<String>,
-    activePath: String?,
+    highlightedPaths: Set<String>,
     returnedPaths: Set<String>,
     arrivedPaths: Set<String>,
     onToggle: (String) -> Unit,
+    onSelect: (String, Boolean, Boolean) -> Unit,
     onChangeClick: (FileChange) -> Unit,
     onRevert: (FileChange) -> Unit,
 ) {
@@ -349,14 +359,17 @@ private fun ChangeRows(
                 change = change,
                 label = group.labelFor(change.path),
                 checked = change.path in selectedPaths,
-                active = change.path == activePath,
+                selected = change.path in highlightedPaths,
                 mark = when (change.path) {
                     in returnedPaths -> commitMark(returned = true)
                     in arrivedPaths -> commitMark(returned = false)
                     else -> null
                 },
                 onToggle = { onToggle(change.path) },
-                onPathClick = { onChangeClick(change) },
+                onPathClick = { toggle, range ->
+                    onSelect(change.path, toggle, range)
+                    if (!toggle && !range) onChangeClick(change)
+                },
                 onRevert = { onRevert(change) },
             )
         }
@@ -462,24 +475,33 @@ private fun MessageRow(message: String, onClick: () -> Unit) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ChangeRow(
+internal fun ChangeRow(
     change: FileChange,
     label: String,
     checked: Boolean,
-    active: Boolean,
+    selected: Boolean,
     mark: String?,
     onToggle: () -> Unit,
-    onPathClick: () -> Unit,
+    onPathClick: (toggle: Boolean, range: Boolean) -> Unit,
     onRevert: () -> Unit,
 ) {
+    var shiftPressed by remember { mutableStateOf(false) }
+    var togglePressed by remember { mutableStateOf(false) }
+    fun select() {
+        val range = shiftPressed
+        val toggle = togglePressed
+        shiftPressed = false
+        togglePressed = false
+        onPathClick(toggle, range)
+    }
     // Right-click a changed file to revert it — mirrors the project tree's context menu rather than
     // putting a button on every row, which would clutter a long change list. The ellipsis signals
     // that a confirmation dialog follows (revert is destructive).
     ContextMenuArea(items = { listOf(ContextMenuItem("Revert…") { onRevert() }) }) {
         val isDark = JewelTheme.isDark
-        // The project tree's active-file colours, so the two panels mark the same file the same way.
+        // Use the project tree's selection colours for the file-row selection.
         val rowBackground = when {
-            !active -> Color.Transparent
+            !selected -> Color.Transparent
             isDark -> Color(0xFF2B5282)
             else -> Color(0xFFCEE0FD)
         }
@@ -488,18 +510,34 @@ private fun ChangeRow(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(4.dp))
                 .background(rowBackground)
+                .selectable(selected = selected, onClick = { select() })
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed) {
+                                shiftPressed = event.keyboardModifiers.isShiftPressed
+                                togglePressed = event.keyboardModifiers.isCtrlPressed || event.keyboardModifiers.isMetaPressed
+                            }
+                        }
+                    }
+                }
                 .padding(vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            CheckboxRow(checked = checked, onCheckedChange = { onToggle() }) {}
+            CheckboxRow(checked = checked, onCheckedChange = {
+                shiftPressed = false
+                togglePressed = false
+                onToggle()
+            }) {}
             Text(ChangeColors.prefixFor(change.kind), color = ChangeColors.forKind(change.kind))
             if (mark != null) Text(mark, color = ChangeColors.CONFLICT)
             val pathText: @Composable () -> Unit = {
                 Text(
                     label,
                     color = when {
-                        !active -> Color.Unspecified
+                        !selected -> Color.Unspecified
                         isDark -> Color(0xFFFFFFFF)
                         else -> Color(0xFF0F3E85)
                     },
@@ -507,9 +545,7 @@ private fun ChangeRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // The whole remaining width opens the diff — not just the (often short) label text —
-            // so clicking anywhere on the row past the checkbox works.
-            Box(modifier = Modifier.weight(1f).clickable { onPathClick() }) {
+            Box(modifier = Modifier.weight(1f)) {
                 if (label != change.path) {
                     // The group's shared directory prefix is stripped from the label; hover for
                     // the full path.
