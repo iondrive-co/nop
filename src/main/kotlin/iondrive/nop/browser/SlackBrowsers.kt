@@ -1,0 +1,445 @@
+package iondrive.nop.browser
+
+import iondrive.nop.Log
+import iondrive.nop.terminal.openUrlInBrowser
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.swing.Swing
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
+import me.friwi.jcefmaven.CefAppBuilder
+import me.friwi.jcefmaven.MavenCefAppHandlerAdapter
+import org.cef.CefApp
+import org.cef.CefClient
+import org.cef.browser.CefBrowser
+import org.cef.browser.CefFrame
+import org.cef.callback.CefBeforeDownloadCallback
+import org.cef.callback.CefDownloadItem
+import org.cef.callback.CefDownloadItemCallback
+import org.cef.handler.CefDisplayHandlerAdapter
+import org.cef.handler.CefDownloadHandler
+import org.cef.handler.CefLifeSpanHandlerAdapter
+import org.cef.handler.CefLoadHandler.ErrorCode
+import org.cef.handler.CefLoadHandlerAdapter
+import org.cef.handler.CefRequestHandlerAdapter
+import org.cef.network.CefRequest
+import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import javax.swing.SwingUtilities
+
+internal const val SLACK_HOME = "https://app.slack.com/client"
+
+private val slackLayoutScript: String by lazy {
+    checkNotNull(SlackBrowsers::class.java.getResource("/browser/slack-layout.js")).readText()
+}
+
+/** Browsers survive tab and project switches; the shared profile keeps Slack signed in. */
+object SlackBrowsers {
+    private data class Key(val project: Path, val workspace: String?)
+    private val sessions = mutableMapOf<Key, SlackBrowser>()
+    private val json = Json { ignoreUnknownKeys = true }
+    private var tabs = SlackWorkspaceTabs(loadWorkspaces(), loadClosedWorkspaces())
+    private val mutableKnownWorkspaces = MutableStateFlow(tabs.known)
+    val knownWorkspaces = mutableKnownWorkspaces.asStateFlow()
+    private val mutableWorkspaces = MutableStateFlow(tabs.open)
+    val workspaces = mutableWorkspaces.asStateFlow()
+    private val mutableAttention = MutableStateFlow<Map<String, SlackAttention>>(emptyMap())
+    val attention = mutableAttention.asStateFlow()
+    private val runtimeLock = Any()
+    private val terminated = CountDownLatch(1)
+    @Volatile private var app: CefApp? = null
+    @Volatile private var stopping = false
+    @Volatile private var runtimeStarted = false
+
+    @Synchronized
+    fun of(project: Path, workspaceId: String? = null): SlackBrowser {
+        require(workspaceId == null || SlackWorkspaceNames.validId(workspaceId))
+        val normalized = project.toAbsolutePath().normalize()
+        val session = sessions.getOrPut(Key(normalized, workspaceId)) {
+            SlackBrowser(normalized, workspaceId?.let { "https://app.slack.com/client/$it" } ?: SLACK_HOME)
+        }
+        val current = session.state.value.workspace
+        if (workspaceId != null && current != null && current.id != workspaceId) {
+            session.navigate("https://app.slack.com/client/$workspaceId")
+        }
+        return session
+    }
+
+    @Synchronized
+    fun connect(project: Path) {
+        val normalized = project.toAbsolutePath().normalize()
+        sessions.remove(Key(normalized, null))?.close()
+        sessions[Key(normalized, null)] = SlackBrowser(normalized, "https://app.slack.com/workspace-signin")
+    }
+
+    @Synchronized
+    fun reopen(workspaceId: String) {
+        val next = tabs.reopen(workspaceId)
+        if (next == tabs) return
+        tabs = next
+        publishTabs()
+    }
+
+    @Synchronized
+    fun close(project: Path, workspaceId: String?) {
+        if (workspaceId == null) {
+            sessions.remove(Key(project.toAbsolutePath().normalize(), null))?.close()
+        } else {
+            tabs = tabs.close(workspaceId)
+            sessions.keys.filter { it.workspace == workspaceId }.forEach { sessions.remove(it)?.close() }
+            mutableAttention.update { it - workspaceId }
+            publishTabs()
+        }
+    }
+
+    private fun publishTabs() {
+        mutableKnownWorkspaces.value = tabs.known
+        mutableWorkspaces.value = tabs.open
+        runCatching {
+            Files.createDirectories(dataDirectory())
+            val file = dataDirectory().resolve("closed-workspaces.json")
+            val temporary = file.resolveSibling("closed-workspaces.json.tmp")
+            Files.writeString(temporary, json.encodeToString(tabs.closed))
+            Files.move(temporary, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }.onFailure { Log.warn("Could not save Slack tabs: ${it.message}") }
+    }
+
+    @Synchronized
+    internal fun report(project: Path, session: SlackBrowser, metadata: SlackMetadata) {
+        if (session !in sessions.values) return
+        val incoming = metadata.workspaces + listOfNotNull(metadata.current)
+        val merged = tabs.discover(incoming)
+        if (merged != tabs) {
+            tabs = merged
+            mutableKnownWorkspaces.value = tabs.known
+            mutableWorkspaces.value = tabs.open
+            runCatching {
+                val file = dataDirectory().resolve("workspaces.json")
+                val temporary = file.resolveSibling("workspaces.json.tmp")
+                Files.writeString(temporary, json.encodeToString(tabs.known))
+                Files.move(temporary, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }.onFailure { Log.warn("Could not save Slack workspace names: ${it.message}") }
+        }
+        val current = metadata.current?.takeIf { SlackWorkspaceNames.validId(it.id) } ?: return
+        val bootstrap = Key(project, null)
+        val workspace = Key(project, current.id)
+        mutableAttention.update { it + (current.id to metadata.attention.sanitized()) }
+        if (sessions[bootstrap] === session && current.id in tabs.closed) reopen(current.id)
+        if (sessions[bootstrap] === session && !sessions.containsKey(workspace)) {
+            sessions.remove(bootstrap)
+            sessions[workspace] = session
+        }
+    }
+
+    private fun dataDirectory(): Path {
+        val data = System.getenv("XDG_DATA_HOME")?.takeIf { it.isNotBlank() }?.let(Path::of)
+            ?: Path.of(System.getProperty("user.home"), ".local", "share")
+        return data.resolve("nop/browser")
+    }
+
+    private fun loadWorkspaces(): List<SlackWorkspace> = runCatching {
+        val file = dataDirectory().resolve("workspaces.json")
+        if (!Files.isRegularFile(file) || Files.size(file) > 65_536) return@runCatching emptyList()
+        SlackWorkspaceNames.merge(emptyList(), json.decodeFromString<List<SlackWorkspace>>(Files.readString(file)))
+    }.getOrDefault(emptyList())
+
+    private fun loadClosedWorkspaces(): Set<String> = runCatching {
+        val file = dataDirectory().resolve("closed-workspaces.json")
+        if (!Files.isRegularFile(file) || Files.size(file) > 65_536) return@runCatching emptySet()
+        json.decodeFromString<Set<String>>(Files.readString(file)).filter(SlackWorkspaceNames::validId).toSet()
+    }.getOrDefault(emptySet())
+
+    internal fun runtime(progress: (String) -> Unit): CefApp = synchronized(runtimeLock) {
+        check(!stopping) { "Browser is shutting down" }
+        app?.let { return@synchronized it }
+        val requestedRoot = dataDirectory()
+        privateDirectory(requestedRoot)
+        val root = requestedRoot.toRealPath()
+        val profile = root.resolve("slack")
+        privateDirectory(profile)
+        // CEF resolves the root before checking that the profile cache lives below it.
+        val profilePath = profile.toRealPath()
+        val builder = CefAppBuilder().apply {
+            setInstallDir(root.resolve("runtime-152.0.6").toFile())
+            setProgressHandler { state, percent ->
+                progress("Preparing browser: ${state.name.lowercase().replace('_', ' ')}" +
+                    if (percent >= 0) " (${percent.toInt()}%)" else "")
+            }
+            cefSettings.windowless_rendering_enabled = false
+            cefSettings.root_cache_path = profilePath.toString()
+            cefSettings.cache_path = profilePath.resolve("Default").toString()
+            cefSettings.persist_session_cookies = true
+            addJcefArgs("--disable-gpu", "--no-first-run", "--no-default-browser-check")
+            // Chromium logs can contain navigation URLs, including sign-in parameters.
+            cefSettings.log_severity = org.cef.CefSettings.LogSeverity.LOGSEVERITY_DISABLE
+            setAppHandler(object : MavenCefAppHandlerAdapter() {
+                override fun stateHasChanged(state: CefApp.CefAppState) {
+                    if (state == CefApp.CefAppState.TERMINATED) terminated.countDown()
+                }
+            })
+        }
+        builder.build().also {
+            runtimeStarted = true
+            if (stopping) {
+                it.dispose()
+                error("Browser is shutting down")
+            }
+            app = it
+        }
+    }
+
+    @Synchronized
+    fun retain(projects: Collection<Path>) {
+        val open = projects.map { it.toAbsolutePath().normalize() }.toSet()
+        sessions.keys.filter { it.project !in open }.forEach { sessions.remove(it)?.close() }
+    }
+
+    @Synchronized
+    fun disposeAll() {
+        stopping = true
+        sessions.values.forEach { it.close() }
+        sessions.clear()
+        app?.dispose()
+        app = null
+    }
+
+    /** Called after the window loop, with the AWT thread free to finish closing the profile. */
+    fun awaitShutdown() {
+        if (!runtimeStarted) return
+        try {
+            if (!terminated.await(10, TimeUnit.SECONDS)) Log.warn("Chromium did not finish shutting down")
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun privateDirectory(path: Path) {
+        Files.createDirectories(path)
+        if (Files.getFileStore(path).supportsFileAttributeView("posix")) {
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"))
+        }
+    }
+}
+
+data class SlackBrowserState(
+    val preparing: String? = "Preparing browser…",
+    val browser: CefBrowser? = null,
+    val url: String = SLACK_HOME,
+    val loading: Boolean = true,
+    val canGoBack: Boolean = false,
+    val canGoForward: Boolean = false,
+    val error: String? = null,
+    val workspace: SlackWorkspace? = null,
+)
+
+class SlackBrowser internal constructor(private val project: Path, private val initialUrl: String) {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mutableState = MutableStateFlow(SlackBrowserState())
+    val state = mutableState.asStateFlow()
+    private var client: CefClient? = null
+    @Volatile private var closed = false
+    @Volatile private var starting = false
+    @Volatile private var appearance = SlackAppearance()
+    private val json = Json { ignoreUnknownKeys = true }
+
+    init { start() }
+
+    @Synchronized
+    fun start() {
+        if (starting || closed || client != null) return
+        starting = true
+        mutableState.value = SlackBrowserState()
+        scope.launch {
+            try {
+                val app = SlackBrowsers.runtime { progress -> mutableState.update { it.copy(preparing = progress) } }
+                withContext(Dispatchers.Swing) {
+                    if (!closed) {
+                        val next = app.createClient()
+                        configure(next)
+                        val browser = try {
+                            next.createBrowser(initialUrl, false, false)
+                        } catch (failure: Throwable) {
+                            next.dispose()
+                            throw failure
+                        }
+                        client = next
+                        mutableState.update { it.copy(preparing = null, browser = browser) }
+                        watchMetadata(browser)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.error("Could not start the Slack browser", failure)
+                mutableState.update { it.copy(preparing = null, loading = false, error = failure.message ?: "Could not start browser") }
+            } catch (failure: LinkageError) {
+                Log.error("Could not load the Slack browser", failure)
+                mutableState.update { it.copy(preparing = null, loading = false, error = "Could not load Chromium: ${failure.message}") }
+            } finally {
+                starting = false
+            }
+        }
+    }
+
+    private fun watchMetadata(browser: CefBrowser) {
+        scope.launch {
+            while (!closed) {
+                delay(1_500)
+                if (!SlackNavigation.isAppUrl(mutableState.value.url)) continue
+                try {
+                    val response = browser.devToolsClient.executeDevToolsMethod("Runtime.evaluate",
+                        """{"expression":"window.__nopSlackLayout?.metadata() ?? null","returnByValue":true,"timeout":500}""")
+                        .get(2, TimeUnit.SECONDS)
+                    if (response.length > 65_536) continue
+                    val value = json.parseToJsonElement(response).jsonObject["result"]?.jsonObject?.get("value") ?: continue
+                    if (value == kotlinx.serialization.json.JsonNull) continue
+                    val metadata = json.decodeFromJsonElement<SlackMetadata>(value)
+                    SlackBrowsers.report(project, this@SlackBrowser, metadata)
+                    val workspace = metadata.current?.let { SlackWorkspaceNames.merge(emptyList(), listOf(it)).firstOrNull() }
+                    mutableState.update { it.copy(workspace = workspace) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Navigations can replace the JavaScript context between the origin check and evaluation.
+                }
+            }
+        }
+    }
+
+    fun navigate(url: String) {
+        mutableState.value.browser?.loadURL(url)
+    }
+
+    fun setAppearance(next: SlackAppearance) {
+        if (appearance == next) return
+        appearance = next
+        val state = mutableState.value
+        if (SlackNavigation.isAppUrl(state.url)) state.browser?.executeJavaScript(themeScript(), state.url, 0)
+    }
+
+    private fun themeScript(): String = "window.__nopSlackLayout?.setTheme(${json.encodeToString(appearance)});"
+
+    private fun configure(client: CefClient) {
+        client.addDisplayHandler(object : CefDisplayHandlerAdapter() {
+            override fun onAddressChange(browser: CefBrowser, frame: CefFrame, url: String) {
+                if (frame.isMain && !browser.isPopup) mutableState.update { it.copy(url = url) }
+            }
+            override fun onConsoleMessage(browser: CefBrowser, level: org.cef.CefSettings.LogSeverity,
+                                          message: String, source: String, line: Int): Boolean = true
+        })
+        client.addLoadHandler(object : CefLoadHandlerAdapter() {
+            override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
+                if (frame.isMain && !browser.isPopup && SlackNavigation.isAppUrl(frame.url)) {
+                    browser.executeJavaScript(slackLayoutScript + "\n" + themeScript(), frame.url, 0)
+                }
+            }
+            override fun onLoadingStateChange(browser: CefBrowser, isLoading: Boolean, canGoBack: Boolean, canGoForward: Boolean) {
+                if (!browser.isPopup) mutableState.update {
+                    it.copy(loading = isLoading, canGoBack = canGoBack, canGoForward = canGoForward,
+                        error = if (isLoading) null else it.error)
+                }
+            }
+            override fun onLoadError(browser: CefBrowser, frame: CefFrame, errorCode: ErrorCode, errorText: String, failedUrl: String) {
+                if (frame.isMain && !browser.isPopup && errorCode != ErrorCode.ERR_ABORTED) {
+                    mutableState.update { it.copy(loading = false, error = "Slack could not load: $errorText") }
+                }
+            }
+        })
+        client.addLifeSpanHandler(object : CefLifeSpanHandlerAdapter() {
+            override fun onBeforePopup(browser: CefBrowser, frame: CefFrame, targetUrl: String, targetFrameName: String): Boolean {
+                if (SlackNavigation.externalLink(browser.url, targetUrl)) {
+                    openUrlInBrowser(targetUrl)
+                    return true
+                }
+                // Authentication popups keep their opener and share the browser's cookie profile.
+                return targetUrl.isNotEmpty() && !SlackNavigation.isWebUrl(targetUrl) && targetUrl != "about:blank"
+            }
+        })
+        client.addRequestHandler(object : CefRequestHandlerAdapter() {
+            override fun onBeforeBrowse(browser: CefBrowser, frame: CefFrame, request: CefRequest,
+                                        userGesture: Boolean, isRedirect: Boolean): Boolean {
+                val url = request.url
+                if (frame.isMain && userGesture && !isRedirect && SlackNavigation.externalLink(browser.url, url)) {
+                    openUrlInBrowser(url)
+                    return true
+                }
+                if (SlackNavigation.isWebUrl(url) || url == "about:blank") return false
+                // Slack's web sign-in can offer a desktop deep link; keep the session in nop.
+                SlackNavigation.webDeepLink(url)?.let { web -> SwingUtilities.invokeLater { browser.loadURL(web) } }
+                return true
+            }
+            override fun onOpenURLFromTab(browser: CefBrowser, frame: CefFrame, targetUrl: String, userGesture: Boolean): Boolean {
+                if (SlackNavigation.externalLink(browser.url, targetUrl)) {
+                    openUrlInBrowser(targetUrl)
+                    return true
+                }
+                return false
+            }
+        })
+        client.addDownloadHandler(object : CefDownloadHandler {
+            override fun onBeforeDownload(browser: CefBrowser, item: CefDownloadItem, suggestedName: String,
+                                          callback: CefBeforeDownloadCallback): Boolean {
+                callback.Continue("", true)
+                return true
+            }
+            override fun onDownloadUpdated(browser: CefBrowser, item: CefDownloadItem, callback: CefDownloadItemCallback) {}
+        })
+    }
+
+    fun close() {
+        closed = true
+        scope.cancel()
+        SwingUtilities.invokeLater {
+            mutableState.value.browser?.uiComponent?.let { component ->
+                component.parent?.let { parent -> parent.remove(component); parent.revalidate(); parent.repaint() }
+            }
+            client?.dispose()
+            client = null
+        }
+    }
+}
+
+internal object SlackNavigation {
+    fun isAppUrl(url: String): Boolean = parse(url)?.let {
+        it.scheme == "https" && it.host == "app.slack.com" && it.userInfo == null
+    } == true
+
+    fun isWebUrl(url: String): Boolean = parse(url)?.let {
+        it.scheme in setOf("http", "https") && !it.host.isNullOrBlank() && it.userInfo == null
+    } == true
+
+    fun externalLink(current: String, target: String): Boolean {
+        val from = parse(current) ?: return false
+        val to = parse(target) ?: return false
+        return from.host == "app.slack.com" && from.path.orEmpty().startsWith("/client/") &&
+            isWebUrl(target) && to.host != "slack.com" && !to.host.orEmpty().endsWith(".slack.com")
+    }
+
+    fun webDeepLink(url: String): String? {
+        val uri = parse(url)?.takeIf { it.scheme == "slack" } ?: return null
+        val query = uri.rawQuery.orEmpty().split('&').mapNotNull {
+            val pair = it.split('=', limit = 2)
+            if (pair.size == 2) pair[0] to pair[1] else null
+        }.toMap()
+        val team = query["team"]?.takeIf { it.matches(Regex("T[A-Z0-9]+")) } ?: return null
+        val channel = query["id"]?.takeIf { it.matches(Regex("[CDG][A-Z0-9]+")) }
+        return "https://app.slack.com/client/$team" + if (channel == null) "" else "/$channel"
+    }
+
+    private fun parse(url: String): URI? = runCatching { URI(url) }.getOrNull()
+}

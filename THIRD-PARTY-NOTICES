@@ -36,6 +36,17 @@ Direct runtime dependencies
   License: Apache License 2.0
   Source: https://github.com/Kotlin/kotlinx.serialization
 
+- JCEF Maven
+  License: Apache License 2.0
+  Source: https://github.com/jcefmaven/jcefmaven
+
+- Java Chromium Embedded Framework and Chromium Embedded Framework
+  License: BSD-3-Clause, with Chromium third-party notices in the bundled LICENSE.txt
+  Source: https://github.com/chromiumembedded/java-cef
+  Source: https://github.com/chromiumembedded/cef
+  Platform browser archives include their license files; these remain alongside the extracted
+  runtime under the application's browser data directory.
+
 Notable transitive runtime components
 -------------------------------------
 
@@ -54,6 +65,18 @@ Notable transitive runtime components
 - Apache Commons Codec
   License: Apache License 2.0
   Source: https://commons.apache.org/proper/commons-codec/
+
+- Apache Commons Compress
+  License: Apache License 2.0
+  Source: https://commons.apache.org/proper/commons-compress/
+
+- Gson
+  License: Apache License 2.0
+  Source: https://github.com/google/gson
+
+- JOGL and GlueGen
+  License: see jogl.LICENSE.txt and gluegen.LICENSE.txt in the bundled browser runtime
+  Source: https://jogamp.org/
 
 - JavaEWAH
   License: Apache License 2.0

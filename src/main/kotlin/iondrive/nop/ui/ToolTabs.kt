@@ -65,6 +65,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +76,8 @@ import iondrive.nop.StripDrag
 import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSession
 import iondrive.nop.agent.AgentSessions
+import iondrive.nop.browser.SlackAttention
+import iondrive.nop.browser.SlackWorkspace
 import kotlinx.coroutines.launch
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -86,8 +90,8 @@ import org.jetbrains.jewel.ui.theme.defaultTabStyle
  * Which half of the tool region a tab draws into — see [ToolTabs].
  *
  * [Session] is everything with a live process behind it, and they share one AWT card panel, so only
- * one of them can be visible at a time however the panes are arranged. [Tool] is everything Compose
- * draws itself, which can sit beside a running session without fighting it for the screen.
+ * one of them can be visible at a time however the panes are arranged. [Tool] controls the upper
+ * strip. Its Compose panels sit beside a session; a Slack workspace occupies the whole region.
  */
 enum class ToolSide { Session, Tool }
 
@@ -109,6 +113,8 @@ enum class ToolTab(val label: String, val side: ToolSide) {
      * terminals.
      */
     Agent("Agent", ToolSide.Session),
+    /** Workspace tabs fill the tool region so Chromium and terminals share one native host. */
+    Slack("Slack", ToolSide.Tool),
     Commit("Commit", ToolSide.Tool),
 
     /**
@@ -150,7 +156,7 @@ enum class ToolTab(val label: String, val side: ToolSide) {
  * are all absent: they come and go, and each draws its own tab.
  */
 private val FIXED_TOOL_TABS: List<ToolTab> =
-    ToolTab.entries.filter { it.side == ToolSide.Tool && it != ToolTab.History }
+    ToolTab.entries.filter { it.side == ToolSide.Tool && it != ToolTab.History && it != ToolTab.Slack }
 
 /** Caps how wide one tab may grow, so a long terminal name can't push the rest off the strip. */
 private val TAB_MAX_WIDTH = 160.dp
@@ -256,6 +262,14 @@ fun ToolTabs(
     preview: @Composable () -> Unit,
     run: @Composable () -> Unit,
     history: @Composable () -> Unit,
+    slack: @Composable () -> Unit,
+    slackWorkspaces: List<SlackWorkspace>,
+    knownSlackWorkspaces: List<SlackWorkspace>,
+    slackAttention: Map<String, SlackAttention>,
+    onCloseSlack: (String?) -> Unit,
+    selectedSlackId: String?,
+    onSelectSlack: (String?) -> Unit,
+    onNewSlack: () -> Unit,
 ) {
     // Hoisted out of the two branches below so the composable identity survives a collapse: the
     // session pane holds a SwingPanel, and one that is torn down and rebuilt takes the terminal's
@@ -286,7 +300,7 @@ fun ToolTabs(
                     ToolTab.History -> history()
                     // A session tab can never be the tool selection; drawing nothing beats drawing
                     // a second copy of the pane beside it.
-                    ToolTab.Terminal, ToolTab.Agent, ToolTab.Run -> Unit
+                    ToolTab.Terminal, ToolTab.Agent, ToolTab.Run, ToolTab.Slack -> Unit
                 }
             }
         }
@@ -301,9 +315,16 @@ fun ToolTabs(
             histories = histories,
             onSelectHistory = onSelectHistory,
             onCloseHistory = onCloseHistory,
+            slackWorkspaces = slackWorkspaces,
+            knownSlackWorkspaces = knownSlackWorkspaces,
+            slackAttention = slackAttention,
+            onCloseSlack = onCloseSlack,
+            selectedSlackId = selectedSlackId,
+            onSelectSlack = onSelectSlack,
+            onNewSlack = onNewSlack,
         )
         SessionStrip(
-            sessionTab = sessionTab,
+            sessionTab = if (selected == ToolTab.Slack && !collapsed) ToolTab.Slack else sessionTab,
             terminals = terminals,
             onNewTerminal = onNewTerminal,
             onSelectTerminal = onSelectTerminal,
@@ -321,7 +342,9 @@ fun ToolTabs(
             onSelectRun = onSelectRun,
             onCloseRun = onCloseRun,
         )
-        if (collapsed) {
+        if (selected == ToolTab.Slack && !collapsed) {
+            slack()
+        } else if (collapsed) {
             sessionPane()
         } else {
             HorizontalSplit(
@@ -351,6 +374,7 @@ fun ToolTabs(
  * [selected] is still the tab that comes back, so the strip forgets nothing by showing nothing.
  */
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun ToolStrip(
     selected: ToolTab,
     onSelect: (ToolTab) -> Unit,
@@ -359,6 +383,13 @@ private fun ToolStrip(
     histories: HistorySessions,
     onSelectHistory: (String) -> Unit,
     onCloseHistory: (String) -> Unit,
+    slackWorkspaces: List<SlackWorkspace>,
+    knownSlackWorkspaces: List<SlackWorkspace>,
+    slackAttention: Map<String, SlackAttention>,
+    onCloseSlack: (String?) -> Unit,
+    selectedSlackId: String?,
+    onSelectSlack: (String?) -> Unit,
+    onNewSlack: () -> Unit,
 ) {
     val style = JewelTheme.defaultTabStyle
     val isDark = JewelTheme.isDark
@@ -410,6 +441,68 @@ private fun ToolStrip(
                     modifier = Modifier.bringIntoViewRequester(requester),
                 )
             }
+        }
+        slackWorkspaces.forEach { workspace ->
+            key(workspace.id) {
+                val requester = remember { BringIntoViewRequester() }
+                val isSelected = !collapsed && selected == ToolTab.Slack && selectedSlackId == workspace.id
+                val attention = slackAttention[workspace.id] ?: SlackAttention()
+                RevealWhenSelected(requester, isSelected)
+                ToolStripTab(
+                    label = workspace.name, selected = isSelected, isDark = isDark, style = style,
+                    onClick = { onSelectSlack(workspace.id) }, onClose = { onCloseSlack(workspace.id) },
+                    leading = { SlackTabIcon(attention) },
+                    emphasis = if (attention.unread) JewelTheme.globalColors.text.normal else null,
+                    modifier = Modifier.bringIntoViewRequester(requester),
+                )
+            }
+        }
+        if (selected == ToolTab.Slack && selectedSlackId == null && !collapsed) {
+            ToolStripTab(label = "Sign in…", selected = true, isDark = isDark, style = style,
+                leading = { SlackTabIcon() },
+                onClick = { onSelectSlack(null) }, onClose = { onCloseSlack(null) })
+        }
+        val window = LocalWindow.current
+        Tooltip(tooltip = { Text("Add or reopen Slack workspace") }) {
+            ToolStripTab(label = "+", selected = false, isDark = isDark, style = style,
+                leading = { SlackTabIcon() }, onClose = null,
+                onClick = {
+                    if (knownSlackWorkspaces.isEmpty() || window == null) onNewSlack()
+                    else showTabContextMenu(window, isDark,
+                        knownSlackWorkspaces.map { workspace ->
+                            TabMenuItem.Item(workspace.name) { onSelectSlack(workspace.id) }
+                        } + TabMenuItem.Item("Sign in to another workspace…", onClick = onNewSlack))
+                })
+        }
+    }
+}
+
+@Composable
+private fun SlackTabIcon(attention: SlackAttention = SlackAttention()) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Canvas(Modifier.size(14.dp).semantics { contentDescription = "Slack" }) {
+            val scale = size.width / 54f
+            fun pill(color: Color, x: Float, y: Float, w: Float, h: Float) {
+                drawRoundRect(color, Offset(x * scale, y * scale),
+                    androidx.compose.ui.geometry.Size(w * scale, h * scale),
+                    androidx.compose.ui.geometry.CornerRadius(6.5f * scale))
+            }
+            val blue = Color(0xff36c5f0)
+            val green = Color(0xff2eb67d)
+            val yellow = Color(0xffecb22e)
+            val red = Color(0xffe01e5a)
+            pill(blue, 13f, 0f, 13f, 26f); pill(blue, 0f, 13f, 13f, 13f)
+            pill(green, 28f, 13f, 26f, 13f); pill(green, 28f, 0f, 13f, 13f)
+            pill(yellow, 28f, 28f, 13f, 26f); pill(yellow, 41f, 28f, 13f, 13f)
+            pill(red, 0f, 28f, 26f, 13f); pill(red, 13f, 41f, 13f, 13f)
+        }
+        if (attention.mentions > 0) {
+            Text(if (attention.mentions > 99) "99+" else attention.mentions.toString(),
+                color = Color.White, fontWeight = FontWeight.Bold,
+                modifier = Modifier.background(Color(0xffc43c4c), androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                    .padding(horizontal = 4.dp))
+        } else if (attention.unread) {
+            Canvas(Modifier.size(6.dp)) { drawCircle(Color(0xff6b9bfa)) }
         }
     }
 }

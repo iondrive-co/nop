@@ -49,6 +49,21 @@ dependencies {
     implementation("org.jetbrains.jediterm:jediterm-ui:3.72")
     implementation("org.slf4j:slf4j-nop:2.0.9")
 
+    implementation("me.friwi:jcefmaven:152.0.6")
+    // Ship the browser for the distribution's platform so opening Slack needs no runtime download.
+    val browserOs = when {
+        System.getProperty("os.name").startsWith("Windows") -> "windows"
+        System.getProperty("os.name").startsWith("Mac") -> "macosx"
+        else -> "linux"
+    }
+    val browserArch = when (System.getProperty("os.arch")) {
+        "aarch64", "arm64" -> "arm64"
+        "arm" -> "arm"
+        "x86", "i386" -> "i386"
+        else -> "amd64"
+    }
+    runtimeOnly("me.friwi:jcef-natives-$browserOs-$browserArch:jcef-17e805a+cef-152.0.6+g708dc14+chromium-152.0.7977.83")
+
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.13.4")
@@ -105,6 +120,13 @@ compose.desktop {
         mainClass = "iondrive.nop.MainKt"
         // WindowClass sets AWT's X11 window class from NOP_WM_CLASS, through a private field.
         jvmArgs += listOf("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
+        if (System.getProperty("os.name").startsWith("Mac")) {
+            jvmArgs += listOf(
+                "--add-opens=java.desktop/sun.awt=ALL-UNNAMED",
+                "--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED",
+                "--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED",
+            )
+        }
         javaHome = javaToolchains.launcherFor {
             languageVersion = JavaLanguageVersion.of(21)
         }.get().metadata.installationPath.asFile.absolutePath

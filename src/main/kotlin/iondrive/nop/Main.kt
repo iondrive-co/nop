@@ -62,6 +62,7 @@ import iondrive.nop.ui.ProjectTreeState
 import iondrive.nop.ui.RestartDialog
 import iondrive.nop.ui.SharePasswordDialog
 import iondrive.nop.ui.TerminalStore
+import iondrive.nop.browser.SlackBrowsers
 import iondrive.nop.ui.UiStallWatchdog
 import iondrive.nop.ui.projectAgentNews
 import iondrive.nop.ui.WindowPickerPanel
@@ -558,6 +559,7 @@ fun main(args: Array<String>) {
             onDispose {
                 AgentSessionStore.disposeAll()
                 TerminalStore.disposeAll()
+                SlackBrowsers.disposeAll()
             }
         }
         // And the sessions of a project no window has a tab on any more. Parking a window is not
@@ -570,6 +572,7 @@ fun main(args: Array<String>) {
                 .collect { projects ->
                     AgentSessionStore.retain(projects)
                     TerminalStore.retain(projects)
+                    SlackBrowsers.retain(projects)
                 }
         }
         // collectLatest restarts the loop when tabs open or close and when a window changes what it
@@ -676,6 +679,7 @@ fun main(args: Array<String>) {
             }
         }
     }
+    SlackBrowsers.awaitShutdown()
     // The windows are down. A restart replaces the process here; anything else is nop quitting.
     // Either way this launch ended rather than died — unless it is restarting to recover a window,
     // which the next launch has to know about to not do the same again.

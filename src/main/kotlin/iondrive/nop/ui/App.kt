@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.browser.SlackBrowsers
 import iondrive.nop.SplitRatios
 import iondrive.nop.agent.Account
 import iondrive.nop.agent.AgentConfig
@@ -724,6 +726,17 @@ fun App(
     // one (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we flip the tool panel to
     // Search and forward the trigger into SearchPanel so it requests focus on its input field.
     var toolTab by remember(projectPath) { mutableStateOf(ToolTab.Commit) }
+    val slackWorkspaces by SlackBrowsers.workspaces.collectAsState()
+    val knownSlackWorkspaces by SlackBrowsers.knownWorkspaces.collectAsState()
+    val slackAttention by SlackBrowsers.attention.collectAsState()
+    var selectedSlackId by remember(projectPath) { mutableStateOf<String?>(null) }
+    var slackConnectionVersion by remember(projectPath) { mutableStateOf(0) }
+    LaunchedEffect(slackWorkspaces, selectedSlackId) {
+        if (selectedSlackId != null && slackWorkspaces.none { it.id == selectedSlackId }) {
+            selectedSlackId = slackWorkspaces.firstOrNull()?.id
+            if (selectedSlackId == null && toolTab == ToolTab.Slack) toolTab = ToolTab.Commit
+        }
+    }
 
     /**
      * Which collection the session pane on the left is drawing, or null for the agent picker.
@@ -765,6 +778,7 @@ fun App(
      * that coming back to this project shows the same collection. Its terminals are still running.
      */
     fun showSession(tab: ToolTab) {
+        if (toolTab == ToolTab.Slack) toolsCollapsed = true
         sessionTab = tab
         projectTerminals.sessionTab = tab
     }
@@ -1853,6 +1867,31 @@ fun App(
                             ) {
                             ToolTabs(
                                 selected = toolTab,
+                                slackWorkspaces = slackWorkspaces,
+                                knownSlackWorkspaces = knownSlackWorkspaces,
+                                slackAttention = slackAttention,
+                                selectedSlackId = selectedSlackId,
+                                onSelectSlack = { id ->
+                                    id?.let { SlackBrowsers.reopen(it) }
+                                    selectedSlackId = id
+                                    showTool(ToolTab.Slack)
+                                },
+                                onCloseSlack = { id ->
+                                    SlackBrowsers.close(projectPath, id)
+                                    if (selectedSlackId == id && toolTab == ToolTab.Slack) {
+                                        selectedSlackId = SlackBrowsers.workspaces.value.firstOrNull()?.id
+                                        if (selectedSlackId == null) showTool(ToolTab.Commit)
+                                    }
+                                },
+                                onNewSlack = {
+                                    SlackBrowsers.connect(projectPath)
+                                    selectedSlackId = null
+                                    slackConnectionVersion++
+                                    showTool(ToolTab.Slack)
+                                },
+                                slack = {
+                                    SlackPanel(projectPath, selectedSlackId, slackConnectionVersion, terminalCards) { selectedSlackId = it }
+                                },
                                 onSelect = { toggleTool(it) },
                                 sessionTab = sessionTab,
                                 collapsed = toolsCollapsed,

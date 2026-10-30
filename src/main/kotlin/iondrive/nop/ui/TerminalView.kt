@@ -138,7 +138,7 @@ fun TerminalView(tab: TerminalTab, cards: JPanel) {
  */
 val LocalTerminalBottomInset = androidx.compose.runtime.compositionLocalOf { 0.dp }
 
-private const val SHOWN_ID = "nop.shownTerminalId"
+internal const val SHOWN_ID = "nop.shownTerminalId"
 
 /** Lazily create the session's widget and add it to the shared card panel under the run id. */
 private fun ensureCard(
