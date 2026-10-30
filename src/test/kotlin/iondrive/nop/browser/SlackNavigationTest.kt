@@ -35,10 +35,34 @@ class SlackNavigationTest {
         assertEquals("https://app.slack.com/client/TDEMO/CGENERAL",
             SlackNavigation.webDeepLink("slack://channel?team=TDEMO&id=CGENERAL"))
         assertEquals("https://app.slack.com/client/TDEMO", SlackNavigation.webDeepLink("slack://open?team=TDEMO"))
+        assertEquals("https://app.slack.com/client/TDEMO", SlackNavigation.webDeepLink("slack://team?team=TDEMO"))
         assertNull(SlackNavigation.webDeepLink("https://example.org/?team=TDEMO"))
         assertNull(SlackNavigation.webDeepLink("slack://open?team=../other"))
         assertNull(SlackNavigation.webDeepLink("slack://open?team=TDEMO%2Fother"))
         assertNull(SlackNavigation.webDeepLink("slack://open"))
+    }
+
+    @Test
+    fun `2FA desktop handoffs return to the web workspace without forwarding the credential`() {
+        val destination = "https://app.slack.com/client/TWORKSHOP"
+        assertEquals(destination, SlackNavigation.webDeepLink("slack://TWORKSHOP/magic-login/invented-one-time-code?id=example"))
+        // Chromium treats the workspace as a URL host and normalizes its case.
+        assertEquals(destination, SlackNavigation.webDeepLink("slack://tworkshop/magic-login/invented-one-time-code"))
+        assertEquals(destination, SlackNavigation.webDeepLink("SLACK://TWORKSHOP/magic-login/another-invented-code?token=sample"))
+        assertEquals(destination, SlackNavigation.webDeepLink("slack://TWORKSHOP/"))
+        assertEquals(destination, SlackNavigation.webDeepLink("slack://TWORKSHOP/open"))
+        assertNull(SlackNavigation.webDeepLink("slack://TWORKSHOP/magic-login/"))
+        assertNull(SlackNavigation.webDeepLink("slack://TWORKSHOP/not-a-supported-route/secret"))
+    }
+
+    @Test
+    fun `desktop handoffs cannot choose a web host or include URL credentials`() {
+        assertNull(SlackNavigation.webDeepLink("slack://TWORKSHOP.example.org/magic-login/invented-code"))
+        assertNull(SlackNavigation.webDeepLink("slack://TWORKSHOP@example.org/magic-login/invented-code"))
+        assertNull(SlackNavigation.webDeepLink("slack://person@TWORKSHOP/magic-login/invented-code"))
+        assertNull(SlackNavigation.webDeepLink("slack://TWORKSHOP:1234/magic-login/invented-code"))
+        assertNull(SlackNavigation.webDeepLink("slack://open?team=TWORKSHOP%2Fother"))
+        assertNull(SlackNavigation.webDeepLink("slack://open?team=" + "T".repeat(60)))
     }
 
     @Test

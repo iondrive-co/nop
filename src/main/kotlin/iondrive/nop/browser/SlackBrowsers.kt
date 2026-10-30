@@ -27,6 +27,7 @@ import org.cef.browser.CefFrame
 import org.cef.callback.CefBeforeDownloadCallback
 import org.cef.callback.CefDownloadItem
 import org.cef.callback.CefDownloadItemCallback
+import org.cef.callback.CefSchemeRegistrar
 import org.cef.handler.CefDisplayHandlerAdapter
 import org.cef.handler.CefDownloadHandler
 import org.cef.handler.CefLifeSpanHandlerAdapter
@@ -188,6 +189,12 @@ object SlackBrowsers {
             // Chromium logs can contain navigation URLs, including sign-in parameters.
             cefSettings.log_severity = org.cef.CefSettings.LogSeverity.LOGSEVERITY_DISABLE
             setAppHandler(object : MavenCefAppHandlerAdapter() {
+                override fun onRegisterCustomSchemes(registrar: CefSchemeRegistrar) {
+                    SlackSchemeHandler.register(registrar)
+                }
+                override fun onContextInitialized() {
+                    SlackSchemeHandler.install(CefApp.getInstance())
+                }
                 override fun stateHasChanged(state: CefApp.CefAppState) {
                     if (state == CefApp.CefAppState.TERMINATED) terminated.countDown()
                 }
@@ -362,6 +369,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
         })
         client.addLifeSpanHandler(object : CefLifeSpanHandlerAdapter() {
             override fun onBeforePopup(browser: CefBrowser, frame: CefFrame, targetUrl: String, targetFrameName: String): Boolean {
+                if (handleDesktopLink(targetUrl)) return true
                 if (SlackNavigation.externalLink(browser.url, targetUrl)) {
                     openUrlInBrowser(targetUrl)
                     return true
@@ -374,16 +382,16 @@ class SlackBrowser internal constructor(private val project: Path, private val i
             override fun onBeforeBrowse(browser: CefBrowser, frame: CefFrame, request: CefRequest,
                                         userGesture: Boolean, isRedirect: Boolean): Boolean {
                 val url = request.url
+                if (frame.isMain && handleDesktopLink(url)) return true
                 if (frame.isMain && userGesture && !isRedirect && SlackNavigation.externalLink(browser.url, url)) {
                     openUrlInBrowser(url)
                     return true
                 }
                 if (SlackNavigation.isWebUrl(url) || url == "about:blank") return false
-                // Slack's web sign-in can offer a desktop deep link; keep the session in nop.
-                SlackNavigation.webDeepLink(url)?.let { web -> SwingUtilities.invokeLater { browser.loadURL(web) } }
                 return true
             }
             override fun onOpenURLFromTab(browser: CefBrowser, frame: CefFrame, targetUrl: String, userGesture: Boolean): Boolean {
+                if (handleDesktopLink(targetUrl)) return true
                 if (SlackNavigation.externalLink(browser.url, targetUrl)) {
                     openUrlInBrowser(targetUrl)
                     return true
@@ -399,6 +407,12 @@ class SlackBrowser internal constructor(private val project: Path, private val i
             }
             override fun onDownloadUpdated(browser: CefBrowser, item: CefDownloadItem, callback: CefDownloadItemCallback) {}
         })
+    }
+
+    private fun handleDesktopLink(url: String): Boolean {
+        val web = SlackNavigation.webDeepLink(url) ?: return false
+        SwingUtilities.invokeLater { if (!closed) mutableState.value.browser?.loadURL(web) }
+        return true
     }
 
     fun close() {
@@ -431,12 +445,23 @@ internal object SlackNavigation {
     }
 
     fun webDeepLink(url: String): String? {
-        val uri = parse(url)?.takeIf { it.scheme == "slack" } ?: return null
+        val uri = parse(url)?.takeIf { it.scheme.equals("slack", ignoreCase = true) && it.userInfo == null && it.port == -1 } ?: return null
         val query = uri.rawQuery.orEmpty().split('&').mapNotNull {
             val pair = it.split('=', limit = 2)
             if (pair.size == 2) pair[0] to pair[1] else null
         }.toMap()
-        val team = query["team"]?.takeIf { it.matches(Regex("T[A-Z0-9]+")) } ?: return null
+        val hostTeam = uri.host?.uppercase(java.util.Locale.ROOT)?.takeIf(SlackWorkspaceNames::validId)
+        if (hostTeam != null && "team" !in query) {
+            // Desktop handoffs after 2FA carry a one-time credential in the path. The web
+            // client already shares the authenticated cookies; never forward that credential.
+            val path = uri.rawPath.orEmpty()
+            if (path.startsWith("/magic-login/") && path.length > "/magic-login/".length) {
+                return "https://app.slack.com/client/$hostTeam"
+            }
+            if (path.isEmpty() || path == "/" || path == "/open") return "https://app.slack.com/client/$hostTeam"
+            return null
+        }
+        val team = query["team"]?.takeIf(SlackWorkspaceNames::validId) ?: return null
         val channel = query["id"]?.takeIf { it.matches(Regex("[CDG][A-Z0-9]+")) }
         return "https://app.slack.com/client/$team" + if (channel == null) "" else "/$channel"
     }
