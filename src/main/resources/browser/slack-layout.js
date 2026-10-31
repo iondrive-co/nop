@@ -55,9 +55,10 @@
         ${scope} .p-ia4_channel_list > .p-autoclog__hook:has(> [data-qa="upgrades-kit-upgrade-button"]),
         ${scope} .p-sidebar_text_filter_input_header { display: none !important; }
         ${scope} [data-nop-sidebar-hidden] { display: none !important; }
-        ${scope} [data-nop-sidebar-list] { height: auto !important; }
-        ${scope} [data-nop-sidebar-list] > .p-channel_sidebar__static_list__item {
+        ${scope} [data-nop-sidebar-list] { height: auto !important; display: flex !important; flex-direction: column !important; }
+        ${scope} [data-nop-sidebar-list] > .c-virtual_list__item {
             position: relative !important; top: auto !important; transform: none !important;
+            order: var(--nop-sidebar-order, 0) !important; flex: 0 0 auto !important;
         }
         ${scope} :is(a, .c-link) { color: var(--nop-accent) !important; }
         ${scope} .c-button--primary { background: var(--nop-accent) !important; color: white !important; }
@@ -82,6 +83,8 @@
     let drag = null;
     let channelWidth = 216;
     const observer = new MutationObserver(schedule);
+    const sidebarObserver = new MutationObserver(schedule);
+    let observedSidebar = null;
 
     function rgb(hex) {
         return [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16)).join(", ");
@@ -154,22 +157,44 @@
     }
 
     function simplifySidebar(sidebar) {
-        // Slack prepositions its static rows. Put retained rows in normal flow so hidden
-        // navigation and sections leave no holes above or between conversations.
-        const rows = [...sidebar.querySelectorAll('.p-channel_sidebar__static_list__item')];
-        let section = null;
-        for (const row of rows) {
-            const heading = row.querySelector('.p-channel_sidebar__section_heading');
-            if (heading) section = heading.dataset.qa;
-            const keep = section === 'channels' || section === 'direct_messages';
-            row.toggleAttribute('data-nop-sidebar-hidden', !keep);
-            row.parentElement.setAttribute('data-nop-sidebar-list', '');
+        if (observedSidebar !== sidebar) {
+            sidebarObserver.disconnect();
+            sidebarObserver.observe(sidebar, { attributes: true, attributeFilter: ['style', 'aria-expanded', 'data-qa'], subtree: true });
+            observedSidebar = sidebar;
+        }
+        // Slack positions virtual rows by inline offsets; their DOM order can differ after
+        // expansion or recycling. Classify and display them in that native order, without
+        // moving React's nodes or losing rows appended after another section's header.
+        const lists = new Map();
+        for (const row of sidebar.querySelectorAll('.c-virtual_list__item')) {
+            const list = row.parentElement;
+            if (!lists.has(list)) lists.set(list, []);
+            let y = parseFloat(row.style.top) || 0;
+            try { y += new DOMMatrixReadOnly(row.style.transform || undefined).m42; } catch (_) {}
+            lists.get(list).push({ row, y });
+        }
+        for (const [list, rows] of lists) {
+            if (!rows.some(({ row }) => row.querySelector('.p-channel_sidebar__section_heading'))) continue;
+            rows.sort((a, b) => a.y - b.y);
+            let section = null;
+            rows.forEach(({ row }, index) => {
+                const heading = row.querySelector('.p-channel_sidebar__section_heading');
+                if (heading) section = heading.dataset.qa;
+                const keep = section === 'channels' || section === 'direct_messages';
+                row.toggleAttribute('data-nop-sidebar-hidden', !keep);
+                row.setAttribute('data-nop-sidebar-row', '');
+                const order = String(index);
+                if (row.style.getPropertyValue('--nop-sidebar-order') !== order) row.style.setProperty('--nop-sidebar-order', order);
+            });
+            list.setAttribute('data-nop-sidebar-list', '');
         }
     }
 
     function storageKey() { return `nop.channelWidth.${metadata().current?.id || "default"}`; }
 
     function clear() {
+        sidebarObserver.disconnect();
+        observedSidebar = null;
         panel?.removeAttribute("data-nop-channels-right");
         document.documentElement.removeAttribute("data-nop-slack-layout");
         current = null;
@@ -243,6 +268,7 @@
         refresh: schedule, metadata, setTheme,
         dispose() {
             observer.disconnect();
+            sidebarObserver.disconnect();
             removeEventListener("popstate", schedule);
             removeEventListener("hashchange", schedule);
             document.removeEventListener("pointerdown", pointerDown, true);
@@ -254,6 +280,10 @@
             document.querySelectorAll('[data-nop-sidebar-hidden], [data-nop-sidebar-list]').forEach(element => {
                 element.removeAttribute('data-nop-sidebar-hidden');
                 element.removeAttribute('data-nop-sidebar-list');
+            });
+            document.querySelectorAll('[data-nop-sidebar-row]').forEach(element => {
+                element.style.removeProperty('--nop-sidebar-order');
+                element.removeAttribute('data-nop-sidebar-row');
             });
             style.remove(); themeStyle.remove();
             delete window.__nopSlackLayout;

@@ -15,6 +15,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -345,8 +346,9 @@ fun App(
     // the tool panel beside it. Slightly past half by default — the pane holding a full-screen TUI
     // is the one that suffers first when it is short of columns.
     var sessionRatio by remember(projectPath) { mutableStateOf(savedRatios.session ?: 0.58f) }
+    var slackRatio by remember(projectPath) { mutableStateOf(savedRatios.slack ?: 0.60f) }
     LaunchedEffect(projectPath) {
-        snapshotFlow { SplitRatios(hRatio, toolsRatio, diffRatio, sessionRatio) }
+        snapshotFlow { SplitRatios(hRatio, toolsRatio, diffRatio, sessionRatio, slackRatio) }
             .drop(1)
             .debounce(500)
             .distinctUntilChanged()
@@ -730,15 +732,24 @@ fun App(
     // one (Commit by default). Ctrl+Shift+F bumps findInFilesTrigger; we flip the tool panel to
     // Search and forward the trigger into SearchPanel so it requests focus on its input field.
     var toolTab by remember(projectPath) { mutableStateOf(ToolTab.Commit) }
-    val slackWorkspaces by SlackBrowsers.workspaces.collectAsState()
+    val slackWorkspaces by key(projectPath) {
+        remember(projectPath) { SlackBrowsers.workspaces(projectPath) }.collectAsState()
+    }
     val knownSlackWorkspaces by SlackBrowsers.knownWorkspaces.collectAsState()
-    val slackAttention by SlackBrowsers.attention.collectAsState()
+    val slackAttention by key(projectPath) {
+        remember(projectPath) { SlackBrowsers.attention(projectPath) }.collectAsState()
+    }
+    DisposableEffect(projectPath) {
+        val view = SlackBrowsers.retainProjectView(projectPath)
+        onDispose { view.close() }
+    }
     var selectedSlackId by remember(projectPath) { mutableStateOf<String?>(null) }
+    var slackVisible by remember(projectPath) { mutableStateOf(false) }
     var slackConnectionVersion by remember(projectPath) { mutableStateOf(0) }
     LaunchedEffect(slackWorkspaces, selectedSlackId) {
         if (selectedSlackId != null && slackWorkspaces.none { it.id == selectedSlackId }) {
             selectedSlackId = slackWorkspaces.firstOrNull()?.id
-            if (selectedSlackId == null && toolTab == ToolTab.Slack) toolTab = ToolTab.Commit
+            if (selectedSlackId == null) slackVisible = false
         }
     }
 
@@ -782,7 +793,6 @@ fun App(
      * that coming back to this project shows the same collection. Its terminals are still running.
      */
     fun showSession(tab: ToolTab) {
-        if (toolTab == ToolTab.Slack) toolsCollapsed = true
         sessionTab = tab
         projectTerminals.sessionTab = tab
     }
@@ -1109,6 +1119,7 @@ fun App(
     // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in
     // it — outlive visits to the other tool tabs.
     val terminalCards = remember(projectPath) { JPanel(CardLayout()) }
+    val slackCards = remember(projectPath) { JPanel(CardLayout()) }
 
     // Commit-message text-area height, persisted per-project. Long commit messages need more
     // room than the default; we save what the user dragged it to so reopening the project
@@ -1799,7 +1810,7 @@ fun App(
                         ratio = toolsRatio,
                         onRatioChange = { toolsRatio = it },
                         minFirstDp = 240.dp,
-                        minSecondDp = 240.dp,
+                        minSecondDp = if (slackVisible) (if (toolsCollapsed) 524.dp else 728.dp) else 240.dp,
                         first = {
                             TabbedViewerPanel(
                                 tabsState = tabsState,
@@ -1874,27 +1885,31 @@ fun App(
                                 slackWorkspaces = slackWorkspaces,
                                 knownSlackWorkspaces = knownSlackWorkspaces,
                                 slackAttention = slackAttention,
+                                slackVisible = slackVisible,
+                                onToggleSlack = { slackVisible = !slackVisible },
+                                slackPaneRatio = slackRatio,
+                                onSlackPaneRatioChange = { slackRatio = it },
                                 selectedSlackId = selectedSlackId,
                                 onSelectSlack = { id ->
-                                    id?.let { SlackBrowsers.reopen(it) }
+                                    id?.let { SlackBrowsers.reopen(projectPath, it) }
+                                    slackVisible = true
                                     selectedSlackId = id
-                                    showTool(ToolTab.Slack)
                                 },
                                 onCloseSlack = { id ->
                                     SlackBrowsers.close(projectPath, id)
-                                    if (selectedSlackId == id && toolTab == ToolTab.Slack) {
-                                        selectedSlackId = SlackBrowsers.workspaces.value.firstOrNull()?.id
-                                        if (selectedSlackId == null) showTool(ToolTab.Commit)
+                                    if (selectedSlackId == id) {
+                                        selectedSlackId = SlackBrowsers.workspaces(projectPath).value.firstOrNull()?.id
+                                        if (selectedSlackId == null) slackVisible = false
                                     }
                                 },
                                 onNewSlack = {
                                     SlackBrowsers.connect(projectPath)
                                     selectedSlackId = null
                                     slackConnectionVersion++
-                                    showTool(ToolTab.Slack)
+                                    slackVisible = true
                                 },
                                 slack = {
-                                    SlackPanel(projectPath, selectedSlackId, slackConnectionVersion, terminalCards) { selectedSlackId = it }
+                                    SlackPanel(projectPath, selectedSlackId, slackConnectionVersion, slackCards) { selectedSlackId = it }
                                 },
                                 onSelect = { toggleTool(it) },
                                 sessionTab = sessionTab,

@@ -21,12 +21,12 @@ data class SlackAttention(val unread: Boolean = false, val mentions: Int = 0) {
 
 internal data class SlackWorkspaceTabs(
     val known: List<SlackWorkspace> = emptyList(),
-    val closed: Set<String> = emptySet(),
+    val opened: Set<String> = emptySet(),
 ) {
-    val open: List<SlackWorkspace> get() = known.filterNot { it.id in closed }
+    val open: List<SlackWorkspace> get() = known.filter { it.id in opened }
     fun discover(incoming: List<SlackWorkspace>) = copy(known = SlackWorkspaceNames.merge(known, incoming))
-    fun close(id: String) = if (SlackWorkspaceNames.validId(id)) copy(closed = closed + id) else this
-    fun reopen(id: String) = copy(closed = closed - id)
+    fun close(id: String) = copy(opened = opened - id)
+    fun reopen(id: String) = if (SlackWorkspaceNames.validId(id)) copy(opened = opened + id) else this
 }
 
 @Serializable

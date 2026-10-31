@@ -91,7 +91,7 @@ import org.jetbrains.jewel.ui.theme.defaultTabStyle
  *
  * [Session] is everything with a live process behind it, and they share one AWT card panel, so only
  * one of them can be visible at a time however the panes are arranged. [Tool] controls the upper
- * strip. Its Compose panels sit beside a session; a Slack workspace occupies the whole region.
+ * strip. Its Compose panels sit beside a session; Slack has an independent pane on their right.
  */
 enum class ToolSide { Session, Tool }
 
@@ -113,8 +113,6 @@ enum class ToolTab(val label: String, val side: ToolSide) {
      * terminals.
      */
     Agent("Agent", ToolSide.Session),
-    /** Workspace tabs fill the tool region so Chromium and terminals share one native host. */
-    Slack("Slack", ToolSide.Tool),
     Commit("Commit", ToolSide.Tool),
 
     /**
@@ -156,7 +154,7 @@ enum class ToolTab(val label: String, val side: ToolSide) {
  * are all absent: they come and go, and each draws its own tab.
  */
 private val FIXED_TOOL_TABS: List<ToolTab> =
-    ToolTab.entries.filter { it.side == ToolSide.Tool && it != ToolTab.History && it != ToolTab.Slack }
+    ToolTab.entries.filter { it.side == ToolSide.Tool && it != ToolTab.History }
 
 /** Caps how wide one tab may grow, so a long terminal name can't push the rest off the strip. */
 private val TAB_MAX_WIDTH = 160.dp
@@ -263,6 +261,10 @@ fun ToolTabs(
     run: @Composable () -> Unit,
     history: @Composable () -> Unit,
     slack: @Composable () -> Unit,
+    slackVisible: Boolean,
+    onToggleSlack: () -> Unit,
+    slackPaneRatio: Float,
+    onSlackPaneRatioChange: (Float) -> Unit,
     slackWorkspaces: List<SlackWorkspace>,
     knownSlackWorkspaces: List<SlackWorkspace>,
     slackAttention: Map<String, SlackAttention>,
@@ -300,7 +302,7 @@ fun ToolTabs(
                     ToolTab.History -> history()
                     // A session tab can never be the tool selection; drawing nothing beats drawing
                     // a second copy of the pane beside it.
-                    ToolTab.Terminal, ToolTab.Agent, ToolTab.Run, ToolTab.Slack -> Unit
+                    ToolTab.Terminal, ToolTab.Agent, ToolTab.Run -> Unit
                 }
             }
         }
@@ -315,6 +317,8 @@ fun ToolTabs(
             histories = histories,
             onSelectHistory = onSelectHistory,
             onCloseHistory = onCloseHistory,
+            slackVisible = slackVisible,
+            onToggleSlack = onToggleSlack,
             slackWorkspaces = slackWorkspaces,
             knownSlackWorkspaces = knownSlackWorkspaces,
             slackAttention = slackAttention,
@@ -324,7 +328,7 @@ fun ToolTabs(
             onNewSlack = onNewSlack,
         )
         SessionStrip(
-            sessionTab = if (selected == ToolTab.Slack && !collapsed) ToolTab.Slack else sessionTab,
+            sessionTab = sessionTab,
             terminals = terminals,
             onNewTerminal = onNewTerminal,
             onSelectTerminal = onSelectTerminal,
@@ -342,20 +346,33 @@ fun ToolTabs(
             onSelectRun = onSelectRun,
             onCloseRun = onCloseRun,
         )
-        if (selected == ToolTab.Slack && !collapsed) {
-            slack()
-        } else if (collapsed) {
-            sessionPane()
-        } else {
+        val workPane: @Composable () -> Unit = {
+            if (collapsed) {
+                sessionPane()
+            } else {
+                HorizontalSplit(
+                    modifier = Modifier.fillMaxSize(),
+                    ratio = paneRatio,
+                    onRatioChange = onPaneRatioChange,
+                    minFirstDp = 200.dp,
+                    minSecondDp = 200.dp,
+                    first = sessionPane,
+                    second = toolPane,
+                )
+            }
+        }
+        if (slackVisible) {
             HorizontalSplit(
                 modifier = Modifier.fillMaxSize(),
-                ratio = paneRatio,
-                onRatioChange = onPaneRatioChange,
-                minFirstDp = 200.dp,
-                minSecondDp = 200.dp,
-                first = sessionPane,
-                second = toolPane,
+                ratio = slackPaneRatio,
+                onRatioChange = onSlackPaneRatioChange,
+                minFirstDp = if (collapsed) 200.dp else 404.dp,
+                minSecondDp = 320.dp,
+                first = workPane,
+                second = slack,
             )
+        } else {
+            workPane()
         }
     }
 }
@@ -383,6 +400,8 @@ private fun ToolStrip(
     histories: HistorySessions,
     onSelectHistory: (String) -> Unit,
     onCloseHistory: (String) -> Unit,
+    slackVisible: Boolean,
+    onToggleSlack: () -> Unit,
     slackWorkspaces: List<SlackWorkspace>,
     knownSlackWorkspaces: List<SlackWorkspace>,
     slackAttention: Map<String, SlackAttention>,
@@ -445,22 +464,22 @@ private fun ToolStrip(
         slackWorkspaces.forEach { workspace ->
             key(workspace.id) {
                 val requester = remember { BringIntoViewRequester() }
-                val isSelected = !collapsed && selected == ToolTab.Slack && selectedSlackId == workspace.id
+                val isSelected = slackVisible && selectedSlackId == workspace.id
                 val attention = slackAttention[workspace.id] ?: SlackAttention()
                 RevealWhenSelected(requester, isSelected)
                 ToolStripTab(
                     label = workspace.name, selected = isSelected, isDark = isDark, style = style,
-                    onClick = { onSelectSlack(workspace.id) }, onClose = { onCloseSlack(workspace.id) },
+                    onClick = { if (isSelected) onToggleSlack() else onSelectSlack(workspace.id) }, onClose = { onCloseSlack(workspace.id) },
                     leading = { SlackTabIcon(attention) },
                     emphasis = if (attention.unread) JewelTheme.globalColors.text.normal else null,
                     modifier = Modifier.bringIntoViewRequester(requester),
                 )
             }
         }
-        if (selected == ToolTab.Slack && selectedSlackId == null && !collapsed) {
+        if (slackVisible && selectedSlackId == null) {
             ToolStripTab(label = "Sign in…", selected = true, isDark = isDark, style = style,
                 leading = { SlackTabIcon() },
-                onClick = { onSelectSlack(null) }, onClose = { onCloseSlack(null) })
+                onClick = onToggleSlack, onClose = { onCloseSlack(null) })
         }
         val window = LocalWindow.current
         Tooltip(tooltip = { Text("Add or reopen Slack workspace") }) {

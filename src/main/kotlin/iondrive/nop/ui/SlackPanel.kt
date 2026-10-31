@@ -34,7 +34,7 @@ import java.awt.Component
 import java.nio.file.Path
 import javax.swing.JPanel
 
-/** Chromium uses the same native host as the terminals while a workspace fills the tool region. */
+/** Chromium has its own native host so sessions and tools remain visible beside the workspace. */
 @Composable
 fun SlackPanel(
     project: Path,

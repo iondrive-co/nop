@@ -11,13 +11,27 @@ class SlackWorkspaceTest {
     @Test
     fun `closed workspace stays closed on rediscovery and can reopen without losing identity`() {
         val first = SlackWorkspaceTabs().discover(listOf(SlackWorkspace("TALPHA", "Workshop"), SlackWorkspace("TBRAVO", "Studio")))
+            .reopen("TALPHA").reopen("TBRAVO")
         val closed = first.close("TALPHA").discover(listOf(SlackWorkspace("TALPHA", "New workshop")))
         assertEquals(listOf("TBRAVO"), closed.open.map { it.id })
         assertEquals("New workshop", closed.known.first().name)
         assertEquals(closed.known, closed.reopen("TALPHA").open)
-        val restored = SlackWorkspaceTabs(closed.known, Json.decodeFromString(Json.encodeToString(closed.closed)))
+        val restored = SlackWorkspaceTabs(closed.known, Json.decodeFromString(Json.encodeToString(closed.opened)))
         assertEquals(closed.open, restored.open)
         assertEquals(first, first.close("../invalid"))
+    }
+
+    @Test
+    fun `discovering saved sign-ins never adds workspace tabs to another project`() {
+        val catalog = listOf(SlackWorkspace("TALPHA", "Workshop"), SlackWorkspace("TBRAVO", "Studio"))
+        val first = SlackWorkspaceTabs(catalog).reopen("TALPHA")
+        val second = SlackWorkspaceTabs(catalog).reopen("TBRAVO")
+        val discovered = catalog + SlackWorkspace("TCHARLIE", "Library")
+        assertEquals(listOf("TALPHA"), first.discover(discovered).open.map { it.id })
+        assertEquals(listOf("TBRAVO"), second.discover(discovered).open.map { it.id })
+        assertTrue(SlackWorkspaceTabs(discovered).open.isEmpty())
+        assertTrue(first.close("TALPHA").open.isEmpty())
+        assertEquals(listOf("TBRAVO"), second.open.map { it.id })
     }
 
     @Test

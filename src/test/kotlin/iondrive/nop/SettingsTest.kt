@@ -393,6 +393,35 @@ class SettingsTest {
     }
 
     @Test
+    fun `Slack divider is saved per project without losing other splits`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val a = tmp.resolve("workshop")
+        val b = tmp.resolve("studio")
+        val first = SplitRatios(0.25f, 0.65f, 0.5f, 0.58f, slack = 0.62f)
+        val second = first.copy(slack = 0.44f)
+        Settings.saveSplitRatios(a, first)
+        Settings.saveSplitRatios(b, second)
+        assertEquals(first, Settings.loadSplitRatios(a))
+        assertEquals(second, Settings.loadSplitRatios(b))
+        assertEquals(second, Settings.loadSplitRatios())
+        Settings.saveSplitRatios(0.2f, 0.6f, 0.5f, 0.55f)
+        assertEquals(second.slack, Settings.loadSplitRatios().slack)
+    }
+
+    @Test
+    fun `four-column split settings remain readable before Slack is resized`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("workshop")
+        val file = Settings.projectDataDir(project).resolve("split")
+        Files.createDirectories(file.parent)
+        Files.writeString(file, "0.25,0.65,0.5,0.58")
+        val previous = SplitRatios(0.25f, 0.65f, 0.5f, 0.58f)
+        assertEquals(previous, Settings.loadSplitRatios(project))
+        Settings.saveSplitRatios(project, previous.copy(slack = 0.63f))
+        assertEquals(previous.copy(slack = 0.63f), Settings.loadSplitRatios(project))
+    }
+
+    @Test
     fun `a project with no split of its own starts from the last one saved`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val a = tmp.resolve("a").also { Files.createDirectories(it) }

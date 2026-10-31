@@ -18,6 +18,8 @@ data class SplitRatios(
     val diff: Float?,
     /** Share of the tool region given to the session pane; the rest is the tool panel beside it. */
     val session: Float?,
+    /** Share of the tool region left for sessions and tools when Slack is beside them. */
+    val slack: Float? = null,
 )
 
 /**
@@ -339,15 +341,17 @@ object Settings {
             tools = map["split.tools"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
             diff = map["split.diff"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
             session = map["split.session"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
+            slack = map["split.slack"]?.toFloatOrNull()?.takeIf { it in 0f..1f },
         )
     }
 
-    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float, session: Float) {
+    fun saveSplitRatios(horizontal: Float, tools: Float, diff: Float, session: Float, slack: Float? = null) {
         val map = load()
         map["split.h"] = horizontal.toString()
         map["split.tools"] = tools.toString()
         map["split.diff"] = diff.toString()
         map["split.session"] = session.toString()
+        if (slack != null) map["split.slack"] = slack.toString()
         // A state file may carry a "split.preview" line; nothing reads it. The markdown preview is
         // in the tool panel, which "split.tools" sizes.
         save(map)
@@ -369,6 +373,7 @@ object Settings {
             tools = at(1) ?: global.tools,
             diff = at(2) ?: global.diff,
             session = at(3) ?: global.session,
+            slack = at(4) ?: global.slack,
         )
     }
 
@@ -379,11 +384,11 @@ object Settings {
             Files.createDirectories(f.parent)
             Files.writeString(
                 f,
-                listOf(r.horizontal, r.tools, r.diff, r.session).joinToString(",") { it?.toString().orEmpty() },
+                listOf(r.horizontal, r.tools, r.diff, r.session, r.slack).joinToString(",") { it?.toString().orEmpty() },
             )
         }
         if (r.horizontal != null && r.tools != null && r.diff != null && r.session != null) {
-            saveSplitRatios(r.horizontal, r.tools, r.diff, r.session)
+            saveSplitRatios(r.horizontal, r.tools, r.diff, r.session, r.slack)
         }
     }
 

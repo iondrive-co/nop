@@ -1,6 +1,7 @@
 package iondrive.nop.browser
 
 import iondrive.nop.Log
+import iondrive.nop.Settings
 import iondrive.nop.terminal.openUrlInBrowser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -49,18 +50,57 @@ private val slackLayoutScript: String by lazy {
     checkNotNull(SlackBrowsers::class.java.getResource("/browser/slack-layout.js")).readText()
 }
 
-/** Browsers survive tab and project switches; the shared profile keeps Slack signed in. */
+/** Tabs belong to projects; only projects visible in a window keep their browser pages alive. */
 object SlackBrowsers {
     private data class Key(val project: Path, val workspace: String?)
     private val sessions = mutableMapOf<Key, SlackBrowser>()
     private val json = Json { ignoreUnknownKeys = true }
-    private var tabs = SlackWorkspaceTabs(loadWorkspaces(), loadClosedWorkspaces())
-    private val mutableKnownWorkspaces = MutableStateFlow(tabs.known)
+    private val mutableKnownWorkspaces = MutableStateFlow(loadWorkspaces())
     val knownWorkspaces = mutableKnownWorkspaces.asStateFlow()
-    private val mutableWorkspaces = MutableStateFlow(tabs.open)
-    val workspaces = mutableWorkspaces.asStateFlow()
-    private val mutableAttention = MutableStateFlow<Map<String, SlackAttention>>(emptyMap())
-    val attention = mutableAttention.asStateFlow()
+    private val projectStore = SlackProjectStore(Settings::projectDataDir)
+    private class ProjectState(var tabs: SlackWorkspaceTabs) {
+        val workspaces = MutableStateFlow(tabs.open)
+        val attention = MutableStateFlow<Map<String, SlackAttention>>(emptyMap())
+    }
+    private val projects = mutableMapOf<Path, ProjectState>()
+    private val visibleProjects = mutableMapOf<Path, Int>()
+
+    private fun projectState(project: Path): ProjectState = projects.getOrPut(project.toAbsolutePath().normalize()) {
+        ProjectState(SlackWorkspaceTabs(mutableKnownWorkspaces.value, projectStore.load(project)))
+    }
+
+    @Synchronized
+    fun workspaces(project: Path) = projectState(project).workspaces.asStateFlow()
+
+    @Synchronized
+    fun attention(project: Path) = projectState(project).attention.asStateFlow()
+
+    /** A project can be visible in more than one nop window. Release pages after its last view. */
+    @Synchronized
+    fun retainProjectView(project: Path): AutoCloseable {
+        val path = project.toAbsolutePath().normalize()
+        visibleProjects[path] = (visibleProjects[path] ?: 0) + 1
+        var released = false
+        return AutoCloseable {
+            synchronized(this) {
+                if (!released) {
+                    released = true
+                    val remaining = (visibleProjects[path] ?: 1) - 1
+                    if (remaining > 0) visibleProjects[path] = remaining
+                    else {
+                        visibleProjects.remove(path)
+                        closeProjectBrowsers(path)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun closeProjectBrowsers(project: Path) {
+        sessions.keys.filter { it.project == project }.forEach { sessions.remove(it)?.close() }
+        projects[project]?.attention?.value = emptyMap()
+    }
+
     private val runtimeLock = Any()
     private val terminated = CountDownLatch(1)
     @Volatile private var app: CefApp? = null
@@ -89,58 +129,54 @@ object SlackBrowsers {
     }
 
     @Synchronized
-    fun reopen(workspaceId: String) {
-        val next = tabs.reopen(workspaceId)
-        if (next == tabs) return
-        tabs = next
-        publishTabs()
+    fun reopen(project: Path, workspaceId: String) {
+        val state = projectState(project)
+        val next = state.tabs.reopen(workspaceId)
+        if (next == state.tabs) return
+        state.tabs = next
+        state.workspaces.value = next.open
+        projectStore.save(project, next.opened)
     }
 
     @Synchronized
     fun close(project: Path, workspaceId: String?) {
-        if (workspaceId == null) {
-            sessions.remove(Key(project.toAbsolutePath().normalize(), null))?.close()
-        } else {
-            tabs = tabs.close(workspaceId)
-            sessions.keys.filter { it.workspace == workspaceId }.forEach { sessions.remove(it)?.close() }
-            mutableAttention.update { it - workspaceId }
-            publishTabs()
+        val path = project.toAbsolutePath().normalize()
+        sessions.remove(Key(path, workspaceId))?.close()
+        if (workspaceId != null) {
+            val state = projectState(path)
+            state.tabs = state.tabs.close(workspaceId)
+            state.workspaces.value = state.tabs.open
+            state.attention.update { it - workspaceId }
+            projectStore.save(path, state.tabs.opened)
         }
-    }
-
-    private fun publishTabs() {
-        mutableKnownWorkspaces.value = tabs.known
-        mutableWorkspaces.value = tabs.open
-        runCatching {
-            Files.createDirectories(dataDirectory())
-            val file = dataDirectory().resolve("closed-workspaces.json")
-            val temporary = file.resolveSibling("closed-workspaces.json.tmp")
-            Files.writeString(temporary, json.encodeToString(tabs.closed))
-            Files.move(temporary, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-        }.onFailure { Log.warn("Could not save Slack tabs: ${it.message}") }
     }
 
     @Synchronized
     internal fun report(project: Path, session: SlackBrowser, metadata: SlackMetadata) {
         if (session !in sessions.values) return
         val incoming = metadata.workspaces + listOfNotNull(metadata.current)
-        val merged = tabs.discover(incoming)
-        if (merged != tabs) {
-            tabs = merged
-            mutableKnownWorkspaces.value = tabs.known
-            mutableWorkspaces.value = tabs.open
+        val merged = SlackWorkspaceNames.merge(mutableKnownWorkspaces.value, incoming)
+        if (merged != mutableKnownWorkspaces.value) {
+            mutableKnownWorkspaces.value = merged
+            projects.values.forEach { state ->
+                state.tabs = state.tabs.discover(merged)
+                state.workspaces.value = state.tabs.open
+            }
             runCatching {
                 val file = dataDirectory().resolve("workspaces.json")
                 val temporary = file.resolveSibling("workspaces.json.tmp")
-                Files.writeString(temporary, json.encodeToString(tabs.known))
+                Files.writeString(temporary, json.encodeToString(merged))
                 Files.move(temporary, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
             }.onFailure { Log.warn("Could not save Slack workspace names: ${it.message}") }
         }
         val current = metadata.current?.takeIf { SlackWorkspaceNames.validId(it.id) } ?: return
+        // Other authenticated teams in Slack's metadata are available in the add menu, but
+        // only the workspace actually opened here becomes a tab in this project.
+        reopen(project, current.id)
+        val state = projectState(project)
+        state.attention.update { it + (current.id to metadata.attention.sanitized()) }
         val bootstrap = Key(project, null)
         val workspace = Key(project, current.id)
-        mutableAttention.update { it + (current.id to metadata.attention.sanitized()) }
-        if (sessions[bootstrap] === session && current.id in tabs.closed) reopen(current.id)
         if (sessions[bootstrap] === session && !sessions.containsKey(workspace)) {
             sessions.remove(bootstrap)
             sessions[workspace] = session
@@ -158,12 +194,6 @@ object SlackBrowsers {
         if (!Files.isRegularFile(file) || Files.size(file) > 65_536) return@runCatching emptyList()
         SlackWorkspaceNames.merge(emptyList(), json.decodeFromString<List<SlackWorkspace>>(Files.readString(file)))
     }.getOrDefault(emptyList())
-
-    private fun loadClosedWorkspaces(): Set<String> = runCatching {
-        val file = dataDirectory().resolve("closed-workspaces.json")
-        if (!Files.isRegularFile(file) || Files.size(file) > 65_536) return@runCatching emptySet()
-        json.decodeFromString<Set<String>>(Files.readString(file)).filter(SlackWorkspaceNames::validId).toSet()
-    }.getOrDefault(emptySet())
 
     internal fun runtime(progress: (String) -> Unit): CefApp = synchronized(runtimeLock) {
         check(!stopping) { "Browser is shutting down" }
@@ -211,9 +241,10 @@ object SlackBrowsers {
     }
 
     @Synchronized
-    fun retain(projects: Collection<Path>) {
-        val open = projects.map { it.toAbsolutePath().normalize() }.toSet()
-        sessions.keys.filter { it.project !in open }.forEach { sessions.remove(it)?.close() }
+    fun retain(openProjects: Collection<Path>) {
+        val open = openProjects.map { it.toAbsolutePath().normalize() }.toSet()
+        sessions.keys.filter { it.project !in open }.map { it.project }.distinct().forEach(::closeProjectBrowsers)
+        projects.keys.retainAll(open)
     }
 
     @Synchronized
@@ -221,6 +252,8 @@ object SlackBrowsers {
         stopping = true
         sessions.values.forEach { it.close() }
         sessions.clear()
+        visibleProjects.clear()
+        projects.clear()
         app?.dispose()
         app = null
     }
