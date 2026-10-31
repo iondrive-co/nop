@@ -182,7 +182,7 @@ compose.desktop {
             // Analyzed projects can use every Java SE API, including modules nop itself never loads.
             modules("java.se", "java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
             packageName = "nop"
-            packageVersion = "1.4.9"
+            packageVersion = "1.5.0"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
