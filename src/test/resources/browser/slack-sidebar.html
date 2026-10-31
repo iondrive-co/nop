@@ -1,0 +1,113 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Slack sidebar regression fixture</title>
+<style>
+    html, body { margin: 0; height: 100%; font: 14px sans-serif; }
+    .p-client_workspace_wrapper, .p-client_workspace { height: 100%; display: grid; }
+    .p-client_workspace_wrapper { grid-template-areas: "p-client-workspace"; }
+    .p-client_workspace { grid-area: p-client-workspace; }
+    .p-client_workspace__tabpanel {
+        display: grid; grid-template-columns: 216px 1fr; height: 100%;
+        grid-template-areas: "p-view_contents--sidebar p-view_contents--primary";
+    }
+    .p-view_contents--primary { grid-area: p-view_contents--primary; }
+    .p-view_contents--sidebar { grid-area: p-view_contents--sidebar; overflow: hidden; }
+    .p-ia4_home_header { height: 40px; }
+    .c-scrollbar__hider { height: 336px; overflow: auto; }
+    .c-virtual_list__scroll_container { position: relative; }
+    .c-virtual_list__item { position: absolute; width: 100%; height: 28px; line-height: 28px; }
+    .p-channel_sidebar__section_heading { cursor: pointer; font-weight: bold; }
+    .p-channel_sidebar__channel { padding-left: 16px; }
+</style>
+<div class="p-client_workspace_wrapper"><div class="p-client_workspace">
+    <div class="p-client_workspace__tabpanel">
+        <div class="p-view_contents--primary">Conversation fixture</div>
+        <div class="p-view_contents--sidebar"><div class="p-channel_sidebar">
+            <div class="p-ia4_home_header">Example workspace</div>
+            <div class="c-scrollbar__hider"><div class="c-virtual_list__scroll_container" role="tree"></div></div>
+        </div></div>
+    </div>
+</div></div>
+<script>
+// Model a virtualizer, not an all-rows-mounted list: only the viewport and an overscan
+// window exist in the DOM. The inline spacer height and row offsets belong to Slack.
+const mode = new URLSearchParams(location.search).get('mode') || 'transform';
+const scroller = document.querySelector('.c-scrollbar__hider');
+const list = document.querySelector('[role="tree"]');
+let expanded = false;
+const channels = Array.from({length: 120}, (_, i) => ({key: 'room-' + i, kind: 'channel'}));
+const heading = (key, qa) => ({key, qa});
+let rows;
+function updateRows() {
+    rows = [{key: 'Threads'}, heading('Starred', 'starred'), {key: 'saved-room', kind: 'channel'},
+        heading('Channels', 'channels'), ...(expanded ? channels : []), {key: '+ Add channels'},
+        heading('Direct messages', 'direct_messages'), {key: 'Colleague'}, heading('Apps', 'recent_apps'), {key: 'Helper'}];
+    list.style.height = rows.length * 28 + 'px';
+    render();
+}
+function render() {
+    const start = Math.max(0, Math.floor(scroller.scrollTop / 28) - 2);
+    const end = Math.min(rows.length, Math.ceil((scroller.scrollTop + scroller.clientHeight) / 28) + 2);
+    const mounted = new Map([...list.children].map(element => [element.dataset.key, element]));
+    const keep = new Set();
+    for (let i = start; i < end; i++) {
+        const item = rows[i];
+        let row = mounted.get(item.key);
+        if (!row) {
+            row = document.createElement('div');
+            row.className = 'c-virtual_list__item'; row.dataset.key = item.key;
+            const content = document.createElement('div'); content.textContent = item.key;
+            if (item.qa) { content.className = 'p-channel_sidebar__section_heading'; content.dataset.qa = item.qa; }
+            if (item.kind === 'channel') content.className = 'p-channel_sidebar__channel';
+            if (item.qa === 'channels') content.onclick = () => { expanded = !expanded; updateRows(); };
+            row.append(content); list.append(row);
+        }
+        row.style.top = mode === 'top' ? i * 28 + 'px' : '0px';
+        row.style.transform = mode === 'top' ? 'none' : `translateY(${i * 28}px)`;
+        keep.add(item.key);
+    }
+    for (const [key, row] of mounted) if (!keep.has(key)) row.remove();
+}
+scroller.addEventListener('scroll', render);
+updateRows();
+window.runFixture = async function () {
+    const checks = [];
+    const check = (name, pass) => checks.push({name, pass: !!pass});
+    const settle = () => new Promise(resolve => setTimeout(resolve, 100));
+    const visible = key => {
+        const row = [...list.children].find(element => element.dataset.key === key);
+        if (!row || getComputedStyle(row).display === 'none') return false;
+        const rect = row.getBoundingClientRect(), viewport = scroller.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom && rect.height > 0;
+    };
+    await settle();
+    for (let cycle = 0; cycle < 3; cycle++) {
+        scroller.scrollTop = 0; render(); await settle();
+        list.querySelector('[data-qa="channels"]').click(); await settle();
+        check('expansion ' + cycle + ' shows first channel', visible('room-0'));
+        check('virtual spacer survives expansion ' + cycle, list.getBoundingClientRect().height === rows.length * 28);
+        // Visit every channel through scrolling; headings get unmounted and row nodes recycled.
+        let visited = new Set();
+        for (let offset = 0; offset < rows.length * 28; offset += 168) {
+            scroller.scrollTop = offset; render(); await settle();
+            for (const channel of channels) if (visible(channel.key)) visited.add(channel.key);
+        }
+        check('all channels reachable ' + cycle, visited.size === channels.length);
+        check('direct messages reachable ' + cycle, visible('Direct messages') && visible('Colleague'));
+        scroller.scrollTop = 0; render(); await settle();
+        list.querySelector('[data-qa="channels"]').click(); await settle();
+        check('collapse ' + cycle + ' hides channels', !list.querySelector('[data-key="room-0"]'));
+    }
+    if (window.__nopSlackLayout) {
+        const sidebar = document.querySelector('.p-view_contents--sidebar').getBoundingClientRect();
+        const primary = document.querySelector('.p-view_contents--primary').getBoundingClientRect();
+        check('sidebar remains on right', sidebar.left >= primary.right - 1);
+        window.__nopSlackLayout.dispose();
+        await settle();
+        check('native spacer survives disposal', list.getBoundingClientRect().height === rows.length * 28);
+    }
+    const result = {mode, checks, passed: checks.every(check => check.pass)};
+    document.body.dataset.result = JSON.stringify(result);
+    await fetch('/result', {method: 'POST', body: JSON.stringify(result)});
+};
+</script>

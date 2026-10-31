@@ -88,6 +88,19 @@ tasks.test {
     environment("XDG_CONFIG_HOME", layout.buildDirectory.dir("test-config-home").get().asFile.absolutePath)
 }
 
+// Native Chromium regression test with an invented virtual sidebar, no Slack sign-in.
+// On headless Linux: xvfb-run -a ./gradlew testSlackSidebar
+// Kept in a separate JVM because CEF owns a process-wide native singleton.
+tasks.register<JavaExec>("testSlackSidebar") {
+    group = "verification"
+    description = "Check Slack channel expansion and virtual scrolling in embedded Chromium"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("iondrive.nop.browser.SlackSidebarSmoke")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    args(layout.buildDirectory.dir("slack-sidebar-smoke").get().asFile.absolutePath)
+}
+
 // The version nop reports about itself, read at runtime by iondrive.nop.update.BuildInfo. Taken from
 // packageVersion below (which scripts/release.sh bumps) so there is one place the version lives; the
 // self-updater compares it with the latest release, and a build that cannot say what it is would be
