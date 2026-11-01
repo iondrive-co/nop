@@ -72,6 +72,7 @@ scroller.addEventListener('scroll', render);
 updateRows();
 window.runFixture = async function () {
     const checks = [];
+    const measurements = {};
     const check = (name, pass) => checks.push({name, pass: !!pass});
     const settle = () => new Promise(resolve => setTimeout(resolve, 100));
     const visible = key => {
@@ -102,11 +103,70 @@ window.runFixture = async function () {
         const sidebar = document.querySelector('.p-view_contents--sidebar').getBoundingClientRect();
         const primary = document.querySelector('.p-view_contents--primary').getBoundingClientRect();
         check('sidebar remains on right', sidebar.left >= primary.right - 1);
+        const wrapper = document.querySelector('.p-client_workspace_wrapper');
+        const originalPanel = document.querySelector('.p-client_workspace__tabpanel');
+        const primaryElement = originalPanel.querySelector('.p-view_contents--primary');
+        const sidebarElement = originalPanel.querySelector('.p-view_contents--sidebar');
+        const measureWrapper = wrapper.getBoundingClientRect;
+        let shellMeasurements = 0, attributeWrites = 0;
+        wrapper.getBoundingClientRect = function () { shellMeasurements++; return measureWrapper.call(this); };
+        const attributes = new MutationObserver(records => attributeWrites += records.length);
+        attributes.observe(document.documentElement, {attributes: true, subtree: true,
+            attributeFilter: ['data-nop-slack-layout', 'data-nop-channels-right']});
+        // Streaming messages and recycled channel rows must not cause shell layout work.
+        for (let i = 0; i < 20; i++) {
+            primaryElement.append(document.createElement('span'));
+            primaryElement.lastChild.remove();
+            sidebarElement.append(document.createElement('span'));
+            sidebarElement.lastChild.remove();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }
+        await settle();
+        attributes.disconnect();
+        wrapper.getBoundingClientRect = measureWrapper;
+        measurements.contentUpdates = {shellMeasurements, attributeWrites};
+        check('content updates avoid shell measurements', shellMeasurements === 0);
+        check('content updates avoid layout attribute writes', attributeWrites === 0);
+
+        window.__nopSlackLayout.setTheme({dark: false, background: '#fafafa', foreground: '#101010'});
+        await settle();
+        check('light theme updates without replacing panels', getComputedStyle(primaryElement).backgroundColor === 'rgb(250, 250, 250)' &&
+            getComputedStyle(document.documentElement).colorScheme === 'light');
+        window.__nopSlackLayout.setTheme({dark: true});
+        await settle();
+        check('dark theme updates without replacing panels', getComputedStyle(document.documentElement).colorScheme === 'dark');
+
+        // Layout must recover when React replaces panels or rebuilds the workspace asynchronously.
+        localStorage.setItem('nop.channelWidth.TEXAMPLE', '284');
+        const replacement = originalPanel.cloneNode(true);
+        replacement.removeAttribute('data-nop-channels-right');
+        replacement.style.removeProperty('--nop-channel-width');
+        originalPanel.replaceWith(replacement);
+        await settle();
+        check('replacement panel receives the layout', replacement.hasAttribute('data-nop-channels-right'));
+        check('workspace width restores before its name is available', replacement.style.getPropertyValue('--nop-channel-width') === '284px');
+        const parent = wrapper.parentElement;
+        wrapper.remove();
+        await settle();
+        check('leaving workspace clears layout', !document.documentElement.hasAttribute('data-nop-slack-layout'));
+        const loading = document.createElement('div');
+        parent.append(loading);
+        await settle();
+        loading.append(wrapper);
+        await settle();
+        check('asynchronous workspace rebuild restores layout', replacement.hasAttribute('data-nop-channels-right') &&
+            document.documentElement.getAttribute('data-nop-slack-layout') === 'channels-right');
+        parent.append(wrapper);
+        loading.remove();
+        replacement.replaceWith(originalPanel);
+        await settle();
+        check('original panel can be restored', originalPanel.hasAttribute('data-nop-channels-right'));
+        localStorage.removeItem('nop.channelWidth.TEXAMPLE');
         window.__nopSlackLayout.dispose();
         await settle();
         check('native spacer survives disposal', list.getBoundingClientRect().height === rows.length * 28);
     }
-    const result = {mode, checks, passed: checks.every(check => check.pass)};
+    const result = {mode, measurements, checks, passed: checks.every(check => check.pass)};
     document.body.dataset.result = JSON.stringify(result);
     await fetch('/result', {method: 'POST', body: JSON.stringify(result)});
 };

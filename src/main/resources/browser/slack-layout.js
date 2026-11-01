@@ -73,6 +73,8 @@
     let pending = 0;
     let current = null;
     let panel = null;
+    let sidebar = null;
+    let primary = null;
     let themed = false;
     let drag = null;
     let channelWidth = 216;
@@ -92,7 +94,6 @@
             root.style.setProperty(`--nop-${key}-rgb`, rgb(color));
         }
         root.style.setProperty("--nop-color-scheme", appearance.dark ? "dark" : "light");
-        schedule();
     }
 
     function themeTokens(sidebar) {
@@ -132,7 +133,7 @@
         const workspaces = Object.values(teams).slice(0, 128)
             .filter(team => team && /^T[A-Z0-9]{1,31}$/.test(team.id) && typeof team.name === "string")
             .map(team => ({ id: team.id, name: team.name.slice(0, 120) }));
-        const id = location.pathname.match(/^\/client\/(T[A-Z0-9]{1,31})(?:\/|$)/)?.[1];
+        const id = workspaceId();
         const heading = document.querySelector(".p-ia4_home_header_menu__team_name")?.textContent?.trim();
         const name = heading || workspaces.find(team => team.id === id)?.name;
         // Slack's title carries notification counts even when the conversation isn't visible.
@@ -152,13 +153,33 @@
     // virtualizer mounts only a window of rows, and headings may be outside that
     // window. Hiding inferred sections or reflowing rows breaks expansion/scrolling.
 
-    function storageKey() { return `nop.channelWidth.${metadata().current?.id || "default"}`; }
+    function workspaceId() { return location.pathname.match(/^\/client\/(T[A-Z0-9]{1,31})(?:\/|$)/)?.[1]; }
+    function storageKey() { return `nop.channelWidth.${workspaceId() || "default"}`; }
+
+    function observeLayout() {
+        observer.disconnect();
+        if (!panel) {
+            // During sign-in/loading, wait for the workspace shell to appear.
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+            return;
+        }
+        // Message streaming and virtual rows change inside these panes. Only their
+        // ancestors can replace the shell; observe those direct children, not all content.
+        const ancestors = new Set([document.documentElement, document.head]);
+        for (const pane of [sidebar, primary]) {
+            for (let parent = pane.parentElement; parent; parent = parent.parentElement) ancestors.add(parent);
+        }
+        for (const element of ancestors) if (element) observer.observe(element, { childList: true });
+    }
 
     function clear() {
         panel?.removeAttribute("data-nop-channels-right");
         document.documentElement.removeAttribute("data-nop-slack-layout");
         current = null;
         panel = null;
+        sidebar = null;
+        primary = null;
+        themed = false;
     }
 
     function refresh() {
@@ -167,14 +188,17 @@
             ? [...document.querySelectorAll(".p-client_workspace_wrapper")].find(element =>
                 element.getBoundingClientRect().width > 0 && element.querySelector(".p-client_workspace"))
             : null;
-        if (!wrapper) { clear(); return; }
-        const sidebar = wrapper.querySelector(".p-view_contents--sidebar");
-        const tabpanel = sidebar?.closest(".p-client_workspace__tabpanel");
-        if (!tabpanel || !tabpanel.querySelector(".p-view_contents--primary")) { clear(); return; }
-        if (current !== wrapper || panel !== tabpanel) {
+        if (!wrapper) { clear(); observeLayout(); return; }
+        const nextSidebar = wrapper.querySelector(".p-view_contents--sidebar");
+        const tabpanel = nextSidebar?.closest(".p-client_workspace__tabpanel");
+        const nextPrimary = tabpanel?.querySelector(".p-view_contents--primary");
+        if (!tabpanel || !nextPrimary) { clear(); observeLayout(); return; }
+        if (current !== wrapper || panel !== tabpanel || sidebar !== nextSidebar || primary !== nextPrimary) {
             clear();
             current = wrapper;
             panel = tabpanel;
+            sidebar = nextSidebar;
+            primary = nextPrimary;
             try {
                 const saved = Number(localStorage.getItem(storageKey()));
                 channelWidth = saved >= 120 && saved <= 600 ? saved : sidebar.getBoundingClientRect().width || 216;
@@ -182,9 +206,12 @@
             panel.style.setProperty("--nop-channel-width", `${channelWidth}px`);
         }
         if (!style.isConnected) document.head.append(style);
-        if (!themed) themeTokens(sidebar);
-        panel.setAttribute("data-nop-channels-right", "");
-        document.documentElement.setAttribute("data-nop-slack-layout", "channels-right");
+        if (!themed || !themeStyle.isConnected) themeTokens(sidebar);
+        if (!panel.hasAttribute("data-nop-channels-right")) panel.setAttribute("data-nop-channels-right", "");
+        if (document.documentElement.getAttribute("data-nop-slack-layout") !== "channels-right") {
+            document.documentElement.setAttribute("data-nop-slack-layout", "channels-right");
+        }
+        observeLayout();
     }
 
     function schedule() { if (!pending) pending = requestAnimationFrame(refresh); }
@@ -216,7 +243,6 @@
         event.stopImmediatePropagation();
     }
 
-    observer.observe(document.documentElement, { childList: true, subtree: true });
     addEventListener("popstate", schedule);
     addEventListener("hashchange", schedule);
     document.addEventListener("pointerdown", pointerDown, true);

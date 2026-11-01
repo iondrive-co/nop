@@ -338,6 +338,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
 
     private fun watchMetadata(browser: CefBrowser) {
         scope.launch {
+            var previous: SlackMetadata? = null
             while (!closed) {
                 delay(1_500)
                 if (!SlackNavigation.isAppUrl(mutableState.value.url)) continue
@@ -349,9 +350,11 @@ class SlackBrowser internal constructor(private val project: Path, private val i
                     val value = json.parseToJsonElement(response).jsonObject["result"]?.jsonObject?.get("value") ?: continue
                     if (value == kotlinx.serialization.json.JsonNull) continue
                     val metadata = json.decodeFromJsonElement<SlackMetadata>(value)
+                    if (metadata == previous) continue
                     SlackBrowsers.report(project, this@SlackBrowser, metadata)
                     val workspace = metadata.current?.let { SlackWorkspaceNames.merge(emptyList(), listOf(it)).firstOrNull() }
                     mutableState.update { it.copy(workspace = workspace) }
+                    previous = metadata
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
