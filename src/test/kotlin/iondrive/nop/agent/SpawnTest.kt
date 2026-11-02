@@ -135,6 +135,7 @@ class SpawnTest {
         val command = Spawn.command(codex(), projectDir)
 
         assertTrue("--dangerously-bypass-approvals-and-sandbox" in command.argv)
+        assertTrue("--no-alt-screen" in command.argv)
         assertEquals(projectDir.absolutePath, command.argv.after("-C"))
         // Codex names its own session, so there is nothing to know until it writes its first line.
         assertEquals(null, command.nativeSessionId)
@@ -155,6 +156,7 @@ class SpawnTest {
         val resumeAt = command.argv.indexOf("resume")
         assertTrue(resumeAt > 0, "expected a resume subcommand")
         assertEquals("roll-7", command.argv[resumeAt + 1])
+        assertTrue(command.argv.indexOf("--no-alt-screen") in 1 until resumeAt)
         assertTrue(
             command.argv.indexOf("-m") < resumeAt,
             "options must come before the subcommand or the CLI rejects them: ${command.argv}",

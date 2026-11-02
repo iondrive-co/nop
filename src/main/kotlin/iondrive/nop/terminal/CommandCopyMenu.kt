@@ -23,7 +23,6 @@ internal class CommandCopyMenu(private val commands: TerminalCommands) {
         }
         for (match in matches.asReversed()) {
             menu.insert(JMenuItem(match.snippet.label).apply {
-                toolTipText = "Copy the complete original text, preserving intentional newlines"
                 addActionListener { commands.copy(match.snippet.text) }
             }, 0)
         }

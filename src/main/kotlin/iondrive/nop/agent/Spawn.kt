@@ -152,6 +152,8 @@ object Spawn {
         val argv = mutableListOf(
             CliTools.resolve(Provider.OpenAI),
             "--dangerously-bypass-approvals-and-sandbox",
+            // Keep the conversation in terminal scrollback so nop can scroll and mark prompts.
+            "--no-alt-screen",
             "-C",
             projectDir.absolutePath,
         )

@@ -261,7 +261,6 @@ internal class NopTerminalPanel(
 
     fun showCommandCopies(commands: TerminalCommands) {
         commandCopies = CommandCopyMenu(commands)
-        toolTipText = "Right-click a command or code block to copy its original text"
     }
 
     override fun processMouseEvent(event: MouseEvent) {
