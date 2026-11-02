@@ -41,6 +41,7 @@ fun SlackPanel(
     workspaceId: String?,
     connectionVersion: Int,
     cards: JPanel,
+    onFloat: (() -> Unit)? = null,
     onWorkspaceDetected: (String) -> Unit,
 ) {
     val session = remember(project, workspaceId, connectionVersion) { SlackBrowsers.of(project, workspaceId) }
@@ -66,6 +67,11 @@ fun SlackPanel(
         state.workspace?.id?.takeIf { it != workspaceId }?.let(onWorkspaceDetected)
     }
     Column(Modifier.fillMaxSize().background(background)) {
+        if (onFloat != null) {
+            Row(Modifier.fillMaxWidth().padding(6.dp), horizontalArrangement = Arrangement.End) {
+                OutlinedButton(onClick = onFloat) { Text("Float") }
+            }
+        }
         if (state.error != null) {
             Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(state.error!!, modifier = Modifier.weight(1f))

@@ -136,6 +136,30 @@ window.runFixture = async function () {
         await settle();
         check('dark theme updates without replacing panels', getComputedStyle(document.documentElement).colorScheme === 'dark');
 
+        const message = document.createElement('div');
+        message.dataset.qa = 'message_container';
+        message.innerHTML = '<div class="c-message_kit__message"><span>Example message</span></div><div class="p-control_strip"><button data-qa="message-actions-menu" aria-label="More actions">More actions</button></div><a href="#example">Attachment</a><div contenteditable="true">Draft</div>';
+        primaryElement.append(message);
+        let menuOpened = 0;
+        const more = message.querySelector('button');
+        more.onclick = () => menuOpened++;
+        const rightClick = (target, options = {}) => {
+            const event = new MouseEvent('contextmenu', {bubbles: true, cancelable: true, button: 2, ...options});
+            target.dispatchEvent(event);
+            return event.defaultPrevented;
+        };
+        check('native message actions stay visible', more.getBoundingClientRect().height > 0);
+        check('right click opens native message menu', rightClick(message.querySelector('span')) && menuOpened === 1);
+        check('link context menu remains available', !rightClick(message.querySelector('a')) && menuOpened === 1);
+        check('draft context menu remains available', !rightClick(message.querySelector('[contenteditable]')) && menuOpened === 1);
+        check('shift right click keeps browser menu', !rightClick(message, {shiftKey: true}) && menuOpened === 1);
+        more.disabled = true;
+        check('disabled menu cannot edit a message', !rightClick(message) && menuOpened === 1);
+        more.disabled = false;
+        more.removeAttribute('data-qa');
+        check('accessible menu label is supported', rightClick(message) && menuOpened === 2);
+        message.remove();
+
         // Layout must recover when React replaces panels or rebuilds the workspace asynchronously.
         localStorage.setItem('nop.channelWidth.TEXAMPLE', '284');
         const replacement = originalPanel.cloneNode(true);

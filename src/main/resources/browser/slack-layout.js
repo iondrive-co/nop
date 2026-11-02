@@ -13,7 +13,7 @@
     style.textContent = `
         ${scope} { color-scheme: var(--nop-color-scheme); }
         ${scope} body { background: var(--nop-background) !important; color: var(--nop-foreground) !important; }
-        ${scope} .p-ia4_top_nav, ${scope} .p-tab_rail, ${scope} .p-control_strip { display: none !important; }
+        ${scope} .p-ia4_top_nav, ${scope} .p-tab_rail { display: none !important; }
         ${scope} .p-client_workspace_wrapper {
             height: 100% !important;
             grid-template-columns: minmax(0, 1fr) !important;
@@ -243,12 +243,30 @@
         event.stopImmediatePropagation();
     }
 
+    // Use Slack's own menu so permissions, edit history and the editor stay native.
+    function messageMenu(event) {
+        if (!panel || event.shiftKey || event.target.closest?.('a, img, input, textarea, [contenteditable="true"]')) return;
+        const rows = '[data-qa="message_container"], .c-message_kit__message, .c-message_kit__background, .c-message_kit__hover';
+        let message = event.target.closest?.(rows);
+        let menu = null;
+        while (message && !menu) {
+            menu = message.querySelector('[data-qa="message-actions-menu"], [data-qa="more_message_actions"]') ||
+                [...message.querySelectorAll('button, [role="button"]')].find(button => /^(more actions|more message actions)$/i.test(button.getAttribute('aria-label') || ''));
+            message = message.parentElement?.closest(rows);
+        }
+        if (!menu || menu.disabled || menu.getAttribute('aria-disabled') === 'true') return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        menu.click();
+    }
+
     addEventListener("popstate", schedule);
     addEventListener("hashchange", schedule);
     document.addEventListener("pointerdown", pointerDown, true);
     document.addEventListener("pointermove", pointerMove, true);
     document.addEventListener("pointerup", pointerUp, true);
     document.addEventListener("pointercancel", pointerUp, true);
+    document.addEventListener("contextmenu", messageMenu, true);
     window.__nopSlackLayout = {
         refresh: schedule, metadata, setTheme,
         dispose() {
@@ -259,6 +277,7 @@
             document.removeEventListener("pointermove", pointerMove, true);
             document.removeEventListener("pointerup", pointerUp, true);
             document.removeEventListener("pointercancel", pointerUp, true);
+            document.removeEventListener("contextmenu", messageMenu, true);
             if (pending) cancelAnimationFrame(pending);
             clear();
             style.remove(); themeStyle.remove();

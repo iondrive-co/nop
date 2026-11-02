@@ -13,6 +13,9 @@ import org.cef.handler.CefLoadHandlerAdapter;
 import javax.swing.JFrame;
 import javax.swing.SwingUtilities;
 import java.net.InetSocketAddress;
+import java.awt.Robot;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -69,6 +72,7 @@ public class SlackSidebarSmoke {
         CefApp app = null;
         org.cef.CefClient client = null;
         JFrame frame = new JFrame("Slack sidebar regression fixture");
+        JFrame floating = new JFrame("Floating Slack regression fixture");
         var ended = new CountDownLatch(1);
         try {
             // Own profile and native runtime; never open or copy the user's Slack profile.
@@ -115,14 +119,56 @@ public class SlackSidebarSmoke {
                     throw new AssertionError("Sidebar regression: " + test);
                 }
             }
+            evaluate(browser, "window.fixtureIdentity = crypto.randomUUID(); " +
+                "document.querySelector('.p-view_contents--primary').innerHTML = '<input id=transfer-draft value=Draft style=margin:40px;width:200px;height:40px>'; true");
+            var identity = evaluate(browser, "window.fixtureIdentity");
+            var robot = new Robot();
+            for (int cycle = 0; cycle < 4; cycle++) {
+                final JFrame destination = cycle % 2 == 0 ? floating : frame;
+                SwingUtilities.invokeAndWait(() -> {
+                    destination.add(browser.getUIComponent());
+                    destination.setSize(900 + (destination == floating ? 80 : 0), 650);
+                    destination.setVisible(true);
+                    destination.toFront();
+                    destination.validate();
+                    browser.setFocus(true);
+                });
+                robot.delay(500);
+                if (!evaluate(browser, "window.fixtureIdentity").equals(identity)) throw new AssertionError("Browser page was replaced during transfer");
+                // Real pointer and keyboard input checks the native child, not only its Java wrapper.
+                var bounds = JsonParser.parseString(evaluate(browser,
+                    "JSON.stringify((() => {const r = document.querySelector('#transfer-draft').getBoundingClientRect(); return {x:r.x+20,y:r.y+20};})())")).getAsJsonObject();
+                final java.awt.Point point = new java.awt.Point();
+                SwingUtilities.invokeAndWait(() -> point.setLocation(browser.getUIComponent().getLocationOnScreen()));
+                robot.mouseMove(point.x + bounds.get("x").getAsInt(), point.y + bounds.get("y").getAsInt());
+                robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
+                robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+                robot.keyPress(KeyEvent.VK_END);
+                robot.keyRelease(KeyEvent.VK_END);
+                robot.keyPress(KeyEvent.VK_X);
+                robot.keyRelease(KeyEvent.VK_X);
+                robot.delay(200);
+                String expected = "Draft" + "x".repeat(cycle + 1);
+                if (!evaluate(browser, "document.querySelector('#transfer-draft').value").equals(expected)) {
+                    throw new AssertionError("Draft or keyboard focus lost on browser transfer " + cycle);
+                }
+                System.out.println("SLACK_TRANSFER " + cycle + " draft and native focus preserved");
+            }
         } finally {
             if (client != null) client.dispose();
             SwingUtilities.invokeAndWait(frame::dispose);
+            SwingUtilities.invokeAndWait(floating::dispose);
             server.stop(0);
             if (app != null) {
                 app.dispose();
                 ended.await(5, TimeUnit.SECONDS);
             }
         }
+    }
+
+    private static String evaluate(CefBrowser browser, String expression) throws Exception {
+        var response = browser.getDevToolsClient().executeDevToolsMethod("Runtime.evaluate",
+            "{\"expression\":" + new com.google.gson.Gson().toJson(expression) + ",\"returnByValue\":true}").get(5, TimeUnit.SECONDS);
+        return JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("result").get("value").getAsString();
     }
 }

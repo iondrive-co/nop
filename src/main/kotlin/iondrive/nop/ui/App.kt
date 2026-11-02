@@ -743,13 +743,15 @@ fun App(
         val view = SlackBrowsers.retainProjectView(projectPath)
         onDispose { view.close() }
     }
-    var selectedSlackId by remember(projectPath) { mutableStateOf<String?>(null) }
-    var slackVisible by remember(projectPath) { mutableStateOf(false) }
-    var slackConnectionVersion by remember(projectPath) { mutableStateOf(0) }
+    val slackView = remember(projectPath) { SlackWindows.of(projectPath) }
+    var selectedSlackId by slackView.selectedId
+    var slackVisible by slackView.visible
+    var slackConnectionVersion by slackView.connectionVersion
+    SideEffect { if (!slackView.floating) slackView.dockedViewReady() }
     LaunchedEffect(slackWorkspaces, selectedSlackId) {
         if (selectedSlackId != null && slackWorkspaces.none { it.id == selectedSlackId }) {
             selectedSlackId = slackWorkspaces.firstOrNull()?.id
-            if (selectedSlackId == null) slackVisible = false
+            if (selectedSlackId == null) slackView.hide()
         }
     }
 
@@ -1810,7 +1812,7 @@ fun App(
                         ratio = toolsRatio,
                         onRatioChange = { toolsRatio = it },
                         minFirstDp = 240.dp,
-                        minSecondDp = if (slackVisible) (if (toolsCollapsed) 524.dp else 728.dp) else 240.dp,
+                        minSecondDp = if (slackVisible && !slackView.floating) (if (toolsCollapsed) 524.dp else 728.dp) else 240.dp,
                         first = {
                             TabbedViewerPanel(
                                 tabsState = tabsState,
@@ -1886,30 +1888,30 @@ fun App(
                                 knownSlackWorkspaces = knownSlackWorkspaces,
                                 slackAttention = slackAttention,
                                 slackVisible = slackVisible,
-                                onToggleSlack = { slackVisible = !slackVisible },
+                                slackFloating = slackView.floating,
+                                onToggleSlack = { if (slackView.floating) slackView.show() else slackVisible = !slackVisible },
                                 slackPaneRatio = slackRatio,
                                 onSlackPaneRatioChange = { slackRatio = it },
                                 selectedSlackId = selectedSlackId,
                                 onSelectSlack = { id ->
                                     id?.let { SlackBrowsers.reopen(projectPath, it) }
-                                    slackVisible = true
-                                    selectedSlackId = id
+                                    slackView.show(id)
                                 },
                                 onCloseSlack = { id ->
                                     SlackBrowsers.close(projectPath, id)
                                     if (selectedSlackId == id) {
                                         selectedSlackId = SlackBrowsers.workspaces(projectPath).value.firstOrNull()?.id
-                                        if (selectedSlackId == null) slackVisible = false
+                                        if (selectedSlackId == null) slackView.hide()
                                     }
                                 },
                                 onNewSlack = {
                                     SlackBrowsers.connect(projectPath)
                                     selectedSlackId = null
                                     slackConnectionVersion++
-                                    slackVisible = true
+                                    slackView.show(null)
                                 },
                                 slack = {
-                                    SlackPanel(projectPath, selectedSlackId, slackConnectionVersion, slackCards) { selectedSlackId = it }
+                                    SlackPanel(projectPath, selectedSlackId, slackConnectionVersion, slackCards, onFloat = slackView::float) { selectedSlackId = it }
                                 },
                                 onSelect = { toggleTool(it) },
                                 sessionTab = sessionTab,

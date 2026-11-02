@@ -63,6 +63,8 @@ import iondrive.nop.ui.RestartDialog
 import iondrive.nop.ui.SharePasswordDialog
 import iondrive.nop.ui.TerminalStore
 import iondrive.nop.browser.SlackBrowsers
+import iondrive.nop.ui.SlackWindows
+import iondrive.nop.ui.SlackFloatingWindows
 import iondrive.nop.ui.UiStallWatchdog
 import iondrive.nop.ui.projectAgentNews
 import iondrive.nop.ui.WindowPickerPanel
@@ -559,6 +561,7 @@ fun main(args: Array<String>) {
             onDispose {
                 AgentSessionStore.disposeAll()
                 TerminalStore.disposeAll()
+                SlackWindows.views.values.forEach { SlackWindows.save(it, it.placement()) }
                 SlackBrowsers.disposeAll()
             }
         }
@@ -572,6 +575,7 @@ fun main(args: Array<String>) {
                 .collect { projects ->
                     AgentSessionStore.retain(projects)
                     TerminalStore.retain(projects)
+                    SlackWindows.retain(projects)
                     SlackBrowsers.retain(projects)
                 }
         }
@@ -599,6 +603,7 @@ fun main(args: Array<String>) {
                 }
         }
 
+        SlackFloatingWindows(darkMode) { project -> revealProject(focusedId, project) }
         val allWindows = workspaces.toList()
         val projectTreeStates = remember { mutableMapOf<Long, ProjectTreeState>() }
         SideEffect {

@@ -262,6 +262,7 @@ fun ToolTabs(
     history: @Composable () -> Unit,
     slack: @Composable () -> Unit,
     slackVisible: Boolean,
+    slackFloating: Boolean,
     onToggleSlack: () -> Unit,
     slackPaneRatio: Float,
     onSlackPaneRatioChange: (Float) -> Unit,
@@ -361,7 +362,7 @@ fun ToolTabs(
                 )
             }
         }
-        if (slackVisible) {
+        if (slackVisible && !slackFloating) {
             HorizontalSplit(
                 modifier = Modifier.fillMaxSize(),
                 ratio = slackPaneRatio,
@@ -497,7 +498,7 @@ private fun ToolStrip(
 }
 
 @Composable
-private fun SlackTabIcon(attention: SlackAttention = SlackAttention()) {
+internal fun SlackTabIcon(attention: SlackAttention = SlackAttention()) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Canvas(Modifier.size(14.dp).semantics { contentDescription = "Slack" }) {
             val scale = size.width / 54f
@@ -1089,7 +1090,7 @@ internal fun showTabContextMenu(
  */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun ToolStripTab(
+internal fun ToolStripTab(
     label: String,
     selected: Boolean,
     isDark: Boolean,
