@@ -2,6 +2,7 @@ package iondrive.nop.terminal
 
 import com.jediterm.terminal.CursorShape
 import com.jediterm.terminal.DefaultTerminalCopyPasteHandler
+import com.jediterm.terminal.HyperlinkStyle
 import com.jediterm.terminal.TerminalColor
 import com.jediterm.terminal.TerminalCopyPasteHandler
 import com.jediterm.terminal.TextStyle
@@ -9,6 +10,9 @@ import com.jediterm.terminal.model.StyleState
 import com.jediterm.terminal.model.TerminalTextBuffer
 import com.jediterm.terminal.ui.JediTermWidget
 import com.jediterm.terminal.ui.TerminalPanel
+import com.jediterm.terminal.ui.TerminalAction
+import com.jediterm.terminal.ui.TerminalActionProvider
+import com.jediterm.terminal.ui.hyperlinks.LinkInfoEx
 import com.jediterm.terminal.ui.settings.SettingsProvider
 import java.awt.Color
 import java.awt.Composite
@@ -30,6 +34,7 @@ import java.io.File
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import java.awt.event.HierarchyEvent
+import java.awt.event.InputEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.font.FontRenderContext
@@ -46,6 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JScrollBar
+import javax.swing.JPopupMenu
 import javax.swing.SwingUtilities
 import javax.swing.Timer
 import javax.swing.plaf.basic.BasicScrollBarUI
@@ -244,28 +250,27 @@ internal class NopTerminalWidget(
  * TerminalPanel subclass applying contrast adjustments to ensure readable text on light or dark themes,
  * and resetting the scroll position when switching out of the alternate screen buffer.
  */
-private class NopTerminalPanel(
+internal class NopTerminalPanel(
     private val settings: NopTerminalSettings,
     textBuffer: TerminalTextBuffer,
     styleState: StyleState,
 ) : TerminalPanel(settings, textBuffer, styleState) {
 
-    private var commandCopies: CommandCopyGutter? = null
+    private var commandCopies: CommandCopyMenu? = null
+    private var copyMenuShown = false
 
     fun showCommandCopies(commands: TerminalCommands) {
-        commandCopies = CommandCopyGutter(this, commands, settings) {
-            CommandCopyGutter.Geometry(myClientScrollOrigin, terminalTextBuffer.height,
-                myCharSize.width, myCharSize.height, insetX, cursorRow())
-        }
-        revalidate()
-        repaint()
+        commandCopies = CommandCopyMenu(commands)
+        toolTipText = "Right-click a command or code block to copy its original text"
     }
 
-    override fun getInsetX(): Int = super.getInsetX() + if (commandCopies != null) CommandCopyGutter.WIDTH else 0
-
     override fun processMouseEvent(event: MouseEvent) {
-        if (commandCopies != null && event.x < insetX && event.id in setOf(
-                MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED, MouseEvent.MOUSE_CLICKED)) {
+        if (commandCopies != null && (SwingUtilities.isRightMouseButton(event) || event.isPopupTrigger)) {
+            if (event.id == MouseEvent.MOUSE_PRESSED) copyMenuShown = false
+            if (event.isPopupTrigger || (event.id == MouseEvent.MOUSE_CLICKED && !copyMenuShown)) {
+                if (!copyMenuShown) commandCopyPopup(event).show(this, event.x, event.y)
+                copyMenuShown = true
+            }
             event.consume()
             return
         }
@@ -273,12 +278,32 @@ private class NopTerminalPanel(
     }
 
     override fun processMouseMotionEvent(event: MouseEvent) {
-        if (commandCopies != null && event.x < insetX) {
-            commandCopies?.clearHover()
+        if (commandCopies != null && event.modifiersEx and InputEvent.BUTTON3_DOWN_MASK != 0) {
             event.consume()
             return
         }
         super.processMouseMotionEvent(event)
+    }
+
+    internal fun commandCopyPopup(event: MouseEvent): JPopupMenu {
+        val row = myClientScrollOrigin + event.y / myCharSize.height.coerceAtLeast(1)
+        val column = Math.floorDiv(event.x - insetX, myCharSize.width.coerceAtLeast(1))
+        val buffer = terminalTextBuffer
+        val link = if (column in 0 until buffer.width && row in -buffer.historyLinesCount until buffer.height) {
+            buffer.lock()
+            try { (buffer.getStyleAt(column, row) as? HyperlinkStyle)?.linkInfo }
+            finally { buffer.unlock() }
+        } else null
+        val linkActions = link?.let { LinkInfoEx.getPopupMenuGroupProvider(it)?.getPopupMenuGroup(event) }.orEmpty()
+        val provider = object : TerminalActionProvider {
+            override fun getActions(): List<TerminalAction> = linkActions
+            override fun getNextProvider(): TerminalActionProvider = this@NopTerminalPanel
+            override fun setNextProvider(provider: TerminalActionProvider?) = Unit
+        }
+        return createPopupMenu(provider).apply {
+            isLightWeightPopupEnabled = false
+            commandCopies?.addTo(this, buffer, row, column, cursorRow())
+        }
     }
 
     override fun createCopyPasteHandler(): TerminalCopyPasteHandler =
@@ -343,7 +368,6 @@ private class NopTerminalPanel(
         }
         val wrapper = ContrastAdjustingGraphics2D(g2d, settings, fillColor = userMessages?.let { UserRowFill(it)::fill })
         super.paintComponent(wrapper)
-        commandCopies?.paint(g2d)
     }
 
     /**

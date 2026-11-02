@@ -3,9 +3,12 @@ package iondrive.nop.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
@@ -20,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -31,6 +35,7 @@ import iondrive.nop.WindowGeometry
 import iondrive.nop.WindowOverhead
 import iondrive.nop.browser.SlackAttention
 import iondrive.nop.browser.SlackBrowsers
+import iondrive.nop.browser.SlackWorkspace
 import iondrive.nop.browser.SlackWorkspaceNames
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
@@ -205,46 +210,75 @@ private fun SlackFloatingWindow(view: SlackViewState, dark: Boolean, onDock: () 
             styling = ComponentStyling.default(),
         ) {
             CompositionLocalProvider(LocalWindow provides window, LocalTerminalBottomInset provides 0.dp) {
-                Column(Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
-                    Row(Modifier.padding(6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = onDock) { Text("Dock") }
-                        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
-                            workspaces.forEach { workspace ->
-                                val unread = attention[workspace.id]
-                                ToolStripTab(
-                                    label = workspace.name, selected = workspace.id == view.selectedId.value,
-                                    isDark = dark, style = JewelTheme.defaultTabStyle,
-                                    onClick = { view.show(workspace.id) },
-                                    onClose = {
-                                        SlackBrowsers.close(view.project, workspace.id)
-                                        if (view.selectedId.value == workspace.id) {
-                                            view.selectedId.value = SlackBrowsers.workspaces(view.project).value.firstOrNull()?.id
-                                            if (view.selectedId.value == null) view.hide()
-                                        }
-                                    },
-                                    leading = { SlackTabIcon(unread ?: SlackAttention()) },
-                                    emphasis = if (unread?.unread == true) JewelTheme.globalColors.text.normal else null,
-                                )
-                            }
-                            if (view.selectedId.value == null) Text("Sign in…", Modifier.padding(6.dp))
+                SlackFloatingContent(
+                    workspaces = workspaces,
+                    selectedId = view.selectedId.value,
+                    attention = attention,
+                    onDock = onDock,
+                    onSelect = { view.show(it) },
+                    onClose = { id ->
+                        SlackBrowsers.close(view.project, id)
+                        if (view.selectedId.value == id) {
+                            view.selectedId.value = SlackBrowsers.workspaces(view.project).value.firstOrNull()?.id
+                            if (view.selectedId.value == null) view.hide()
                         }
-                        OutlinedButton(onClick = {
-                            showTabContextMenu(window, dark,
-                                knownWorkspaces.map { workspace ->
-                                    TabMenuItem.Item(workspace.name) {
-                                        SlackBrowsers.reopen(view.project, workspace.id)
-                                        view.show(workspace.id)
-                                    }
-                                } + TabMenuItem.Item("Sign in to another workspace…") {
-                                    SlackBrowsers.connect(view.project)
-                                    view.connectionVersion.value++
-                                    view.show(null)
-                                })
-                        }) { Text("+") }
-                    }
+                    },
+                    onAdd = {
+                        showTabContextMenu(window, dark,
+                            knownWorkspaces.map { workspace ->
+                                TabMenuItem.Item(workspace.name) {
+                                    SlackBrowsers.reopen(view.project, workspace.id)
+                                    view.show(workspace.id)
+                                }
+                            } + TabMenuItem.Item("Sign in to another workspace…") {
+                                SlackBrowsers.connect(view.project)
+                                view.connectionVersion.value++
+                                view.show(null)
+                            })
+                    },
+                ) {
                     SlackPanel(view.project, view.selectedId.value, view.connectionVersion.value, cards) { view.selectedId.value = it }
                 }
             }
         }
+    }
+}
+
+/** Tabs fill the toolbar's fixed height; the browser owns the remaining window space. */
+@Composable
+internal fun SlackFloatingContent(
+    workspaces: List<SlackWorkspace>,
+    selectedId: String?,
+    attention: Map<String, SlackAttention>,
+    onDock: () -> Unit,
+    onSelect: (String) -> Unit,
+    onClose: (String) -> Unit,
+    onAdd: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val dark = JewelTheme.isDark
+    Column(Modifier.fillMaxSize().background(JewelTheme.globalColors.panelBackground)) {
+        Row(
+            Modifier.fillMaxWidth().height(40.dp).padding(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(onClick = onDock) { Text("Dock") }
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+                workspaces.forEach { workspace ->
+                    val unread = attention[workspace.id]
+                    ToolStripTab(
+                        label = workspace.name, selected = workspace.id == selectedId,
+                        isDark = dark, style = JewelTheme.defaultTabStyle,
+                        onClick = { onSelect(workspace.id) }, onClose = { onClose(workspace.id) },
+                        leading = { SlackTabIcon(unread ?: SlackAttention()) },
+                        emphasis = if (unread?.unread == true) JewelTheme.globalColors.text.normal else null,
+                    )
+                }
+                if (selectedId == null) Text("Sign in…", Modifier.padding(6.dp))
+            }
+            OutlinedButton(onClick = onAdd) { Text("Add workspace…") }
+        }
+        Box(Modifier.weight(1f).fillMaxWidth()) { content() }
     }
 }

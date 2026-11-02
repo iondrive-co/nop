@@ -40,9 +40,9 @@ internal class TerminalCommands(
         }
         parser.parse(text).accept(object : AbstractVisitor() {
             override fun visit(code: Code) {
-                // Single identifiers and file names would put a button on nearly every prose row.
+                // Paths, punctuation and single identifiers do not identify a runnable command.
                 val content = code.literal
-                if (content.any(Char::isWhitespace) || content.startsWith("./") || content.startsWith("/")) {
+                if (content.any(Char::isLetterOrDigit) && (content.any(Char::isWhitespace) || content.startsWith("./"))) {
                     add(content, command = true)
                 }
             }
@@ -61,7 +61,7 @@ internal class TerminalCommands(
     }
 
     /**
-     * Matches whole snippets across terminal rows, ignoring display whitespace and box edges.
+     * Matches whole snippets across terminal rows, allowing display wrapping and box edges.
      * Distinct originals that look the same after wrapping are ambiguous and get no copy control.
      * [firstRow] uses the terminal buffer's row numbers, including negative scrollback rows.
      */
@@ -86,9 +86,34 @@ internal class TerminalCommands(
         for ((compact, originals) in sources.groupBy { it.compact }) {
             if (compact.isEmpty() || originals.map { it.text }.distinct().size != 1) continue
             val snippet = originals.first()
+            val sourceCells = snippet.text.indices.filter { !displaySpace(snippet.text[it]) }
             var at = screen.indexOf(compact)
             while (at >= 0) {
                 val end = at + compact.length
+                // Within a row, whitespace separates tokens. Only a row boundary may insert or
+                // remove whitespace inside one; otherwise unrelated text can look like a command.
+                val whitespaceMatches = (1 until compact.length).all { i ->
+                    val left = cells[at + i - 1]
+                    val right = cells[at + i]
+                    left / stride != right / stride ||
+                        right - left == sourceCells[i] - sourceCells[i - 1]
+                }
+                fun joinedToToken(index: Int, edge: Int): Boolean {
+                    if (index !in screen.indices) return false
+                    val a = cells[index]
+                    val b = cells[edge]
+                    if (screen[index] == '.' && index > edge) {
+                        val next = index + 1
+                        // A sentence's full stop is not an executable or argument extension.
+                        if (next !in screen.indices || cells[next] != a + 1 || !tokenChar(screen[next])) return false
+                    }
+                    return a / stride == b / stride && kotlin.math.abs(a - b) == 1 &&
+                        tokenChar(screen[index]) && tokenChar(screen[edge])
+                }
+                if (!whitespaceMatches || joinedToToken(at - 1, at) || joinedToToken(end, end - 1)) {
+                    at = screen.indexOf(compact, at + 1)
+                    continue
+                }
                 val spans = ArrayList<Span>()
                 for (i in at until end) {
                     val cell = Span(firstRow + cells[i] / stride, cells[i] % stride, cells[i] % stride + 1)
@@ -114,5 +139,6 @@ internal class TerminalCommands(
     companion object {
         private val SHELLS = setOf("", "sh", "shell", "bash", "zsh", "fish", "console", "powershell", "ps1", "cmd", "bat")
         private fun displaySpace(c: Char): Boolean = c.isWhitespace() || c == '\u0000'
+        private fun tokenChar(c: Char): Boolean = c.isLetterOrDigit() || c in "_./-"
     }
 }

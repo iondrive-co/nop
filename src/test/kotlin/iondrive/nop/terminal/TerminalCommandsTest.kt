@@ -87,97 +87,118 @@ class TerminalCommandsTest {
     }
 
     @Test
-    fun `live button copies without a selection and hover highlights all wrapped rows`() = onEdt {
+    fun `paths and punctuation do not become inline commands`() {
+        val commands = TerminalCommands().apply {
+            addMessage("See `/`, `/var/example/data`, `///`, `--` and `settings.conf`. Run `./inspect`.")
+        }
+        assertEquals(listOf("./inspect"), commands.snippets.map { it.text })
+    }
+
+    @Test
+    fun `command tokens cannot match unrelated fragments or longer words`() {
+        val commands = TerminalCommands().apply { addMessage("Use `runner --check all`.") }
+        for (line in listOf("runner--checkall", "run ner --check all", "prerunner --check all", "runner --check allowed")) {
+            assertTrue(commands.find(listOf(line), 0, 1).isEmpty(), line)
+        }
+        val executable = TerminalCommands().apply { addMessage("Run `./inspect`.") }
+        assertTrue(executable.find(listOf("./inspect.log"), 0, 1).isEmpty())
+        assertEquals("./inspect", executable.find(listOf("Run ./inspect."), 0, 1).single().snippet.text)
+    }
+
+    @Test
+    fun `right click on either wrapped row copies the original without a selection or gutter`() = onEdt {
         val original = "runner --target=sample --mode=inspect --message='two  spaces'"
         val copied = mutableListOf<String>()
         val commands = TerminalCommands { copied += it }.apply { addMessage("Run `$original`.") }
         val widget = terminal(48, 12, commands)
+        val plain = NopTerminalWidget(48, 12, NopTerminalSettings(Color.WHITE, Color.BLACK, Color.BLUE))
         try {
             feed(widget, "Try this:\r\n  runner --target=sample --mode=\r\n  inspect --message='two  spaces'\r\n\r\nReady.\r\n")
-            val before = paint(widget)
-            val button = buttons(widget).single()
-            assertEquals("Copy command", button.text)
-            assertTrue(button.isVisible)
+            paint(widget)
+            assertEquals(plain.terminalPanel.pixelWidth, widget.terminalPanel.pixelWidth)
+            assertTrue(widget.terminalPanel.components.none { it is JButton })
+            for (row in listOf(1, 2)) copyItem(widget, row, 4).doClick(0)
+            assertEquals(listOf(original, original), copied)
             assertTrue(widget.terminalPanel.selection == null)
-            button.model.isRollover = true
-            val after = paint(widget)
-            val changedByRow = (0 until after.height).filter { y ->
-                (CommandCopyGutter.WIDTH + 5 until after.width).any { x -> before.getRGB(x, y) != after.getRGB(x, y) }
-            }.map { it / (widget.terminalPanel.pixelHeight / 12) }.toSet()
-            assertEquals(setOf(1, 2), changedByRow)
+            assertTrue(copyItems(popup(widget, 0, 4)).isEmpty())
+            assertTrue(copyItems(popup(widget, 2, 0)).isEmpty())
+        } finally { widget.close(); plain.close() }
+    }
 
-            button.doClick(0)
-            assertEquals(listOf(original), copied)
-            assertEquals("Copied", button.text)
-            assertTrue(widget.terminalPanel.selection == null)
-            savePreview(after, "inline")
+    @Test
+    fun `right click chooses the command under the pointer on a shared row`() = onEdt {
+        val copied = mutableListOf<String>()
+        val commands = TerminalCommands { copied += it }.apply {
+            addMessage("Run `runner --list` or `runner --check`.")
+        }
+        val widget = terminal(64, 12, commands)
+        try {
+            feed(widget, "Run runner --list or runner --check.\r\nReady.\r\n")
+            paint(widget)
+            copyItem(widget, 0, 5).doClick(0)
+            copyItem(widget, 0, 22).doClick(0)
+            assertEquals(listOf("runner --list", "runner --check"), copied)
+            assertTrue(copyItems(popup(widget, 0, 18)).isEmpty())
         } finally { widget.close() }
     }
 
     @Test
-    fun `partly visible scripts get a button which copies the entire script`() = onEdt {
+    fun `partly visible scripts copy all original lines from scrollback`() = onEdt {
         val original = (1..18).joinToString("\n") { "printf 'entry $it'" }
         val copied = mutableListOf<String>()
-        val commands = TerminalCommands { copied += it }.apply { addMessage("```bash\n$original\n```") }
-        val widget = terminal(48, 12, commands)
+        val widget = terminal(48, 12, TerminalCommands { copied += it }.apply { addMessage("```bash\n$original\n```") })
         try {
             feed(widget, original.replace("\n", "\r\n") + "\r\nReady.\r\n")
             paint(widget)
-            val button = buttons(widget).single()
-            assertEquals(0, button.y)
-            button.doClick(0)
-            assertEquals(listOf(original), copied)
-
+            copyItem(widget, 0, 3).doClick(0)
             widget.terminalPanel.verticalScrollModel.value = -widget.terminalTextBuffer.historyLinesCount
             paint(widget)
-            buttons(widget).single().doClick(0)
+            copyItem(widget, 0, 3).doClick(0)
             assertEquals(listOf(original, original), copied)
         } finally { widget.close() }
     }
 
     @Test
-    fun `redraws invalidate controls before their clicks can copy stale text`() = onEdt {
-        val copied = mutableListOf<String>()
-        val commands = TerminalCommands { copied += it }.apply { addMessage("Run `runner --check all`.") }
-        val widget = terminal(48, 12, commands)
-        try {
-            feed(widget, "runner --check all\r\nReady.\r\n")
-            paint(widget)
-            val button = buttons(widget).single()
-            feed(widget, "\u001b[2J\u001b[HNothing to copy.\r\n")
-            button.doClick(0)
-            assertTrue(copied.isEmpty())
-            paint(widget)
-            assertTrue(buttons(widget).isEmpty())
-        } finally { widget.close() }
-    }
-
-    @Test
-    fun `buttons follow terminal reflow and a theme change`() = onEdt {
+    fun `right click resolves current buffer after a redraw and reflow`() = onEdt {
         val original = "runner --target=sample --mode=inspect --message='two  spaces'"
         val copied = mutableListOf<String>()
-        val settings = NopTerminalSettings(Color.WHITE, Color.BLACK, Color(0x17, 0x50, 0xEB))
-        val commands = TerminalCommands { copied += it }.apply { addMessage("Run `$original`.") }
-        val widget = NopTerminalWidget(72, 12, settings).apply { showCommandCopies(commands) }
+        val widget = terminal(72, 12, TerminalCommands { copied += it }.apply { addMessage("Run `$original`.") })
         try {
             feed(widget, original + "\r\nReady.\r\n")
             paint(widget)
-            val firstY = buttons(widget).single().y
             widget.terminal.resize(TermSize(36, 12), RequestOrigin.User)
-            settings.bg = Color(0x1E, 0x1F, 0x22)
-            settings.fg = Color(0xDF, 0xE1, 0xE5)
-            settings.link = Color(0x68, 0x97, 0xBB)
-            val image = paint(widget)
-            buttons(widget).single().doClick(0)
+            paint(widget)
+            copyItem(widget, 1, 3).doClick(0)
             assertEquals(listOf(original), copied)
-            assertEquals(firstY, buttons(widget).single().y)
-            assertEquals(settings.bg, buttons(widget).single().background)
-            savePreview(image, "dark")
+            feed(widget, "\u001b[2J\u001b[HNothing to copy.\r\n")
+            paint(widget)
+            assertTrue(copyItems(popup(widget, 0, 3)).isEmpty())
         } finally { widget.close() }
     }
 
     @Test
-    fun `native click copies to the clipboard without sending a mouse report to the CLI`() {
+    fun `command menu keeps the terminal and hyperlink actions`() = onEdt {
+        val opened = mutableListOf<String>()
+        val original = "fetch https://docs.example.test/start"
+        val settings = NopTerminalSettings(Color.WHITE, Color.BLACK, Color.BLUE)
+        val widget = NopTerminalWidget(72, 12, settings).apply {
+            showCommandCopies(TerminalCommands().apply { addMessage("Run `$original`.") })
+            addAsyncHyperlinkFilter(CellStylePreservingLinks(terminalTextBuffer,
+                UrlHyperlinkFilter { opened += it }, settings.hyperlinkColor, settings.hyperlinkHighlightingMode))
+        }
+        try {
+            feed(widget, original + "\r\nReady.\r\n")
+            paint(widget)
+            val menu = popup(widget, 0, 12)
+            val items = menu.components.filterIsInstance<javax.swing.JMenuItem>()
+            assertTrue(items.map { it.text }.containsAll(listOf("Copy command", "Copy", "Paste", "Open Link", "Copy Link Address")))
+            items.single { it.text == "Open Link" }.doClick(0)
+            assertEquals(listOf("https://docs.example.test/start"), opened)
+        } finally { widget.close() }
+    }
+
+    @Test
+    fun `native right click copies without selecting text or sending mouse reports`() {
         assumeTrue(System.getenv("NOP_TEST_PRIVATE_DISPLAY") == "1" && !GraphicsEnvironment.isHeadless(),
             "Requires a private display, so the desktop and its clipboard are left alone")
         val original = "runner --target=sample --mode=inspect --message='two  spaces'"
@@ -200,38 +221,51 @@ class TerminalCommandsTest {
         try {
             val robot = Robot().apply { autoDelay = 30 }
             robot.waitForIdle()
-            Thread.sleep(100)
             val point = onEdt {
-                buttons(widget).single().let { button -> button.locationOnScreen.apply {
-                    translate(button.width / 2, button.height / 2)
-                } }
+                widget.terminalPanel.locationOnScreen.apply {
+                    translate(widget.terminalPanel.pixelWidth / 72 * 6, widget.terminalPanel.pixelHeight / 12 * 2 + 5)
+                }
             }
             robot.mouseMove(point.x, point.y)
+            robot.mousePress(InputEvent.BUTTON3_DOWN_MASK)
+            robot.mouseRelease(InputEvent.BUTTON3_DOWN_MASK)
+            robot.waitForIdle()
+            val menu = onEdt {
+                javax.swing.MenuSelectionManager.defaultManager().selectedPath.filterIsInstance<javax.swing.JPopupMenu>().single()
+            }
+            val itemPoint = onEdt {
+                copyItems(menu).single().let { item -> item.locationOnScreen.apply { translate(item.width / 2, item.height / 2) } }
+            }
+            savePreview(robot.createScreenCapture(onEdt { frame.bounds }), "context-menu")
+            robot.mouseMove(itemPoint.x, itemPoint.y)
             robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
             robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
             robot.waitForIdle()
             onEdt {
                 assertEquals(original, Toolkit.getDefaultToolkit().systemClipboard.getData(DataFlavor.stringFlavor))
-                assertEquals("Copied", buttons(widget).single().text)
                 assertTrue(widget.terminalPanel.selection == null)
-                assertTrue(sent.isEmpty(), "clicking Copy must not send input to the CLI")
+                assertTrue(sent.isEmpty(), "right-clicking Copy must not send input to the CLI")
             }
-            val bounds = onEdt { frame.bounds }
-            savePreview(robot.createScreenCapture(bounds), "native")
-            val gutter = onEdt { widget.terminalPanel.locationOnScreen.apply { translate(2, 120) } }
-            robot.mouseMove(gutter.x, gutter.y)
-            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
-            robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
-            robot.waitForIdle()
-            assertTrue(sent.isEmpty(), "the rest of the copy gutter must also leave the CLI alone")
-            val text = onEdt { widget.terminalPanel.locationOnScreen.apply { translate(CommandCopyGutter.WIDTH + 25, 100) } }
-            robot.mouseMove(text.x, text.y)
+            robot.mouseMove(point.x, point.y)
             robot.mousePress(InputEvent.BUTTON1_DOWN_MASK)
             robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK)
             robot.waitForIdle()
             assertTrue(sent.isNotEmpty(), "the simulated CLI really has mouse reporting enabled")
         } finally { onEdt { frame.dispose(); widget.close() } }
     }
+
+    private fun popup(widget: NopTerminalWidget, row: Int, column: Int): javax.swing.JPopupMenu {
+        val panel = widget.terminalPanel as NopTerminalPanel
+        val x = panel.pixelWidth / widget.terminalTextBuffer.width * column + 5
+        val y = panel.pixelHeight / widget.terminalTextBuffer.height * row + 5
+        return panel.commandCopyPopup(java.awt.event.MouseEvent(panel, java.awt.event.MouseEvent.MOUSE_PRESSED,
+            0, InputEvent.BUTTON3_DOWN_MASK, x, y, 1, true, java.awt.event.MouseEvent.BUTTON3))
+    }
+
+    private fun copyItems(menu: javax.swing.JPopupMenu) =
+        menu.components.filterIsInstance<javax.swing.JMenuItem>().filter { it.text in setOf("Copy command", "Copy code") }
+
+    private fun copyItem(widget: NopTerminalWidget, row: Int, column: Int) = copyItems(popup(widget, row, column)).single()
 
     private fun terminal(columns: Int, rows: Int, commands: TerminalCommands) =
         NopTerminalWidget(columns, rows, NopTerminalSettings(Color.WHITE, Color.BLACK, Color(0x17, 0x50, 0xEB)))
@@ -252,8 +286,6 @@ class TerminalCommandsTest {
         }
         return image
     }
-
-    private fun buttons(widget: NopTerminalWidget) = widget.terminalPanel.components.filterIsInstance<JButton>()
 
     private fun savePreview(image: BufferedImage, name: String) {
         val directory = Path.of("build", "test-previews", "command-copy")
