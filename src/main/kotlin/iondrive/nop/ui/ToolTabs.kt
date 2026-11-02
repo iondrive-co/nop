@@ -71,6 +71,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import iondrive.nop.StripDrag
 import iondrive.nop.agent.Activity
@@ -499,6 +500,7 @@ private fun ToolStrip(
 
 @Composable
 internal fun SlackTabIcon(attention: SlackAttention = SlackAttention()) {
+    val status = attention.sanitized()
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Canvas(Modifier.size(14.dp).semantics { contentDescription = "Slack" }) {
             val scale = size.width / 54f
@@ -516,13 +518,26 @@ internal fun SlackTabIcon(attention: SlackAttention = SlackAttention()) {
             pill(yellow, 28f, 28f, 13f, 26f); pill(yellow, 41f, 28f, 13f, 13f)
             pill(red, 0f, 28f, 26f, 13f); pill(red, 13f, 41f, 13f, 13f)
         }
-        if (attention.mentions > 0) {
-            Text(if (attention.mentions > 99) "99+" else attention.mentions.toString(),
-                color = Color.White, fontWeight = FontWeight.Bold,
-                modifier = Modifier.background(Color(0xffc43c4c), androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
-                    .padding(horizontal = 4.dp))
-        } else if (attention.unread) {
-            Canvas(Modifier.size(6.dp)) { drawCircle(Color(0xff6b9bfa)) }
+        if (status.unread) {
+            val label = when {
+                status.mentions > 99 -> "99+"
+                status.mentions > 0 -> status.mentions.toString()
+                else -> "Unread"
+            }
+            val description = when (status.mentions) {
+                0 -> "Unread messages"
+                1 -> "1 unread mention"
+                else -> "${status.mentions} unread mentions"
+            }
+            Text(
+                label, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp,
+                maxLines = 1,
+                modifier = Modifier
+                    .background(if (status.mentions > 0) Color(0xffc43c4c) else Color(0xff1750eb),
+                        androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                    .semantics { contentDescription = description },
+            )
         }
     }
 }

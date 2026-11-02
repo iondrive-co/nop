@@ -18,6 +18,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.Density
 import iondrive.nop.browser.SlackWorkspace
+import iondrive.nop.browser.SlackAttention
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
 import org.jetbrains.jewel.ui.component.Text
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -35,6 +36,7 @@ class SlackFloatingContentTest {
     private class Preview(width: Int, val height: Int, workspace: SlackWorkspace, dark: Boolean) : AutoCloseable {
         var workspaces by mutableStateOf(listOf(workspace))
         var selected by mutableStateOf(workspace.id)
+        var attention by mutableStateOf<Map<String, SlackAttention>>(emptyMap())
         var additions = 0
         var docks = 0
         var body = Rect.Zero
@@ -43,7 +45,7 @@ class SlackFloatingContentTest {
             ImageComposeScene(width, height, Density(1f)) {
                 IntUiTheme(isDark = dark) {
                     SlackFloatingContent(
-                        workspaces, selected, emptyMap(),
+                        workspaces, selected, attention,
                         onDock = { docks++ }, onSelect = { selected = it },
                         onClose = { id -> workspaces = workspaces.filterNot { it.id == id } },
                         onAdd = { additions++ },
@@ -67,6 +69,13 @@ class SlackFloatingContentTest {
                 node.takeIf { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true }
                     ?: node.children.firstNotNullOfOrNull(::find)
             scene.semanticsOwners.firstNotNullOf { find(it.unmergedRootSemanticsNode) }.boundsInRoot
+        }
+
+        fun statusDescriptions(): List<String> = onEdt {
+            fun descriptions(node: SemanticsNode): List<String> =
+                node.config.getOrNull(SemanticsProperties.ContentDescription).orEmpty() + node.children.flatMap(::descriptions)
+            scene.semanticsOwners.flatMap { descriptions(it.unmergedRootSemanticsNode) }
+                .filter { it.startsWith("Unread") || it.contains("unread mention") }
         }
 
         fun click(text: String) {
@@ -113,6 +122,38 @@ class SlackFloatingContentTest {
                 preview.screenshot(if (dark) "dark" else "light")
                 preview.click("Dock")
                 assertEquals(1, preview.docks)
+            }
+        }
+    }
+
+    @Test
+    fun `workspace badges track unread and mentions independently of tab selection`() {
+        for (dark in listOf(false, true)) {
+            Preview(900, 700, first, dark).use { preview ->
+                preview.workspaces = listOf(first, second)
+                preview.attention = mapOf(first.id to SlackAttention(unread = true))
+                preview.settle()
+                assertEquals(listOf("Unread messages"), preview.statusDescriptions())
+                assertTrue(preview.bounds("Unread").bottom <= preview.body.top)
+
+                preview.attention = preview.attention + (second.id to SlackAttention(mentions = 7))
+                preview.settle()
+                assertEquals(listOf("Unread messages", "7 unread mentions"), preview.statusDescriptions())
+                preview.click(second.name)
+                assertEquals(listOf("Unread messages", "7 unread mentions"), preview.statusDescriptions())
+                preview.screenshot(if (dark) "unread-dark" else "unread-light")
+
+                preview.attention = preview.attention + (first.id to SlackAttention())
+                preview.settle()
+                assertEquals(listOf("7 unread mentions"), preview.statusDescriptions())
+                preview.attention = mapOf(second.id to SlackAttention(mentions = 123))
+                preview.settle()
+                assertTrue(preview.bounds("99+").width > 0)
+                assertEquals(listOf("123 unread mentions"), preview.statusDescriptions())
+
+                preview.attention = emptyMap()
+                preview.settle()
+                assertTrue(preview.statusDescriptions().isEmpty())
             }
         }
     }
