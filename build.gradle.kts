@@ -7,6 +7,7 @@ import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import javax.imageio.ImageIO
+import java.util.Properties
 
 plugins {
     kotlin("jvm") version "2.2.20"
@@ -23,6 +24,48 @@ kotlin {
         languageVersion = JavaLanguageVersion.of(21)
     }
 }
+
+val cefRuntimeConfig = Properties().apply {
+    file("native/cef/runtime.properties").inputStream().use { load(it) }
+}
+val browserOs = when {
+    System.getProperty("os.name").startsWith("Windows") -> "windows"
+    System.getProperty("os.name").startsWith("Mac") -> "macosx"
+    else -> "linux"
+}
+val browserArch = when (System.getProperty("os.arch")) {
+    "aarch64", "arm64" -> "arm64"
+    "arm" -> "arm"
+    "x86", "i386" -> "i386"
+    else -> "amd64"
+}
+val cefNativeVersion = "jcef-${cefRuntimeConfig.getProperty("jcefCommit")}+cef-${cefRuntimeConfig.getProperty("version")}+g${cefRuntimeConfig.getProperty("cefCommit").take(7)}+chromium-${cefRuntimeConfig.getProperty("chromiumVersion")}"
+val cefNativeUpstream = configurations.create("cefNativeUpstream") {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+val correctedCefJar = layout.buildDirectory.file("cef-runtime/jcef-natives-fixed.jar")
+val cefRuntimeResources = layout.buildDirectory.dir("generated/cef-runtime")
+val testCefPackaging = tasks.register<Exec>("testCefPackaging") {
+    group = "verification"
+    description = "Check corrected-native archive packaging and integrity metadata"
+    onlyIf { browserOs == "linux" }
+    commandLine("python3", "-B", "-m", "unittest", "discover", "-s", "src/test/python", "-p", "test_cef_*.py")
+}
+val prepareCefRuntime = if (browserOs == "linux") tasks.register<Exec>("prepareCefRuntime") {
+    group = "build setup"
+    description = "Package the pinned Linux CEF runtime with malloc diagnostics disabled"
+    inputs.files(cefNativeUpstream, fileTree("native/cef"), "scripts/build-cef-runtime.py")
+    outputs.file(correctedCefJar)
+    outputs.dir(cefRuntimeResources)
+    doFirst {
+        commandLine("python3", "scripts/build-cef-runtime.py",
+            "--base-native", cefNativeUpstream.singleFile.absolutePath,
+            "--output", correctedCefJar.get().asFile.absolutePath,
+            "--metadata", cefRuntimeResources.get().file("nop-cef-runtime.properties").asFile.absolutePath,
+            "--arch", browserArch)
+    }
+} else null
 
 dependencies {
     implementation("org.jetbrains.jewel:jewel-int-ui-standalone:0.34.0-253.32098.37")
@@ -49,20 +92,13 @@ dependencies {
     implementation("org.jetbrains.jediterm:jediterm-ui:3.72")
     implementation("org.slf4j:slf4j-nop:2.0.9")
 
-    implementation("me.friwi:jcefmaven:152.0.6")
-    // Ship the browser for the distribution's platform so opening Slack needs no runtime download.
-    val browserOs = when {
-        System.getProperty("os.name").startsWith("Windows") -> "windows"
-        System.getProperty("os.name").startsWith("Mac") -> "macosx"
-        else -> "linux"
-    }
-    val browserArch = when (System.getProperty("os.arch")) {
-        "aarch64", "arm64" -> "arm64"
-        "arm" -> "arm"
-        "x86", "i386" -> "i386"
-        else -> "amd64"
-    }
-    runtimeOnly("me.friwi:jcef-natives-$browserOs-$browserArch:jcef-17e805a+cef-152.0.6+g708dc14+chromium-152.0.7977.83")
+    implementation("me.friwi:jcefmaven:${cefRuntimeConfig.getProperty("version")}")
+    val nativeCoordinates = "me.friwi:jcef-natives-$browserOs-$browserArch:$cefNativeVersion"
+    add(cefNativeUpstream.name, nativeCoordinates)
+    // Linux ships the library with optional malloc diagnostics disabled.
+    // It cannot silently fall back to the upstream native artifact during packaging.
+    if (prepareCefRuntime != null) runtimeOnly(files(correctedCefJar).builtBy(prepareCefRuntime))
+    else runtimeOnly(nativeCoordinates)
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
@@ -70,6 +106,7 @@ dependencies {
 }
 
 tasks.test {
+    dependsOn(testCefPackaging)
     useJUnitPlatform()
     systemProperty("nop.test.gradleHome", gradle.gradleHomeDir!!.absolutePath)
     maxHeapSize = "512m"
@@ -88,6 +125,11 @@ tasks.test {
     environment("XDG_CONFIG_HOME", layout.buildDirectory.dir("test-config-home").get().asFile.absolutePath)
 }
 
+if (prepareCefRuntime != null) {
+    sourceSets.main { resources.srcDir(cefRuntimeResources) }
+    tasks.named("processResources") { dependsOn(prepareCefRuntime) }
+}
+
 // Native Chromium regression test with an invented virtual sidebar, no Slack sign-in.
 // On headless Linux: xvfb-run -a ./gradlew testSlackSidebar
 // Kept in a separate JVM because CEF owns a process-wide native singleton.
@@ -99,6 +141,18 @@ tasks.register<JavaExec>("testSlackSidebar") {
     mainClass.set("iondrive.nop.browser.SlackSidebarSmoke")
     javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
     args(layout.buildDirectory.dir("slack-sidebar-smoke").get().asFile.absolutePath)
+}
+
+// This test forces CEF's native allocator sampler past the 2/4 GiB boundaries.
+// Keep it in its own JVM so a native abort fails the check without killing Gradle.
+tasks.register<JavaExec>("testCefMemory") {
+    group = "verification"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("iondrive.nop.browser.CefMemorySmoke")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    jvmArgs("-XX:-CreateCoredumpOnCrash")
+    args(layout.buildDirectory.dir("cef-memory-test").get().asFile.absolutePath)
 }
 
 // The version nop reports about itself, read at runtime by iondrive.nop.update.BuildInfo. Taken from

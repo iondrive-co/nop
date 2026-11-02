@@ -74,7 +74,8 @@ public class SlackSidebarSmoke {
             // Own profile and native runtime; never open or copy the user's Slack profile.
             var profile = Files.createTempDirectory(scratch, "profile-");
             var builder = new CefAppBuilder();
-            builder.setInstallDir(scratch.resolve("runtime").toFile());
+            var runtime = scratch.resolve(CefRuntime.INSTANCE.getDirectoryName());
+            builder.setInstallDir(runtime.toFile());
             builder.getCefSettings().windowless_rendering_enabled = false;
             builder.getCefSettings().root_cache_path = profile.toString();
             builder.getCefSettings().cache_path = profile.resolve("Default").toString();
@@ -85,6 +86,9 @@ public class SlackSidebarSmoke {
                     if (state == CefApp.CefAppState.TERMINATED) ended.countDown();
                 }
             });
+            builder.install();
+            CefRuntime.INSTANCE.verify(runtime);
+            builder.setSkipInstallation(true);
             app = builder.build();
             client = app.createClient();
             client.addLoadHandler(new CefLoadHandlerAdapter() {

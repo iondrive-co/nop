@@ -206,7 +206,7 @@ object SlackBrowsers {
         // CEF resolves the root before checking that the profile cache lives below it.
         val profilePath = profile.toRealPath()
         val builder = CefAppBuilder().apply {
-            setInstallDir(root.resolve("runtime-152.0.6").toFile())
+            setInstallDir(root.resolve(CefRuntime.directoryName).toFile())
             setProgressHandler { state, percent ->
                 progress("Preparing browser: ${state.name.lowercase().replace('_', ' ')}" +
                     if (percent >= 0) " (${percent.toInt()}%)" else "")
@@ -230,6 +230,9 @@ object SlackBrowsers {
                 }
             })
         }
+        builder.install()
+        CefRuntime.verify(root.resolve(CefRuntime.directoryName))
+        builder.setSkipInstallation(true)
         builder.build().also {
             runtimeStarted = true
             if (stopping) {
