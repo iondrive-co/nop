@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.InternalComposeUiApi
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerButtons
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -70,7 +71,12 @@ class AgentSummaryViewTest {
 
         fun refresh() {
             val node = nodes().single { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == "Refresh" } == true }
-            val at = node.boundsInRoot.center
+            click(node.boundsInRoot.center)
+        }
+
+        fun clickScrollbar() = click(Offset(896f, 500f))
+
+        private fun click(at: Offset) {
             onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
             settle()
             onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary) }
@@ -79,8 +85,8 @@ class AgentSummaryViewTest {
             settle()
         }
 
-        fun screenshot() {
-            val file = Path.of("build/test-screenshots/agent-summary${if (dark) "-dark" else ""}.png")
+        fun screenshot(suffix: String = "") {
+            val file = Path.of("build/test-screenshots/agent-summary$suffix${if (dark) "-dark" else ""}.png")
             Files.createDirectories(file.parent)
             onEdt {
                 scene.render(time).use { image ->
@@ -95,6 +101,32 @@ class AgentSummaryViewTest {
             var result: Result<T>? = null
             EventQueue.invokeAndWait { result = runCatching(block) }
             return result!!.getOrThrow()
+        }
+    }
+
+    @Test
+    fun `prompt marks leave the scrollbar usable in both themes`() {
+        for (dark in listOf(false, true)) {
+            val state = ConversationSummaryState().apply {
+                snapshot = ConversationSummary((1..30).map { index ->
+                    val user = index % 5 == 1
+                    val incoming = index % 5 == 3
+                    ConversationSummary.Message(
+                        if (user) "You" else if (incoming) "From agent Review" else "Agent",
+                        "Message $index.\n" + "The checks are progressing.\n".repeat(index % 4),
+                        !user && !incoming,
+                        index.toLong(),
+                    )
+                }, 1)
+            }
+            Reader(dir.resolve("unused.jsonl"), state, dark).use { reader ->
+                reader.settle()
+                reader.screenshot("-markers")
+                reader.clickScrollbar()
+                reader.visible = false
+                reader.settle()
+                assertTrue(state.scrollIndex > 0, "marks must not intercept scrollbar clicks")
+            }
         }
     }
 

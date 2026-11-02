@@ -1,34 +1,43 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import iondrive.nop.agent.ConversationSummary
 import iondrive.nop.agent.ConversationSummaryState
 import kotlinx.coroutines.Dispatchers
@@ -112,12 +121,35 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
             }
         }
     }
-    Box(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize().padding(top = 8.dp, bottom = 16.dp)) {
+        val density = LocalDensity.current
+        val lineHeight = with(density) { 20.sp.toPx() }
+        val spacing = with(density) { 20.dp.roundToPx() }
+        val chromeHeight = with(density) { 26.dp.toPx() }
+        val charactersPerLine = with(density) {
+            ((maxWidth - 64.dp).toPx() / (14.sp.toPx() * 0.6f)).toInt().coerceAtLeast(1)
+        }
+        val ranges = remember(snapshot) { snapshot.messages.indices.map { it..it } }
+        val estimates = remember(snapshot, charactersPerLine, lineHeight, spacing, chromeHeight) {
+            DoubleArray(snapshot.messages.size) { index ->
+                val message = snapshot.messages[index]
+                val lines = message.text.lineSequence().sumOf { (it.length - 1).coerceAtLeast(0) / charactersPerLine + 1 }
+                ((lines + 1) * lineHeight + chromeHeight + if (index < snapshot.messages.lastIndex) spacing else 0).toDouble()
+            }
+        }
+        val scrollbar = remember(scroll, ranges, estimates) { DiffScrollbarAdapter(scroll, ranges, lineHeight, estimates) }
+        LaunchedEffect(scrollbar) {
+            snapshotFlow {
+                scroll.layoutInfo.visibleItemsInfo.map {
+                    it.index to it.size + if (it.index < snapshot.messages.lastIndex) spacing else 0
+                }
+            }.collect { scrollbar.updateMeasurements(it) }
+        }
         SelectionContainer {
             LazyColumn(
                 state = scroll,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 16.dp, end = 24.dp, top = 8.dp, bottom = 16.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
                 items(snapshot.messages) { message ->
@@ -148,9 +180,43 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
             }
         }
         VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scroll),
-            modifier = Modifier.align(Alignment.CenterEnd),
+            adapter = scrollbar,
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
             style = NopScrollbarStyle,
         )
+        // As in the live terminal, marks are drawn over the thumb and do not intercept its mouse input.
+        Canvas(Modifier.align(Alignment.CenterEnd).width(8.dp).fillMaxHeight()) {
+            val fill = if (isDark) Color(0xFF5C4813) else Color(0xFFFFDB80)
+            val edge = if (isDark) null else Color(0xFFB29959)
+            val inset = 1.dp.toPx()
+            val markerSize = size.width - 2 * inset
+            for (mark in summaryUserMessageMarks(snapshot.messages, scrollbar.metrics, size.height, scrollbar.viewportSize, markerSize)) {
+                val at = Offset(inset, mark.top)
+                val markSize = Size(markerSize, mark.height)
+                drawRect(fill, at, markSize)
+                if (edge != null) {
+                    val stroke = 1.dp.toPx()
+                    drawRect(edge, at + Offset(stroke / 2, stroke / 2), Size(markSize.width - stroke, markSize.height - stroke), style = Stroke(stroke))
+                }
+            }
+        }
+    }
+}
+
+/** User prompts only; incoming agents and service messages have their own speakers. */
+internal fun summaryUserMessageMarks(
+    messages: List<ConversationSummary.Message>,
+    metrics: DiffScrollMetrics,
+    laneHeight: Float,
+    viewportHeight: Double,
+    markerSize: Float,
+): List<MarkerBar> {
+    if (laneHeight <= 0 || markerSize <= 0 || metrics.contentSize <= viewportHeight) return emptyList()
+    val height = markerSize.coerceAtMost(laneHeight)
+    return messages.mapIndexedNotNull { index, message ->
+        if (message.assistant || message.speaker != "You") return@mapIndexedNotNull null
+        val offset = metrics.itemOffsets.getOrNull(index) ?: return@mapIndexedNotNull null
+        val centre = (offset / metrics.contentSize * laneHeight).toFloat()
+        MarkerBar((centre - height / 2).coerceIn(0f, laneHeight - height), height)
     }
 }

@@ -12,11 +12,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
@@ -61,6 +67,9 @@ import org.commonmark.node.Text
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
+import kotlinx.coroutines.delay
 import org.jetbrains.jewel.ui.component.Text as JewelText
 
 internal data class MdColors(
@@ -213,14 +222,35 @@ private fun ListBlockView(node: ListBlock, ordered: Boolean, colors: MdColors) {
 
 @Composable
 private fun CodeBlockView(content: String, colors: MdColors) {
-    Box(
+    val text = content.removeSuffix("\n")
+    var copied by remember(content) { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1800)
+            copied = false
+        }
+    }
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(colors.codeBg)
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            DisableSelection {
+                JewelText(
+                    text = if (copied) "Copied" else "Copy code",
+                    color = colors.link,
+                    modifier = Modifier.clickable {
+                        runCatching {
+                            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
+                        }.onSuccess { copied = true }
+                    }.padding(horizontal = 4.dp, vertical = 2.dp),
+                )
+            }
+        }
         JewelText(
-            text = content.trimEnd('\n'),
+            text = text,
             fontFamily = NopFonts.Mono,
             fontSize = 12.sp,
             color = colors.fg,

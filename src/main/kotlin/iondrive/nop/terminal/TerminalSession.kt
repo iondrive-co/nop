@@ -169,6 +169,19 @@ class TerminalSession private constructor(
     private var bracketedPaste = false
 
     private var widget: JediTermWidget? = null
+    private val commandCopies = nopPrompts?.let { TerminalCommands() }
+
+    /** Original assistant text, received from the transcript rather than reconstructed from PTY output. */
+    internal fun recordAssistantText(text: String) {
+        recordAssistantTexts(listOf(text))
+    }
+
+    internal fun recordAssistantTexts(texts: Iterable<String>) {
+        val copies = commandCopies ?: return
+        var changed = false
+        texts.forEach { if (copies.addMessage(it)) changed = true }
+        if (changed) SwingUtilities.invokeLater { widget?.repaint() }
+    }
     private var settings: NopTerminalSettings? = null
     @Volatile
     private var process: PtyProcess? = null
@@ -221,6 +234,7 @@ class TerminalSession private constructor(
         // that drawing: a terminal of any other size would wrap it into nonsense before the panel
         // has even been laid out.
         val w = NopTerminalWidget(adopted?.columns ?: INITIAL_COLUMNS, adopted?.rows ?: INITIAL_ROWS, s)
+        commandCopies?.let(w::showCommandCopies)
         // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
         // Must be installed before the process starts writing, or early output misses out: JediTerm
         // only runs the filters over a line as it is written. Through CellStylePreservingLinks so a

@@ -52,11 +52,13 @@ internal class DiffScrollbarAdapter(
     private val listState: LazyListState,
     private val ranges: List<IntRange>,
     private val lineHeightPx: Float,
+    private val estimatedItemHeights: DoubleArray? = null,
 ) : ScrollbarAdapter {
     private val measuredHeights = mutableStateMapOf<Int, Int>()
     val metrics by derivedStateOf {
         DiffScrollMetrics(ranges, DoubleArray(ranges.size) { item ->
-            (measuredHeights[item] ?: (ranges[item].count() * lineHeightPx).roundToInt()).coerceAtLeast(1).toDouble()
+            (measuredHeights[item]?.toDouble() ?: estimatedItemHeights?.get(item)
+                ?: (ranges[item].count() * lineHeightPx).roundToInt().toDouble()).coerceAtLeast(1.0)
         })
     }
 

@@ -1224,6 +1224,13 @@ class AgentSession(
             account, command, terminal, seededFromHandoff, tracker, conversationMissing,
             startedAt = carried?.let { Instant.ofEpochMilli(it.startedAt) } ?: Instant.now(),
         )
+        if (log.hadHistory && (resumeId != null || carried != null)) {
+            kotlin.concurrent.thread(isDaemon = true, name = "agent-command-history") {
+                runCatching { ConversationSummary.read(log.file) }.onSuccess { history ->
+                    terminal.recordAssistantTexts(history.messages.filter { it.assistant }.map { it.text })
+                }
+            }
+        }
         if (!seed.isNullOrBlank()) {
             newRun.userPromptSubmitted = true
         }
@@ -1286,6 +1293,9 @@ class AgentSession(
             onEvent = { event ->
                 if (event !is AgentEvent.SessionTitled) {
                     log.append(event)
+                }
+                if (event is AgentEvent.AssistantMessage) {
+                    event.blocks.filterIsInstance<Block.Text>().forEach { terminal.recordAssistantText(it.text) }
                 }
                 // The CLI names its own session a turn or two in. That name says far more about
                 // which of three open tabs this is than the account does.

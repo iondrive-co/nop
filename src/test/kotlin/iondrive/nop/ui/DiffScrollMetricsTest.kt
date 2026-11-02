@@ -1,10 +1,20 @@
 package iondrive.nop.ui
 
+import androidx.compose.foundation.lazy.LazyListState
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertContentEquals
 
 class DiffScrollMetricsTest {
+    @Test fun `measured message heights replace estimates for both markers and the thumb`() {
+        val scrollbar = DiffScrollbarAdapter(LazyListState(), listOf(0..0, 1..1), 20f, doubleArrayOf(100.0, 600.0))
+        assertEquals(700.0, scrollbar.contentSize)
+        scrollbar.updateMeasurements(listOf(0 to 30, 1 to 240))
+        assertEquals(270.0, scrollbar.contentSize)
+        assertEquals(30.0, scrollbar.metrics.itemOffsets[1])
+        assertEquals(RowLocation(1, 60), scrollbar.metrics.locationAt(90.0))
+    }
+
     @Test fun `markers in a diff that fits stay beside the changed lines`() {
         val metrics = DiffScrollMetrics(listOf(0..19), doubleArrayOf(400.0))
         assertEquals(MarkerBar(200f, 20f), metrics.markerBounds(10, laneHeight = 800f, viewportHeight = 800.0))

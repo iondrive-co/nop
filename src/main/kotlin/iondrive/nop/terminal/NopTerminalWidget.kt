@@ -82,6 +82,10 @@ internal class NopTerminalWidget(
             markMessagesSoon()
         }
 
+    internal fun showCommandCopies(commands: TerminalCommands) {
+        (terminalPanel as NopTerminalPanel).showCommandCopies(commands)
+    }
+
     /** Set while a [markTimer] run is on its way, so a burst of output asks for one. */
     private val marksDue = AtomicBoolean(false)
 
@@ -246,6 +250,37 @@ private class NopTerminalPanel(
     styleState: StyleState,
 ) : TerminalPanel(settings, textBuffer, styleState) {
 
+    private var commandCopies: CommandCopyGutter? = null
+
+    fun showCommandCopies(commands: TerminalCommands) {
+        commandCopies = CommandCopyGutter(this, commands, settings) {
+            CommandCopyGutter.Geometry(myClientScrollOrigin, terminalTextBuffer.height,
+                myCharSize.width, myCharSize.height, insetX, cursorRow())
+        }
+        revalidate()
+        repaint()
+    }
+
+    override fun getInsetX(): Int = super.getInsetX() + if (commandCopies != null) CommandCopyGutter.WIDTH else 0
+
+    override fun processMouseEvent(event: MouseEvent) {
+        if (commandCopies != null && event.x < insetX && event.id in setOf(
+                MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED, MouseEvent.MOUSE_CLICKED)) {
+            event.consume()
+            return
+        }
+        super.processMouseEvent(event)
+    }
+
+    override fun processMouseMotionEvent(event: MouseEvent) {
+        if (commandCopies != null && event.x < insetX) {
+            commandCopies?.clearHover()
+            event.consume()
+            return
+        }
+        super.processMouseMotionEvent(event)
+    }
+
     override fun createCopyPasteHandler(): TerminalCopyPasteHandler =
         NopTerminalCopyPasteHandler()
 
@@ -308,6 +343,7 @@ private class NopTerminalPanel(
         }
         val wrapper = ContrastAdjustingGraphics2D(g2d, settings, fillColor = userMessages?.let { UserRowFill(it)::fill })
         super.paintComponent(wrapper)
+        commandCopies?.paint(g2d)
     }
 
     /**
