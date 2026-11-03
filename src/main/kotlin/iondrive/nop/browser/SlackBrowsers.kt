@@ -43,8 +43,12 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
+import kotlin.math.ln
 
 internal const val SLACK_HOME = "https://app.slack.com/client"
+
+// Chromium's zoom levels use multiplicative steps of 1.2.
+internal val slackZoomLevel = ln(1.5) / ln(1.2)
 
 private val slackLayoutScript: String by lazy {
     checkNotNull(SlackBrowsers::class.java.getResource("/browser/slack-layout.js")).readText()
@@ -391,6 +395,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
         client.addLoadHandler(object : CefLoadHandlerAdapter() {
             override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
                 if (frame.isMain && !browser.isPopup && SlackNavigation.isAppUrl(frame.url)) {
+                    browser.zoomLevel = slackZoomLevel
                     browser.executeJavaScript(slackLayoutScript + "\n" + themeScript(), frame.url, 0)
                 }
             }

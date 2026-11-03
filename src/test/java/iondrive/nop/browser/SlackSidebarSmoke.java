@@ -12,6 +12,7 @@ import org.cef.handler.CefLoadHandlerAdapter;
 
 import javax.swing.JFrame;
 import javax.swing.SwingUtilities;
+import javax.imageio.ImageIO;
 import java.net.InetSocketAddress;
 import java.awt.Robot;
 import java.awt.event.InputEvent;
@@ -99,6 +100,7 @@ public class SlackSidebarSmoke {
                 @Override public void onLoadEnd(CefBrowser browser, CefFrame loadedFrame, int status) {
                     if (!loadedFrame.isMain()) return;
                     var wrapped = loadedFrame.getURL().contains("wrapped=1");
+                    if (wrapped) browser.setZoomLevel(SlackBrowsersKt.getSlackZoomLevel());
                     browser.executeJavaScript((wrapped ? script : "") + "\nwindow.runFixture();", loadedFrame.getURL(), 0);
                 }
             });
@@ -110,6 +112,7 @@ public class SlackSidebarSmoke {
                 frame.setVisible(true);
             });
             // Baseline proves that the fixture works before applying nop's script.
+            double baselineScale = 1;
             for (String test : new String[]{"baseline", "transform", "top"}) {
                 if (!test.equals("baseline")) browser.loadURL(origin + "?mode=" + test + "&wrapped=1");
                 String result = results.poll(45, TimeUnit.SECONDS);
@@ -118,11 +121,25 @@ public class SlackSidebarSmoke {
                 if (!JsonParser.parseString(result).getAsJsonObject().get("passed").getAsBoolean()) {
                     throw new AssertionError("Sidebar regression: " + test);
                 }
+                double scale = Double.parseDouble(evaluate(browser, "window.devicePixelRatio"));
+                if (test.equals("baseline")) baselineScale = scale;
+                else if (Math.abs(scale / baselineScale - 1.5) > .01) throw new AssertionError("Slack text did not enlarge to 150%: " + scale);
+            }
+            var robot = new Robot();
+            evaluate(browser, script + "\ntrue");
+            for (String theme : new String[]{"light", "dark"}) {
+                var appearance = theme.equals("light")
+                    ? "{dark:false,background:'#fafafa',panel:'#f0f0f0',foreground:'#101010',selection:'#dbe7ff'}"
+                    : "{dark:true}";
+                evaluate(browser, "window.__nopSlackLayout.setTheme(" + appearance + "); true");
+                robot.delay(200);
+                var rectangle = new java.awt.Rectangle();
+                SwingUtilities.invokeAndWait(() -> rectangle.setBounds(frame.getBounds()));
+                ImageIO.write(robot.createScreenCapture(rectangle), "png", scratch.resolve("readability-" + theme + ".png").toFile());
             }
             evaluate(browser, "window.fixtureIdentity = crypto.randomUUID(); " +
                 "document.querySelector('.p-view_contents--primary').innerHTML = '<input id=transfer-draft value=Draft style=margin:40px;width:200px;height:40px>'; true");
             var identity = evaluate(browser, "window.fixtureIdentity");
-            var robot = new Robot();
             for (int cycle = 0; cycle < 4; cycle++) {
                 final JFrame destination = cycle % 2 == 0 ? floating : frame;
                 SwingUtilities.invokeAndWait(() -> {
@@ -140,7 +157,9 @@ public class SlackSidebarSmoke {
                     "JSON.stringify((() => {const r = document.querySelector('#transfer-draft').getBoundingClientRect(); return {x:r.x+20,y:r.y+20};})())")).getAsJsonObject();
                 final java.awt.Point point = new java.awt.Point();
                 SwingUtilities.invokeAndWait(() -> point.setLocation(browser.getUIComponent().getLocationOnScreen()));
-                robot.mouseMove(point.x + bounds.get("x").getAsInt(), point.y + bounds.get("y").getAsInt());
+                double zoom = Math.pow(1.2, browser.getZoomLevel());
+                robot.mouseMove(point.x + (int) Math.round(bounds.get("x").getAsDouble() * zoom),
+                    point.y + (int) Math.round(bounds.get("y").getAsDouble() * zoom));
                 robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
                 robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
                 robot.keyPress(KeyEvent.VK_END);

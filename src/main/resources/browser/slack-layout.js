@@ -55,6 +55,18 @@
         ${scope} .p-ia4_channel_list > .p-autoclog__hook:has(> [data-qa="upgrades-kit-upgrade-button"]),
         ${scope} .p-sidebar_text_filter_input_header { display: none !important; }
         ${scope} :is(a, .c-link) { color: var(--nop-accent) !important; }
+        ${scope} .p-channel_sidebar :is(.p-channel_sidebar__channel, .p-channel_sidebar__link,
+            .p-channel_sidebar__name, .p-channel_sidebar__section_heading,
+            .p-channel_sidebar__section_heading_label, .p-channel_sidebar__channel_icon),
+        ${scope} .p-channel_sidebar :is(.p-channel_sidebar__name, .p-channel_sidebar__section_heading_label) * {
+            color: var(--nop-foreground) !important;
+            opacity: 1 !important;
+        }
+        ${scope} :is(.c-timestamp, .c-timestamp__label, .c-message_kit__timestamp, [data-qa="message_timestamp"]),
+        ${scope} :is(.c-timestamp, .c-timestamp__label, .c-message_kit__timestamp, [data-qa="message_timestamp"]) * {
+            color: var(--nop-foreground) !important;
+            opacity: 1 !important;
+        }
         ${scope} .c-button--primary { background: var(--nop-accent) !important; color: white !important; }
         ${scope} :is(.p-view_header, .p-ia4_view_header, .p-message_pane__foreword, .p-workspace__primary_view_footer,
             .p-workspace__primary_view_footer--float) { background-color: var(--nop-background) !important; }

@@ -18,10 +18,20 @@
     .c-virtual_list__item { position: absolute; width: 100%; height: 28px; line-height: 28px; }
     .p-channel_sidebar__section_heading { cursor: pointer; font-weight: bold; }
     .p-channel_sidebar__channel { padding-left: 16px; }
+    .p-channel_sidebar__channel { opacity: .65; }
+    .p-channel_sidebar__link, .p-channel_sidebar__name { color: #aaaaaa; opacity: .5; }
+    .p-channel_sidebar__link--unread { font-weight: 700; }
+    .c-timestamp { color: #d5d5d5; opacity: .45; font-size: 12px; }
+    .c-timestamp__label { color: #111111; opacity: .6; }
+    .c-message_kit__timestamp { color: #cccccc; opacity: .5; font-size: 12px; }
 </style>
 <div class="p-client_workspace_wrapper"><div class="p-client_workspace">
     <div class="p-client_workspace__tabpanel">
-        <div class="p-view_contents--primary">Conversation fixture</div>
+        <div class="p-view_contents--primary">Conversation fixture
+            <a class="c-timestamp" href="#message"><span class="c-timestamp__label">08:37</span></a>
+            <span class="c-message_kit__timestamp"><a data-qa="message_timestamp" href="#reply"><span style="color: black; opacity: .4">08:39</span></a></span>
+            <a id="ordinary-message-link" href="#attachment">Attachment</a>
+        </div>
         <div class="p-view_contents--sidebar"><div class="p-channel_sidebar">
             <div class="p-ia4_home_header">Example workspace</div>
             <div class="c-scrollbar__hider"><div class="c-virtual_list__scroll_container" role="tree"></div></div>
@@ -58,7 +68,15 @@ function render() {
             row.className = 'c-virtual_list__item'; row.dataset.key = item.key;
             const content = document.createElement('div'); content.textContent = item.key;
             if (item.qa) { content.className = 'p-channel_sidebar__section_heading'; content.dataset.qa = item.qa; }
-            if (item.kind === 'channel') content.className = 'p-channel_sidebar__channel';
+            if (item.kind === 'channel') {
+                content.className = 'p-channel_sidebar__channel';
+                content.textContent = '';
+                const link = document.createElement('a');
+                link.className = 'p-channel_sidebar__link'; link.href = '#channel';
+                const name = document.createElement('span');
+                name.className = 'p-channel_sidebar__name'; name.textContent = item.key;
+                link.append(name); content.append(link);
+            }
             if (item.qa === 'channels') content.onclick = () => { expanded = !expanded; updateRows(); };
             row.append(content); list.append(row);
         }
@@ -128,13 +146,51 @@ window.runFixture = async function () {
         check('content updates avoid shell measurements', shellMeasurements === 0);
         check('content updates avoid layout attribute writes', attributeWrites === 0);
 
-        window.__nopSlackLayout.setTheme({dark: false, background: '#fafafa', foreground: '#101010'});
+        function contrast(first, second) {
+            const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(Number)
+                .map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
+                .reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
+            const a = luminance(first), b = luminance(second);
+            return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+        }
+        function checkTimestamps(theme) {
+            const background = getComputedStyle(primaryElement).backgroundColor;
+            const foreground = getComputedStyle(primaryElement).color;
+            const timestamps = [...primaryElement.querySelectorAll('.c-timestamp, .c-timestamp__label, .c-message_kit__timestamp, [data-qa="message_timestamp"], [data-qa="message_timestamp"] span')];
+            check(theme + ' timestamps use readable text color', timestamps.every(element => getComputedStyle(element).color === foreground));
+            check(theme + ' timestamps are fully opaque', timestamps.every(element => getComputedStyle(element).opacity === '1'));
+            check(theme + ' timestamps contrast with conversation', timestamps.every(element =>
+                contrast(getComputedStyle(element).color, background) >= 4.5));
+            check(theme + ' ordinary message links keep accent color', getComputedStyle(primaryElement.querySelector('#ordinary-message-link')).color !== foreground);
+        }
+        function checkChannels(theme) {
+            const channel = sidebarElement.querySelector('.p-channel_sidebar__channel');
+            const link = channel.querySelector('.p-channel_sidebar__link');
+            const name = link.querySelector('.p-channel_sidebar__name');
+            const foreground = getComputedStyle(sidebarElement).color;
+            for (const state of ['', 'p-channel_sidebar__link--unread', 'p-channel_sidebar__link--selected']) {
+                link.className = 'p-channel_sidebar__link ' + state;
+                check(theme + ' channel text stays readable ' + state, getComputedStyle(name).color === foreground &&
+                    [channel, link, name].every(element => getComputedStyle(element).opacity === '1'));
+                const background = state.endsWith('--selected') ? getComputedStyle(link).backgroundColor : getComputedStyle(sidebarElement).backgroundColor;
+                check(theme + ' channel contrast ' + state, contrast(getComputedStyle(name).color, background) >= 4.5);
+                if (state.endsWith('--unread')) check(theme + ' unread channels stay bold', getComputedStyle(name).fontWeight === '700');
+            }
+            link.className = 'p-channel_sidebar__link';
+        }
+        checkTimestamps('initial dark');
+        checkChannels('initial dark');
+        window.__nopSlackLayout.setTheme({dark: false, background: '#fafafa', panel: '#f0f0f0', foreground: '#101010', selection: '#dbe7ff'});
         await settle();
         check('light theme updates without replacing panels', getComputedStyle(primaryElement).backgroundColor === 'rgb(250, 250, 250)' &&
             getComputedStyle(document.documentElement).colorScheme === 'light');
+        checkTimestamps('light');
+        checkChannels('light');
         window.__nopSlackLayout.setTheme({dark: true});
         await settle();
         check('dark theme updates without replacing panels', getComputedStyle(document.documentElement).colorScheme === 'dark');
+        checkTimestamps('restored dark');
+        checkChannels('restored dark');
 
         const message = document.createElement('div');
         message.dataset.qa = 'message_container';
