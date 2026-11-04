@@ -143,7 +143,7 @@ object Indexer {
             val children = dir.listFiles() ?: continue
             for (f in children) {
                 if (f.name in IGNORED_DIR_NAMES) continue
-                if (ProjectWalk.leavesProject(rootFile, f)) continue
+                if (ProjectWalk.skips(rootFile, f)) continue
                 if (f.isDirectory) {
                     if (f.lastModified() > since) return true
                     stack.addLast(f)
@@ -173,7 +173,7 @@ object Indexer {
         val children = dir.listFiles() ?: return
         for (f in children) {
             if (f.name in IGNORED_DIR_NAMES) continue
-            if (ProjectWalk.leavesProject(root, f)) continue
+            if (ProjectWalk.skips(root, f)) continue
             val rel = prefix + f.name
             if (f.isDirectory) {
                 indexDirectory(root, f, out)

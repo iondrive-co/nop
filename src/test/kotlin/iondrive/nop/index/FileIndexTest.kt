@@ -91,6 +91,70 @@ class FileIndexTest {
         assertEquals(listOf("alias/Main.kt", "src/Main.kt"), idx.files)
     }
 
+    /**
+     * A stage directory linking back to the tree that holds it. Followed, the walk goes round until
+     * the kernel gives up at 40 links in a path, listing everything under `var` forty times; on a
+     * tree of a hundred thousand files that is four million paths, and a 2 GB heap full of them.
+     */
+    @Test
+    fun `build does not go round a link back to a directory that holds it`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve("var/dev/job/stage"))
+        Files.writeString(tmp.resolve("var/data.json"), "")
+        Files.createSymbolicLink(tmp.resolve("var/dev/job/stage/var"), tmp.resolve("var"))
+        Files.createSymbolicLink(tmp.resolve("var/dev/job/stage/relative"), Path.of("../../.."))
+
+        assertEquals(listOf("var/data.json"), FileIndex.build(tmp).files)
+    }
+
+    @Test
+    fun `build does not go round a link back to the project root`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve("sub"))
+        Files.writeString(tmp.resolve("sub/kept.txt"), "")
+        Files.createSymbolicLink(tmp.resolve("sub/top"), tmp)
+
+        assertEquals(listOf("sub/kept.txt"), FileIndex.build(tmp).files)
+    }
+
+    /** Neither link points at a directory holding it; the loop only shows on going through both. */
+    @Test
+    fun `build does not go round two links that lead to each other`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve("x"))
+        Files.createDirectories(tmp.resolve("y"))
+        Files.writeString(tmp.resolve("x/f.txt"), "")
+        Files.writeString(tmp.resolve("y/g.txt"), "")
+        Files.createSymbolicLink(tmp.resolve("x/to-y"), tmp.resolve("y"))
+        Files.createSymbolicLink(tmp.resolve("y/to-x"), tmp.resolve("x"))
+
+        assertEquals(
+            listOf("x/f.txt", "x/to-y/g.txt", "y/g.txt", "y/to-x/f.txt"),
+            FileIndex.build(tmp).files,
+        )
+    }
+
+    /** Two links to one directory are not a loop, and neither is a link beside what it names. */
+    @Test
+    fun `build still follows a link to a directory that does not hold it`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve("a"))
+        Files.createDirectories(tmp.resolve("shared"))
+        Files.writeString(tmp.resolve("shared/s.txt"), "")
+        Files.createSymbolicLink(tmp.resolve("a/one"), tmp.resolve("shared"))
+        Files.createSymbolicLink(tmp.resolve("a/two"), tmp.resolve("shared"))
+
+        assertEquals(listOf("a/one/s.txt", "a/two/s.txt", "shared/s.txt"), FileIndex.build(tmp).files)
+    }
+
+    @Test
+    fun `the symbol walk agrees with the file index about a link loop`(@TempDir tmp: Path) {
+        Files.createDirectories(tmp.resolve("var/stage"))
+        Files.writeString(tmp.resolve("var/data.json"), "")
+        Files.createSymbolicLink(tmp.resolve("var/stage/var"), tmp.resolve("var"))
+
+        val walked = mutableListOf<String>()
+        Indexer.build(tmp, files = walked)
+
+        assertEquals(listOf("var/data.json"), walked)
+    }
+
     @Test
     fun `files are listed case-insensitively`() {
         val idx = FileIndex.of(listOf("b.txt", "a/c.txt", "B/d.txt", "A.txt"))

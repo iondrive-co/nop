@@ -268,6 +268,21 @@ class IndexerTest {
         assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
     }
 
+    /**
+     * The probe counts files against the cached list, so it must skip the loop the walk skipped:
+     * counting round it would call every project with a loop stale, and rebuild it on every refresh.
+     */
+    @Test fun `isStale counts the same files as the walk across a link loop`(@TempDir tmp: Path) {
+        val data = tmp.resolve("var/data.json")
+        data.parent.createDirectories(); data.writeText("{}\n")
+        tmp.resolve("var/stage").createDirectories()
+        java.nio.file.Files.createSymbolicLink(tmp.resolve("var/stage/var"), tmp.resolve("var"))
+        val walked = mutableListOf<String>()
+        Indexer.build(tmp, files = walked)
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = walked.size))
+    }
+
     @Test fun `an incremental build keeps an unchanged java file's entries without parsing it`(@TempDir tmp: Path) {
         val a = tmp.resolve("A.java"); a.writeText("class A { void before() {} }")
         a.toFile().setLastModified(past)
