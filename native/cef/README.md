@@ -36,7 +36,7 @@ The runtime cache directory includes the patch revision and library hash, and
 nop verifies the extracted library before loading JNI. Browser profiles remain
 in their existing separate location.
 
-Run `xvfb-run -a ./gradlew testCefMemory testSlackSidebar` on Linux. The memory
+Run `xvfb-run -a ./gradlew testCefMemory testCefShutdown testSlackSidebar` on Linux. The memory
 regression allocates 2.5 GiB and 4.5 GiB through native malloc in an isolated JVM,
 forces detailed CEF memory dumps, verifies that malloc virtual-size counters
 are absent, and checks that other providers run in multiple browser processes.

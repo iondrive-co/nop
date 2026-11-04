@@ -155,6 +155,18 @@ tasks.register<JavaExec>("testCefMemory") {
     args(layout.buildDirectory.dir("cef-memory-test").get().asFile.absolutePath)
 }
 
+// Closing the browsers at a quit, and being replaced by an exec at a restart, both against real CEF.
+// Each case gets its own JVM, so a native crash fails that case and not Gradle.
+tasks.register<JavaExec>("testCefShutdown") {
+    group = "verification"
+    description = "Check that embedded Chromium survives nop quitting and restarting in place"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("iondrive.nop.browser.CefShutdownSmoke")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    args(layout.buildDirectory.dir("cef-shutdown-test").get().asFile.absolutePath)
+}
+
 // The version nop reports about itself, read at runtime by iondrive.nop.update.BuildInfo. Taken from
 // packageVersion below (which scripts/release.sh bumps) so there is one place the version lives; the
 // self-updater compares it with the latest release, and a build that cannot say what it is would be

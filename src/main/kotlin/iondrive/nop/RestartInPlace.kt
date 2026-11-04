@@ -5,6 +5,7 @@ import iondrive.nop.agent.AgentMessages
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.handoverTarget
 import iondrive.nop.agent.resumesAfterReset
+import iondrive.nop.browser.SlackBrowsers
 import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.terminal.Posix
@@ -52,6 +53,7 @@ object RestartInPlace {
             pending = Pending(launcher, Handover.Outgoing())
             return
         }
+        SlackBrowsers.leaveForExec()
         for ((root, _, sessions) in AgentSessionStore.byRoot()) {
             // The rows are what puts back the tabs that are not running, and the order of all of them.
             // Normally saved as they change, on a coroutine; written here as well so a change from the

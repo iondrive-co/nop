@@ -52,7 +52,7 @@ jobs:
       - name: Verify corrected native Chromium
         if: runner.os == 'Linux'
         shell: bash
-        run: xvfb-run -a ./gradlew testCefPackaging testCefMemory testSlackSidebar --no-daemon
+        run: xvfb-run -a ./gradlew testCefPackaging testCefMemory testCefShutdown testSlackSidebar --no-daemon
 
       - name: Build installer (${{ matrix.task }})
         shell: bash
