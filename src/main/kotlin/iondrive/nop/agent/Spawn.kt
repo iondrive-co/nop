@@ -29,9 +29,10 @@ data class AgentCommand(
  * login — which is why `SpawnTest` checks the environment against a recorded capture rather than
  * against its own idea of what it should be.
  *
- * Both YOLO flags are unconditional. This is a launcher for agents that are trusted to edit the
- * project they were opened on; a permission prompt the user cannot see the reason for, inside a
- * TUI nop does not parse, is worse than no prompt at all.
+ * No CLI asks before it acts. This is a launcher for agents that are trusted to edit the project
+ * they were opened on; a permission prompt the user cannot see the reason for, inside a TUI nop
+ * does not parse, is worse than no prompt at all. The one question let through is an MCP server's
+ * own, in Codex — see [CODEX_APPROVAL_POLICY].
  */
 object Spawn {
 
@@ -151,7 +152,14 @@ object Spawn {
     ): AgentCommand {
         val argv = mutableListOf(
             CliTools.resolve(Provider.OpenAI),
-            "--dangerously-bypass-approvals-and-sandbox",
+            "--sandbox",
+            "danger-full-access",
+            "-c",
+            CODEX_APPROVAL_POLICY,
+            // The questions that policy lets through go to the person at the keyboard, not to
+            // Codex's automatic reviewer, whatever the account's config.toml says.
+            "-c",
+            "approvals_reviewer=\"user\"",
             // Keep the conversation in terminal scrollback so nop can scroll and mark prompts.
             "--no-alt-screen",
             "-C",
@@ -163,7 +171,7 @@ object Spawn {
         // A developer message is Codex's one per-run way in for extra instructions. It replaces any
         // `developer_instructions` in the account's own config.toml for runs nop starts.
         argv += listOf("-c", "developer_instructions=${tomlString(SharedMemory.instructions(projectDir.toPath()))}")
-        argv += McpServers.codexOverrides(mcp.servers)
+        argv += McpServers.codexOverrides(mcp.servers, mcp.codexConfigured)
 
         // `resume` is a subcommand, so it follows the options rather than joining them.
         if (resumeId != null) argv += listOf("resume", resumeId)
@@ -171,6 +179,22 @@ object Spawn {
 
         return AgentCommand(argv, mapOf("HOME" to account.home), resumeId, isResume = resumeId != null)
     }
+
+    /**
+     * Codex's approval policy for the runs nop starts. With no sandbox, every category that could
+     * stop a shell command is rejected rather than asked about, so commands run without a word, as
+     * they did under `--dangerously-bypass-approvals-and-sandbox`. Only `mcp_elicitations` reaches
+     * the user: an MCP server's own form, drawn inline. Accepting it resumes the tool call that
+     * asked; declining or Esc leaves whatever it guards closed.
+     *
+     * The bypass flag answered those forms itself, `decline` without showing them, so a server that
+     * asks before it opens access could never be told yes. The same category also carries Codex's
+     * own "Allow the … MCP server to run tool …?" before every call to a tool not marked read-only,
+     * which nop turns off per server — see [McpServers.codexOverrides].
+     */
+    internal const val CODEX_APPROVAL_POLICY =
+        "approval_policy={granular={sandbox_approval=false,rules=false,mcp_elicitations=true," +
+            "request_permissions=false,skill_approval=false}}"
 
     /**
      * [text] as a TOML basic string, which is how `-c` reads a value: anything that doesn't parse as

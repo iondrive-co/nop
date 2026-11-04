@@ -12,8 +12,10 @@
     }
     .p-view_contents--primary { grid-area: p-view_contents--primary; }
     .p-view_contents--sidebar { grid-area: p-view_contents--sidebar; overflow: hidden; }
-    .p-ia4_home_header { height: 40px; }
-    .c-scrollbar__hider { height: 336px; overflow: auto; }
+    /* As in Slack, the list fills whatever height its column leaves it. */
+    .p-channel_sidebar { height: 100%; display: flex; flex-direction: column; }
+    .p-ia4_home_header { height: 40px; flex: none; }
+    .c-scrollbar__hider { flex: 1; min-height: 0; overflow: auto; }
     .c-virtual_list__scroll_container { position: relative; }
     .c-virtual_list__item { position: absolute; width: 100%; height: 28px; line-height: 28px; }
     .p-channel_sidebar__section_heading { cursor: pointer; font-weight: bold; }
@@ -24,6 +26,18 @@
     .c-timestamp { color: #d5d5d5; opacity: .45; font-size: 12px; }
     .c-timestamp__label { color: #111111; opacity: .6; }
     .c-message_kit__timestamp { color: #cccccc; opacity: .5; font-size: 12px; }
+    :root { --sk_primary_background: 255, 255, 255; --sk_foreground_low: 29, 28, 29;
+        --sk_foreground_max_solid: 97, 96, 97; --sk_foreground_min_solid: 248, 248, 248; }
+    .c-message_kit__actions .c-message__actions.c-message_actions__container { display: inline-flex; }
+    .c-message_actions__group { background: rgba(var(--sk_primary_background, 255, 255, 255), 1); border-radius: 12px;
+        box-shadow: 0 0 0 1px rgba(var(--sk_foreground_low, 29, 28, 29), .13), 0 1px 3px 0 #00000014;
+        margin-left: 8px; padding: 4px; display: flex; }
+    .c-message_actions__button { color: rgba(var(--sk_foreground_max_solid, 97, 96, 97), 1); border: 0;
+        background: none; border-radius: 8px; height: 32px; font-size: 18px; }
+    .p-control_strip { z-index: 1000; flex-direction: column; justify-content: end; align-items: center; row-gap: 16px;
+        width: 70px; padding: 0 0 24px; display: flex; position: fixed; bottom: 0; left: 0; }
+    .p-control_strip__circle_button { border: 0; border-radius: 18px; width: 36px; height: 36px; }
+    .p-ia__nav__user__avatar { display: block; width: 36px; height: 36px; border-radius: 8px; background: #b0703a; }
 </style>
 <div class="p-client_workspace_wrapper"><div class="p-client_workspace">
     <div class="p-client_workspace__tabpanel">
@@ -36,6 +50,11 @@
             <div class="p-ia4_home_header">Example workspace</div>
             <div class="c-scrollbar__hider"><div class="c-virtual_list__scroll_container" role="tree"></div></div>
         </div></div>
+    </div>
+    <div class="p-control_strip" role="toolbar" aria-label="Control strip">
+        <button class="p-control_strip__circle_button" aria-label="Create new">+</button>
+        <div class="p-ia__nav__user"><button class="p-ia__nav__user__button" data-qa="user-button" aria-label="User menu"
+            style="border: 0; padding: 0; background: none"><span class="p-ia__nav__user__avatar"></span></button></div>
     </div>
 </div></div>
 <script>
@@ -146,8 +165,18 @@ window.runFixture = async function () {
         check('content updates avoid shell measurements', shellMeasurements === 0);
         check('content updates avoid layout attribute writes', attributeWrites === 0);
 
+        // Computed colours can be rgb() or, from color-mix(), color(srgb ...); a canvas gives both as bytes.
+        const swatch = document.createElement('canvas').getContext('2d', {willReadFrequently: true});
+        function bytes(color) {
+            swatch.clearRect(0, 0, 1, 1);
+            swatch.fillStyle = '#000';
+            swatch.fillStyle = color;
+            swatch.fillRect(0, 0, 1, 1);
+            return [...swatch.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+        }
+        const firstShadowColor = shadow => shadow.match(/^(rgba?\([^)]*\)|color\([^)]*\))/)?.[1] || 'transparent';
         function contrast(first, second) {
-            const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(Number)
+            const luminance = color => bytes(color)
                 .map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
                 .reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
             const a = luminance(first), b = luminance(second);
@@ -178,23 +207,64 @@ window.runFixture = async function () {
             }
             link.className = 'p-channel_sidebar__link';
         }
+        function checkToolbar(theme) {
+            const sample = document.createElement('div');
+            sample.className = 'c-message_kit__actions';
+            sample.innerHTML = '<div class="c-message__actions c-message_actions__container"><div class="c-message_actions__group">' +
+                '<button class="c-message_actions__button" aria-label="Add reaction">&#9786;</button>' +
+                '<button class="c-message_actions__button" aria-label="More actions">&#8942;</button></div></div>';
+            primaryElement.append(sample);
+            const conversation = getComputedStyle(primaryElement).backgroundColor;
+            const group = getComputedStyle(sample.querySelector('.c-message_actions__group'));
+            const icon = getComputedStyle(sample.querySelector('.c-message_actions__button')).color;
+            measurements['toolbar ' + theme] = {conversation, background: group.backgroundColor, icon, shadow: group.boxShadow};
+            check(theme + ' toolbar icons contrast with toolbar', contrast(icon, group.backgroundColor) >= 4.5);
+            check(theme + ' toolbar edge stands out from conversation', contrast(firstShadowColor(group.boxShadow), conversation) >= 2.5);
+            sample.remove();
+        }
+        function checkStrip(theme) {
+            const strip = document.querySelector('.p-control_strip');
+            const rect = strip.getBoundingClientRect();
+            const user = document.querySelector('[data-qa="user-button"]').getBoundingClientRect();
+            const conversation = primaryElement.getBoundingClientRect();
+            const sidebarRect = sidebarElement.getBoundingClientRect();
+            const listBottom = sidebarRect.bottom - parseFloat(getComputedStyle(sidebarElement).paddingBottom);
+            measurements['strip ' + theme] = {strip: rect.toJSON(), user: user.toJSON(), conversationRight: conversation.right, listBottom};
+            check(theme + ' control strip stays out of the conversation', rect.left >= conversation.right - 1);
+            check(theme + ' control strip fits the window', rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1 && rect.top >= 0);
+            check(theme + ' channel list ends above the control strip', listBottom <= rect.top + 1);
+            const hit = document.elementFromPoint(user.left + user.width / 2, user.top + user.height / 2);
+            check(theme + ' profile button receives clicks', !!hit?.closest('[data-qa="user-button"]'));
+            const create = getComputedStyle(strip.querySelector('.p-control_strip__circle_button'));
+            check(theme + ' strip buttons are readable', contrast(create.color, create.backgroundColor) >= 4.5);
+        }
         checkTimestamps('initial dark');
         checkChannels('initial dark');
+        checkToolbar('initial dark');
+        checkStrip('initial dark');
         window.__nopSlackLayout.setTheme({dark: false, background: '#fafafa', panel: '#f0f0f0', foreground: '#101010', selection: '#dbe7ff'});
         await settle();
         check('light theme updates without replacing panels', getComputedStyle(primaryElement).backgroundColor === 'rgb(250, 250, 250)' &&
             getComputedStyle(document.documentElement).colorScheme === 'light');
         checkTimestamps('light');
         checkChannels('light');
+        checkToolbar('light');
+        checkStrip('light');
+        // nop's light panel and background can be the same colour.
+        window.__nopSlackLayout.setTheme({dark: false, background: '#f7f8fa', panel: '#f7f8fa', foreground: '#000000',
+            muted: '#818594', border: '#ebecf0'});
+        await settle();
+        checkToolbar('light flat');
         window.__nopSlackLayout.setTheme({dark: true});
         await settle();
         check('dark theme updates without replacing panels', getComputedStyle(document.documentElement).colorScheme === 'dark');
         checkTimestamps('restored dark');
         checkChannels('restored dark');
+        checkToolbar('restored dark');
 
         const message = document.createElement('div');
         message.dataset.qa = 'message_container';
-        message.innerHTML = '<div class="c-message_kit__message"><span>Example message</span></div><div class="p-control_strip"><button data-qa="message-actions-menu" aria-label="More actions">More actions</button></div><a href="#example">Attachment</a><div contenteditable="true">Draft</div>';
+        message.innerHTML = '<div class="c-message_kit__message"><span>Example message</span></div><div class="c-message_kit__actions"><div class="c-message__actions c-message_actions__container"><div class="c-message_actions__group"><button class="c-message_actions__button" data-qa="message-actions-menu" aria-label="More actions">More actions</button></div></div></div><a href="#example">Attachment</a><div contenteditable="true">Draft</div>';
         primaryElement.append(message);
         let menuOpened = 0;
         const more = message.querySelector('button');

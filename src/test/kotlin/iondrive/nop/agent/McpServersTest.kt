@@ -99,11 +99,92 @@ class McpServersTest {
 
         assertEquals(
             listOf(
-                "-c", """mcp_servers.tracker={command="/opt/x", args=["-v"], env={"K"="v\"q"}}""",
-                "-c", """mcp_servers.api={url="https://api.example/mcp", http_headers={"A"="b"}}""",
+                "-c", """mcp_servers.tracker={command="/opt/x", args=["-v"], env={"K"="v\"q"}, default_tools_approval_mode="approve"}""",
+                "-c", """mcp_servers.api={url="https://api.example/mcp", http_headers={"A"="b"}, default_tools_approval_mode="approve"}""",
             ),
             McpServers.codexOverrides(servers),
         )
+    }
+
+    /**
+     * The policy that lets a server's own form reach the user would also put Codex's "Allow the …
+     * MCP server to run tool …?" in front of every call, so each server, nop's or the account's,
+     * runs its tools without that.
+     */
+    @Test
+    fun `codex runs the account's own servers without asking first, and names no other`() {
+        val servers = mapOf("tracker" to obj("""{"command":"/opt/x"}"""))
+
+        assertEquals(
+            listOf(
+                "-c", """mcp_servers.tracker={command="/opt/x", default_tools_approval_mode="approve"}""",
+                "-c", """mcp_servers.ledger.default_tools_approval_mode="approve"""",
+            ),
+            McpServers.codexOverrides(servers, configured = setOf("ledger", "tracker")),
+        )
+    }
+
+    /**
+     * An override for a server Codex has not loaded is a table with no transport, and the CLI will
+     * not start on it — so only names the file really defines, and not one that picks its own mode.
+     */
+    @Test
+    fun `the servers in a codex config are read from every form a server can take`() {
+        val Q = "\"\"\""
+        val toml = """
+            model = "m"
+            notes = $Q
+            [mcp_servers.quoted_in_a_string]
+            mcp_servers.also_in_a_string.command = "x"
+            $Q
+            mcp_servers.dotted.command = "/opt/dotted"
+            mcp_servers.inline = { command = "/opt/inline" }
+            mcp_servers.inline_picky = { command = "/opt/p", default_tools_approval_mode = "auto" }
+
+            [projects."/home/dev/mcp_servers.x"]
+            trust_level = "trusted"
+
+            # [mcp_servers.commented]
+            [mcp_servers.ledger]
+            command = "/opt/ledger"
+            args = [
+              "--mode=fast",
+            ]
+
+            [mcp_servers.ledger.env]
+            LEDGER_DIR = "/srv/ledger"
+
+            [mcp_servers."quoted"]
+            url = "https://quoted.example/mcp"
+
+            [mcp_servers."has space"]
+            command = "/opt/space"
+
+            [mcp_servers.picky]
+            command = "/opt/picky"
+            default_tools_approval_mode = "prompt"
+
+            [notice]
+            fast_default_opt_out = true
+        """.trimIndent()
+
+        assertEquals(setOf("dotted", "inline", "ledger", "quoted"), McpServers.codexConfigured(toml))
+    }
+
+    @Test
+    fun `servers kept as keys of one mcp_servers table are found too`() {
+        val toml = """
+            [mcp_servers]
+            ledger = { command = "/opt/ledger", env = { LEDGER_DIR = "/srv/ledger" } }
+            picky = { url = "https://picky.example/mcp", default_tools_approval_mode = "prompt" }
+        """.trimIndent()
+
+        assertEquals(setOf("ledger"), McpServers.codexConfigured(toml))
+    }
+
+    @Test
+    fun `an account with no codex config has no servers of its own`(@TempDir home: Path) {
+        assertEquals(emptySet<String>(), McpServers.codexConfigured(home.resolve(".codex/config.toml")))
     }
 
     @Test

@@ -130,11 +130,29 @@ class SpawnTest {
         assertEquals("21000", command.env["MAX_THINKING_TOKENS"])
     }
 
+    /**
+     * The bypass flag answered every MCP server's own form itself, declining it unseen, so a server
+     * that asks before it opens access could never be told yes. What replaces it has to keep shell
+     * commands running without a question while letting exactly that one kind through.
+     */
     @Test
-    fun `a codex run bypasses approvals and is pointed at the project`() {
+    fun `a codex run asks nothing about commands but lets an MCP server's form through to the user`() {
         val command = Spawn.command(codex(), projectDir)
 
-        assertTrue("--dangerously-bypass-approvals-and-sandbox" in command.argv)
+        assertFalse("--dangerously-bypass-approvals-and-sandbox" in command.argv)
+        assertEquals("danger-full-access", command.argv.after("--sandbox"))
+        val policy = command.argv.configs().single { it.startsWith("approval_policy=") }
+        for (rejected in listOf("sandbox_approval", "rules", "request_permissions", "skill_approval")) {
+            assertTrue("$rejected=false" in policy, "$rejected must be rejected, not asked: $policy")
+        }
+        assertTrue("mcp_elicitations=true" in policy, policy)
+        assertTrue("approvals_reviewer=\"user\"" in command.argv.configs())
+    }
+
+    @Test
+    fun `a codex run is pointed at the project`() {
+        val command = Spawn.command(codex(), projectDir)
+
         assertTrue("--no-alt-screen" in command.argv)
         assertEquals(projectDir.absolutePath, command.argv.after("-C"))
         // Codex names its own session, so there is nothing to know until it writes its first line.
@@ -146,7 +164,7 @@ class SpawnTest {
         val command = Spawn.command(codex(model = "gpt-5.5-codex", reasoning = "high"), projectDir)
 
         assertEquals("gpt-5.5-codex", command.argv.after("-m"))
-        assertEquals("model_reasoning_effort=\"high\"", command.argv.after("-c"))
+        assertTrue("model_reasoning_effort=\"high\"" in command.argv.configs(), "${command.argv}")
     }
 
     @Test
@@ -321,4 +339,8 @@ class SpawnTest {
     /** The value following [flag], or null when the flag isn't there. */
     private fun List<String>.after(flag: String): String? =
         indexOf(flag).takeIf { it >= 0 && it + 1 < size }?.let { this[it + 1] }
+
+    /** Every `-c` override, in order. */
+    private fun List<String>.configs(): List<String> =
+        indices.filter { this[it] == "-c" && it + 1 < size }.map { this[it + 1] }
 }

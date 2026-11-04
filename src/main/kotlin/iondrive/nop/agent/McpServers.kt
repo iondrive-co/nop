@@ -42,8 +42,15 @@ object McpServers {
 
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
-    /** What a run needs: the servers, and for Claude the file they were written to. */
-    data class Launch(val servers: Map<String, JsonObject>, val claudeConfig: Path? = null) {
+    /**
+     * What a run needs: the servers, for Claude the file they were written to, and for Codex the
+     * servers its account's own config.toml already has (see [codexConfigured]).
+     */
+    data class Launch(
+        val servers: Map<String, JsonObject>,
+        val claudeConfig: Path? = null,
+        val codexConfigured: Set<String> = emptySet(),
+    ) {
         companion object {
             val NONE = Launch(emptyMap())
         }
@@ -81,7 +88,7 @@ object McpServers {
             .getOrDefault(emptyMap())
         return when (account.provider) {
             Provider.Anthropic -> Launch(servers, if (servers.isEmpty()) null else writeClaudeConfig(projectDir, servers))
-            Provider.OpenAI -> Launch(servers)
+            Provider.OpenAI -> Launch(servers, codexConfigured = codexConfigured(codexConfig(account.homePath)))
             Provider.Antigravity -> {
                 installForAntigravity(account.homePath, servers)
                 Launch.NONE
@@ -104,8 +111,15 @@ object McpServers {
     /**
      * `-c` overrides that give a `codex` run [servers]. A server it cannot express — SSE, which the
      * CLI does not speak, or a name that isn't a bare TOML key — is left out rather than guessed at.
+     *
+     * Every server, these and the [configured] ones the account's config.toml already has, runs its
+     * tools without Codex asking first. [Spawn.CODEX_APPROVAL_POLICY] lets MCP questions through to
+     * the user so that a server's own form can reach them; the same category would otherwise put
+     * Codex's "Allow the … MCP server to run tool …?" in front of every call to a tool not marked
+     * read-only, and a tab would stop at each one.
      */
-    internal fun codexOverrides(servers: Map<String, JsonObject>): List<String> = buildList {
+    internal fun codexOverrides(servers: Map<String, JsonObject>, configured: Set<String> = emptySet()): List<String> = buildList {
+        val given = mutableSetOf<String>()
         for ((name, server) in servers) {
             val fields = if (BARE_KEY.matches(name)) toCodex(name, server) else {
                 Log.info("mcp server '$name' left out of codex: not a bare TOML key")
@@ -113,10 +127,83 @@ object McpServers {
             }
             if (fields != null) {
                 add("-c")
-                add("mcp_servers.$name={${fields.joinToString(", ")}}")
+                add("mcp_servers.$name={${(fields + CODEX_RUN_WITHOUT_ASKING).joinToString(", ")}}")
+                given += name
             }
         }
+        for (name in configured - given) {
+            add("-c")
+            add("mcp_servers.$name.$CODEX_RUN_WITHOUT_ASKING")
+        }
     }
+
+    private const val CODEX_RUN_WITHOUT_ASKING = "default_tools_approval_mode=\"approve\""
+
+    private fun codexConfig(home: Path): Path = home.resolve(".codex").resolve("config.toml")
+
+    /** [codexConfigured] of the file at [config], or none when it cannot be read. */
+    internal fun codexConfigured(config: Path): Set<String> = runCatching {
+        if (Files.isRegularFile(config)) codexConfigured(Files.readString(config)) else emptySet()
+    }.onFailure { Log.warn("could not read the MCP servers in $config: $it") }.getOrDefault(emptySet())
+
+    /**
+     * The MCP servers a Codex config.toml defines that leave Codex to decide whether to ask before
+     * their tools run. A server that chooses its own `default_tools_approval_mode` keeps it.
+     *
+     * Read only from the account's own config.toml, the one layer Codex always loads. An override
+     * naming a server Codex has not loaded is a table with no transport, and the CLI refuses to start
+     * on it ("invalid transport in `mcp_servers.<name>`"), so a name is only given when it is certain:
+     * a project's `.codex/config.toml` is loaded or not by Codex's own rules on trust, and is left out.
+     *
+     * Not a TOML parser: it reads `[mcp_servers.<name>…]` headers, `<name> = {…}` under `[mcp_servers]`,
+     * and dotted `mcp_servers.<name>.…` keys, skipping comments and multi-line strings.
+     */
+    internal fun codexConfigured(toml: String): Set<String> {
+        val choosesOwn = LinkedHashMap<String, Boolean>()
+        var table: List<String>? = emptyList()
+        var openString: String? = null
+        for (raw in toml.lines()) {
+            val line = raw.trim()
+            if (openString != null) {
+                if (line.split(openString).size % 2 == 0) openString = null
+                continue
+            }
+            if (line.isEmpty() || line.startsWith("#")) continue
+            if (line.startsWith("[")) {
+                table = TOML_HEADER.matchEntire(line)?.let { keyPath(it.groupValues[1]) }
+                if (table != null && table.size >= 2 && table[0] == "mcp_servers") choosesOwn.putIfAbsent(table[1], false)
+                continue
+            }
+            val pair = TOML_PAIR.matchEntire(line) ?: continue
+            val value = pair.groupValues[2]
+            openString = listOf("\"\"\"", "'''").firstOrNull { value.split(it).size % 2 == 0 }
+            val path = (table ?: continue) + (keyPath(pair.groupValues[1]) ?: continue)
+            if (path.size < 2 || path[0] != "mcp_servers") continue
+            val name = path[1]
+            val own = (path.size == 3 && path[2] == "default_tools_approval_mode") ||
+                (path.size == 2 && "default_tools_approval_mode" in value)
+            choosesOwn[name] = (choosesOwn[name] ?: false) || own
+        }
+        return choosesOwn.filter { (name, own) -> !own && BARE_KEY.matches(name) }.keys
+    }
+
+    /** A header's key path, `mcp_servers."x".env` as `[mcp_servers, x, env]`; null if it can't be read. */
+    private fun keyPath(text: String): List<String>? {
+        val parts = TOML_KEY_PART.findAll(text).toList()
+        if (parts.isEmpty() || parts.joinToString("") { it.value }.trim() != text.trim()) return null
+        return parts.map { part ->
+            part.groups[1]?.value ?: part.groups[2]?.value ?: part.groups[3]?.value ?: return null
+        }
+    }
+
+    /** `[table]` or `[[array.of.tables]]`, with an optional trailing comment. */
+    private val TOML_HEADER = Regex("""\[\[?\s*([^\[\]]+?)\s*]]?\s*(?:#.*)?""")
+
+    /** `key = value`, where the key may be dotted and quoted. */
+    private val TOML_PAIR = Regex("""((?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*')(?:\s*\.\s*(?:[A-Za-z0-9_-]+|"[^"]*"|'[^']*'))*)\s*=\s*(.*)""")
+
+    /** One part of a dotted key, with the dot and space before it. */
+    private val TOML_KEY_PART = Regex("""\s*\.?\s*(?:([A-Za-z0-9_-]+)|"([^"]*)"|'([^']*)')\s*""")
 
     /** Claude's server as the fields of a Codex `mcp_servers` inline table. */
     private fun toCodex(name: String, server: JsonObject): List<String>? = when (transport(server)) {

@@ -77,6 +77,46 @@
             border-color: var(--nop-border) !important;
         }
         ${scope} .c-menu_item__button:hover { background: var(--nop-hover) !important; }
+        /* Slack paints the hover toolbar in the conversation's own background with a 13% outline,
+           so it needs a raised surface and a visible edge to stand apart from the message under it. */
+        ${scope} .c-message_actions__group {
+            background: var(--nop-raised) !important;
+            box-shadow: 0 0 0 1px var(--nop-outline), 0 2px 8px var(--nop-shadow) !important;
+        }
+        ${scope} .c-message_actions__button { color: var(--nop-foreground) !important; }
+        ${scope} .c-message_actions__button:is(:hover, :focus-visible) {
+            background: var(--nop-raised-hover) !important;
+            color: var(--nop-foreground) !important;
+        }
+        /* Slack fixes its control strip (create, focus mode and the avatar that opens status, profile
+           and preferences) to the bottom of the rail this layout hides, where it would sit on the
+           composer. Dock it below the channel list, which gives up that much of its height. */
+        ${scope} { --nop-strip-height: 64px; }
+        ${scope} .p-view_contents--sidebar {
+            box-sizing: border-box !important;
+            padding-bottom: var(--nop-strip-height) !important;
+        }
+        ${scope} .p-control_strip {
+            left: auto !important;
+            right: 0 !important;
+            top: auto !important;
+            width: min(var(--nop-channel-width, 216px), 45vw) !important;
+            height: var(--nop-strip-height) !important;
+            box-sizing: border-box !important;
+            flex-direction: row-reverse !important;
+            justify-content: flex-end !important;
+            align-items: flex-end !important;
+            gap: 10px !important;
+            padding: 0 12px 12px !important;
+            opacity: 1 !important;
+        }
+        ${scope} .p-control_strip:not([class*="huddles_bottom_bar_visible"]) { bottom: 0 !important; }
+        ${scope} .p-control_strip__circle_button {
+            background: var(--nop-raised) !important;
+            color: var(--nop-foreground) !important;
+            box-shadow: 0 0 0 1px var(--nop-outline) !important;
+        }
+        ${scope} .p-control_strip__circle_button:hover { background: var(--nop-raised-hover) !important; }
     `;
 
     const defaults = { dark: true, background: "#1e1f22", panel: "#2b2d30", foreground: "#dfe1e5", muted: "#9da0a8",
@@ -106,6 +146,13 @@
             root.style.setProperty(`--nop-${key}-rgb`, rgb(color));
         }
         root.style.setProperty("--nop-color-scheme", appearance.dark ? "dark" : "light");
+        // Floating controls need a surface of their own: nop's panel colour often equals its background.
+        root.style.setProperty("--nop-raised", appearance.dark
+            ? "color-mix(in srgb, var(--nop-foreground) 10%, var(--nop-background))"
+            : "color-mix(in srgb, #ffffff 80%, var(--nop-background))");
+        root.style.setProperty("--nop-raised-hover", "color-mix(in srgb, var(--nop-foreground) 14%, var(--nop-raised))");
+        root.style.setProperty("--nop-outline", "color-mix(in srgb, var(--nop-foreground) 40%, var(--nop-background))");
+        root.style.setProperty("--nop-shadow", appearance.dark ? "rgba(0, 0, 0, .55)" : "rgba(0, 0, 0, .16)");
     }
 
     function themeTokens(sidebar) {
@@ -126,7 +173,12 @@
             } else if (name === "--sk_primary_background") value = "var(--nop-background-rgb)";
             else if (name === "--sk_primary_foreground") value = "var(--nop-foreground-rgb)";
             else if (name === "--sk_secondary_foreground") value = "var(--nop-muted-rgb)";
-            else if (/^--sk_foreground_/.test(name)) value = name.endsWith("_solid") ? "var(--nop-border-rgb)" : "var(--nop-foreground-rgb)";
+            // The solid steps are opaque greys by strength: max and high colour icons and secondary
+            // text, mid and low draw rules, min and soft fill quiet surfaces.
+            else if (/^--sk_foreground_(max|high)_solid$/.test(name)) value = "var(--nop-muted-rgb)";
+            else if (/^--sk_foreground_(min|soft)_solid$/.test(name)) value = "var(--nop-hover-rgb)";
+            else if (/^--sk_foreground_\w+_solid$/.test(name)) value = "var(--nop-border-rgb)";
+            else if (/^--sk_foreground_/.test(name)) value = "var(--nop-foreground-rgb)";
             else if (/^--sk_(highlight|brand_foreground|focused)/.test(name)) value = "var(--nop-accent-rgb)";
             else if (name === "--p-team_sidebar__nav-bg") value = "var(--nop-panel)";
             else if (name.startsWith("--p-team_sidebar__text-color")) value = "var(--nop-foreground)";
@@ -184,6 +236,12 @@
         for (const element of ancestors) if (element) observer.observe(element, { childList: true });
     }
 
+    // The control strip is not inside the panel, so the shared root carries the width for it too.
+    function showChannelWidth() {
+        panel.style.setProperty("--nop-channel-width", `${channelWidth}px`);
+        document.documentElement.style.setProperty("--nop-channel-width", `${channelWidth}px`);
+    }
+
     function clear() {
         panel?.removeAttribute("data-nop-channels-right");
         document.documentElement.removeAttribute("data-nop-slack-layout");
@@ -215,7 +273,7 @@
                 const saved = Number(localStorage.getItem(storageKey()));
                 channelWidth = saved >= 120 && saved <= 600 ? saved : sidebar.getBoundingClientRect().width || 216;
             } catch (_) { channelWidth = 216; }
-            panel.style.setProperty("--nop-channel-width", `${channelWidth}px`);
+            showChannelWidth();
         }
         if (!style.isConnected) document.head.append(style);
         if (!themed || !themeStyle.isConnected) themeTokens(sidebar);
@@ -242,7 +300,7 @@
         if (!drag || event.pointerId !== drag.id || !panel) return;
         const max = Math.max(100, panel.getBoundingClientRect().width * .45);
         channelWidth = Math.max(Math.min(160, max), Math.min(max, drag.width - (event.clientX - drag.x)));
-        panel.style.setProperty("--nop-channel-width", `${channelWidth}px`);
+        showChannelWidth();
         event.preventDefault();
         event.stopImmediatePropagation();
     }

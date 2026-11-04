@@ -127,6 +127,11 @@ public class SlackSidebarSmoke {
             }
             var robot = new Robot();
             evaluate(browser, script + "\ntrue");
+            // A hover toolbar in the screenshots, so its contrast can be judged by eye as well.
+            evaluate(browser, "document.querySelector('.p-view_contents--primary').insertAdjacentHTML('beforeend', " +
+                "'<div class=\"c-message_kit__actions\"><div class=\"c-message__actions c-message_actions__container\">" +
+                "<div class=\"c-message_actions__group\"><button class=\"c-message_actions__button\">&#9786;</button>" +
+                "<button class=\"c-message_actions__button\">&#8942;</button></div></div></div>'); true");
             for (String theme : new String[]{"light", "dark"}) {
                 var appearance = theme.equals("light")
                     ? "{dark:false,background:'#fafafa',panel:'#f0f0f0',foreground:'#101010',selection:'#dbe7ff'}"
