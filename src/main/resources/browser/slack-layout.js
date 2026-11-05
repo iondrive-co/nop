@@ -31,6 +31,14 @@
             cursor: col-resize !important;
         }
         ${scope} .p-view_contents { min-width: 0 !important; border-radius: 0 !important; }
+        /* Slack caps each pane at the viewport less its top bar, which this layout hides. */
+        ${scope} :is(.p-view_contents--primary, .p-view_contents--secondary, .p-view_contents--sidebar) {
+            max-height: none !important;
+        }
+        /* The bar under the composer holds the typing notice and the formatting hint;
+           collapsing it ends the conversation just below the composer. */
+        ${scope} .p-notification_bar { height: 8px !important; padding: 0 !important; overflow: hidden !important; }
+        ${scope} .p-notification_bar > * { display: none !important; }
         ${scope} .p-view_contents--sidebar { border-left: 1px solid var(--nop-border) !important; }
         ${scope} :is(.p-ia4_client, .p-client_workspace, .p-client_workspace__layout, .p-client_workspace__tabpanel,
             .p-view_contents--primary, .p-workspace__primary_view_body, .p-message_pane,
@@ -88,35 +96,9 @@
             background: var(--nop-raised-hover) !important;
             color: var(--nop-foreground) !important;
         }
-        /* Slack fixes its control strip (create, focus mode and the avatar that opens status, profile
-           and preferences) to the bottom of the rail this layout hides, where it would sit on the
-           composer. Dock it below the channel list, which gives up that much of its height. */
-        ${scope} { --nop-strip-height: 64px; }
-        ${scope} .p-view_contents--sidebar {
-            box-sizing: border-box !important;
-            padding-bottom: var(--nop-strip-height) !important;
-        }
-        ${scope} .p-control_strip {
-            left: auto !important;
-            right: 0 !important;
-            top: auto !important;
-            width: min(var(--nop-channel-width, 216px), 45vw) !important;
-            height: var(--nop-strip-height) !important;
-            box-sizing: border-box !important;
-            flex-direction: row-reverse !important;
-            justify-content: flex-end !important;
-            align-items: flex-end !important;
-            gap: 10px !important;
-            padding: 0 12px 12px !important;
-            opacity: 1 !important;
-        }
-        ${scope} .p-control_strip:not([class*="huddles_bottom_bar_visible"]) { bottom: 0 !important; }
-        ${scope} .p-control_strip__circle_button {
-            background: var(--nop-raised) !important;
-            color: var(--nop-foreground) !important;
-            box-shadow: 0 0 0 1px var(--nop-outline) !important;
-        }
-        ${scope} .p-control_strip__circle_button:hover { background: var(--nop-raised-hover) !important; }
+        /* Slack fixes its control strip (create, focus mode, the avatar menu) to the bottom of the
+           rail this layout hides; the channel list runs to the bottom instead. */
+        ${scope} .p-control_strip { display: none !important; }
     `;
 
     const defaults = { dark: true, background: "#1e1f22", panel: "#2b2d30", foreground: "#dfe1e5", muted: "#9da0a8",
