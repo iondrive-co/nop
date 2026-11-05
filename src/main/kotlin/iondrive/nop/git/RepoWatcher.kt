@@ -11,7 +11,13 @@ import java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY
 import java.nio.file.StandardWatchEventKinds.OVERFLOW
 import java.nio.file.WatchKey
 import java.nio.file.WatchService
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -31,9 +37,27 @@ import java.util.concurrent.atomic.AtomicLong
  * nested clone that costs nothing — the parent reports the whole directory as untracked whatever
  * happens inside it. For a true submodule, whose content changes do show as a parent modification,
  * the parent's flag would wait for the next change it can see. No repository open here has one.
+ *
+ * The JDK answers register, cancel and close on a thread of its own, and waits for the answer with no
+ * timeout and no regard for interrupts. An uncaught OutOfMemoryError ends that thread and nothing
+ * replaces it, so every later request would wait for ever: nop once hung exiting on the UI thread,
+ * with no windows, and every launch was forwarded to it. So those requests are made from a thread
+ * that can be abandoned ([onService]), and a watcher that loses the JDK's thread reports [UNKNOWN]
+ * from then on, which is the walk the caller would have done anyway.
  */
-class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
+class RepoWatcher(
+    private val maxDirs: Int = MAX_WATCHED_DIRS,
+    private val serviceTimeoutMs: Long = SERVICE_TIMEOUT_MS,
+    private val heartbeatMs: Long = HEARTBEAT_MS,
+) : AutoCloseable {
     private val service: WatchService = FileSystems.getDefault().newWatchService()
+
+    private val serviceCalls = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "nop:repo-watch-calls").apply { isDaemon = true }
+    }
+
+    /** The JDK's watch thread stopped answering. Nothing brings it back, so this is for good. */
+    @Volatile private var serviceLost = false
 
     /** Working-tree root -> its watch state. */
     private val watched = ConcurrentHashMap<Path, Watched>()
@@ -70,7 +94,7 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
      * no-op in the JDK.
      */
     fun sync(repo: GitRepo) {
-        if (closed) return
+        if (closed || serviceLost) return
         val state = watched.computeIfAbsent(repo.rootDir) { Watched() }
         if (!state.watchable || !state.needsRegister) return
         // Cleared before the walk rather than after. An event for a directory the walk has already
@@ -99,6 +123,8 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
      * inequality — two consecutive [UNKNOWN]s are not evidence of a quiet tree.
      */
     fun generation(root: Path): Long {
+        // With either thread gone no event can arrive, and a count that cannot move reads as quiet.
+        if (serviceLost || !drainThread.isAlive) return UNKNOWN
         val state = watched[root] ?: return UNKNOWN
         if (!state.watchable || state.needsRegister) return UNKNOWN
         return state.generation.get()
@@ -110,7 +136,7 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
         synchronized(state) {
             for (key in state.keys.values) {
                 keyOwner.remove(key)
-                key.cancel()
+                onService { key.cancel() }
             }
             state.keys.clear()
         }
@@ -125,9 +151,10 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
     override fun close() {
         closed = true
         for (root in watched.keys.toList()) unwatch(root)
-        // Closing the service is what wakes the drain thread out of take(); the interrupt only
-        // covers the window before it gets there.
-        runCatching { service.close() }
+        // Closing the service is what wakes the drain thread out of poll(); the interrupt only
+        // covers the window before it gets there, and a service that could not be closed.
+        onService { service.close() }
+        serviceCalls.shutdown()
         drainThread.interrupt()
     }
 
@@ -137,17 +164,58 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
             for (dir in wanted) {
                 if (state.keys.containsKey(dir)) continue
                 // A directory can go away between the walk and here; that is not worth logging.
-                val key = runCatching { dir.register(service, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY) }
-                    .getOrNull() ?: continue
+                val key = onService { dir.register(service, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY) } ?: continue
                 state.keys[dir] = key
                 keyOwner[key] = root
             }
             for (dir in state.keys.keys - wanted) {
                 val key = state.keys.remove(dir) ?: continue
                 keyOwner.remove(key)
-                key.cancel()
+                onService { key.cancel() }
             }
         }
+    }
+
+    /**
+     * Runs [request], which needs an answer from the JDK's watch thread, and gives up after
+     * [serviceTimeoutMs] if none comes. Null when it failed or could not be made, as a directory that
+     * has just gone away does; the caller treats it the same as any watch it could not place.
+     *
+     * Giving up is final and abandons the thread stuck inside the JDK, a daemon that cannot stop nop
+     * exiting. A healthy answer takes well under a millisecond, so one that takes this long means the
+     * thread is gone or the JVM is too starved of memory for watches to be worth trusting.
+     */
+    private fun <T : Any> onService(request: () -> T): T? {
+        if (serviceLost) return null
+        return try {
+            serviceCalls.submit(Callable(request)).get(serviceTimeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            serviceLost = true
+            serviceCalls.shutdownNow()
+            Log.warn("repo watch: the JDK's watch thread stopped answering; every project is polled from now on")
+            null
+        } catch (_: ExecutionException) {
+            null
+        } catch (_: RejectedExecutionException) {
+            null
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
+    }
+
+    /**
+     * Whether the JDK's watch thread still answers, asked only when nothing has arrived for a while.
+     * Its death is otherwise silent: no events is also what a quiet tree looks like, so every tree
+     * would read as unchanged, and its git status stay stale, until something next asked for a watch.
+     *
+     * Registering a directory already watched changes nothing but is a request the thread must answer.
+     */
+    private fun checkServiceAnswers() {
+        val dir = keyOwner.keys.firstOrNull { it.isValid }?.watchable() as? Path ?: return
+        val key = onService { dir.register(service, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY) } ?: return
+        // Its tree was unwatched just as this ran, which leaves a watch that nothing owns.
+        if (!keyOwner.containsKey(key)) onService { key.cancel() }
     }
 
     /**
@@ -167,13 +235,17 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
     }
 
     private fun drain() {
-        while (!closed) {
+        while (!closed && !serviceLost) {
             val key = try {
-                service.take()
+                service.poll(heartbeatMs, TimeUnit.MILLISECONDS)
             } catch (interrupted: InterruptedException) {
                 return
             } catch (serviceClosed: ClosedWatchServiceException) {
                 return
+            }
+            if (key == null) {
+                checkServiceAnswers()
+                continue
             }
             val dir = key.watchable() as? Path
             val events = key.pollEvents()
@@ -216,5 +288,11 @@ class RepoWatcher(private val maxDirs: Int = MAX_WATCHED_DIRS) : AutoCloseable {
          * answer. Linux's default watch limit (~500k) is far above either number.
          */
         const val MAX_WATCHED_DIRS = 20_000
+
+        /** How long a request to the JDK's watch thread may take before the thread is given up on. */
+        const val SERVICE_TIMEOUT_MS = 5_000L
+
+        /** How long the watcher sits with no events before checking the JDK's watch thread is alive. */
+        const val HEARTBEAT_MS = 30_000L
     }
 }

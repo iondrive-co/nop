@@ -1,19 +1,25 @@
 package iondrive.nop.terminal
 
 import com.jediterm.core.util.TermSize
+import com.jediterm.terminal.ui.JediTermWidget
+import com.jediterm.terminal.ui.settings.DefaultSettingsProvider
 import com.pty4j.PtyProcess
 import com.pty4j.PtyProcessBuilder
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.junit.jupiter.api.condition.DisabledOnOs
 import org.junit.jupiter.api.condition.OS
+import java.awt.GraphicsEnvironment
 import java.io.File
 import java.net.ServerSocket
 import java.time.Duration
+import java.util.concurrent.TimeUnit
+import javax.swing.SwingUtilities
 
 /**
  * Exercises the pty4j + [PtyTtyConnector] core without any Swing/JediTerm UI. The headline test is
@@ -58,6 +64,94 @@ class PtyTerminalSessionTest {
             sb.append(buf, 0, n)
         }
         return sb.toString()
+    }
+
+    /**
+     * JediTerm closes the connector whenever its session ends, including when an OutOfMemoryError
+     * ends it, and closing signals the program. That turned nop running out of heap into agents being
+     * SIGTERMed mid-work, so a close with the program alive and nothing ending it must leave it be.
+     */
+    @Test
+    fun `a close nobody asked for leaves a running program alone`() {
+        val process = ptyProcess("sleep", "30")
+        try {
+            val connector = PtyTtyConnector(process)
+            var told = false
+            connector.onReaderLost = { told = true }
+            connector.close()
+            Thread.sleep(300)
+            assertTrue(process.isAlive, "the reader failing is no reason to end the program")
+            assertTrue(connector.readerLost && told, "whoever holds the terminal has to hear of it")
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
+    @Test
+    fun `a close from whoever is ending the terminal still ends the program`() {
+        val process = ptyProcess("sleep", "30")
+        try {
+            val connector = PtyTtyConnector(process)
+            connector.releasing = true
+            connector.close()
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS), "closing the tab must not leave its program running")
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
+    /** It stops writing to a terminal and carries on, which SIGTERM has always been what ends. */
+    @Test
+    fun `a close after the output ran out still ends a program left behind`() {
+        val process = ptyProcess("sh", "-c", "exec 0<&- 1>&- 2>&-; sleep 30")
+        try {
+            val connector = PtyTtyConnector(process)
+            connector.drainToEof()
+            connector.close()
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS), "nothing can read it, so nothing will ever show it")
+            assertFalse(connector.readerLost)
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
+    /** The whole of it, through JediTerm's own session: the error, the close, and reading again. */
+    @Test
+    fun `a terminal keeps reading its program after an OutOfMemoryError ends the session`() {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "needs a display to build the widget")
+        val process = ptyProcess("sh", "-c", "while :; do echo tick; sleep 0.05; done")
+        val seen = StringBuffer()
+        val connector = PtyTtyConnector(process, tap = { seen.append(it) })
+        var widget: JediTermWidget? = null
+        try {
+            SwingUtilities.invokeAndWait {
+                val w = JediTermWidget(80, 24, DefaultSettingsProvider())
+                widget = w
+                connector.onReaderLost = { resumeReading(w, connector, retryMs = 50) { true } }
+                w.ttyConnector = connector
+                w.start()
+            }
+            awaitTrue("the program's output reaches the terminal") { "tick" in seen }
+
+            connector.failNextRead = OutOfMemoryError("test")
+            awaitTrue("the error reaches the reader") { connector.failNextRead == null }
+            Thread.sleep(200)
+            assertTrue(process.isAlive, "the program must survive the session it was read by")
+
+            seen.setLength(0)
+            awaitTrue("output must reach the terminal again") { "tick" in seen }
+            assertFalse(connector.readerLost, "a session is reading again")
+        } finally {
+            connector.releasing = true
+            process.destroyForcibly()
+            SwingUtilities.invokeAndWait { widget?.close() }
+        }
+    }
+
+    private fun awaitTrue(what: String, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
+        while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(condition(), what)
     }
 
     @Test

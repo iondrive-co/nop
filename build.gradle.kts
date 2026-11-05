@@ -112,6 +112,9 @@ tasks.test {
     maxHeapSize = "512m"
     // Software rendering allocates native memory outside the heap; return freed allocations regularly.
     jvmArgs("-XX:TrimNativeHeapInterval=60000")
+    // RepoWatcherTest kills the JDK's own watch thread, which nothing public can do, to prove nop
+    // survives what an OutOfMemoryError does to it.
+    jvmArgs("--add-opens=java.base/sun.nio.fs=ALL-UNNAMED")
     // After tests pass, refresh the deployed jar that the desktop launcher points at. Skipping
     // this step has bitten us — code under test would change but the menu icon still ran the
     // stale jar from build/compose/binaries/main/app/nop/. Up-to-date checks make this a ~1s

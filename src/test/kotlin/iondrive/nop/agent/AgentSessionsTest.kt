@@ -175,6 +175,65 @@ class AgentSessionsTest {
         assertEquals("parser rewrite", session.title, "the name should be trimmed, not padded")
     }
 
+    private fun past(title: String, byUser: Boolean = false) = PastSession(
+        sessionId = "earlier",
+        projectPath = "/p",
+        startedAt = 0L,
+        title = title,
+        titleByUser = byUser,
+        lastProvider = "anthropic",
+        lastAccount = "claude-main",
+        lastNativeSessionId = "kept-1",
+    )
+
+    @Test
+    fun `reopening an earlier session keeps its name and resumes its conversation`(@TempDir tmp: Path) {
+        val state = sessions()
+
+        val session = state.reopen(past("Trade", byUser = true), tmp.toFile(), account("claude-main"))
+
+        assertEquals("Trade", session.title)
+        assertEquals("kept-1", session.run.nativeSessionId)
+        assertEquals(session.sessionId, state.selectedId)
+    }
+
+    @Test
+    fun `a reopened tab the user named keeps that name when the CLI offers its own`(@TempDir tmp: Path) {
+        val session = sessions().reopen(past("Trade", byUser = true), tmp.toFile(), account("claude-main"))
+
+        session.titleFromTranscript("Fix the order router")
+
+        assertEquals("Trade", session.title)
+    }
+
+    @Test
+    fun `a reopened tab with an inferred name still takes the CLI's`(@TempDir tmp: Path) {
+        val session = sessions().reopen(past("Fix the router"), tmp.toFile(), account("claude-main"))
+
+        session.titleFromTranscript("Order router rewrite")
+
+        assertEquals("Order router rewrite", session.title)
+    }
+
+    /** A placeholder is no name: the tab should behave like any other that has yet to earn one. */
+    @Test
+    fun `reopening an untitled session does not call the tab Untitled session`(@TempDir tmp: Path) {
+        val session = sessions().reopen(past("Untitled session"), tmp.toFile(), account("claude-main"))
+
+        assertEquals("Agent", session.title)
+    }
+
+    /** The tab has a log of its own, so the name has to reach it to survive a second trip through the picker. */
+    @Test
+    fun `the name survives being closed and reopened from the picker again`(@TempDir tmp: Path) {
+        val first = sessions().reopen(past("Trade", byUser = true), tmp.toFile(), account("claude-main"))
+
+        val listed = EventLog.sessions().single { it.sessionId == first.sessionId }
+
+        assertEquals("Trade", listed.title)
+        assertTrue(listed.titleByUser, "whose name it is has to travel with it")
+    }
+
     @Test
     fun `a blank rename is a cancel, not an unlabelled tab`(@TempDir tmp: Path) {
         val state = sessions()

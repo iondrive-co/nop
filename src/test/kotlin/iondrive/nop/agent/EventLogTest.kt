@@ -272,6 +272,19 @@ class EventLogTest {
     }
 
     @Test
+    fun `a listed session says whether the user gave it its name`(@TempDir tmp: Path) {
+        session("named", tmp.toString(), title = null, firstPrompt = "x")
+            .append(AgentEvent.SessionTitled("Trade", now(), byUser = true))
+        session("inferred", tmp.toString(), title = "Fix the router", firstPrompt = "x")
+
+        val listed = EventLog.sessions(tmp).associateBy { it.sessionId }
+
+        assertTrue(listed.getValue("named").titleByUser)
+        assertEquals("Trade", listed.getValue("named").title)
+        assertFalse(listed.getValue("inferred").titleByUser)
+    }
+
+    @Test
     fun `a session with no title of its own is labelled by the first thing the user typed`(@TempDir tmp: Path) {
         session("by-prompt", tmp.toString(), null, "Make the provisioning script work for AWS\nand test it")
 

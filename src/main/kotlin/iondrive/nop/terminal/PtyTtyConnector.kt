@@ -2,14 +2,19 @@ package iondrive.nop.terminal
 
 import com.jediterm.core.util.TermSize
 import com.jediterm.terminal.ProcessTtyConnector
+import com.jediterm.terminal.ui.JediTermWidget
 import com.pty4j.PtyProcess
 import com.pty4j.WinSize
+import iondrive.nop.Log
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.io.Reader
 import java.nio.charset.StandardCharsets
+import javax.swing.SwingUtilities
+import kotlin.concurrent.thread
 
 /**
  * Adapts a pty4j [PtyProcess] to JediTerm's `TtyConnector`. JediTerm doesn't publish a PTY
@@ -60,12 +65,44 @@ class PtyTtyConnector(
     @Volatile
     var handedOver: Boolean = false
 
+    /**
+     * Whoever holds this terminal is ending it, so closing should end the program as well. Without
+     * it a close comes from JediTerm alone, whose session ending is no reason to end the program.
+     */
+    @Volatile
+    var releasing: Boolean = false
+
+    /**
+     * Called when JediTerm's session has ended with the program still running and still writing,
+     * for the holder to read it again. See [close].
+     */
+    @Volatile
+    var onReaderLost: (() -> Unit)? = null
+
+    /** The session reading this has ended and none has replaced it yet. */
+    @Volatile
+    var readerLost: Boolean = false
+        private set
+
+    /** The program's output has run out, which a session ending over is the ordinary way to end. */
+    @Volatile
+    private var outputEnded = false
+
+    /** Thrown by the next [read], as an error anywhere in the session would end it. For tests. */
+    @Volatile
+    internal var failNextRead: Throwable? = null
+
     private var replayReader: Reader? =
         replay?.takeIf { it.isNotEmpty() }?.let { InputStreamReader(ByteArrayInputStream(it), StandardCharsets.UTF_8) }
 
     override fun getName(): String = "pty"
 
     override fun read(buf: CharArray, offset: Int, length: Int): Int {
+        readerLost = false
+        failNextRead?.let {
+            failNextRead = null
+            throw it
+        }
         replayReader?.let { r ->
             val n = r.read(buf, offset, length)
             if (n > 0) {
@@ -74,7 +111,13 @@ class PtyTtyConnector(
             }
             replayReader = null
         }
-        val read = super.read(buf, offset, length)
+        val read = try {
+            super.read(buf, offset, length)
+        } catch (e: IOException) {
+            outputEnded = true
+            throw e
+        }
+        if (read < 0) outputEnded = true
         val listener = tap
         if (read > 0 && listener != null) {
             // Failures are swallowed: a broken tap must never cost the user their terminal.
@@ -101,8 +144,20 @@ class PtyTtyConnector(
 
     override fun isConnected(): Boolean = process.isAlive
 
+    /**
+     * JediTerm closes this whenever its session ends, and closing sends the program SIGTERM. Most
+     * sessions end because the program did, but one also ends on any error drawing its output, and an
+     * OutOfMemoryError in nop is not the program's fault: that was agents dying mid-work because
+     * nop's heap filled. So a close with the program alive, its output still flowing and nobody ending
+     * it leaves the program running, for [onReaderLost] to start reading it again.
+     */
     override fun close() {
         if (handedOver) return
+        if (!releasing && !outputEnded && process.isAlive) {
+            readerLost = true
+            runCatching { onReaderLost?.invoke() }
+            return
+        }
         super.close()
     }
 
@@ -126,3 +181,31 @@ private class RecordedProcess(private val inner: Process, recorder: PtyRecorder)
     override fun isAlive(): Boolean = inner.isAlive
     override fun pid(): Long = inner.pid()
 }
+
+/**
+ * Starts [widget] reading [connector] again after the session reading it died, trying every [retryMs]
+ * until one takes or [wanted] says the terminal is no longer worth it. It does not give up while the
+ * program runs: a program nothing reads blocks once the PTY fills, which it recovers from when the
+ * heap does, where ending it would lose whatever it was doing.
+ *
+ * What the session was drawing when it died is lost from the screen, not from the program. A TUI
+ * draws over it on its next redraw.
+ */
+internal fun resumeReading(
+    widget: JediTermWidget,
+    connector: PtyTtyConnector,
+    retryMs: Long = RESUME_RETRY_MS,
+    wanted: () -> Boolean,
+) {
+    fun lost() = connector.readerLost && connector.isConnected && !connector.releasing && wanted()
+    thread(isDaemon = true, name = "terminal-resume") {
+        runCatching { Log.warn("terminal: reading stopped with its program still running; reading it again") }
+        while (lost()) {
+            Thread.sleep(retryMs)
+            // Starting one before the last has finished ending is refused, so the next pass retries.
+            SwingUtilities.invokeLater { if (lost()) runCatching { widget.start() } }
+        }
+    }
+}
+
+private const val RESUME_RETRY_MS = 1_000L

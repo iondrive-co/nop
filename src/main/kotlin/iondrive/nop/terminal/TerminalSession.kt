@@ -327,6 +327,7 @@ class TerminalSession private constructor(
         val old = process
         process = null
         running = true // show Stop (not Re-run) during the brief teardown, and block a double Re-run
+        connector?.releasing = true
         w.stop()
         thread(isDaemon = true, name = "terminal-restart") {
             old?.let { p ->
@@ -463,12 +464,15 @@ class TerminalSession private constructor(
 
     /** Kills the process tree, detaches the widget from its host card, and disposes it. Idempotent. */
     fun dispose() {
+        connector?.releasing = true
         killProcess()
         widget?.let { w ->
             (w.parent as? Container)?.remove(w)
             w.close()
         }
         widget = null
+        // No session is left to close a connector whose reader died, and the PTY is still open.
+        connector?.takeIf { it.readerLost }?.let { c -> runCatching { c.close() } }
     }
 
     /**
@@ -568,6 +572,7 @@ class TerminalSession private constructor(
             inputTap = ::noteInput,
         )
         connector = c
+        c.onReaderLost = { resumeReading(w, c) { widget === w && connector === c && !handedOver } }
         w.ttyConnector = c
         w.start()
     }

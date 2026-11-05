@@ -2,10 +2,13 @@ package iondrive.nop.git
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.time.Duration
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 
@@ -131,6 +134,92 @@ class RepoWatcherTest {
      * writes are still landing as events when a test starts, and a test that read the count once
      * would be racing them. Each pass re-syncs, which is what a poller does every tick.
      */
+    /**
+     * An OutOfMemoryError can kill the thread the JDK answers watch requests on, and then every later
+     * request waits on it for ever. Closing is one, and it runs on the UI thread as nop exits: nop
+     * hung there with no windows, and every launch after that was forwarded to it and went nowhere.
+     */
+    @Test
+    fun `closing does not hang once the watch thread has died`(@TempDir tmp: Path) {
+        val repo = initRepo(tmp)
+        val watcher = RepoWatcher()
+        settle(watcher, repo)
+        killWatchThread(watcher)
+        assertTimeoutPreemptively(Duration.ofSeconds(20)) { watcher.close() }
+        repo.close()
+    }
+
+    /** Nothing asks the dead thread for anything here, so only the watcher's own check can notice. */
+    @Test
+    fun `a dead watch thread is noticed while idle, rather than every tree reading as quiet`(@TempDir tmp: Path) {
+        val repo = initRepo(tmp)
+        val watcher = RepoWatcher(serviceTimeoutMs = 200, heartbeatMs = 100)
+        val start = settle(watcher, repo)
+        assertNotEquals(RepoWatcher.UNKNOWN, start, "a live watcher answers")
+
+        killWatchThread(watcher)
+
+        assertTimeoutPreemptively(Duration.ofSeconds(10)) {
+            while (watcher.generation(tmp) != RepoWatcher.UNKNOWN) Thread.sleep(20)
+        }
+        watcher.close()
+        repo.close()
+    }
+
+    @Test
+    fun `every other request returns once the watch thread has died`(@TempDir tmp: Path) {
+        val repo = initRepo(tmp)
+        (tmp / "sub").createDirectories()
+        val watcher = RepoWatcher(serviceTimeoutMs = 200, heartbeatMs = Long.MAX_VALUE)
+        settle(watcher, repo)
+        killWatchThread(watcher)
+
+        assertTimeoutPreemptively(Duration.ofSeconds(10)) {
+            watcher.unwatch(tmp)
+            watcher.sync(repo)
+            assertEquals(RepoWatcher.UNKNOWN, watcher.generation(tmp), "a lost watcher cannot vouch for a tree")
+            watcher.close()
+        }
+        repo.close()
+    }
+
+    /** A false alarm would turn every project back to polling for the rest of the run. */
+    @Test
+    fun `the idle check leaves a healthy watcher working`(@TempDir tmp: Path) {
+        val repo = initRepo(tmp)
+        (tmp / "a.txt").writeText("v1\n")
+        RepoWatcher(heartbeatMs = 20).use { watcher ->
+            val start = settle(watcher, repo)
+            assertTrue(stayedQuiet(watcher, repo, start), "checking the thread must not look like a change")
+            (tmp / "a.txt").writeText("v2\n")
+            assertTrue(awaitChange(watcher, repo, start), "the watch must still be delivering events")
+            assertTrue(watcher.watchCount(tmp) > 0, "the check must not cost the tree its watches")
+        }
+        repo.close()
+    }
+
+    /** Puts a request with no type in front of the JDK's poller, whose switch on it then throws. */
+    private fun killWatchThread(watcher: RepoWatcher) {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"), "reaches into the Linux watch service")
+        fun running() = Thread.getAllStackTraces().keys.count { it.name == "FileSystemWatchService" }
+        fun read(owner: Any, declaring: Class<*>, name: String) =
+            declaring.getDeclaredField(name).apply { isAccessible = true }.get(owner)
+        val before = running()
+        val service = read(watcher, RepoWatcher::class.java, "service")
+        val poller = read(service, service.javaClass, "poller")
+        val abstractPoller = Class.forName("sun.nio.fs.AbstractPoller")
+        @Suppress("UNCHECKED_CAST")
+        val requests = read(poller, abstractPoller, "requests") as MutableCollection<Any?>
+        val poison = Class.forName("sun.nio.fs.AbstractPoller\$Request").declaredConstructors.single()
+            .apply { isAccessible = true }
+            .newInstance(null, arrayOfNulls<Any>(0))
+        synchronized(requests) { requests.add(poison) }
+        abstractPoller.getDeclaredMethod("wakeup").apply { isAccessible = true }.invoke(poller)
+        val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
+        while (running() >= before && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(running() < before, "the watch thread should have died")
+    }
+
     private fun settle(watcher: RepoWatcher, repo: GitRepo): Long {
         var last = RepoWatcher.UNKNOWN
         var stable = 0

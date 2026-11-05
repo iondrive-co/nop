@@ -154,6 +154,8 @@ data class PastSession(
     val projectPath: String,
     val startedAt: Long,
     val title: String,
+    /** Whether [title] is a name the user typed, which the CLI may not replace on a reopen. */
+    val titleByUser: Boolean = false,
     val lastProvider: String?,
     val lastAccount: String?,
     val lastNativeSessionId: String?,
@@ -412,6 +414,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             // [resumeId], which needs the difference.
             var lastSpawn: AgentEvent.RunStarted? = null
             var titled: String? = null
+            var titledByUser = false
             var firstPrompt: String? = null
 
             val read = runCatching {
@@ -437,7 +440,10 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                                 if (event.transcriptPath == null) lastSpawn = event
                             }
                             is AgentEvent.SessionTitled -> {
-                                if (event.byUser || !SessionTitle.isInjected(event.title)) titled = event.title
+                                if (event.byUser || !SessionTitle.isInjected(event.title)) {
+                                    titled = event.title
+                                    titledByUser = event.byUser
+                                }
                             }
                             is AgentEvent.UserMessage ->
                                 firstPrompt = firstPrompt ?: SessionTitle.fromPrompt(event.text)
@@ -462,6 +468,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
                 projectPath = placed?.projectPath ?: session.projectPath,
                 startedAt = session.at,
                 title = resolvedTitle,
+                titleByUser = titledByUser,
                 lastProvider = lastRun?.provider,
                 lastAccount = lastRun?.account,
                 lastNativeSessionId = resumeId(lastRun, lastSpawn?.at ?: session.at),

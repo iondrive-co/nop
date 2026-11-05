@@ -2057,10 +2057,10 @@ fun App(
                                             // the row was clickable in the first place.
                                             val account = past.accountIn(agentAccounts)
                                             if (account != null) {
-                                                agentSessions.open(
+                                                agentSessions.reopen(
+                                                    past = past,
                                                     dir = rootPath.toFile(),
                                                     account = account,
-                                                    resumeId = past.lastNativeSessionId,
                                                     // Where the resumed work starts from nop's side.
                                                     // The conversation is older than this tab; the
                                                     // changes the user is about to watch are not.

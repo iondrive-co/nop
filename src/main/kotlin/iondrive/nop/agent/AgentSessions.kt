@@ -78,12 +78,17 @@ class AgentSessions {
         resumeId: String? = null,
         /** HEAD as the caller sees it now — see [AgentSession.baselineSha]. */
         baselineSha: String? = null,
+        /** The name the tab starts under, and whether the user chose it. See [reopen]. */
+        title: String? = null,
+        titleByUser: Boolean = false,
     ): AgentSession {
         val session = AgentSession(
             dir,
             account,
             seed,
             resumeId,
+            restoredTitle = title,
+            titleByUser = titleByUser,
             baselineSha = baselineSha,
             handoverTarget = { from -> handoverTarget(from) },
             hasRunOut = { of -> hasRunOut(of) },
@@ -91,11 +96,32 @@ class AgentSessions {
             resumesAfterReset = { of -> resumesAfterReset(of) },
             onExited = { ended -> close(ended.sessionId) },
         )
+        // A new tab has a new log, and this is the only name in it until the CLI offers one. Without
+        // it the name would be gone the next time this conversation is reopened from the picker.
+        if (title != null && session.title == title) {
+            session.log.append(AgentEvent.SessionTitled(title, System.currentTimeMillis(), byUser = titleByUser))
+        }
         _sessions.add(session)
         selectedId = session.sessionId
         pickerTabVisible = false
         return session
     }
+
+    /**
+     * Opens [past] from the picker as a new tab resuming its conversation, under the name it had.
+     *
+     * A name the user typed stays theirs. One the CLI or a first request gave it is only the starting
+     * point, and the CLI can still replace it, as it could in the tab this one continues.
+     */
+    fun reopen(past: PastSession, dir: File, account: Account, baselineSha: String? = null): AgentSession =
+        open(
+            dir = dir,
+            account = account,
+            resumeId = past.lastNativeSessionId,
+            baselineSha = baselineSha,
+            title = past.title,
+            titleByUser = past.titleByUser,
+        )
 
     fun select(id: String?) {
         if (id == null || _sessions.any { it.sessionId == id }) selectedId = id
