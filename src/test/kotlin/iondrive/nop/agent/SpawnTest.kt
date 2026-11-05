@@ -149,6 +149,20 @@ class SpawnTest {
         assertTrue("approvals_reviewer=\"user\"" in command.argv.configs())
     }
 
+    /**
+     * A resize or a resume makes Codex clear the scrollback and print the conversation again, by
+     * default only its last ~1000 rows. It should print as much as the terminal keeps, on a resume
+     * too, so the limit goes ahead of the subcommand.
+     */
+    @Test
+    fun `a codex run reprints as much of the conversation as nop's terminal keeps`() {
+        val limit = "tui.terminal_resize_reflow_max_rows=${iondrive.nop.terminal.NopTerminalSettings.SCROLLBACK_LINES}"
+
+        assertTrue(limit in Spawn.command(codex(), projectDir).argv.configs())
+        val resumed = Spawn.command(codex(), projectDir, resumeId = "roll-7").argv
+        assertTrue(resumed.indexOf(limit) in 1 until resumed.indexOf("resume"), "$resumed")
+    }
+
     @Test
     fun `a codex run is pointed at the project`() {
         val command = Spawn.command(codex(), projectDir)

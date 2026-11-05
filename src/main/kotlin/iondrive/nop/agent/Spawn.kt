@@ -1,5 +1,6 @@
 package iondrive.nop.agent
 
+import iondrive.nop.terminal.NopTerminalSettings
 import java.io.File
 import java.util.UUID
 
@@ -162,6 +163,13 @@ object Spawn {
             "approvals_reviewer=\"user\"",
             // Keep the conversation in terminal scrollback so nop can scroll and mark prompts.
             "--no-alt-screen",
+            // When the terminal is resized, and when a session is resumed, Codex clears the
+            // scrollback (ESC[3J) and prints the conversation again, and by default only its last
+            // ~1000 rows, under "Earlier messages are available — press ^t to view the full
+            // transcript". A busy tab is then left with its last few messages. As many rows as nop's
+            // terminal keeps, so a resize or a resume gives back all the scrollback there is room for.
+            "-c",
+            "tui.terminal_resize_reflow_max_rows=${NopTerminalSettings.SCROLLBACK_LINES}",
             "-C",
             projectDir.absolutePath,
         )

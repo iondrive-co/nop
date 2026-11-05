@@ -167,7 +167,7 @@ class NopTerminalSettings(
      * Scrollback. A launcher run is usually a build or a dev server, whose interesting output (the
      * first error) can be thousands of lines above the tail; JediTerm's 5000-line default drops it.
      */
-    override fun getBufferMaxLinesCount(): Int = 20_000
+    override fun getBufferMaxLinesCount(): Int = SCROLLBACK_LINES
 
     /**
      * Disable predictive typeahead.
@@ -197,6 +197,9 @@ class NopTerminalSettings(
     private fun Color.toJediColor() = com.jediterm.core.Color(red, green, blue)
 
     companion object {
+        /** The rows of scrollback every terminal keeps; see [getBufferMaxLinesCount]. */
+        const val SCROLLBACK_LINES = 20_000
+
         const val BLINK_IDLE_MS = 15_000L
         const val BLINK_PERIOD_MS = 505
         const val IDLE_BLINKING_PERIOD_MS = Int.MAX_VALUE
