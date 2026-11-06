@@ -5,10 +5,17 @@
 # which builds .deb/.msi/.dmg on Linux/Windows/macOS runners and attaches them to a fresh
 # GitHub release.
 #
+# First it runs the Linux checks of ci.yml and release.yml here, with scripts/ci-local.sh, and
+# releases nothing if any of them fails. NOP_RELEASE_SKIP_LOCAL_CI=1 skips them.
+#
 # Pass an explicit version to override the auto-bump:
 #     scripts/release.sh           # auto-bump (e.g. 1.1.9 -> 1.2.0)
 #     scripts/release.sh 2.0.0     # force a specific version
 set -euo pipefail
+
+# All in one function, called on the last line: bash reads the whole file before running any of
+# it, so a change to this script during the long checks can't change what this release does.
+main() {
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -64,6 +71,24 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     exit 1
 fi
 
+# GitHub runs its checks only once the tag is pushed, and a release whose Linux job fails still
+# publishes, just without the .deb or the Linux self-update. So run the same Linux checks here
+# first, on the commit being released, and stop if any fails.
+if [[ "${NOP_RELEASE_SKIP_LOCAL_CI:-}" == 1 ]]; then
+    echo "Skipping the local Linux checks (NOP_RELEASE_SKIP_LOCAL_CI=1)."
+else
+    HEAD_BEFORE="$(git rev-parse HEAD)"
+    echo "Running GitHub's Linux checks here first (scripts/ci-local.sh, around 20 minutes)."
+    if ! "$REPO_ROOT/scripts/ci-local.sh" --commit "$HEAD_BEFORE" --version "$VERSION"; then
+        echo "Not releasing $TAG: the Linux checks failed here, so they would fail on GitHub too." >&2
+        exit 1
+    fi
+    if [[ "$(git rev-parse HEAD)" != "$HEAD_BEFORE" || -n "$(git status --porcelain)" ]]; then
+        echo "Not releasing $TAG: the checkout changed while the checks ran. Run scripts/release.sh again." >&2
+        exit 1
+    fi
+fi
+
 echo "Bumping packageVersion: $CURRENT -> $VERSION"
 # Only rewrite the top-level packageVersion; OS targets inherit it.
 python3 - "$GRADLE_FILE" "$CURRENT" "$VERSION" <<'PY'
@@ -87,3 +112,6 @@ git push origin "$TAG"
 
 echo
 echo "Released $TAG. Watch the build: https://github.com/iondrive-co/nop/actions"
+}
+
+main "$@"

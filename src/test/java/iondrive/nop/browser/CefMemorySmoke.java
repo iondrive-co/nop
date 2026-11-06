@@ -7,6 +7,7 @@ import me.friwi.jcefmaven.MavenCefAppHandlerAdapter;
 import org.cef.CefApp;
 import org.cef.CefSettings;
 import org.cef.browser.CefBrowser;
+import org.cef.browser.DevToolsCalls;
 import org.cef.handler.CefLoadHandlerAdapter;
 import javax.swing.JFrame;
 import javax.swing.SwingUtilities;
@@ -66,6 +67,7 @@ public class CefMemorySmoke {
         });
         var browser = client.createBrowser("about:blank", false, false);
         var frame = new JFrame("Native allocator regression");
+        DevToolsCalls calls = null;
         try {
             SwingUtilities.invokeAndWait(() -> {
                 frame.add(browser.getUIComponent());
@@ -73,7 +75,9 @@ public class CefMemorySmoke {
                 frame.setVisible(true);
             });
             if (!loaded.await(30, TimeUnit.SECONDS)) throw new AssertionError("Browser did not load");
+            // Events come through JCEF's client; method calls through DevToolsCalls, which never loses a reply.
             var devtools = browser.getDevToolsClient();
+            calls = new DevToolsCalls(browser);
             var traceComplete = new CountDownLatch(1);
             var streamHandle = new java.util.concurrent.atomic.AtomicReference<String>();
             devtools.addEventListener((method, json) -> {
@@ -82,17 +86,17 @@ public class CefMemorySmoke {
                 if (data.has("stream")) streamHandle.set(data.get("stream").getAsString());
                 traceComplete.countDown();
             });
-            devtools.executeDevToolsMethod("Tracing.start",
-                    "{\"categories\":\"disabled-by-default-memory-infra\",\"transferMode\":\"ReturnAsStream\",\"streamFormat\":\"json\"}")
-                    .get(30, TimeUnit.SECONDS);
+            calls.call("Tracing.start",
+                    "{\"categories\":\"disabled-by-default-memory-infra\",\"transferMode\":\"ReturnAsStream\",\"streamFormat\":\"json\"}",
+                    30, TimeUnit.SECONDS);
             long[] sizes = probe ? new long[]{64L << 20} : new long[]{2560L << 20, 4608L << 20};
             for (long size : sizes) {
                 long allocation = Native.malloc(size);
                 if (allocation == 0) throw new AssertionError("Native allocation failed");
                 try {
                     System.out.println("Forcing CEF memory dump above " + size + " bytes");
-                    String reply = devtools.executeDevToolsMethod("Tracing.requestMemoryDump",
-                            "{\"levelOfDetail\":\"detailed\",\"deterministic\":true}").get(30, TimeUnit.SECONDS);
+                    String reply = calls.call("Tracing.requestMemoryDump",
+                            "{\"levelOfDetail\":\"detailed\",\"deterministic\":true}", 30, TimeUnit.SECONDS);
                     var result = JsonParser.parseString(reply).getAsJsonObject();
                     if (result == null || !result.get("success").getAsBoolean()) {
                         throw new AssertionError("Native memory dump failed: " + reply);
@@ -102,7 +106,7 @@ public class CefMemorySmoke {
                     Native.free(allocation);
                 }
             }
-            devtools.executeDevToolsMethod("Tracing.end");
+            calls.call("Tracing.end", null, 30, TimeUnit.SECONDS);
             if (!traceComplete.await(30, TimeUnit.SECONDS)) throw new AssertionError("Trace did not complete");
             if (streamHandle.get() == null) throw new AssertionError("Trace stream was not returned");
             var trace = new StringBuilder();
@@ -111,8 +115,8 @@ public class CefMemorySmoke {
                 var params = new com.google.gson.JsonObject();
                 params.addProperty("handle", streamHandle.get());
                 params.addProperty("size", 1048576);
-                var chunk = JsonParser.parseString(devtools.executeDevToolsMethod("IO.read", params.toString())
-                        .get(30, TimeUnit.SECONDS)).getAsJsonObject();
+                var chunk = JsonParser.parseString(calls.call("IO.read", params.toString(), 30, TimeUnit.SECONDS))
+                        .getAsJsonObject();
                 String data = chunk.get("data").getAsString();
                 if (chunk.has("base64Encoded") && chunk.get("base64Encoded").getAsBoolean()) {
                     data = new String(java.util.Base64.getDecoder().decode(data), java.nio.charset.StandardCharsets.UTF_8);
@@ -157,6 +161,7 @@ public class CefMemorySmoke {
                 throw new AssertionError("Malloc diagnostics must be disabled during normal nop use");
             }
         } finally {
+            if (calls != null) calls.close();
             client.dispose();
             SwingUtilities.invokeAndWait(frame::dispose);
             app.dispose();

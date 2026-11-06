@@ -22,6 +22,8 @@ import java.awt.EventQueue
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.swing.Swing
 import kotlinx.serialization.json.Json
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
 import org.junit.jupiter.api.Test
@@ -46,8 +48,12 @@ class AgentSummaryViewTest {
     ) : AutoCloseable {
         var visible by mutableStateOf(true)
         private var time = 0L
+        // On the EDT, as in nop. A scene's coroutines otherwise run Unconfined: they resume on whatever
+        // thread woke them, and the scrollbar's press-and-hold scroll, which repeats from 300 ms on,
+        // then measures the list from a timer thread while the EDT is measuring it too. The GitHub
+        // runner is slow enough that one settle() lasts that long.
         private val scene = onEdt {
-            ImageComposeScene(900, 650, Density(1f)) {
+            ImageComposeScene(900, 650, Density(1f), coroutineContext = Dispatchers.Swing) {
                 IntUiTheme(isDark = dark) {
                     if (visible) AgentSummaryView(state, log)
                 }
@@ -75,6 +81,25 @@ class AgentSummaryViewTest {
         }
 
         fun clickScrollbar() = click(Offset(896f, 500f))
+
+        /** Presses the scrollbar track and holds it for [millis], the pointer still, before letting go. */
+        fun holdScrollbar(millis: Long) {
+            val at = Offset(896f, 500f)
+            val pressed = PointerButtons(isPrimaryPressed = true)
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = pressed, button = PointerButton.Primary) }
+            val until = System.nanoTime() + millis * 1_000_000
+            while (System.nanoTime() < until) {
+                time += 16_000_000
+                onEdt { scene.render(time).close() }
+                // A held mouse still reports where it is, and each report measures the scene first.
+                onEdt { scene.sendPointerEvent(PointerEventType.Move, at, buttons = pressed) }
+                Thread.sleep(5)
+            }
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
+            settle()
+        }
 
         private fun click(at: Offset) {
             onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
@@ -128,6 +153,33 @@ class AgentSummaryViewTest {
                 assertTrue(state.scrollIndex > 0, "marks must not intercept scrollbar clicks")
             }
         }
+    }
+
+    @Test
+    fun `holding the scrollbar track keeps scrolling`() {
+        fun conversation() = ConversationSummaryState().apply {
+            snapshot = ConversationSummary((1..60).map { index ->
+                ConversationSummary.Message(if (index % 5 == 1) "You" else "Agent",
+                    "Message $index.\n" + "The checks are progressing.\n".repeat(index % 4), index % 5 != 1, index.toLong())
+            }, 1)
+        }
+        val clicked = conversation()
+        Reader(dir.resolve("unused.jsonl"), clicked).use { reader ->
+            reader.settle()
+            reader.clickScrollbar()
+            reader.visible = false
+            reader.settle()
+        }
+        // Held past the 300 ms after which the track repeats its scroll, so the repeats run.
+        val held = conversation()
+        Reader(dir.resolve("unused.jsonl"), held).use { reader ->
+            reader.settle()
+            reader.holdScrollbar(1_500)
+            reader.visible = false
+            reader.settle()
+        }
+        assertTrue(clicked.scrollIndex > 0, "a click on the track scrolls")
+        assertTrue(held.scrollIndex > clicked.scrollIndex, "holding scrolls on: ${held.scrollIndex} after holding, ${clicked.scrollIndex} after a click")
     }
 
     @Test

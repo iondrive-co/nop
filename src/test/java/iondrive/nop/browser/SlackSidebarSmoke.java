@@ -8,6 +8,7 @@ import org.cef.CefApp;
 import org.cef.CefSettings;
 import org.cef.browser.CefBrowser;
 import org.cef.browser.CefFrame;
+import org.cef.browser.DevToolsCalls;
 import org.cef.handler.CefLoadHandlerAdapter;
 
 import javax.swing.JFrame;
@@ -75,6 +76,7 @@ public class SlackSidebarSmoke {
         JFrame frame = new JFrame("Slack sidebar regression fixture");
         JFrame floating = new JFrame("Floating Slack regression fixture");
         var ended = new CountDownLatch(1);
+        DevToolsCalls devtools = null;
         try {
             // Own profile and native runtime; never open or copy the user's Slack profile.
             var profile = Files.createTempDirectory(scratch, "profile-");
@@ -121,14 +123,16 @@ public class SlackSidebarSmoke {
                 if (!JsonParser.parseString(result).getAsJsonObject().get("passed").getAsBoolean()) {
                     throw new AssertionError("Sidebar regression: " + test);
                 }
-                double scale = Double.parseDouble(evaluate(browser, "window.devicePixelRatio"));
+                // Once the first page has run, so the native browser certainly exists.
+                if (devtools == null) devtools = new DevToolsCalls(browser);
+                double scale = Double.parseDouble(evaluate(devtools, "window.devicePixelRatio"));
                 if (test.equals("baseline")) baselineScale = scale;
                 else if (Math.abs(scale / baselineScale - 1.5) > .01) throw new AssertionError("Slack text did not enlarge to 150%: " + scale);
             }
             var robot = new Robot();
-            evaluate(browser, script + "\ntrue");
+            evaluate(devtools, script + "\ntrue");
             // A hover toolbar in the screenshots, so its contrast can be judged by eye as well.
-            evaluate(browser, "document.querySelector('.p-view_contents--primary').insertAdjacentHTML('beforeend', " +
+            evaluate(devtools, "document.querySelector('.p-view_contents--primary').insertAdjacentHTML('beforeend', " +
                 "'<div class=\"c-message_kit__actions\"><div class=\"c-message__actions c-message_actions__container\">" +
                 "<div class=\"c-message_actions__group\"><button class=\"c-message_actions__button\">&#9786;</button>" +
                 "<button class=\"c-message_actions__button\">&#8942;</button></div></div></div>'); true");
@@ -136,15 +140,15 @@ public class SlackSidebarSmoke {
                 var appearance = theme.equals("light")
                     ? "{dark:false,background:'#fafafa',panel:'#f0f0f0',foreground:'#101010',selection:'#dbe7ff'}"
                     : "{dark:true}";
-                evaluate(browser, "window.__nopSlackLayout.setTheme(" + appearance + "); true");
+                evaluate(devtools, "window.__nopSlackLayout.setTheme(" + appearance + "); true");
                 robot.delay(200);
                 var rectangle = new java.awt.Rectangle();
                 SwingUtilities.invokeAndWait(() -> rectangle.setBounds(frame.getBounds()));
                 ImageIO.write(robot.createScreenCapture(rectangle), "png", scratch.resolve("readability-" + theme + ".png").toFile());
             }
-            evaluate(browser, "window.fixtureIdentity = crypto.randomUUID(); " +
+            evaluate(devtools, "window.fixtureIdentity = crypto.randomUUID(); " +
                 "document.querySelector('.p-view_contents--primary').innerHTML = '<input id=transfer-draft value=Draft style=margin:40px;width:200px;height:40px>'; true");
-            var identity = evaluate(browser, "window.fixtureIdentity");
+            var identity = evaluate(devtools, "window.fixtureIdentity");
             for (int cycle = 0; cycle < 4; cycle++) {
                 final JFrame destination = cycle % 2 == 0 ? floating : frame;
                 SwingUtilities.invokeAndWait(() -> {
@@ -156,9 +160,9 @@ public class SlackSidebarSmoke {
                     browser.setFocus(true);
                 });
                 robot.delay(500);
-                if (!evaluate(browser, "window.fixtureIdentity").equals(identity)) throw new AssertionError("Browser page was replaced during transfer");
+                if (!evaluate(devtools, "window.fixtureIdentity").equals(identity)) throw new AssertionError("Browser page was replaced during transfer");
                 // Real pointer and keyboard input checks the native child, not only its Java wrapper.
-                var bounds = JsonParser.parseString(evaluate(browser,
+                var bounds = JsonParser.parseString(evaluate(devtools,
                     "JSON.stringify((() => {const r = document.querySelector('#transfer-draft').getBoundingClientRect(); return {x:r.x+20,y:r.y+20};})())")).getAsJsonObject();
                 final java.awt.Point point = new java.awt.Point();
                 SwingUtilities.invokeAndWait(() -> point.setLocation(browser.getUIComponent().getLocationOnScreen()));
@@ -173,12 +177,13 @@ public class SlackSidebarSmoke {
                 robot.keyRelease(KeyEvent.VK_X);
                 robot.delay(200);
                 String expected = "Draft" + "x".repeat(cycle + 1);
-                if (!evaluate(browser, "document.querySelector('#transfer-draft').value").equals(expected)) {
+                if (!evaluate(devtools, "document.querySelector('#transfer-draft').value").equals(expected)) {
                     throw new AssertionError("Draft or keyboard focus lost on browser transfer " + cycle);
                 }
                 System.out.println("SLACK_TRANSFER " + cycle + " draft and native focus preserved");
             }
         } finally {
+            if (devtools != null) devtools.close();
             if (client != null) client.dispose();
             SwingUtilities.invokeAndWait(frame::dispose);
             SwingUtilities.invokeAndWait(floating::dispose);
@@ -190,9 +195,9 @@ public class SlackSidebarSmoke {
         }
     }
 
-    private static String evaluate(CefBrowser browser, String expression) throws Exception {
-        var response = browser.getDevToolsClient().executeDevToolsMethod("Runtime.evaluate",
-            "{\"expression\":" + new com.google.gson.Gson().toJson(expression) + ",\"returnByValue\":true}").get(5, TimeUnit.SECONDS);
+    private static String evaluate(DevToolsCalls devtools, String expression) throws Exception {
+        var response = devtools.call("Runtime.evaluate",
+            "{\"expression\":" + new com.google.gson.Gson().toJson(expression) + ",\"returnByValue\":true}", 5, TimeUnit.SECONDS);
         return JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("result").get("value").getAsString();
     }
 }
