@@ -18,7 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Keeps a nop installed from a release up to date.
  *
- * Every hour it asks GitHub for the latest release, and when that is newer than this build it
+ * Every hour it asks GitHub for the newest release with an update for this platform
+ * ([Updater.latest]), and when that is newer than this build it
  * stages it beside the install as a version of its own ([Updater]). The next restart starts that
  * version, handing the running agents and terminals over to it as any restart does — or, when its
  * build cannot take those over, the next start does ([redirectAtStart]). The install's home moves to

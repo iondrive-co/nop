@@ -1,6 +1,7 @@
 package iondrive.nop.update
 
 import iondrive.nop.agent.arr
+import iondrive.nop.agent.bool
 import iondrive.nop.agent.obj
 import iondrive.nop.agent.str
 import kotlinx.serialization.json.Json
@@ -38,7 +39,7 @@ import java.util.zip.ZipFile
  * came up or [FAILED] when it did not.
  */
 class Updater(
-    private val latestUrl: URI = LATEST,
+    private val releasesUrl: URI = RELEASES,
     private val key: PublicKey = UpdateManifest.releaseKey,
     private val platform: String? = UpdateManifest.currentPlatform(),
     private val http: HttpClient = HttpClient.newBuilder()
@@ -65,20 +66,31 @@ class Updater(
     /** Held while a version directory is created, swapped in or removed. */
     private val lock = Any()
 
-    /** The latest release, as GitHub names it. */
+    /**
+     * The newest published release that carries a signed update for this platform. A release whose
+     * build for this platform failed has none, and is passed over for the newest one that does, rather
+     * than leaving every install on this platform where it is until the next release.
+     */
     fun latest(): Release {
-        val body = get(latestUrl, "application/vnd.github+json").use { it.readBytes() }
-        val release = runCatching { Json.parseToJsonElement(body.decodeToString()).obj() }.getOrNull()
-            ?: throw UpdateException("GitHub's answer about the latest release does not parse")
-        val tag = release["tag_name"].str() ?: throw UpdateException("the latest release has no tag")
-        val version = Version.parse(tag) ?: throw UpdateException("the latest release, $tag, is not a version")
-        val assets = release["assets"].arr().orEmpty().mapNotNull { asset ->
-            val o = asset.obj() ?: return@mapNotNull null
-            val name = o["name"].str() ?: return@mapNotNull null
-            val url = o["browser_download_url"].str() ?: return@mapNotNull null
-            name to runCatching { URI.create(url) }.getOrElse { return@mapNotNull null }
-        }.toMap()
-        return Release(version, assets)
+        val body = get(releasesUrl, "application/vnd.github+json").use { it.readBytes() }
+        val releases = runCatching { Json.parseToJsonElement(body.decodeToString()).arr() }.getOrNull()
+            ?: throw UpdateException("GitHub's answer about the releases does not parse")
+        val published = releases.mapNotNull { element ->
+            val release = element.obj() ?: return@mapNotNull null
+            if (release["draft"].bool() || release["prerelease"].bool()) return@mapNotNull null
+            val version = release["tag_name"].str()?.let(Version::parse) ?: return@mapNotNull null
+            val assets = release["assets"].arr().orEmpty().mapNotNull { asset ->
+                val o = asset.obj() ?: return@mapNotNull null
+                val name = o["name"].str() ?: return@mapNotNull null
+                val url = o["browser_download_url"].str() ?: return@mapNotNull null
+                name to runCatching { URI.create(url) }.getOrElse { return@mapNotNull null }
+            }.toMap()
+            Release(version, assets)
+        }.sortedByDescending { it.version }
+        if (published.isEmpty()) throw UpdateException("GitHub lists no published release")
+        val platform = platform ?: return published.first()
+        return published.firstOrNull { manifestName(it, platform) != null }
+            ?: throw UpdateException("no published release has a signed update for $platform")
     }
 
     /** Where [version] goes beside [home]. */
@@ -213,11 +225,16 @@ class Updater(
         }
     }
 
-    /** The release's manifest for [platform], checked against its signature. */
-    private fun manifestOf(release: Release, platform: String): UpdateManifest {
+    /** The name of the release's manifest for [platform], when it has one with a signature beside it. */
+    private fun manifestName(release: Release, platform: String): String? {
         // Per platform, and on Linux the name releases had before there were others.
         val names = listOf("update-$platform.json") + if (platform == "linux-x64") listOf(MANIFEST) else emptyList()
-        val name = names.firstOrNull { it in release.assets && "$it.sig" in release.assets }
+        return names.firstOrNull { it in release.assets && "$it.sig" in release.assets }
+    }
+
+    /** The release's manifest for [platform], checked against its signature. */
+    private fun manifestOf(release: Release, platform: String): UpdateManifest {
+        val name = manifestName(release, platform)
             ?: throw UpdateException("release ${release.version} has no signed update for $platform")
         val manifest = UpdateManifest.verified(
             asset(release, name).use { it.readNBytes(MAX_MANIFEST_BYTES) },
@@ -440,7 +457,8 @@ class Updater(
     }
 
     companion object {
-        val LATEST: URI = URI.create("https://api.github.com/repos/iondrive-co/nop/releases/latest")
+        /** Newest first, as GitHub lists them; far more than ever sit between two good releases. */
+        val RELEASES: URI = URI.create("https://api.github.com/repos/iondrive-co/nop/releases?per_page=30")
 
         /** The Linux manifest's name in releases from before there was one per platform. */
         const val MANIFEST = "update.json"

@@ -59,7 +59,17 @@ class UpdaterTest {
     @AfterTest
     fun stop() = server.stop(0)
 
-    private fun updater() = Updater(URI.create("$base/latest"), key.public, platform = "linux-x64")
+    private fun updater() = Updater(URI.create("$base/releases"), key.public, platform = "linux-x64")
+
+    /** The releases the stand-in for GitHub lists, newest first, as JSON objects. */
+    private val releases = mutableListOf<String>()
+
+    /** Lists a release on the stand-in for GitHub, with [assets] (name to served path) and nothing else. */
+    private fun list(version: String, assets: Map<String, String>, draft: Boolean = false, prerelease: Boolean = false) {
+        val listed = assets.entries.joinToString(",") { (name, path) -> """{"name":"$name","browser_download_url":"$base$path"}""" }
+        releases.add(0, """{"tag_name":"v$version","draft":$draft,"prerelease":$prerelease,"assets":[$listed]}""")
+        served["/releases"] = releases.joinToString(",", "[", "]").toByteArray()
+    }
 
     /** A launcher that answers the probe as [version] adopting [adopts], or as [behaviour] says. */
     private fun launcherScript(version: String, adopts: Set<Int>, behaviour: String = "answers") = when (behaviour) {
@@ -132,11 +142,12 @@ class UpdaterTest {
         val archive = root.resolve("nop-$version.tar.gz")
         tar(root, archive, "nop")
         val bytes = Files.readAllBytes(archive)
+        val assets = linkedMapOf<String, ByteArray>()
         val delta = deltaFiles?.let { list ->
             val d = root.resolve("nop-$version-delta.tar.gz")
             tar(root, d, *list.map { "nop/$it" }.toTypedArray())
             val db = Files.readAllBytes(d)
-            served["/assets/nop-$version-delta.tar.gz"] = db
+            assets["nop-$version-delta.tar.gz"] = db
             ""","delta":{"from":"9.9.8","name":"nop-$version-delta.tar.gz","sha256":"${sha256(db)}","size":${db.size},"root":"nop"}"""
         }.orEmpty()
         val manifest = """
@@ -149,13 +160,11 @@ class UpdaterTest {
             update(manifest)
             sign()
         }
-        served["/assets/$manifestName"] = manifest
-        served["/assets/$manifestName.sig"] = signature
-        served["/assets/nop-$version.tar.gz"] = bytes
-        val assets = served.keys.filter { it.startsWith("/assets/") }.joinToString(",") { path ->
-            """{"name":"${path.removePrefix("/assets/")}","browser_download_url":"$base$path"}"""
-        }
-        served["/latest"] = """{"tag_name":"v$version","assets":[$assets]}""".toByteArray()
+        assets[manifestName] = manifest
+        assets["$manifestName.sig"] = signature
+        assets["nop-$version.tar.gz"] = bytes
+        assets.forEach { (name, body) -> served["/assets/$version/$name"] = body }
+        list(version, assets.keys.associateWith { "/assets/$version/$it" })
     }
 
     private fun sha256(bytes: ByteArray) = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))
@@ -179,6 +188,42 @@ class UpdaterTest {
         assertTrue("launcher 1.0.0" in home.resolve("bin/nop").readText(), "staging leaves the running install alone")
         assertEquals(emptyList(), leftovers(home))
         assertEquals(listOf(staged), updater.images(home))
+    }
+
+    @Test
+    fun `a newer release whose build for this platform failed does not hide the last one that has an update`() {
+        val home = install()
+        publish("9.9.8")
+        list("9.9.9", mapOf("nop-9.9.9.dmg" to "/assets/9.9.9/nop-9.9.9.dmg", "nop-9.9.9.msi" to "/assets/9.9.9/nop-9.9.9.msi"))
+        val updater = updater()
+
+        val latest = updater.latest()
+
+        assertEquals(Version(9, 9, 8), latest.version)
+        assertEquals(Version(9, 9, 8), updater.stage(home, latest).version)
+    }
+
+    @Test
+    fun `drafts and prereleases are not offered, and the newest version wins whatever order they are listed in`() {
+        publish("9.9.7")
+        publish("9.9.9")
+        publish("9.9.8")
+        val updater = updater()
+        assertEquals(Version(9, 9, 9), updater.latest().version)
+
+        val newest = mapOf("update-linux-x64.json" to "/assets/9.9.9/update-linux-x64.json", "update-linux-x64.json.sig" to "/assets/9.9.9/update-linux-x64.json.sig")
+        list("10.0.0", newest, draft = true)
+        list("10.0.1", newest, prerelease = true)
+        assertEquals(Version(9, 9, 9), updater.latest().version)
+    }
+
+    @Test
+    fun `with no release carrying an update for this platform, the check says so`() {
+        list("9.9.9", mapOf("nop-9.9.9.msi" to "/assets/9.9.9/nop-9.9.9.msi"))
+
+        val refused = assertFailsWith<UpdateException> { updater().latest() }
+
+        assertTrue("no published release has a signed update for linux-x64" in refused.message!!, refused.message)
     }
 
     @Test

@@ -24,6 +24,9 @@ import kotlin.system.exitProcess
 object CefShutdownSmoke {
     private const val PASSED = "CEF_SHUTDOWN_PASSED"
     private const val CASE_TIMEOUT_SECONDS = 120L
+    /** A visit answers in milliseconds; this is for a loaded CI runner. */
+    private const val COOKIE_WAIT_SECONDS = 30L
+    private const val LOG_LINES_SHOWN = 60
     private const val COOKIE_URL = "https://cookie.test/"
     private const val COOKIE_NAME = "kept"
 
@@ -76,6 +79,8 @@ object CefShutdownSmoke {
             if (!finished) process.destroyForcibly().waitFor()
             val passed = finished && process.exitValue() == 0 && Files.readString(output).lines().contains(PASSED)
             println("$name: ${if (passed) "passed" else "FAILED (${if (finished) "exit ${process.exitValue()}" else "timed out"}), see $output"}")
+            // A CI runner's files are gone with it, so what went wrong has to be in the build's output.
+            if (!passed) Files.readAllBytes(output).decodeToString().lines().takeLast(LOG_LINES_SHOWN).forEach { println("    $it") }
             passed
         }
         if (failed.isNotEmpty()) {
@@ -148,6 +153,9 @@ object CefShutdownSmoke {
             COOKIE_NAME, "1", "cookie.test", "/", true, false,
             Date(), Date(), true, Date(System.currentTimeMillis() + TimeUnit.DAYS.toMillis(1)),
         ))) { "the cookie was refused" }
+        // setCookie only queues the cookie. A page's cookies are in the store long before a restart, so
+        // the restart starts once this one is.
+        check(cookieIsSet()) { "the cookie was never set" }
         // RestartInPlace.prepare, then the windows closing as they do on the way to the exec.
         SwingUtilities.invokeAndWait { SlackBrowsers.leaveForExec() }
         if (windowsGoFirst) closeWindowsAWhileBeforeTheBrowsers()
@@ -181,13 +189,25 @@ object CefShutdownSmoke {
             Thread.sleep(100)
         }
         showPage(project)
-        val found = CountDownLatch(1)
-        check(CefCookieManager.getGlobalManager().visitUrlCookies(COOKIE_URL, false, CefCookieVisitor { cookie, _, _, _ ->
-            if (cookie.name == COOKIE_NAME) found.countDown()
-            true
-        })) { "the cookies could not be read" }
-        check(found.await(10, TimeUnit.SECONDS)) { "the cookie did not survive the restart" }
+        check(cookieIsSet()) { "the cookie did not survive the restart" }
         quit()
+    }
+
+    /**
+     * Whether the store holds the test's cookie, asking again each second: a visit made just behind
+     * setCookie can miss the cookie, and a visit that finds nothing never calls its visitor at all.
+     */
+    private fun cookieIsSet(): Boolean {
+        val found = CountDownLatch(1)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(COOKIE_WAIT_SECONDS)
+        while (true) {
+            check(CefCookieManager.getGlobalManager().visitUrlCookies(COOKIE_URL, false, CefCookieVisitor { cookie, _, _, _ ->
+                if (cookie.name == COOKIE_NAME) found.countDown()
+                true
+            })) { "the cookies could not be read" }
+            if (found.await(1, TimeUnit.SECONDS)) return true
+            if (System.nanoTime() > deadline) return false
+        }
     }
 
     private fun running(pid: Long): Boolean {

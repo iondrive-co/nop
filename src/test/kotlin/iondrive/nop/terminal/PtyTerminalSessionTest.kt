@@ -89,9 +89,12 @@ class PtyTerminalSessionTest {
 
     @Test
     fun `a close from whoever is ending the terminal still ends the program`() {
-        val process = ptyProcess("sleep", "30")
+        // A program is only signalled once it runs: between pty4j's fork and the exec, the child still
+        // has the JVM's SIGTERM handler, which takes the signal and does nothing with it.
+        val process = ptyProcess("sh", "-c", "echo started; exec sleep 30")
         try {
             val connector = PtyTtyConnector(process)
+            connector.readUntil("started")
             connector.releasing = true
             connector.close()
             assertTrue(process.waitFor(5, TimeUnit.SECONDS), "closing the tab must not leave its program running")
