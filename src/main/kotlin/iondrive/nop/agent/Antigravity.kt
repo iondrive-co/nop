@@ -152,7 +152,10 @@ internal object Antigravity {
      * here, because nothing is trusted here: it is a label.
      */
     fun email(account: Account): String? {
-        val idToken = readToken(account.credentialFile)?.get("id_token").str() ?: return null
+        val token = readToken(account.credentialFile) ?: return null
+        // Newer CLIs keep only the address, beside the token, and no id token at all.
+        token["id_token_email"].str()?.takeIf { it.isNotBlank() }?.let { return it }
+        val idToken = token["id_token"].str() ?: return null
         val payload = idToken.split(".").getOrNull(1) ?: return null
         return runCatching {
             val decoded = java.util.Base64.getUrlDecoder()

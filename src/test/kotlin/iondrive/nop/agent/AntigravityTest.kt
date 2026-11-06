@@ -49,6 +49,19 @@ class AntigravityTest {
     // ── the login, and where it has to live ──
 
     @Test
+    fun `the login's address is read from beside the token, or from an id token`(@TempDir tmp: Path) {
+        val account = signedIn(tmp)
+        assertEquals(null, Antigravity.email(account))
+
+        Files.writeString(account.credentialFile, token().dropLast(1) + ""","id_token_email":"pat@example.org"}""")
+        assertEquals("pat@example.org", Antigravity.email(account))
+
+        val payload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("""{"email":"sam@example.org"}""".toByteArray())
+        Files.writeString(account.credentialFile, token().dropLast(1) + ""","id_token":"h.$payload.s"}""")
+        assertEquals("sam@example.org", Antigravity.email(account))
+    }
+
+    @Test
     fun `an account is signed in when it holds a refresh token, not merely a file`(@TempDir tmp: Path) {
         val account = signedIn(tmp)
         assertTrue(Antigravity.signedIn(account))

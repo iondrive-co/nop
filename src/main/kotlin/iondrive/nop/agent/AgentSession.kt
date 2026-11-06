@@ -1176,6 +1176,8 @@ class AgentSession(
                 // from whether it has a token — so an account inherited with a perfectly good login
                 // would be asked to sign in again. See VendorConfig.
                 VendorConfig.prepareForInteractive(account)
+                // The hook that keeps the user's addresses out of what the agent sends. See AddressGuard.
+                AddressGuard.prepare(account)
                 // Every run is told to read the memory first, so it has to be there to read.
                 SharedMemory.ensure(projectDir.toPath())
             }

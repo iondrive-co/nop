@@ -38,6 +38,7 @@ import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import iondrive.nop.agent.Accounts
+import iondrive.nop.agent.AddressGuard
 import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.Backup
@@ -180,6 +181,9 @@ fun main(args: Array<String>) {
 
     // Only the nop that owns the windows backs the sessions up — see [Backup].
     Backup.start()
+
+    // And keeps the user's own email addresses out of what its agents send — see [AddressGuard].
+    AddressGuard.start()
 
     // And keeps itself up to date, when it is a release install — see [SelfUpdate].
     SelfUpdate.start()
