@@ -5,7 +5,10 @@ import com.jediterm.terminal.DefaultTerminalCopyPasteHandler
 import com.jediterm.terminal.HyperlinkStyle
 import com.jediterm.terminal.TerminalColor
 import com.jediterm.terminal.TerminalCopyPasteHandler
+import com.jediterm.terminal.TerminalStarter
 import com.jediterm.terminal.TextStyle
+import com.jediterm.terminal.TtyConnector
+import com.jediterm.terminal.model.JediTerminal
 import com.jediterm.terminal.model.StyleState
 import com.jediterm.terminal.model.TerminalTextBuffer
 import com.jediterm.terminal.ui.JediTermWidget
@@ -239,6 +242,9 @@ internal class NopTerminalWidget(
         textBuffer: TerminalTextBuffer,
     ): TerminalPanel =
         NopTerminalPanel(settingsProvider as NopTerminalSettings, textBuffer, styleState)
+
+    override fun createTerminalStarter(terminal: JediTerminal, connector: TtyConnector): TerminalStarter =
+        TerminalResize(terminal, connector, typeAheadManager, executorServiceManager)
 
     private companion object {
         /** How long output has to pause for before the scrollbar's marks are read again, at most. */

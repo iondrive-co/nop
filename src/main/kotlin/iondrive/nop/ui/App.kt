@@ -1120,7 +1120,7 @@ fun App(
     // One shared Swing CardLayout panel hosts every terminal widget (see TerminalView for why a
     // SwingPanel-per-run can't work). Remembered beside the sessions so it — and the live PTYs in
     // it — outlive visits to the other tool tabs.
-    val terminalCards = remember(projectPath) { JPanel(CardLayout()) }
+    val terminalCards = remember(projectPath) { JPanel(TerminalCardLayout()) }
     val slackCards = remember(projectPath) { JPanel(CardLayout()) }
 
     // Commit-message text-area height, persisted per-project. Long commit messages need more
