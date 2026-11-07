@@ -147,6 +147,7 @@ class SpawnTest {
         }
         assertTrue("mcp_elicitations=true" in policy, policy)
         assertTrue("approvals_reviewer=\"user\"" in command.argv.configs())
+        assertTrue("notice.hide_rate_limit_model_nudge=true" in command.argv.configs())
     }
 
     /**

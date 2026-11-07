@@ -215,6 +215,7 @@ class VendorConfigTest {
             service_tier = "default"
             [notice]
             fast_default_opt_out = true
+            hide_rate_limit_model_nudge = true
         """.trimIndent() + "\n"
         Files.writeString(file, content)
 

@@ -731,6 +731,30 @@ class AgentSessionsTest {
     }
 
     @Test
+    fun `Codex resumes the authorized model even when its transcript names another model`(@TempDir tmp: Path) {
+        val home = tmp.resolve("home")
+        val transcript = home.resolve(".codex/sessions/sample/rollout-native-orchid.jsonl")
+        Files.createDirectories(transcript.parent)
+        Files.writeString(transcript, """{"type":"turn_context","payload":{"model":"model-fern","effort":"medium"}}""" + "\n")
+        val selected = Account("codex-alpha", Provider.OpenAI, home.toString(), model = "model-orchid", reasoning = "high")
+        val session = sessions().open(tmp.toFile(), selected, resumeId = "native-orchid")
+        assertEquals("model-orchid", session.run.account.model)
+        assertEquals("model-orchid", session.run.command.argv.let { it[it.indexOf("-m") + 1] })
+
+        session.run.modelAuthorization.observe(ConversationModel("model-iris", "medium"), 20_000, 19_900)
+        val row = session.asOpenAgent()!!
+        assertEquals("model-iris", row.authorizedModel)
+        session.dispose()
+        val restored = sessions()
+        restored.restore(listOf(row), tmp.toFile(), listOf(selected))
+        val resumed = restored.sessions.single()
+        assertEquals("model-iris", resumed.run.modelAuthorization.choice?.model)
+        assertEquals("medium", resumed.run.modelAuthorization.choice?.reasoning)
+        resumed.reopen()
+        assertEquals("model-iris", resumed.run.account.model)
+    }
+
+    @Test
     fun `a resumed conversation comes back in the model it was last switched to`(@TempDir tmp: Path) {
         val home = tmp.resolve("home")
         val transcript = home.resolve("projects")

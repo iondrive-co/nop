@@ -130,7 +130,8 @@ internal object VendorConfig {
 
         val hasServiceTier = CODEX_SERVICE_TIER_REGEX.containsMatchIn(existing)
         val hasFastOptOut = CODEX_FAST_OPT_OUT_REGEX.containsMatchIn(existing)
-        if (hasServiceTier && hasFastOptOut) return
+        val hasModelNudgeOptOut = Regex("""(?m)^\s*hide_rate_limit_model_nudge\s*=""").containsMatchIn(existing)
+        if (hasServiceTier && hasFastOptOut && hasModelNudgeOptOut) return
 
         runCatching {
             val lines = if (existing.isEmpty()) mutableListOf() else existing.lines().toMutableList()
@@ -154,6 +155,16 @@ internal object VendorConfig {
                     }
                     lines.add("[notice]")
                     lines.add("fast_default_opt_out = true")
+                }
+            }
+
+            if (!hasModelNudgeOptOut) {
+                val noticeIdx = lines.indexOfFirst { TOML_NOTICE_TABLE_REGEX.matches(it) }
+                if (noticeIdx >= 0) {
+                    lines.add(noticeIdx + 1, "hide_rate_limit_model_nudge = true")
+                } else {
+                    lines.add("[notice]")
+                    lines.add("hide_rate_limit_model_nudge = true")
                 }
             }
 

@@ -172,7 +172,10 @@ class AgentSessions {
             _sessions.add(
                 AgentSession(
                     projectDir = dir,
-                    account = account,
+                    account = if (row.authorizedModel.isNotBlank()) account.copy(
+                        model = row.authorizedModel,
+                        reasoning = row.authorizedReasoning.takeIf { it.isNotBlank() },
+                    ) else account,
                     resumeId = if (row.provider == Provider.Anthropic.id) {
                         EventLog.ownConversation(row.sessionId, row.nativeSessionId)
                     } else {

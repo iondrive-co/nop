@@ -36,11 +36,10 @@ import javax.swing.Timer
  * project's tabs — sends the same way under its own name, but only to that project's tabs, so it is
  * held or let through exactly as a message between those tabs would be.
  *
- * Delivered, a message is typed into the prompt and submitted exactly as if the user had, headed
- * with its sender and how to answer ([envelope]). Its text is cleaned when it is held ([clean]), so
- * what the user reads is what is typed, and no byte of it can act as a key. A delivered message
- * still waits while the tab cannot safely take it: a CLI still starting, or holding a question (the
- * text would be taken as the answer).
+ * Delivered, a message carries its sender and how to answer ([envelope]). Codex takes it over its
+ * private control socket, independently of its composer and dialogs. Other CLIs take a paste and
+ * Enter once their prompts can accept it. Its text is cleaned when held ([clean]), so no byte can
+ * act as a key. A terminal delivery waits while the user has a draft or a question to answer.
  *
  * Every message has an id, and its sender is told where it has got to ([Status]): held for the user,
  * waiting and on what, being typed in, sent with Enter, or discarded. The answer to a send says so
@@ -84,16 +83,20 @@ object AgentMessages {
 
         /** What the log last said holds it back, so the log speaks when that changes rather than at every pass. */
         internal var loggedBlocker: String? = null
+        internal var retryAt: Long = 0L
+        internal var attemptedAt: Long = 0L
+        internal var attempts: Int = 0
 
         /** As the next nop is handed it across a restart. */
-        fun record() = Handover.HeldRecord(from, fromId, fromProject.path, body, typed, at, approved, id, sender)
+        fun record() = Handover.HeldRecord(from, fromId, fromProject.path, body, typed, at, approved, id, sender,
+            attemptedAt = attemptedAt, attempts = attempts)
 
         companion object {
             /** A message the last nop handed over, back in an inbox as it was. */
             fun of(record: Handover.HeldRecord) = Held(
                 record.from, record.fromId, File(record.fromProject), record.body, record.typed, record.at,
                 id = record.id.ifEmpty { newId() }, sender = record.sender,
-            ).also { it.approved = record.approved }
+            ).also { it.approved = record.approved; it.attemptedAt = record.attemptedAt; it.attempts = record.attempts }
         }
     }
 
@@ -131,8 +134,8 @@ object AgentMessages {
     }
 
     /** How [pump] types a message in, and hears whether its Enter reached a running CLI. Replaced in tests. */
-    internal var typeInto: (AgentSession, String, (Boolean) -> Unit) -> Unit =
-        { s, text, entered -> s.run.session.submit(text, entered) }
+    internal var typeInto: (AgentSession, Held, (Boolean) -> Unit) -> Unit =
+        { s, held, entered -> s.submitAgentMessage(held.typed, entered, held.id, held.attemptedAt.takeIf { held.attempts > 1 }) }
 
     /** When the pump last typed a message in, in any tab. Set in tests. */
     internal var lastSubmitAt = 0L
@@ -339,7 +342,7 @@ object AgentMessages {
     internal fun pump(now: Long) {
         val waiting = sessions().filter { s -> !s.ended && s.inbox.any { it.approved } }
         if (now - lastSubmitAt >= BETWEEN_SUBMITS_MS) {
-            val ready = waiting.firstOrNull { waitReason(it, now) == null }
+            val ready = waiting.firstOrNull { waitReason(it, now) == null && it.inbox.first { held -> held.approved }.retryAt <= now }
             if (ready != null) {
                 val next = ready.inbox.first { it.approved }
                 ready.inbox.remove(next)
@@ -353,17 +356,31 @@ object AgentMessages {
 
     /** Types [held], out of [s]'s inbox now, into its prompt, and keeps its [Status] as it goes. */
     private fun typeIn(s: AgentSession, held: Held, now: Long) {
+        if (held.attempts++ == 0) held.attemptedAt = now
+        s.inFlightMessage = held
         val to = "\"${clean(s.title)}\" (${s.shortId})"
-        gone[held.id] = held.sender to Status(held.id, Status.State.Submitting, "typed into $to's prompt at ${clock(now)}; its Enter follows")
-        Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: typing it in")
-        typeInto(s, held.typed) { entered ->
+        gone[held.id] = held.sender to Status(held.id, Status.State.Submitting,
+            if (s.usesControlDelivery) "sending to $to at ${clock(now)}"
+            else "typed into $to's prompt at ${clock(now)}; its Enter follows")
+        Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: " +
+            if (s.usesControlDelivery) "sending through Codex's local control socket" else "typing it in")
+        typeInto(s, held) { entered ->
+            s.inFlightMessage = null
             val at = System.currentTimeMillis()
             gone[held.id] = held.sender to if (entered) {
                 Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: submitted")
-                Status(held.id, Status.State.Submitted, "typed into $to's prompt and sent with Enter at ${clock(at)}")
+                Status(held.id, Status.State.Submitted, if (s.usesControlDelivery) "accepted by $to's local control socket at ${clock(at)}"
+                    else "typed into $to's prompt and sent with Enter at ${clock(at)}")
             } else {
-                Log.warn("agent message ${held.id} from ${held.fromId} to ${s.shortId}: its CLI stopped before the Enter that sends it")
-                Status(held.id, Status.State.Undeliverable, "typed into $to's prompt, but its CLI stopped before the Enter that sends it")
+                if (!s.ended && s.account.provider == Provider.OpenAI) {
+                    held.retryAt = at + 3_000
+                    s.inbox.add(0, held)
+                    startPump()
+                    Status(held.id, Status.State.Waiting, "retrying delivery to $to's local control socket")
+                } else {
+                    Log.warn("agent message ${held.id} from ${held.fromId} to ${s.shortId}: its CLI stopped before the Enter that sends it")
+                    Status(held.id, Status.State.Undeliverable, "typed into $to's prompt, but its CLI stopped before the Enter that sends it")
+                }
             }
         }
     }
@@ -384,6 +401,12 @@ object AgentMessages {
             !terminal.isStarted || terminal.deferred -> "the tab is opened and its CLI starts"
             !terminal.running -> "its CLI is running again"
             now - s.run.startedAt.toEpochMilli() < BOOT_MS -> "its CLI has finished starting"
+            s.account.provider == Provider.OpenAI -> when {
+                terminal.submitting -> "nop has finished delivering another message"
+                !s.usesControlDelivery && terminal.mayHoldDraft(now) -> "the draft in its prompt is sent or cleared"
+                !s.usesControlDelivery && terminal.lastSubmitAt > 0L && now - terminal.lastSubmitAt < BETWEEN_SUBMITS_MS -> "the prompt has finished sending"
+                else -> null
+            }
             s.activity == Activity.Asking -> "the question it is asking has been answered"
             terminal.submitting -> "nop has finished typing another message into it"
             terminal.mayHoldDraft(now) -> "the draft in its prompt is sent or cleared"

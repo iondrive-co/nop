@@ -161,6 +161,9 @@ object Spawn {
             // Codex's automatic reviewer, whatever the account's config.toml says.
             "-c",
             "approvals_reviewer=\"user\"",
+            // Automated messages must never accept a suggestion to change the selected model.
+            "-c",
+            "notice.hide_rate_limit_model_nudge=true",
             // Keep the conversation in terminal scrollback so nop can scroll and mark prompts.
             "--no-alt-screen",
             // When the terminal is resized, and when a session is resumed, Codex clears the

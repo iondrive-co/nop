@@ -125,6 +125,11 @@ class TerminalSession private constructor(
     /** When input last left [draftPending] set, for [mayHoldDraft] to give the screen time to draw it. */
     private var draftAt = 0L
 
+    /** A physical Enter in the model picker, distinct from nop submitting a message. */
+    @Volatile
+    internal var modelSelectionAt: Long = 0L
+        private set
+
     /**
      * Whether text typed in and submitted now could take a draft with it: [draftPending], unless the
      * program's own screen shows its prompt empty ([promptLooksEmpty]).
@@ -139,15 +144,21 @@ class TerminalSession private constructor(
         draftPending && (now - draftAt < DRAFT_SETTLE_MS || !promptShowsEmpty())
 
     private fun promptShowsEmpty(): Boolean {
-        val buffer = widget?.terminalTextBuffer ?: return false
+        return promptLooksEmpty(screenLines())
+    }
+
+    private fun screenLines(): List<ScreenLine> {
+        val buffer = widget?.terminalTextBuffer ?: return emptyList()
         buffer.lock()
         val lines = try {
             (0 until buffer.height).map { screenLine(buffer.getLine(it)) }
         } finally {
             buffer.unlock()
         }
-        return promptLooksEmpty(lines)
+        return lines
     }
+
+    internal fun modelPickerOpen(): Boolean = modelPickerVisible(screenLines().map { it.text })
 
     /** When a prompt was last submitted (by the user or via [submit]) in this terminal. */
     var lastSubmitAt: Long = 0L
@@ -160,6 +171,25 @@ class TerminalSession private constructor(
      */
     var submitting: Boolean = false
         internal set
+
+    private var pasting = false
+    private val keysAfterPaste = mutableListOf<ByteArray>()
+
+    private fun acceptInput(bytes: ByteArray): Boolean = synchronized(keysAfterPaste) {
+        if (!pasting || isTerminalReport(bytes)) true
+        else { keysAfterPaste.add(bytes.copyOf()); false }
+    }
+
+    private fun finishPaste() {
+        val keys = synchronized(keysAfterPaste) {
+            pasting = false
+            keysAfterPaste.toList().also { keysAfterPaste.clear() }
+        }
+        for (bytes in keys) {
+            noteInput(bytes)
+            runCatching { process?.outputStream?.let { it.write(bytes); it.flush() } }
+        }
+    }
 
     /**
      * Whether the program in the terminal has asked for bracketed paste (`ESC [ ? 2004 h`) and not
@@ -372,6 +402,7 @@ class TerminalSession private constructor(
      */
     fun sendText(text: String) {
         settings?.nudgeActive()
+        if (!acceptInput(text.toByteArray(Charsets.UTF_8))) return
         noteInput(text.toByteArray(Charsets.UTF_8))
         write(text)
     }
@@ -404,7 +435,9 @@ class TerminalSession private constructor(
      * [onEntered] is told, on the EDT, once the Enter has been written, and whether it reached a
      * running program.
      */
-    fun submit(text: String, onEntered: ((Boolean) -> Unit)? = null) {
+    fun submit(text: String, onEntered: ((Boolean) -> Unit)? = null) = submitText(text, false, onEntered)
+
+    private fun submitText(text: String, requireComposer: Boolean, onEntered: ((Boolean) -> Unit)?) {
         settings?.nudgeActive()
         // Nothing in the text may reach the program as anything but text: an ESC would let it end
         // the paste early (`ESC [ 2 0 1 ~`) and carry on as keystrokes, and a bare CR or any other
@@ -418,17 +451,33 @@ class TerminalSession private constructor(
             safe.trim().replace(LINE_BREAKS, " ").replace('\t', ' ')
         }
         submitting = true
+        synchronized(keysAfterPaste) { pasting = true }
         write(body)
         javax.swing.Timer(SUBMIT_DELAY_MS) {
-            val entered = write("\r")
-            noteInput(byteArrayOf('\r'.code.toByte()))
+            val entered = (!requireComposer || composerVisible(screenLines().map { it.text })) && write("\r")
+            if (entered) noteInput(byteArrayOf('\r'.code.toByte()), automated = true)
             // Enter sends the whole prompt, so whatever was in it has gone too.
             draftPending = false
             submitting = false
+            finishPaste()
             onEntered?.invoke(entered)
         }.apply {
             isRepeats = false
             start()
+        }
+    }
+
+    /** Boots a fresh Codex thread through its composer; established threads use the control socket. */
+    internal fun submitToComposer(text: String, onEntered: (Boolean) -> Unit, attempt: Int = 0) {
+        if (attempt == 0) submitting = true
+        if (mayHoldDraft() || !running || attempt >= 20) { submitting = false; onEntered(false); return }
+        if (promptShowsEmpty()) {
+            submitText(text, true, onEntered)
+        } else {
+            // Esc backs out of a CLI picker without accepting its selected option.
+            if (attempt == 0) write("\u001b")
+            javax.swing.Timer(100) { submitToComposer(text, onEntered, attempt + 1) }
+                .apply { isRepeats = false; start() }
         }
     }
 
@@ -569,7 +618,8 @@ class TerminalSession private constructor(
                 noteBracketedPaste(text)
                 outputTap?.invoke(text)
             },
-            inputTap = ::noteInput,
+            inputTap = { noteInput(it) },
+            acceptInput = ::acceptInput,
         )
         connector = c
         c.onReaderLost = { resumeReading(w, c) { widget === w && connector === c && !handedOver } }
@@ -601,10 +651,15 @@ class TerminalSession private constructor(
     }
 
     /** Records input from both JediTerm and [sendText], with submission only for an Enter key. */
-    internal fun noteInput(bytes: ByteArray) {
+    internal fun noteInput(bytes: ByteArray, automated: Boolean = false) {
         noteDraft(bytes)
         // Enter arrives as its own carriage return. A paste may contain line breaks too, but
         // those are part of the draft, as is the line feed Shift+Enter inserts.
+        if (!automated && bytes.size == 1 && (bytes[0] == '\r'.code.toByte() || bytes[0].toInt() in 49..57)) {
+            if (modelPickerVisible(screenLines().map { it.text })) {
+                modelSelectionAt = System.currentTimeMillis()
+            }
+        }
         if (bytes.size == 1 && bytes[0] == '\r'.code.toByte()) {
             lastSubmitAt = System.currentTimeMillis()
             onUserInput?.invoke()
@@ -717,6 +772,17 @@ class TerminalSession private constructor(
             if (next.isBlank()) return true
             val first = next.text.first { !isBlank(it) }
             return first in PROMPT_ENDS
+        }
+
+        internal fun modelPickerVisible(lines: List<String>): Boolean = lines.any {
+            it.trim().startsWith("Select model", ignoreCase = true) ||
+                it.trim().startsWith("Select reasoning", ignoreCase = true)
+        }
+
+        internal fun composerVisible(lines: List<String>): Boolean {
+            if (modelPickerVisible(lines)) return false
+            val prompt = lines.lastOrNull { promptStart(it) >= 0 } ?: return false
+            return !Regex("""^\d+[.)]\s""").containsMatchIn(prompt.substring(promptStart(prompt)).trimStart())
         }
 
         /** Where the text after a prompt marker starts on [text], or -1 when [text] is not a prompt row. */

@@ -65,14 +65,16 @@ for command in "$release_cef" "$release_package" 'Self-update bundle (Linux)' 't
         || fail ".github/workflows/release.yml no longer has '$command': update scripts/ci-local.sh to match it"
 done
 
+# Gradle's default home follows Java's user.home, which may differ from a CLI's isolated HOME.
+gradle_source_home="${GRADLE_USER_HOME:-$(python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')/.gradle}"
 java_home="${NOP_CI_JAVA_HOME:-}"
 if [[ -z "$java_home" ]]; then
-    for candidate in "$HOME"/.gradle/jdks/eclipse_adoptium-21-* /usr/lib/jvm/temurin-21-* /usr/lib/jvm/*-21-*; do
-        if [[ -x "$candidate/bin/java" ]]; then java_home="$candidate"; break; fi
+    for candidate in "$gradle_source_home"/jdks/eclipse_adoptium-21-* /usr/lib/jvm/temurin-21-* /usr/lib/jvm/*-21-*; do
+        if [[ -x "$candidate/bin/java" && -x "$candidate/bin/javac" ]]; then java_home="$candidate"; break; fi
     done
 fi
-[[ -n "$java_home" && -x "$java_home/bin/java" ]] \
-    || fail "no JDK 21 found: set NOP_CI_JAVA_HOME (the workflows use Temurin 21)"
+[[ -n "$java_home" && -x "$java_home/bin/java" && -x "$java_home/bin/javac" ]] \
+    || fail "no full JDK 21 found: set NOP_CI_JAVA_HOME (the workflows use Temurin 21)"
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/nop-ci"
 mkdir -p "$cache"
@@ -134,12 +136,14 @@ runner_env=(
     # Java reads user.home from the password file, so $HOME alone would leave it at your real home.
     JAVA_TOOL_OPTIONS="-Duser.home=$home"
     GRADLE_USER_HOME="$gradle_home"
-    GRADLE_RO_DEP_CACHE="$HOME/.gradle/caches"
     XDG_RUNTIME_DIR="$run/runtime"
     LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
     CI=true GITHUB_ACTIONS=true
     RUNNER_TEMP="$run/runner-temp"
 )
+if [[ -d "$gradle_source_home/caches" ]]; then
+    runner_env+=(GRADLE_RO_DEP_CACHE="$gradle_source_home/caches")
+fi
 
 echo "ci-local: checking $what"
 echo "ci-local: packageVersion $version, JDK $java_home, ${pin[*]:-all CPUs}"

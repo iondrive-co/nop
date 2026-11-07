@@ -56,8 +56,9 @@ class CodexTailer(private val home: Path) : Tailer {
         if (!Files.isDirectory(root)) return null
         val wanted = run.projectDir.toAbsolutePath().normalize().toString()
 
-        if (run.nativeSessionId != null) {
-            val targetId = run.nativeSessionId
+        val knownId = run.knownNativeSessionId?.invoke() ?: run.nativeSessionId
+        if (knownId != null) {
+            val targetId = knownId
             val candidates = runCatching {
                 Files.walk(root).use { stream ->
                     stream.filter {
@@ -128,10 +129,18 @@ class CodexTailer(private val home: Path) : Tailer {
             }
             "turn_context" -> {
                 model = payload["model"].str() ?: model
-                emptyList()
+                payload["model"].str()?.let {
+                    listOf(AgentEvent.ModelObserved(it, payload["effort"].str(), at))
+                } ?: emptyList()
             }
             "response_item" -> responseItem(payload, at)
-            "event_msg" -> eventMsg(payload, at)
+            "event_msg" -> if (payload["type"].str() == "thread_settings_applied") {
+                val settings = payload["thread_settings"].obj()
+                settings?.get("model").str()?.let {
+                    model = it
+                    listOf(AgentEvent.ModelObserved(it, settings?.get("reasoning_effort").str(), at))
+                } ?: emptyList()
+            } else eventMsg(payload, at)
             else -> emptyList()
         }
     }

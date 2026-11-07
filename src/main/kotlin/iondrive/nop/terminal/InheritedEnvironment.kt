@@ -28,6 +28,8 @@ object InheritedEnvironment {
         "NOP_AGENT_SESSION",
         "NOP_AGENT_TICKET",
         "NOP_SOCKET",
+        "NOP_CODEX_CONTROL_SOCKET",
+        "NOP_CODEX_CONTROL_DIRECTORY",
 
         "CLAUDECODE",
         "CLAUDE_CODE_CHILD_SESSION",

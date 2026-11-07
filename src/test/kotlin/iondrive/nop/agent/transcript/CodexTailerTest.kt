@@ -23,6 +23,15 @@ import java.nio.file.attribute.FileTime
  * readable by the other.
  */
 class CodexTailerTest {
+    @Test
+    fun `model settings and turn context are observations with their reasoning effort`() {
+        val tailer = CodexTailer(java.nio.file.Path.of("/home/dev/agent"))
+        val settings = tailer.parse("""{"timestamp":"2027-03-04T10:00:00Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"model-orchid","reasoning_effort":"high"}}}""")
+        assertEquals("model-orchid", (settings.single() as AgentEvent.ModelObserved).model)
+        assertEquals("high", (settings.single() as AgentEvent.ModelObserved).reasoning)
+        val turn = tailer.parse("""{"timestamp":"2027-03-04T10:00:01Z","type":"turn_context","payload":{"model":"model-fern","effort":"medium"}}""")
+        assertEquals("model-fern", (turn.single() as AgentEvent.ModelObserved).model)
+    }
 
     private fun fixture(): List<String> =
         checkNotNull(javaClass.getResourceAsStream("/agent/codex-rollout.jsonl"))

@@ -51,9 +51,50 @@ class AgentMessagesTest {
     /** What [AgentMessages] types in, and the Enter each is waiting on, in place of a terminal. */
     private fun typedHere(): MutableList<Pair<String, (Boolean) -> Unit>> {
         val typed = mutableListOf<Pair<String, (Boolean) -> Unit>>()
-        AgentMessages.typeInto = { _, text, entered -> typed += text to entered }
+        AgentMessages.typeInto = { _, held, entered -> typed += held.typed to entered }
         AgentMessages.lastSubmitAt = 0L
         return typed
+    }
+
+    @Test
+    fun `Codex control delivery goes ahead during a question and preserves the user's draft`(@TempDir dir: Path) {
+        val (from, to) = tabs(dir, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        running(to)
+        to.run.nativeSessionId = "thread-orchid"
+        val terminal = to.run.session
+        terminal.draftPending = true
+        to.run.tracker.onEvent(AgentEvent.ToolStarted("question-one", "request_user_input", at = System.currentTimeMillis()))
+        to.refreshActivity(to.run.tracker)
+        assertEquals(Activity.Asking, to.activity)
+        assertEquals(null, AgentMessages.waitReason(to))
+        val typed = typedHere()
+        val held = AgentMessages.Held("sender", from.shortId, dir.toFile(), "hello", "[header]\n\nhello", 1)
+        to.inbox.add(held)
+        onEdt { AgentMessages.deliver(to, held); AgentMessages.pump(System.currentTimeMillis() + 10_000) }
+        assertEquals(1, typed.size)
+        assertTrue(terminal.draftPending)
+        typed.single().second(true)
+        assertTrue(terminal.draftPending, "control delivery must not send or clear a user's draft")
+    }
+
+    @Test
+    fun `a failed Codex delivery is retried with the same message instead of being dropped`(@TempDir dir: Path) {
+        val (_, to) = tabs(dir, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        running(to)
+        to.run.nativeSessionId = "thread-orchid"
+        val typed = typedHere()
+        val held = AgentMessages.Held("sender", "sender-id", dir.toFile(), "hello", "[header]\n\nhello", 1)
+        to.inbox.add(held)
+        val now = System.currentTimeMillis() + 10_000
+        onEdt { AgentMessages.deliver(to, held); AgentMessages.pump(now) }
+        assertTrue(to.inbox.isEmpty())
+        onEdt { typed.single().second(false) }
+        assertEquals(listOf(held), to.inbox.toList())
+        onEdt { AgentMessages.pump(now + 10_000) }
+        assertEquals(2, typed.size)
+        assertEquals(typed[0].first, typed[1].first)
+        onEdt { typed.last().second(true) }
+        assertTrue(to.inbox.isEmpty())
     }
 
     /** The id on the status line a send's answer ends with. */
@@ -221,7 +262,7 @@ class AgentMessagesTest {
         @TempDir project: Path,
         @TempDir config: Path,
     ) = withConfigRoot(config) {
-        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.Anthropic)
         AgentMessages.sessions = { listOf(from, to) }
         onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }
 
@@ -317,7 +358,7 @@ class AgentMessagesTest {
         @TempDir elsewhere: Path,
         @TempDir config: Path,
     ) = withConfigRoot(config) {
-        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        val (from, to) = tabs(project, "sender" to Provider.Anthropic, "recipient" to Provider.Anthropic)
         val (stranger) = tabs(elsewhere, "stranger" to Provider.Antigravity)
         AgentMessages.sessions = { listOf(from, to, stranger) }
         onEdt { AgentMessages.setAutoDeliver(project.toFile(), true) }

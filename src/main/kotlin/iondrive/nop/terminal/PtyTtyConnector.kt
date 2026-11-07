@@ -43,6 +43,8 @@ class PtyTtyConnector(
      */
     replay: ByteArray? = null,
     private val replayTap: ((String) -> Unit)? = null,
+    /** False queues a physical key until an automated paste has sent its own Enter. */
+    private val acceptInput: ((ByteArray) -> Boolean)? = null,
     /**
      * Sees every character on its way to the terminal, and changes none of them.
      *
@@ -127,6 +129,7 @@ class PtyTtyConnector(
     }
 
     override fun write(buf: ByteArray) {
+        if (acceptInput?.invoke(buf) == false) return
         val listener = inputTap
         if (listener != null) {
             runCatching { listener(buf) }
@@ -135,6 +138,7 @@ class PtyTtyConnector(
     }
 
     override fun write(string: String) {
+        if (acceptInput?.invoke(string.toByteArray(StandardCharsets.UTF_8)) == false) return
         val listener = inputTap
         if (listener != null) {
             runCatching { listener(string.toByteArray(StandardCharsets.UTF_8)) }

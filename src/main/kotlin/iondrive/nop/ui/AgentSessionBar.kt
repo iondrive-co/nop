@@ -169,6 +169,21 @@ fun AgentSessionBar(
         // Above the list rather than below it: it is news about the run that is on screen now, and
         // it explains why the account named in the row above is not the one this tab was started
         // on. Dismissed by reading it, which is all there is to do about it.
+        run.modelAuthorization.change?.let { change ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Codex changed to ${change.observed.model} without a model selection. " +
+                        if (change.restored) "Restored ${change.expected.model} for subsequent turns."
+                        else "Restoring ${change.expected.model}; messages continue to be delivered.",
+                    color = AgentMuted,
+                    modifier = Modifier.weight(1f),
+                )
+                Text("Dismiss", color = AgentMuted, modifier = Modifier.clickable { run.modelAuthorization.dismiss() })
+            }
+        }
         session.autoHandover?.let { note ->
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),

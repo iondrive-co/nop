@@ -84,6 +84,10 @@ class AgentRun(
      */
     var startedAt: Instant = Instant.now(),
 ) {
+    internal val modelAuthorization = ModelAuthorization(account.model?.takeIf { it != DEFAULT_CHOICE }
+        ?.let { ConversationModel(it, account.reasoning?.takeIf { r -> r != DEFAULT_CHOICE }) })
+
+    internal var restoringModel = false
     /** True when this command resumes an existing session rather than starting a fresh one. */
     val isResume: Boolean get() = command.isResume
 
@@ -258,6 +262,7 @@ class AgentSession(
     val inbox = androidx.compose.runtime.mutableStateListOf<AgentMessages.Held>().apply {
         adoption?.first?.inbox?.forEach { add(AgentMessages.Held.of(it)) }
     }
+    internal var inFlightMessage: AgentMessages.Held? = null
 
     /**
      * What happened in this session, in a vocabulary neither vendor uses — which is what makes a
@@ -465,6 +470,7 @@ class AgentSession(
 
     /** Re-reads the activity once a title has had time to settle. Created on first use, on the EDT. */
     private var settleTimer: javax.swing.Timer? = null
+    private var legacyCodexUpgradePending = false
 
     /**
      * Says the session's TUI is on screen, until the matching [unwatch]. While it is, nothing it does
@@ -510,6 +516,20 @@ class AgentSession(
                 }
             }
             noteChange(was, next)
+        }
+        if (next == Activity.Idle && !legacyCodexUpgradePending && account.provider == Provider.OpenAI &&
+            !usesControlDelivery && run.session.pid() != null && !System.getProperty("os.name").startsWith("Windows", true)
+        ) {
+            val current = run
+            legacyCodexUpgradePending = true
+            javax.swing.Timer(1000) {
+                if (run === current && activity == Activity.Idle && resumeWait == null && current.quota == null &&
+                    !current.session.mayHoldDraft() && !current.session.modelPickerOpen() && !current.session.submitting
+                ) {
+                    Log.info("moving $shortId's idle Codex terminal onto its private control socket")
+                    reopen()
+                } else legacyCodexUpgradePending = false
+            }.apply { isRepeats = false; start() }
         }
         if (settles != null && settles > now) {
             val timer = settleTimer ?: javax.swing.Timer(0) { refreshActivity(run.tracker) }
@@ -643,7 +663,9 @@ class AgentSession(
         // Anything redrawn from the old wall after this is that wall; a new one files a new refusal.
         current.waitedOutWallAt = now
         quotaWatcher.reset()
-        current.session.submit(RESUME_PROMPT)
+        submitAgentMessage(RESUME_PROMPT, { sent ->
+            if (!sent && run === current && !ended) scheduleResume(current, wait.copy(resumeAt = now.plus(RESUME_RETRY)), now)
+        })
     }
 
     /**
@@ -986,7 +1008,7 @@ class AgentSession(
 
     /** Starts the same account again in this tab, resuming the vendor's own session where it left off. */
     fun reopen(resumeId: String? = run.nativeSessionId) {
-        switchTo(account = run.account, resumeId = resumeId, reason = EndReason.Switched)
+        switchTo(account = authorizedAccount(), resumeId = resumeId, reason = EndReason.Switched)
     }
 
     /**
@@ -999,8 +1021,11 @@ class AgentSession(
      * user does not want.
      */
     fun startFresh() {
-        switchTo(account = run.account, resumeId = null, reason = EndReason.Switched)
+        switchTo(account = authorizedAccount(), resumeId = null, reason = EndReason.Switched)
     }
+
+    private fun authorizedAccount(): Account = run.modelAuthorization.choice?.takeIf { account.provider == Provider.OpenAI }
+        ?.let { account.copy(model = it.model, reasoning = it.reasoning) } ?: account
 
     /**
      * This session as a row for the state file, or null for one that should not come back.
@@ -1030,6 +1055,8 @@ class AgentSession(
             title = title,
             titleIsUsers = titleIsUsers,
             baselineSha = baselineSha.orEmpty(),
+            authorizedModel = run.modelAuthorization.choice?.model.orEmpty(),
+            authorizedReasoning = run.modelAuthorization.choice?.reasoning.orEmpty(),
         )
     }
 
@@ -1103,8 +1130,11 @@ class AgentSession(
             baselineSha = baselineSha,
             ticket = agentTicket,
             selected = selected,
-            inbox = inbox.map { it.record() },
+            inbox = (listOfNotNull(inFlightMessage) + inbox).map { it.record() },
             draftPending = current.session.draftPending,
+            codexControlSocket = current.command.env[CodexLaunch.SOCKET_ENV],
+            authorizedModel = current.modelAuthorization.choice?.model,
+            authorizedReasoning = current.modelAuthorization.choice?.reasoning,
         )
         return record to pty
     }
@@ -1123,6 +1153,7 @@ class AgentSession(
         settleTimer?.stop()
         stopResumeWait()
         run.session.dispose()
+        CodexLaunch.cleanup(run.command)
         log.close()
     }
 
@@ -1132,6 +1163,8 @@ class AgentSession(
      * [Transcripts.lastModel].
      */
     private fun inLastModel(account: Account, resumeId: String): Account {
+        // Vendor telemetry records what ran, not who authorized a model change.
+        if (account.provider == Provider.OpenAI) return account
         val last = Transcripts.lastModel(account, projectDir, resumeId) ?: return account
         val resumed = account.copy(
             model = last.model.takeIf { it != DEFAULT_CHOICE },
@@ -1144,6 +1177,77 @@ class AgentSession(
             )
         }
         return resumed
+    }
+
+    internal val usesControlDelivery: Boolean
+        get() = account.provider == Provider.OpenAI && run.command.env[CodexLaunch.SOCKET_ENV] != null
+
+    internal fun submitAgentMessage(text: String, entered: (Boolean) -> Unit, messageId: String = UUID.randomUUID().toString(), retrySince: Long? = null) {
+        val current = run
+        val conversation = current.nativeSessionId
+        if (current.account.provider != Provider.OpenAI) {
+            current.session.submit(text, entered)
+            return
+        }
+        if (!usesControlDelivery) {
+            current.session.submitToComposer(text, entered)
+            return
+        }
+        current.session.submitting = true
+        val authorized = current.modelAuthorization.choice
+        val sendingAt = System.currentTimeMillis()
+        kotlin.concurrent.thread(isDaemon = true, name = "agent-message-control") {
+            val sent = runCatching {
+                CodexControl.send(current.account, conversation, text, UUID.nameUUIDFromBytes(messageId.toByteArray()).toString(), authorized, retrySince,
+                    current.command.env[CodexLaunch.SOCKET_ENV])
+            }
+            SwingUtilities.invokeLater {
+                current.session.submitting = false
+                if (sent.isSuccess) {
+                    current.userPromptSubmitted = true
+                    sent.getOrNull()?.conversation?.let {
+                        current.nativeSessionId = it
+                        LiveTranscripts.claim(it, sessionId)
+                    }
+                    sent.getOrNull()?.takeIf {
+                        current.modelAuthorization.choice?.model == authorized?.model && current.session.modelSelectionAt <= sendingAt
+                    }?.let { observed ->
+                        observed.model?.let { model ->
+                            observeModel(current, AgentEvent.ModelObserved(model, observed.reasoning, System.currentTimeMillis()),
+                                selectedAt = 0L, restored = observed.restored)
+                        }
+                    }
+                } else {
+                    Log.warn("agent message to $shortId failed on Codex's control socket: ${sent.exceptionOrNull()}")
+                }
+                entered(sent.isSuccess)
+            }
+        }
+    }
+
+    private fun observeModel(current: AgentRun, event: AgentEvent.ModelObserved, selectedAt: Long = current.session.modelSelectionAt, restored: Boolean = false) {
+        val authorization = current.modelAuthorization
+        if (authorization.observe(ConversationModel(event.model, event.reasoning), event.at, selectedAt)) {
+            authorization.choice?.let { log.append(AgentEvent.ModelAuthorized(it.model, it.reasoning, event.at)) }
+        }
+        if (restored) authorization.choice?.let(authorization::restored)
+        val unexpected = authorization.change ?: return
+        if (unexpected.restored || current.restoringModel || current !== run) return
+        val conversation = current.nativeSessionId ?: return
+        current.restoringModel = true
+        Log.warn("$shortId observed model ${unexpected.observed.model}; restoring authorized model ${unexpected.expected.model}")
+        kotlin.concurrent.thread(isDaemon = true, name = "agent-model-restore") {
+            val restored = runCatching {
+                CodexControl.restore(current.account, conversation, unexpected.expected, current.command.env[CodexLaunch.SOCKET_ENV],
+                    expectedModel = unexpected.observed.model,
+                    stillAuthorized = { authorization.choice == unexpected.expected && current.session.modelSelectionAt <= event.at })
+            }
+            SwingUtilities.invokeLater {
+                current.restoringModel = false
+                if (restored.getOrNull() == true) authorization.restored(unexpected.expected)
+                else if (restored.isFailure) Log.warn("could not restore $shortId's authorized model: ${restored.exceptionOrNull()}")
+            }
+        }
     }
 
     private fun start(
@@ -1160,14 +1264,19 @@ class AgentSession(
         val conversationMissing = carried == null && resumeId != null && Transcripts.missing(requested, projectDir, resumeId) &&
             !Backup.restore(requested, projectDir, resumeId)
         if (conversationMissing) Log.info("${requested.name} has no transcript for conversation $resumeId")
-        val account = if (carried == null && resumeId != null && !conversationMissing) {
+        val account = if (carried?.authorizedModel != null) {
+            requested.copy(model = carried.authorizedModel, reasoning = carried.authorizedReasoning)
+        } else if (carried != null && requested.provider == Provider.OpenAI) {
+            val modelAt = carried.argv.indexOf("-m")
+            requested.copy(model = carried.argv.getOrNull(modelAt + 1).takeIf { modelAt >= 0 } ?: requested.model)
+        } else if (carried == null && resumeId != null && !conversationMissing) {
             inLastModel(requested, resumeId)
         } else {
             requested
         }
         val command = if (carried != null) {
             // Already running: the argv is what it was started with, and its environment is its own.
-            AgentCommand(carried.argv, emptyMap(), carried.nativeSessionId, carried.isResume)
+            AgentCommand(carried.argv, carried.codexControlSocket?.let { mapOf(CodexLaunch.SOCKET_ENV to it) }.orEmpty(), carried.nativeSessionId, carried.isResume)
         } else {
             // The MCP servers the user's own CLI would have, which the account's isolated home hides.
             val mcp = McpServers.prepare(account, projectDir)
@@ -1180,7 +1289,7 @@ class AgentSession(
                 AddressGuard.prepare(account)
                 // Every run is told to read the memory first, so it has to be there to read.
                 SharedMemory.ensure(projectDir.toPath())
-            }
+            }.let { if (account.provider == Provider.OpenAI) CodexLaunch.wrap(it) else it }
         }
         Log.info(
             "agent run ${account.provider.id}/${account.name} in ${projectDir.name}" +
@@ -1286,6 +1395,7 @@ class AgentSession(
             resumingLoggedWork = (resumeId != null || carried != null) && log.hadHistory,
             joinAt = carried?.transcriptPath?.let { Path.of(it) to (carried.transcriptOffset ?: 0L) },
             pid = { terminal.pid() },
+            knownNativeSessionId = { newRun.nativeSessionId },
         )
         val tailer = tailerFor(account)
         newRun.follower = TranscriptFollower(
@@ -1298,6 +1408,9 @@ class AgentSession(
                 }
                 if (event is AgentEvent.AssistantMessage) {
                     event.blocks.filterIsInstance<Block.Text>().forEach { terminal.recordAssistantText(it.text) }
+                }
+                if (event is AgentEvent.ModelObserved && event.at >= startedAt) {
+                    SwingUtilities.invokeLater { if (run === newRun) observeModel(newRun, event) }
                 }
                 // The CLI names its own session a turn or two in. That name says far more about
                 // which of three open tabs this is than the account does.

@@ -63,6 +63,8 @@ data class RunContext(
      * no process to ask, which is what a test wants; a supplier returning null means not yet.
      */
     val pid: (() -> Long?)? = null,
+    /** The thread a private control connection has identified before the first rollout appears. */
+    val knownNativeSessionId: (() -> String?)? = null,
 )
 
 /**

@@ -67,23 +67,22 @@ class QuestionSubmissionTest {
     }
 
     @Test
-    fun `programmatic submission clears the question when its Enter is sent`(@TempDir tmp: Path) {
+    fun `a submission that never reaches a CLI leaves its question pending`(@TempDir tmp: Path) {
         val tracker = question()
         val terminal = terminal(tmp, tracker)
         val submitted = CountDownLatch(1)
         terminal.onUserInput = {
             tracker.onUserInput()
-            submitted.countDown()
         }
         SwingUtilities.invokeAndWait {
-            terminal.submit("first line\nsecond line")
+            terminal.submit("first line\nsecond line") { submitted.countDown() }
             assertEquals(Activity.Asking, tracker.activity(now = 10_000))
             assertEquals(0L, terminal.lastSubmitAt)
         }
 
-        assertTrue(submitted.await(5, TimeUnit.SECONDS), "the delayed Enter should submit the answer")
-        assertEquals(Activity.Idle, tracker.activity(now = 10_000))
-        assertTrue(terminal.lastSubmitAt > 0)
+        assertTrue(submitted.await(5, TimeUnit.SECONDS), "the delayed submission must report its failure")
+        assertEquals(Activity.Asking, tracker.activity(now = 10_000))
+        assertEquals(0L, terminal.lastSubmitAt)
     }
 
     @Test
@@ -104,7 +103,7 @@ class QuestionSubmissionTest {
         assertTrue(entered.await(5, TimeUnit.SECONDS), "told once the Enter has been written")
         SwingUtilities.invokeAndWait {
             assertFalse(terminal.submitting)
-            assertTrue(terminal.lastSubmitAt > 0)
+            assertEquals(0L, terminal.lastSubmitAt)
         }
         assertEquals(false, reached, "no program was running to take the Enter")
     }

@@ -731,6 +731,8 @@ class SettingsTest {
                 nativeSessionId = "rollout-2026",
                 title = "AWS support",
                 titleIsUsers = false,
+                authorizedModel = "model-orchid",
+                authorizedReasoning = "high",
             ),
         )
         Settings.saveOpenAgents(project, agents)

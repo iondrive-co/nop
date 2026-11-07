@@ -675,6 +675,8 @@ object Settings {
         val titleIsUsers: Boolean,
         /** HEAD when the session was opened; blank for a row written before this was recorded. */
         val baselineSha: String = "",
+        val authorizedModel: String = "",
+        val authorizedReasoning: String = "",
     )
 
     /**
@@ -712,6 +714,8 @@ object Settings {
                     // The seventh field is optional: a six-field row comes back as a session with
                     // no baseline to diff against rather than being skipped as malformed.
                     baselineSha = parts.getOrNull(6)?.trim().orEmpty(),
+                    authorizedModel = parts.getOrNull(7)?.trim().orEmpty(),
+                    authorizedReasoning = parts.getOrNull(8)?.trim().orEmpty(),
                 )
             }
             .toList()
@@ -734,6 +738,8 @@ object Settings {
                     flatten(agent.title),
                     if (agent.titleIsUsers) "1" else "0",
                     flatten(agent.baselineSha),
+                    flatten(agent.authorizedModel),
+                    flatten(agent.authorizedReasoning),
                 ).joinToString("\t")
             }
             Files.writeString(f, if (body.isEmpty()) body else body + "\n")

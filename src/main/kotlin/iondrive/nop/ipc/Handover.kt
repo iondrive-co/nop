@@ -83,6 +83,9 @@ object Handover {
         val inbox: List<HeldRecord> = emptyList(),
         /** Whether its prompt might hold a draft; see [iondrive.nop.terminal.TerminalSession.draftPending]. */
         val draftPending: Boolean = false,
+        val authorizedModel: String? = null,
+        val authorizedReasoning: String? = null,
+        val codexControlSocket: String? = null,
         val pty: PtyRecord? = null,
     )
 
@@ -101,6 +104,8 @@ object Handover {
         val id: String = "",
         /** Who may ask after it — see [iondrive.nop.agent.AgentMessages.Held.sender]. */
         val sender: String = "",
+        val attemptedAt: Long = 0L,
+        val attempts: Int = 0,
     )
 
     /** A Term tab carried across. */
