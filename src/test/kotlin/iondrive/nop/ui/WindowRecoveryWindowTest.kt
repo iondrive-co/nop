@@ -31,11 +31,16 @@ class WindowRecoveryWindowTest {
         val process = ProcessBuilder(command).redirectErrorStream(true).apply {
             environment().remove("DISPLAY")
             environment().remove("WAYLAND_DISPLAY")
+            // Xvfb has no GL context; avoid initializing a driver only to fall back from it.
+            environment()["SKIKO_RENDER_API"] = "SOFTWARE"
         }.start()
         val output = StringBuilder()
         val reader = Thread { process.inputStream.bufferedReader().forEachLine { output.appendLine(it) } }.apply { start() }
         val finished = process.waitFor(90, TimeUnit.SECONDS)
-        if (!finished) process.destroyForcibly()
+        if (!finished) {
+            process.descendants().use { descendants -> descendants.forEach { it.destroyForcibly() } }
+            process.destroyForcibly()
+        }
         reader.join(5_000)
         val checks = output.lines().filter { it.startsWith("CHECK") || it.startsWith("RESULT") }.joinToString("\n")
         println(checks)
