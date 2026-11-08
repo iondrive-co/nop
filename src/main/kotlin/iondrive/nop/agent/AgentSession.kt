@@ -1445,10 +1445,9 @@ class AgentSession(
                 if (event is AgentEvent.UserMessage && event.at >= startedAt - 5000) {
                     newRun.userPromptSubmitted = true
                 }
-                // A question is an open tool call, and a new prompt is a new turn — see
-                // [ActivityTracker]. Nothing else in the transcript changes what the tab is doing.
+                // A question lasts until answered or its turn ends — see [ActivityTracker].
                 if (event is AgentEvent.ToolStarted || event is AgentEvent.ToolFinished ||
-                    event is AgentEvent.UserMessage
+                    event is AgentEvent.UserMessage || event is AgentEvent.AssistantMessage
                 ) {
                     synchronized(tracker) { tracker.onEvent(event) }
                     SwingUtilities.invokeLater { refreshActivity(tracker) }

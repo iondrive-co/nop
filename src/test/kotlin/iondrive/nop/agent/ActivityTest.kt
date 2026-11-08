@@ -164,6 +164,22 @@ class ActivityTest {
     }
 
     @Test
+    fun `a completed turn releases a permission prompt without masking the next question`() {
+        val tracker = ActivityTracker()
+        tracker.onEvent(started("command", "Bash"))
+        tracker.onOutput("Do you want to proceed?\n❯ 1. Yes\n  2. No\n")
+        tracker.onTitle("[ ! ] Action Required | sample", at = 0)
+        tracker.onEvent(AgentEvent.AssistantMessage(emptyList(), stopReason = "tool_use", at = 1))
+        assertEquals(Activity.Asking, tracker.activity(now = 1))
+
+        tracker.onEvent(AgentEvent.AssistantMessage(emptyList(), stopReason = "end_turn", at = 2))
+        assertEquals(Activity.Idle, tracker.activity(now = 2))
+        tracker.onEvent(AgentEvent.UserMessage("Continue", at = 3))
+        tracker.onEvent(started("question", "AskUserQuestion"))
+        assertEquals(Activity.Asking, tracker.activity(now = 4))
+    }
+
+    @Test
     fun `Codex saying Action Required is asking`() {
         val tracker = ActivityTracker()
         tracker.onTitle("[ ! ] Action Required | ops", at = 0)

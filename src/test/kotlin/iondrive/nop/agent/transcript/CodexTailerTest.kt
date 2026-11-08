@@ -1,6 +1,8 @@
 package iondrive.nop.agent.transcript
 
 import iondrive.nop.agent.AgentEvent
+import iondrive.nop.agent.Activity
+import iondrive.nop.agent.ActivityTracker
 import iondrive.nop.agent.Block
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -23,6 +25,32 @@ import java.nio.file.attribute.FileTime
  * readable by the other.
  */
 class CodexTailerTest {
+    @Test
+    fun `finishing or interrupting a turn releases its unanswered async question`() {
+        for (ending in listOf(
+            """{"type":"task_complete","last_agent_message":"Finished checking."}""",
+            """{"type":"task_complete","error":{"message":"request failed"}}""",
+            """{"type":"turn_aborted","reason":"interrupted"}""",
+        )) {
+            val tailer = CodexTailer(Path.of("/nowhere"))
+            val tracker = ActivityTracker()
+            tracker.onTitle("[ ⠹ ] Working | example", at = 0)
+            fun feed(type: String, payload: String): List<AgentEvent> =
+                tailer.parse("""{"timestamp":"2027-03-04T10:00:00Z","type":"$type","payload":$payload}""")
+                    .onEach(tracker::onEvent)
+            feed("response_item", """{"type":"function_call","name":"request_user_input_async","call_id":"survey","arguments":"{}"}""")
+            feed("response_item", """{"type":"function_call_output","call_id":"survey","output":"{\"accepted\":true}"}""")
+            feed("response_item", """{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Continuing the check."}]}""")
+            assertEquals(Activity.Asking, tracker.activity(now = 10_000))
+
+            val completed = feed("event_msg", ending).filterIsInstance<AgentEvent.AssistantMessage>().single()
+            assertTrue(completed.blocks.isEmpty(), "completion does not duplicate the final reply")
+            assertEquals(Activity.Idle, tracker.activity(now = 10_000), ending)
+            val restored = ActivityTracker().apply { restore(tracker.snapshot(), now = 20_000) }
+            assertFalse(restored.activity(now = 30_000) == Activity.Asking, "a restart cannot revive the question")
+        }
+    }
+
     @Test
     fun `model settings and turn context are observations with their reasoning effort`() {
         val tailer = CodexTailer(java.nio.file.Path.of("/home/dev/agent"))

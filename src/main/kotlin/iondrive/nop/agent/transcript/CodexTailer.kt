@@ -298,7 +298,7 @@ class CodexTailer(private val home: Path) : Tailer {
                         ),
                     )
                 } else {
-                    emptyList()
+                    listOf(AgentEvent.AssistantMessage(emptyList(), stopReason = "end_turn", model = model, at = at))
                 }
             }
 

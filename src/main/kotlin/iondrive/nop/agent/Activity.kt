@@ -203,7 +203,8 @@ class ActivityTracker {
     /**
      * A question Codex has queued for the user ("? 1 question · alt + ↑ to answer"), asked with its
      * `request_user_input_async` tool. That call returns at once and the agent works on, so the
-     * question outlives every tool call after it: submitting an answer or a new prompt ends it.
+     * question outlives every tool call after it: submitting an answer, a new prompt, or ending the
+     * turn clears it.
      * Only the call sets it, never words on the screen: a Claude tab quoting Codex's "alt + ↑ to
      * answer" in its reply would otherwise read as asking until its user submitted input.
      */
@@ -284,6 +285,15 @@ class ActivityTracker {
                     hasQueuedQuestion = false
                     recentOutput.setLength(0)
                 }
+            }
+            is AgentEvent.AssistantMessage -> if (event.stopReason == "end_turn" || event.stopReason?.startsWith("aborted:") == true) {
+                // A completed or interrupted turn no longer holds questions or permission dialogs.
+                open.clear()
+                hasQueuedQuestion = false
+                asyncQuestion = false
+                recentOutput.setLength(0)
+                said = TitleSignal.Says.Stopped
+                before = Activity.Idle
             }
             else -> Unit
         }
