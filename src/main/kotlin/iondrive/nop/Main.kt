@@ -642,6 +642,15 @@ fun main(args: Array<String>) {
                             workspace = workspace,
                             windows = allWindows,
                             projectTreeStates = projectTreeStates,
+                            onTreeLayoutChange = { tabId, layout ->
+                                Workspaces.holdingTab(workspaces, tabId)?.let { owner ->
+                                    mutate(owner.id) { ws ->
+                                        ws.copy(tabs = ws.tabs.map { tab ->
+                                            if (tab.id == tabId) tab.copy(treeLayout = layout) else tab
+                                        })
+                                    }
+                                }
+                            },
                             dirtyProjects = projectDirty.filterValues { it }.keys.toSet(),
                             repoWatcher = repoWatcher,
                             onProjectDirty = { path, dirty -> if (projectDirty[path] != dirty) projectDirty[path] = dirty },
@@ -703,6 +712,7 @@ private fun ApplicationScope.WorkspaceWindow(
     workspace: Workspace,
     windows: List<Workspace>,
     projectTreeStates: MutableMap<Long, ProjectTreeState>,
+    onTreeLayoutChange: (Long, ProjectTreeLayout) -> Unit,
     dirtyProjects: Set<Path>,
     repoWatcher: RepoWatcher,
     onProjectDirty: (Path, Boolean) -> Unit,
@@ -989,9 +999,18 @@ private fun ApplicationScope.WorkspaceWindow(
                         // Recreate each tab's workers and project resources when it becomes active.
                         // Its tree layout belongs to the tab and survives outside that composition.
                         key(activeTab.id) {
+                            val treeState = projectTreeStates.getOrPut(activeTab.id) {
+                                ProjectTreeState(activeTab.treeLayout)
+                            }
+                            val layout = treeState.snapshot()
+                            SideEffect {
+                                if (layout != null && layout != activeTab.treeLayout) {
+                                    onTreeLayoutChange(activeTab.id, layout)
+                                }
+                            }
                             App(
                                 projectPath = activeProject,
-                                projectTreeState = projectTreeStates.getOrPut(activeTab.id) { ProjectTreeState() },
+                                projectTreeState = treeState,
                                 repoWatcher = repoWatcher,
                                 onDirtyChange = { dirty -> onProjectDirty(activeProject, dirty) },
                                 recentProjects = recentProjects,

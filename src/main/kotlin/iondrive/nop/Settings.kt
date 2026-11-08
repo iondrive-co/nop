@@ -4,6 +4,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.security.MessageDigest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 data class WindowGeometry(
     val width: Int,
@@ -32,6 +34,7 @@ data class SplitRatios(
  * Both fall back into the open-projects list when no `open.N` entries are present.
  */
 object Settings {
+    private val treeLayoutJson = Json { ignoreUnknownKeys = true }
     private val commitDrafts = java.util.concurrent.ConcurrentHashMap<Path, String>()
 
     /** Overridable for tests; defaults to XDG_CONFIG_HOME (or ~/.config). */
@@ -139,7 +142,14 @@ object Settings {
             // A tab's own name, where it has been given one; blank for the rest, which go by their
             // project's directory name.
             val tabs = ProjectTabs.of(numbered(map, prefix + "project."), nextTab)
-                .mapIndexed { j, tab -> tab.copy(name = map["${prefix}tabname.$j"].orEmpty()) }
+                .mapIndexed { j, tab ->
+                    tab.copy(
+                        name = map["${prefix}tabname.$j"].orEmpty(),
+                        treeLayout = map["${prefix}tree.$j"]?.let { encoded ->
+                            runCatching { treeLayoutJson.decodeFromString<ProjectTreeLayout>(encoded) }.getOrNull()
+                        },
+                    )
+                }
             nextTab += tabs.size
             Workspace(
                 // Ids are handed out by position: nothing outside one run refers to a window by id.
@@ -200,6 +210,7 @@ object Settings {
                 if (tab.name.isNotBlank()) {
                     map["${prefix}tabname.$j"] = tab.name.replace('\n', ' ').replace('\r', ' ')
                 }
+                tab.treeLayout?.let { map["${prefix}tree.$j"] = treeLayoutJson.encodeToString(it) }
             }
         }
         Workspaces.allProjects(list).forEachIndexed { idx, p ->

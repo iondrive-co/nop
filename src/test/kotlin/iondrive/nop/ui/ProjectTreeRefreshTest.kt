@@ -18,6 +18,10 @@ import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.Density
+import iondrive.nop.ProjectTab
+import iondrive.nop.ProjectTreeLayout
+import iondrive.nop.Settings
+import iondrive.nop.Workspace
 import iondrive.nop.git.GitStatus
 import java.awt.EventQueue
 import java.io.File
@@ -38,6 +42,7 @@ class ProjectTreeRefreshTest {
         initialRoot: Path,
         openFiles: List<File> = emptyList(),
         revealFile: File? = null,
+        initialLayout: ProjectTreeLayout? = null,
     ) : AutoCloseable {
         var root by mutableStateOf(initialRoot)
         var tabId by mutableStateOf(0L)
@@ -51,7 +56,7 @@ class ProjectTreeRefreshTest {
                     key(root, tabId) {
                         ProjectTreePanel(
                             projectPath = root,
-                            viewState = states.getOrPut(root to tabId) { ProjectTreeState() },
+                            viewState = states.getOrPut(root to tabId) { ProjectTreeState(initialLayout) },
                             filesRestored = filesRestored,
                             status = GitStatus.EMPTY,
                             openFiles = openFiles.filter { it.toPath().startsWith(root) },
@@ -80,6 +85,15 @@ class ProjectTreeRefreshTest {
         fun collapse(name: String) = setExpanded(name, Key.DirectionLeft)
 
         private fun setExpanded(name: String, direction: Key) {
+            click(name)
+            onEdt { scene.sendKeyEvent(KeyEvent(direction, KeyEventType.KeyDown)) }
+            onEdt { scene.sendKeyEvent(KeyEvent(direction, KeyEventType.KeyUp)) }
+            renderFor(100)
+        }
+
+        fun layout(): ProjectTreeLayout = onEdt { states.getValue(root to tabId).snapshot()!! }
+
+        fun click(name: String) {
             val at = onEdt {
                 fun find(node: SemanticsNode): SemanticsNode? =
                     node.takeIf { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == name } == true }
@@ -92,9 +106,6 @@ class ProjectTreeRefreshTest {
             renderFor(30)
             onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
             renderFor(30)
-            onEdt { scene.sendKeyEvent(KeyEvent(direction, KeyEventType.KeyDown)) }
-            onEdt { scene.sendKeyEvent(KeyEvent(direction, KeyEventType.KeyUp)) }
-            renderFor(100)
         }
 
         fun scrollDown() {
@@ -145,6 +156,72 @@ class ProjectTreeRefreshTest {
 
             Files.delete(renamed)
             panel.awaitNames("anchor.txt", absent = setOf("renamed.txt"))
+        }
+    }
+
+    private fun persistedLayout(project: Path, config: Path, layout: ProjectTreeLayout): ProjectTreeLayout {
+        val originalRoot = Settings.configRoot
+        return try {
+            Settings.configRoot = config
+            Settings.saveWorkspaces(listOf(Workspace(0, "", listOf(ProjectTab(0, project, treeLayout = layout)))))
+            Settings.loadWorkspaces().single().tabs.single().treeLayout!!
+        } finally {
+            Settings.configRoot = originalRoot
+        }
+    }
+
+    @Test fun `restarting restores nested directories and expanded file groups`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").createDirectories()
+        val nested = project.resolve("folder/nested").createDirectories()
+        (1..10).forEach { nested.resolve("file-%02d.txt".format(it)).createFile() }
+        val saved = Panel(project).use { panel ->
+            panel.awaitNames("folder")
+            panel.expand("folder")
+            panel.awaitNames("nested")
+            panel.expand("nested")
+            panel.awaitNames("··· 7 more files ···", absent = setOf("file-10.txt"))
+            panel.click("··· 7 more files ···")
+            panel.awaitNames("file-10.txt")
+            persistedLayout(project, tmp.resolve("config"), panel.layout())
+        }
+        Panel(project, initialLayout = saved).use { panel ->
+            panel.awaitNames("file-10.txt", "▴ collapse 7 files")
+        }
+    }
+
+    @Test fun `restarting respects collapsed ancestors of restored files`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").createDirectories()
+        val file = project.resolve("parent/nested").createDirectories().resolve("anchor.txt").createFile().toFile()
+        val saved = Panel(project, openFiles = listOf(file), revealFile = file).use { panel ->
+            panel.awaitNames("anchor.txt")
+            panel.collapse("parent")
+            panel.awaitNames("parent", absent = setOf("anchor.txt"))
+            persistedLayout(project, tmp.resolve("config"), panel.layout())
+        }
+        Panel(project, openFiles = listOf(file), initialLayout = saved).use { panel ->
+            panel.filesRestored = false
+            panel.renderFor(200)
+            panel.activeFile = file
+            panel.filesRestored = true
+            panel.renderFor(500)
+            panel.awaitNames("parent", absent = setOf("nested", "anchor.txt"))
+            panel.expand("parent")
+            panel.awaitNames("anchor.txt")
+        }
+    }
+
+    @Test fun `restarting preserves a collapsed project root`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").createDirectories()
+        project.resolve("anchor.txt").createFile()
+        val saved = Panel(project).use { panel ->
+            panel.awaitNames("anchor.txt")
+            panel.collapse("project")
+            panel.awaitNames("project", absent = setOf("anchor.txt"))
+            persistedLayout(project, tmp.resolve("config"), panel.layout())
+        }
+        Panel(project, initialLayout = saved).use { panel ->
+            panel.renderFor(500)
+            panel.awaitNames("project", absent = setOf("anchor.txt"))
         }
     }
 

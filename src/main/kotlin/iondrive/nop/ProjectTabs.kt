@@ -1,6 +1,16 @@
 package iondrive.nop
 
 import java.nio.file.Path
+import kotlinx.serialization.Serializable
+
+/** A tab's tree layout, including reveal history so restored files respect collapsed folders. */
+@Serializable
+data class ProjectTreeLayout(
+    val openDirectories: Set<String> = emptySet(),
+    val expandedEllipsisKeys: Set<String> = emptySet(),
+    val revealedFilePaths: Set<String> = emptySet(),
+    val lastRevealFile: String? = null,
+)
 
 /**
  * One tab along a window's project bar: the project directory it shows, and the [id] everything —
@@ -18,7 +28,12 @@ import java.nio.file.Path
  * project's directory name until someone says otherwise. Naming is what tells two tabs on one
  * project apart — "api" and "api — release" rather than two tabs both reading "api".
  */
-data class ProjectTab(val id: Long, val path: Path, val name: String = "") {
+data class ProjectTab(
+    val id: Long,
+    val path: Path,
+    val name: String = "",
+    val treeLayout: ProjectTreeLayout? = null,
+) {
     /** What the tab says on the bar: the name it was given, else the project directory's own. */
     val label: String get() = name.ifBlank { path.fileName?.toString() ?: path.toString() }
 }

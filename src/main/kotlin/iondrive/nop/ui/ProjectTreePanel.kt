@@ -70,6 +70,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import iondrive.nop.ProjectTreeLayout
 import iondrive.nop.git.GitStatus
 import org.jetbrains.jewel.foundation.ExperimentalJewelApi
 import org.jetbrains.jewel.foundation.InternalJewelApi
@@ -495,12 +496,21 @@ private fun File.relativePathTo(repoRoot: Path): String? = runCatching {
 
 /** View state owned by a project tab, so leaving its composition keeps the user's tree layout. */
 @OptIn(ExperimentalJewelApi::class, InternalJewelApi::class)
-class ProjectTreeState {
-    val treeState = TreeState(SelectableLazyListState(LazyListState()))
-    var expandedEllipsisKeys by mutableStateOf<Set<String>>(emptySet())
-    val revealedFilePaths = mutableSetOf<String>()
-    var rootInitialized = false
-    var lastRevealFile: File? = null
+class ProjectTreeState(layout: ProjectTreeLayout? = null) {
+    val treeState = TreeState(SelectableLazyListState(LazyListState())).apply {
+        layout?.let { openNodes(it.openDirectories.toList()) }
+    }
+    var expandedEllipsisKeys by mutableStateOf(layout?.expandedEllipsisKeys.orEmpty())
+    var revealedFilePaths by mutableStateOf(layout?.revealedFilePaths.orEmpty())
+    var rootInitialized by mutableStateOf(layout != null)
+    var lastRevealFile by mutableStateOf(layout?.lastRevealFile?.let(::File))
+
+    fun snapshot(): ProjectTreeLayout? = if (!rootInitialized) null else ProjectTreeLayout(
+        openDirectories = treeState.openNodes.filterIsInstance<String>().toSet(),
+        expandedEllipsisKeys = expandedEllipsisKeys,
+        revealedFilePaths = revealedFilePaths,
+        lastRevealFile = lastRevealFile?.absolutePath,
+    )
 }
 
 @OptIn(
@@ -608,9 +618,6 @@ fun ProjectTreePanel(
         }
     }
 
-    // Track which files have had their ancestors opened so we don't re-expand folders the user collapsed
-    val revealedFilePaths = viewState.revealedFilePaths
-
     LaunchedEffect(rootId) {
         if (!viewState.rootInitialized) {
             treeState.openNodes(listOf(rootId))
@@ -618,14 +625,14 @@ fun ProjectTreePanel(
         }
     }
 
-    // Expand ancestor folders for open files on initial load or when a newly opened file appears
+    // Reveal each open file once, so restored files don't re-expand folders the user collapsed.
     LaunchedEffect(effectiveOpenFiles, projectPath) {
         val rootFile = projectPath.toFile().absoluteFile
         val toOpen = mutableListOf<String>()
         for (f in effectiveOpenFiles) {
             val abs = f.absoluteFile
-            if (abs.path !in revealedFilePaths) {
-                revealedFilePaths.add(abs.path)
+            if (abs.path !in viewState.revealedFilePaths) {
+                viewState.revealedFilePaths += abs.path
                 var cur: File? = abs.parentFile
                 while (cur != null) {
                     toOpen += cur.absolutePath

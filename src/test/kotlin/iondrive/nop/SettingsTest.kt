@@ -14,6 +14,41 @@ import java.nio.file.Paths
 class SettingsTest {
     private val originalRoot: Path = Settings.configRoot
 
+    @Test
+    fun `tree layouts belong to individual tabs and survive workspace changes`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val layout = ProjectTreeLayout(
+            openDirectories = setOf(project.toString(), project.resolve("source").toString()),
+            expandedEllipsisKeys = setOf("files:chapter\nwith=punctuation"),
+            revealedFilePaths = setOf(project.resolve("source/draft.txt").toString()),
+            lastRevealFile = project.resolve("source/draft.txt").toString(),
+        )
+        val tabs = listOf(
+            ProjectTab(0, project, treeLayout = layout),
+            ProjectTab(1, project, treeLayout = ProjectTreeLayout()),
+            ProjectTab(2, project),
+        )
+        Settings.saveWorkspaces(listOf(Workspace(0, "", tabs, active = 0)))
+        val loaded = Settings.loadWorkspaces().single()
+        assertEquals(tabs, loaded.tabs)
+
+        val moved = listOf(loaded.copy(tabs = loaded.tabs.reversed(), active = 1))
+        Settings.saveWorkspaces(moved)
+        assertEquals(listOf(null, ProjectTreeLayout(), layout), Settings.loadWorkspaces().single().tabs.map { it.treeLayout })
+    }
+
+    @Test
+    fun `an invalid saved tree layout leaves the project available`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val state = tmp.resolve("nop/state")
+        Files.createDirectories(state.parent)
+        Files.writeString(state, "ws.0.project.0=${tmp.resolve("project")}\nws.0.tree.0={broken\n")
+        val tab = Settings.loadWorkspaces().single().tabs.single()
+        assertEquals(tmp.resolve("project"), tab.path)
+        assertNull(tab.treeLayout)
+    }
+
     @AfterEach
     fun restoreRoot() {
         Settings.configRoot = originalRoot
