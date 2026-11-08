@@ -52,20 +52,29 @@ class GradleClasspath(
     private val timeoutMillis: Long = TimeUnit.MINUTES.toMillis(3),
 ) {
     private val mutex = Mutex()
-    private var cached: Snapshot? = null
+    @Volatile private var cached: Snapshot? = null
     private var attempted: Pair<String, Int>? = null
     private var failure: Exception? = null
     private val json = Json { ignoreUnknownKeys = true }
 
     @Serializable private data class Snapshot(val version: Int, val fingerprint: String, val model: GradleJavaModel, val artifacts: List<String>)
 
+    private fun snapshot(): Snapshot? = cached ?: runCatching {
+        json.decodeFromString<Snapshot>(Files.readString(cacheDir.resolve("model.json"))).takeIf { it.version == VERSION }
+    }.getOrNull()
+
+    /** Changes only when an import input changes or an imported artifact disappears. */
+    suspend fun inputFingerprint(files: List<String>): String = withContext(Dispatchers.IO) {
+        val snapshot = snapshot()
+        fingerprint(files, snapshot?.model?.inputs.orEmpty()) +
+            snapshot?.artifacts.orEmpty().filterNot { File(it).isFile }.joinToString(separator = "|", prefix = "|")
+    }
+
     /** [refresh] changes only on an explicit refresh; normal source edits reuse the imported model. */
     suspend fun load(files: List<String>, refresh: Int = 0): GradleJavaModel? = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (!isGradleProject(root)) return@withLock null
-            if (cached == null) cached = runCatching {
-                json.decodeFromString<Snapshot>(Files.readString(cacheDir.resolve("model.json"))).takeIf { it.version == VERSION }
-            }.getOrNull()
+            if (cached == null) cached = snapshot()
             val inputHash = fingerprint(files, cached?.model?.inputs.orEmpty())
             val request = inputHash to refresh
             if (attempted == request) {
@@ -103,13 +112,21 @@ class GradleClasspath(
 
     private suspend fun importModel(): GradleJavaModel {
         Files.createDirectories(cacheDir)
-        val script = Files.createTempFile(cacheDir, "classpath-", ".init.gradle")
+        val script = cacheDir.resolve("classpath.init.gradle")
         val output = Files.createTempFile(cacheDir, "classpath-", ".json")
         val log = cacheDir.resolve("import.log").toFile()
         var process: Process? = null
         try {
             val resource = checkNotNull(javaClass.getResourceAsStream("/iondrive/nop/lang/gradle-classpath.init.gradle"))
-            resource.use { Files.copy(it, script, StandardCopyOption.REPLACE_EXISTING) }
+            val contents = resource.use { it.readBytes() }
+            // A stable path and contents let Gradle reuse its compiled init script.
+            if (!Files.isRegularFile(script) || !Files.readAllBytes(script).contentEquals(contents)) {
+                val temporary = Files.createTempFile(cacheDir, "classpath-", ".init.gradle")
+                try {
+                    Files.write(temporary, contents)
+                    Files.move(temporary, script, StandardCopyOption.REPLACE_EXISTING)
+                } finally { Files.deleteIfExists(temporary) }
+            }
             val windows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
             val wrapper = File(root, if (windows) "gradlew.bat" else "gradlew")
             val command = when {
@@ -150,7 +167,6 @@ class GradleClasspath(
                 descendants.asReversed().forEach { it.destroyForcibly() }
                 if (!running.waitFor(1, TimeUnit.SECONDS)) running.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
             }
-            Files.deleteIfExists(script)
             Files.deleteIfExists(output)
         }
     }

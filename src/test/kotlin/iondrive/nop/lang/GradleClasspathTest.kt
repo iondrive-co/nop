@@ -17,6 +17,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -98,7 +99,11 @@ class GradleClasspathTest {
         val files = listOf("build.gradle", "settings.gradle", "app/build.gradle", "model/build.gradle", "unrelated/build.gradle")
         val cache = root.resolve("import-cache")
         val importer = GradleClasspath(root.toFile(), cache)
+        val inputFingerprint = importer.inputFingerprint(files)
         val model = assertNotNull(importer.load(files))
+        assertEquals(inputFingerprint, importer.inputFingerprint(files))
+        val initScript = cache.resolve("classpath.init.gradle")
+        val initScriptTime = Files.getLastModifiedTime(initScript)
         fun analyze(file: java.io.File, text: String = file.readText()) =
             JavaAnalysis.analyze(text, file, root.toFile(), gradle = model)
         for (file in listOf(main, test, verification)) {
@@ -114,6 +119,8 @@ class GradleClasspathTest {
         assertTrue(model.classpath(main).any { it.name == "qualifiers-1.0.jar" })
         assertTrue(model.classpath(main).any { it.name == "helpers-1.0.jar" })
         assertFalse(model.classpath(main).any { it.name == "checks-1.0.jar" })
+        assertEquals(listOf(root.resolve("app/code").toString(), root.resolve("model/src/main/java").toString()),
+            model.sourceSet(test)?.dependencySources)
         val index = JavaLibraryIndex.build(root.toFile(), root.resolve("library-cache"), includeJdk = false, gradle = model)
         val type = assertNotNull(index.find("example.annotations.MaybeNull"))
         assertTrue(assertNotNull(index.materialize(index.target(type).file)).file.readText().contains("@interface MaybeNull"))
@@ -124,21 +131,57 @@ class GradleClasspathTest {
         fun calls() = Files.readAllLines(root.resolve("wrapper-calls")).size
         assertEquals(1, calls())
         assertEquals(model, importer.load(files + "app/code/New.java"))
+        assertEquals(inputFingerprint, importer.inputFingerprint(files + "app/code/New.java"))
         assertEquals(model, GradleClasspath(root.toFile(), cache).load(files))
         assertEquals(1, calls(), "Source edits and a restart reuse the cached model")
         assertNotNull(importer.load(files, refresh = 1))
         assertEquals(2, calls(), "F5 forces another dependency resolution")
+        assertEquals(initScriptTime, Files.getLastModifiedTime(initScript), "Refresh reuses the Gradle init script")
         val buildFile = root.resolve("app/build.gradle")
         Files.writeString(buildFile, Files.readString(buildFile).replace("compileOnly 'example.annotations:qualifiers:1.0'", ""))
+        assertNotEquals(inputFingerprint, importer.inputFingerprint(files))
         val changed = assertNotNull(importer.load(files, refresh = 1))
         assertEquals(3, calls())
         assertFalse(changed.classpath(main).any { it.name == "qualifiers-1.0.jar" })
         val errors = JavaAnalysis.analyze(main.readText(), main, root.toFile(), gradle = changed)
         assertTrue(errors.problems.any { "example.annotations" in it.message }, errors.toString())
         val missing = assertNotNull(changed.classpath(test).firstOrNull { it.name == "checks-1.0.jar" })
+        val beforeDeletion = importer.inputFingerprint(files)
         Files.delete(missing.toPath())
+        assertNotEquals(beforeDeletion, importer.inputFingerprint(files))
         assertFailsWith<java.io.IOException> { importer.load(files, refresh = 1) }
         assertEquals(4, calls(), "A deleted dependency invalidates the in-memory cache")
+    }
+
+    @Test fun `source edits keep the import key stable while Gradle is running`(@TempDir root: Path) = runBlocking {
+        write(root, "build.gradle", "")
+        write(root, "gradlew", """
+            #!/bin/sh
+            touch started
+            while [ ! -f finish ]; do sleep 0.05; done
+            for argument do
+                case "${'$'}argument" in
+                    -Dnop.gradle.output=*) output=${'$'}{argument#*=} ;;
+                esac
+            done
+            printf '{"sourceSets":[],"inputs":[]}' > "${'$'}output"
+        """.trimIndent())
+        val importer = GradleClasspath(root.toFile(), root.resolve("cache"))
+        val files = listOf("build.gradle", "src/main/java/Sample.java")
+        val key = importer.inputFingerprint(files)
+        val job = launch { assertNotNull(importer.load(files)) }
+        try {
+            withTimeout(5000) { while (!Files.exists(root.resolve("started"))) delay(10) }
+            write(root, "src/main/java/Sample.java", "class Sample {}")
+            assertEquals(key, importer.inputFingerprint(files))
+            assertEquals(key, importer.inputFingerprint(files + "src/main/java/Extra.java"))
+            assertTrue(job.isActive)
+            write(root, "build.gradle", "// Updated configuration")
+            assertNotEquals(key, importer.inputFingerprint(files))
+        } finally {
+            write(root, "finish", "")
+            job.cancelAndJoin()
+        }
     }
 
     @Test fun `Kotlin DSL builds import their compile only dependencies and custom source roots`(@TempDir root: Path) = runBlocking {

@@ -516,23 +516,42 @@ fun App(
     var gradleStatus by remember(rootPath) {
         mutableStateOf(if (GradleClasspath.isGradleProject(rootPath.toFile())) "Importing Gradle dependencies…" else null)
     }
+    var gradleInputFingerprint by remember(rootPath) { mutableStateOf<String?>(null) }
     LaunchedEffect(rootPath, fileIndex, fsRefreshKey, gradleRefreshKey) {
+        try {
+            gradleInputFingerprint = gradleImporter.inputFingerprint(fileIndex.files)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            gradleStatus = "${error.message ?: "Cannot read Gradle inputs"} — press F5 to retry"
+            Log.error("Cannot read Gradle import inputs", error)
+        }
+    }
+    // Source edits may rebuild the library index without cancelling a running Gradle import.
+    LaunchedEffect(rootPath, gradleInputFingerprint, gradleRefreshKey) {
+        if (gradleInputFingerprint == null) return@LaunchedEffect
+        val hasJava = fileIndex.files.any { it.endsWith(".java", ignoreCase = true) } || withContext(Dispatchers.IO) {
+            rootPath.resolve(".nop/classpath.txt").toFile().isFile || GradleClasspath.isGradleProject(rootPath.toFile())
+        }
+        if (!hasJava) return@LaunchedEffect
+        gradleStatus = if (GradleClasspath.isGradleProject(rootPath.toFile())) "Importing Gradle dependencies…" else null
+        try {
+            gradleModel = gradleImporter.load(fileIndex.files, gradleRefreshKey)
+            gradleStatus = null
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            gradleStatus = "${error.message ?: "Gradle import failed"} — press F5 to retry"
+            Log.error("Gradle classpath import failed", error)
+        }
+    }
+    LaunchedEffect(rootPath, fileIndex, fsRefreshKey, gradleModel) {
         val hasJava = fileIndex.files.any { it.endsWith(".java", ignoreCase = true) } || withContext(Dispatchers.IO) {
             rootPath.resolve(".nop/classpath.txt").toFile().isFile || GradleClasspath.isGradleProject(rootPath.toFile())
         }
         if (!hasJava) return@LaunchedEffect
         librariesLoading = true
         try {
-            gradleStatus = if (GradleClasspath.isGradleProject(rootPath.toFile())) "Importing Gradle dependencies…" else null
-            try {
-                gradleModel = gradleImporter.load(fileIndex.files, gradleRefreshKey)
-                gradleStatus = null
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                gradleStatus = "${error.message ?: "Gradle import failed"} — press F5 to retry"
-                Log.error("Gradle classpath import failed", error)
-            }
             val previous = javaLibraries
             javaLibraries = withContext(Dispatchers.IO) {
                 JavaLibraryIndex.build(rootPath.toFile(), libraryCache, previous, gradle = gradleModel)

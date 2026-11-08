@@ -43,11 +43,12 @@ class ProjectTreeRefreshTest {
         openFiles: List<File> = emptyList(),
         revealFile: File? = null,
         initialLayout: ProjectTreeLayout? = null,
+        initialFilesRestored: Boolean = true,
     ) : AutoCloseable {
         var root by mutableStateOf(initialRoot)
         var tabId by mutableStateOf(0L)
         var activeFile by mutableStateOf(revealFile)
-        var filesRestored by mutableStateOf(true)
+        var filesRestored by mutableStateOf(initialFilesRestored)
         private val states = mutableMapOf<Pair<Path, Long>, ProjectTreeState>()
         // Scene operations share the AWT thread with Compose's snapshot notifications.
         private val scene = onEdt {
@@ -170,7 +171,7 @@ class ProjectTreeRefreshTest {
         }
     }
 
-    @Test fun `restarting restores nested directories and expanded file groups`(@TempDir tmp: Path) {
+    @Test fun `restarting restores nested directories after switching tabs`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").createDirectories()
         val nested = project.resolve("folder/nested").createDirectories()
         (1..10).forEach { nested.resolve("file-%02d.txt".format(it)).createFile() }
@@ -179,27 +180,30 @@ class ProjectTreeRefreshTest {
             panel.expand("folder")
             panel.awaitNames("nested")
             panel.expand("nested")
-            panel.awaitNames("··· 7 more files ···", absent = setOf("file-10.txt"))
-            panel.click("··· 7 more files ···")
+            panel.awaitNames("file-10.txt")
+            panel.tabId = 1L
+            panel.renderFor(200)
+            panel.awaitNames("folder", absent = setOf("nested", "file-10.txt"))
+            panel.tabId = 0L
             panel.awaitNames("file-10.txt")
             persistedLayout(project, tmp.resolve("config"), panel.layout())
         }
         Panel(project, initialLayout = saved).use { panel ->
-            panel.awaitNames("file-10.txt", "▴ collapse 7 files")
+            panel.awaitNames("file-10.txt")
         }
     }
 
     @Test fun `restarting respects collapsed ancestors of restored files`(@TempDir tmp: Path) {
         val project = tmp.resolve("project").createDirectories()
         val file = project.resolve("parent/nested").createDirectories().resolve("anchor.txt").createFile().toFile()
+        val other = project.resolve("parent/nested/other.txt").createFile().toFile()
         val saved = Panel(project, openFiles = listOf(file), revealFile = file).use { panel ->
             panel.awaitNames("anchor.txt")
             panel.collapse("parent")
             panel.awaitNames("parent", absent = setOf("anchor.txt"))
             persistedLayout(project, tmp.resolve("config"), panel.layout())
         }
-        Panel(project, openFiles = listOf(file), initialLayout = saved).use { panel ->
-            panel.filesRestored = false
+        Panel(project, openFiles = listOf(file), initialLayout = saved, initialFilesRestored = false).use { panel ->
             panel.renderFor(200)
             panel.activeFile = file
             panel.filesRestored = true
@@ -207,6 +211,9 @@ class ProjectTreeRefreshTest {
             panel.awaitNames("parent", absent = setOf("nested", "anchor.txt"))
             panel.expand("parent")
             panel.awaitNames("anchor.txt")
+            panel.collapse("parent")
+            panel.activeFile = other
+            panel.awaitNames("anchor.txt", "other.txt")
         }
     }
 

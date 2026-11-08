@@ -27,6 +27,7 @@ data class ProjectTreeLayout(
  * [name] is what the user renamed this tab to, and blank on nearly all of them: a tab goes by its
  * project's directory name until someone says otherwise. Naming is what tells two tabs on one
  * project apart — "api" and "api — release" rather than two tabs both reading "api".
+ * [treeLayout] keeps that tab's expansion choices across launches, independently of sibling tabs.
  */
 data class ProjectTab(
     val id: Long,

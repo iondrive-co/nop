@@ -13,23 +13,30 @@ gradle.projectsEvaluated {
                 def sets = p.extensions.findByType(SourceSetContainer)
                 sets == null ? [] : sets.collect { s -> [project: p, sourceSet: s] }
             }
+            def mainSourceSetsByProject = [:]
+            def sourcesByClassesDir = [:].withDefault { [] }
+            sourceSets.eachWithIndex { entry, order ->
+                def indexed = [order: order, sources: entry.sourceSet.allJava.srcDirs.collect { it.absolutePath }]
+                if (entry.sourceSet.name == 'main') mainSourceSetsByProject[entry.project.path] = indexed
+                entry.sourceSet.output.classesDirs.files.each { dir -> sourcesByClassesDir[dir].add(indexed) }
+            }
             def model = sourceSets.collect { entry ->
                 def p = entry.project
                 def s = entry.sourceSet
                 def files = s.compileClasspath.files
                 def configuration = p.configurations.findByName(s.compileClasspathConfigurationName)
-                def dependencies = configuration == null ? [] : configuration.incoming.resolutionResult.allComponents.collect { component ->
+                def resolution = configuration?.incoming?.resolutionResult
+                def build = resolution?.root?.id?.build
+                def dependencies = resolution == null ? [] : resolution.allComponents.collect { component ->
                     def id = component.id
-                    id instanceof ProjectComponentIdentifier && (id.build == configuration.incoming.resolutionResult.root.id.build) ? root.findProject(id.projectPath) : null
-                }.findAll { it != null && it != p }
-                def related = sourceSets.findAll { other ->
-                    (dependencies.contains(other.project) && other.sourceSet.name == 'main') ||
-                        other.sourceSet.output.classesDirs.files.any { files.contains(it) }
-                }
+                    id instanceof ProjectComponentIdentifier && id.build == build && id.projectPath != p.path ? id.projectPath : null
+                }.findAll { it != null }
+                def related = (dependencies.collect { mainSourceSetsByProject[it] }.findAll { it != null } +
+                    files.collectMany { sourcesByClassesDir.get(it, []) }).unique { it.order }.sort { it.order }
                 [projectDir: p.projectDir.absolutePath, name: s.name,
                  sourceRoots: s.allJava.srcDirs.collect { it.absolutePath },
                  classpath: files.collect { it.absolutePath },
-                 dependencySources: related.collectMany { it.sourceSet.allJava.srcDirs.collect { dir -> dir.absolutePath } }.unique()]
+                 dependencySources: related.collectMany { it.sources }.unique()]
             }
             def inputs = projects.collect { it.buildFile.absolutePath }
             def output = new File(System.getProperty('nop.gradle.output'))
