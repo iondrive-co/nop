@@ -38,8 +38,10 @@ import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import java.awt.event.HierarchyEvent
 import java.awt.event.InputEvent
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelEvent
 import java.awt.font.FontRenderContext
 import java.awt.font.GlyphVector
 import java.awt.geom.AffineTransform
@@ -51,6 +53,7 @@ import java.awt.image.renderable.RenderableImage
 import java.text.AttributedCharacterIterator
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JScrollBar
@@ -103,7 +106,16 @@ internal class NopTerminalWidget(
         .apply { isRepeats = false }
 
     init {
-        (terminalPanel as NopTerminalPanel).cursorRow = { terminal.cursorY - 1 }
+        val panel = terminalPanel as NopTerminalPanel
+        panel.cursorRow = { terminal.cursorY - 1 }
+        panel.onScrollInput = {
+            settings.nudgeActive()
+            userScrolledUp = panel.verticalScrollModel.value < 0
+        }
+        (scrollBarRef as? TerminalScrollBar)?.apply {
+            beforeScrollInput = panel::flushPendingScroll
+            afterScrollInput = panel.onScrollInput
+        }
         addHierarchyListener { e ->
             if (e.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && isShowing) markMessagesSoon()
         }
@@ -262,6 +274,49 @@ internal class NopTerminalPanel(
     styleState: StyleState,
 ) : TerminalPanel(settings, textBuffer, styleState) {
 
+    @Volatile
+    private var viewingHistory = false
+    private val pendingHistoryScroll = AtomicInteger()
+
+    var onScrollInput: (() -> Unit)? = null
+
+    init {
+        verticalScrollModel.addChangeListener { viewingHistory = verticalScrollModel.value < 0 }
+    }
+
+    override fun scrollArea(scrollRegionTop: Int, scrollRegionSize: Int, dy: Int) {
+        // Only new primary-history rows move a view already reading that history. Accumulating
+        // offsets at the live screen applies old output to the user's next scroll instead.
+        val followsHistory = viewingHistory && !terminalTextBuffer.isUsingAlternateBuffer && scrollRegionTop == 1 && dy < 0
+        if (followsHistory) pendingHistoryScroll.addAndGet(dy)
+        super.scrollArea(scrollRegionTop, scrollRegionSize, 0)
+    }
+
+    /** Apply output's movement before user input changes which rows the viewport is reading. */
+    fun flushPendingScroll() {
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            val dy = pendingHistoryScroll.getAndSet(0)
+            if (buffer.isUsingAlternateBuffer) return
+            val model = verticalScrollModel
+            val value = if (model.value == 0) 0 else (model.value + dy).coerceIn(-buffer.historyLinesCount, 0)
+            model.setRangeProperties(value, model.extent, -buffer.historyLinesCount, model.maximum, model.valueIsAdjusting)
+        } finally { buffer.unlock() }
+    }
+
+    override fun processMouseWheelEvent(event: MouseWheelEvent) {
+        flushPendingScroll()
+        super.processMouseWheelEvent(event)
+        onScrollInput?.invoke()
+    }
+
+    override fun processKeyEvent(event: KeyEvent) {
+        flushPendingScroll()
+        super.processKeyEvent(event)
+        onScrollInput?.invoke()
+    }
+
     private var commandCopies: CommandCopyMenu? = null
     private var copyMenuShown = false
 
@@ -270,6 +325,7 @@ internal class NopTerminalPanel(
     }
 
     override fun processMouseEvent(event: MouseEvent) {
+        flushPendingScroll()
         if (commandCopies != null && (SwingUtilities.isRightMouseButton(event) || event.isPopupTrigger)) {
             if (event.id == MouseEvent.MOUSE_PRESSED) copyMenuShown = false
             if (event.isPopupTrigger || (event.id == MouseEvent.MOUSE_CLICKED && !copyMenuShown)) {
@@ -280,14 +336,17 @@ internal class NopTerminalPanel(
             return
         }
         super.processMouseEvent(event)
+        onScrollInput?.invoke()
     }
 
     override fun processMouseMotionEvent(event: MouseEvent) {
+        if (event.id == MouseEvent.MOUSE_DRAGGED) flushPendingScroll()
         if (commandCopies != null && event.modifiersEx and InputEvent.BUTTON3_DOWN_MASK != 0) {
             event.consume()
             return
         }
         super.processMouseMotionEvent(event)
+        if (event.id == MouseEvent.MOUSE_DRAGGED) onScrollInput?.invoke()
     }
 
     internal fun commandCopyPopup(event: MouseEvent): JPopupMenu {
@@ -367,12 +426,19 @@ internal class NopTerminalPanel(
     var cursorRow: () -> Int = { Int.MIN_VALUE }
 
     override fun paintComponent(g: Graphics) {
-        val g2d = g as? Graphics2D ?: run {
-            super.paintComponent(g)
-            return
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            flushPendingScroll()
+            val g2d = g as? Graphics2D ?: run {
+                super.paintComponent(g)
+                return
+            }
+            val wrapper = ContrastAdjustingGraphics2D(g2d, settings, fillColor = userMessages?.let { UserRowFill(it)::fill })
+            super.paintComponent(wrapper)
+        } finally {
+            buffer.unlock()
         }
-        val wrapper = ContrastAdjustingGraphics2D(g2d, settings, fillColor = userMessages?.let { UserRowFill(it)::fill })
-        super.paintComponent(wrapper)
     }
 
     /**
@@ -762,6 +828,27 @@ internal open class ContrastAdjustingGraphics2D(
  * scrollable, the thumb appears.
  */
 private class TerminalScrollBar(private val settings: NopTerminalSettings) : JScrollBar(VERTICAL) {
+
+    var beforeScrollInput: (() -> Unit)? = null
+    var afterScrollInput: (() -> Unit)? = null
+
+    override fun processMouseEvent(event: MouseEvent) {
+        beforeScrollInput?.invoke()
+        super.processMouseEvent(event)
+        afterScrollInput?.invoke()
+    }
+
+    override fun processMouseMotionEvent(event: MouseEvent) {
+        if (event.id == MouseEvent.MOUSE_DRAGGED) beforeScrollInput?.invoke()
+        super.processMouseMotionEvent(event)
+        if (event.id == MouseEvent.MOUSE_DRAGGED) afterScrollInput?.invoke()
+    }
+
+    override fun processMouseWheelEvent(event: MouseWheelEvent) {
+        beforeScrollInput?.invoke()
+        super.processMouseWheelEvent(event)
+        afterScrollInput?.invoke()
+    }
 
     /** Whether the buffer currently extends past the visible screen. */
     var scrollable: Boolean = false
