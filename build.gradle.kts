@@ -52,9 +52,9 @@ val correctedCefJar = layout.buildDirectory.file("cef-runtime/jcef-natives-fixed
 val cefRuntimeResources = layout.buildDirectory.dir("generated/cef-runtime")
 val testCefPackaging = tasks.register<Exec>("testCefPackaging") {
     group = "verification"
-    description = "Check corrected-native archive packaging and integrity metadata"
+    description = "Check native runtime and update packaging helpers"
     onlyIf { browserOs == "linux" }
-    commandLine("python3", "-B", "-m", "unittest", "discover", "-s", "src/test/python", "-p", "test_cef_*.py")
+    commandLine("python3", "-B", "-m", "unittest", "discover", "-s", "src/test/python", "-p", "test_*.py")
 }
 val prepareCefRuntime = if (browserOs == "linux") tasks.register<Exec>("prepareCefRuntime") {
     group = "build setup"

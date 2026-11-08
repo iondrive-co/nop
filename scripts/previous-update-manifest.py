@@ -39,7 +39,13 @@ def main(argv):
         assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
         for name in names:
             if name in assets:
-                sys.stdout.buffer.write(get(assets[name]))
+                try:
+                    manifest = get(assets[name])
+                except Exception as e:
+                    # A full update does not depend on downloading an optional delta's base.
+                    print(f"previous-update-manifest: could not read update manifest: {e}", file=sys.stderr)
+                    return
+                sys.stdout.buffer.write(manifest)
                 return
 
 
