@@ -12,7 +12,7 @@ import java.nio.file.attribute.PosixFilePermissions
 @EnabledOnOs(OS.LINUX, OS.MAC)
 class CodexLaunchTest {
     @Test
-    fun `remote resumes share sandbox config without permission flags`(@TempDir tmp: Path) {
+    fun `remote resumes restore permissions without client overrides`(@TempDir tmp: Path) {
         val account = Account(name = "codex-alpha", provider = Provider.OpenAI, home = tmp.toString())
         val command = CodexLaunch.wrap(Spawn.command(account, tmp.toFile(), resumeId = "thread-fern"), tmp)
         try {
@@ -23,7 +23,7 @@ class CodexLaunchTest {
             assertTrue(Spawn.CODEX_APPROVAL_POLICY in server)
             assertTrue("approvals_reviewer=\"user\"" in server)
             assertFalse("--sandbox" in terminal)
-            assertTrue("sandbox_mode=\"danger-full-access\"" in terminal)
+            assertFalse("sandbox_mode=\"danger-full-access\"" in terminal)
             assertTrue("tui.terminal_resize_reflow_max_rows=${iondrive.nop.terminal.NopTerminalSettings.SCROLLBACK_LINES}" in terminal)
             assertTrue("notice.hide_rate_limit_model_nudge=true" in terminal)
             assertFalse(Spawn.CODEX_APPROVAL_POLICY in terminal)
@@ -37,6 +37,20 @@ class CodexLaunchTest {
             withoutDisplaySetting.removeAt(limit - 1)
             assertTrue(CodexLaunch.needsTerminalUpgrade(command.copy(argv = withoutDisplaySetting)),
                 "a backend override cannot configure an adopted terminal's display")
+        } finally {
+            CodexLaunch.cleanup(command)
+        }
+    }
+
+    @Test
+    fun `a fresh remote client chooses the configured sandbox`(@TempDir tmp: Path) {
+        val account = Account(name = "codex-alpha", provider = Provider.OpenAI, home = tmp.toString())
+        val command = CodexLaunch.wrap(Spawn.command(account, tmp.toFile()), tmp)
+        try {
+            val terminal = command.argv.drop(command.argv.indexOf("--nop-terminal--") + 1)
+            assertTrue("sandbox_mode=\"danger-full-access\"" in terminal)
+            assertFalse(Spawn.CODEX_APPROVAL_POLICY in terminal)
+            assertFalse("approvals_reviewer=\"user\"" in terminal)
         } finally {
             CodexLaunch.cleanup(command)
         }

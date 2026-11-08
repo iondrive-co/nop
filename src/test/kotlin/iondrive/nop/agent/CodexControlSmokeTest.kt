@@ -19,17 +19,27 @@ class CodexControlSmokeTest {
         javaClass.getResourceAsStream("/agent/codex-control-fixture.py")!!.use { Files.copy(it, script) }
         javaClass.getResourceAsStream("/agent/codex-terminal.sh")!!.use { Files.copy(it, root.resolve("codex-terminal.sh")) }
         val binary = Path.of(System.getenv("NOP_CODEX_SMOKE_BINARY"))
-        val command = CodexLaunch.wrap(AgentCommand(listOf(
+        val initial = AgentCommand(listOf(
             binary.toString(), "-c", "sandbox_mode=\"danger-full-access\"", "--no-alt-screen", "-C", root.resolve("work").toString(),
             "-c", Spawn.CODEX_APPROVAL_POLICY, "-c", "approvals_reviewer=\"user\"",
             "-c", "notice.hide_rate_limit_model_nudge=true",
             "-c", "tui.terminal_resize_reflow_max_rows=${iondrive.nop.terminal.NopTerminalSettings.SCROLLBACK_LINES}",
             "-c", "developer_instructions=\"Preserve fixture launch instructions.\"",
-        ), mapOf("HOME" to root.resolve("home").toString()), null))
+        ), mapOf("HOME" to root.resolve("home").toString()), null)
+        val command = CodexLaunch.wrap(initial)
+        val resumeId = "fixture-resume-id"
+        val resume = CodexLaunch.wrap(initial.copy(
+            argv = initial.argv + listOf("resume", resumeId), nativeSessionId = resumeId, isResume = true,
+        ))
         val launch = root.resolve("launch.json")
         Files.writeString(launch, buildJsonObject {
             put("argv", JsonArray(command.argv.map(::JsonPrimitive)))
             put("env", buildJsonObject { command.env.forEach { (key, value) -> put(key, value) } })
+            put("resume", buildJsonObject {
+                put("argv", JsonArray(resume.argv.map(::JsonPrimitive)))
+                put("env", buildJsonObject { resume.env.forEach { (key, value) -> put(key, value) } })
+                put("id", resumeId)
+            })
         }.toString())
         val fixture = ProcessBuilder("python3", script.toString(), binary.toString(), root.toString(), launch.toString())
             .redirectError(root.resolve("fixture.err").toFile()).start()
@@ -103,6 +113,14 @@ class CodexControlSmokeTest {
             assertTrue("Continue on the authorized model." in resumed["screen"].str()!!, resumed.toString())
             assertEquals(turnsBeforeResume, resumed["turns_started"],
                 "Opening an existing conversation must not submit another prompt")
+            val resumeSocket = resume.env.getValue(CodexLaunch.SOCKET_ENV)
+            CodexControl.connect(account, binary, socket = resumeSocket) {
+                CodexControl.send(it, conversation, "Continue after reopening.", "resumed-message", choice)
+            }
+            awaitScreen("Continue after reopening.")
+            val resumedContext = operation("capture")["contexts"]!!.jsonArray.last().jsonObject
+            assertEquals("danger-full-access", resumedContext["sandbox_policy"].obj()!!["type"].str())
+            assertTrue(resumedContext["approval_policy"].obj()!!["granular"].obj()!!["mcp_elicitations"].bool())
         } finally {
             runCatching { output.write("""{"op":"quit"}"""); output.newLine(); output.flush() }
             if (!fixture.waitFor(30, TimeUnit.SECONDS)) fixture.destroyForcibly()

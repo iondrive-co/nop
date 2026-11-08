@@ -17,6 +17,7 @@ work = root / "work"
 (home / ".codex").mkdir(parents=True)
 work.mkdir()
 requests = []
+pane = None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -67,7 +68,7 @@ tmux = ["tmux", "-S", str(root / "tmux.sock")]
 
 
 def capture():
-    return subprocess.check_output(tmux + ["capture-pane", "-p"], env=env).decode()
+    return subprocess.check_output(tmux + ["capture-pane", "-p", "-t", pane], env=env).decode()
 
 
 def wait_for(predicate, timeout=60):
@@ -80,7 +81,7 @@ def wait_for(predicate, timeout=60):
 
 
 def keys(*args):
-    subprocess.run(tmux + ["send-keys", *args], env=env, check=True)
+    subprocess.run(tmux + ["send-keys", "-t", pane, *args], env=env, check=True)
 
 
 def send(text):
@@ -95,8 +96,10 @@ try:
     socket = env["NOP_CODEX_CONTROL_SOCKET"]
     command = launch["argv"]
     command = ["env", *(key + "=" + env[key] for key in ("HOME", "CODEX_HOME", "NOP_TEST_KEY", "XDG_RUNTIME_DIR")), *command]
-    subprocess.run(tmux + ["new-session", "-d", "-x", "140", "-y", "45", shlex.join(command)],
-                   env=env, check=True)
+    pane = subprocess.check_output(
+        tmux + ["new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "140", "-y", "45", shlex.join(command)],
+        env=env).decode().strip()
+    subprocess.run(tmux + ["set-option", "-g", "remain-on-exit", "on"], env=env, check=True)
     wait_for(lambda: "test-orchid" in capture())
     if not Path(socket).exists():
         keys("F2")
@@ -117,14 +120,26 @@ try:
         elif operation == "close_picker":
             keys("Escape")
         elif operation == "resume":
+            keys("C-d")
+            wait_for(lambda: subprocess.check_output(
+                tmux + ["display-message", "-p", "-t", pane, "#{pane_dead}"], env=env).strip() == b"1")
             rollouts = list((home / ".codex/sessions").glob("**/*.jsonl"))
             assert len(rollouts) == 1, rollouts
             conversation = json.loads(rollouts[0].read_text().splitlines()[0])["payload"]["id"]
-            resumed_socket = str(root / "resumed.sock")
-            resumed_command = [arg.replace(socket, resumed_socket) for arg in command]
-            subprocess.run(tmux + ["new-window", shlex.join(resumed_command + ["resume", conversation])],
-                           env=env, check=True)
-            wait_for(lambda: "Continue on the authorized model." in capture())
+            resume = launch["resume"]
+            resumed_env = {**env, **resume["env"]}
+            resumed_command = ["env", *(key + "=" + resumed_env[key] for key in
+                               ("HOME", "CODEX_HOME", "NOP_TEST_KEY", "XDG_RUNTIME_DIR")),
+                               *(conversation if arg == resume["id"] else arg for arg in resume["argv"])]
+            pane = subprocess.check_output(
+                tmux + ["new-window", "-P", "-F", "#{pane_id}",
+                        shlex.join(resumed_command)], env=env).decode().strip()
+            def resumed():
+                screen = capture()
+                if "Permission overrides are not supported" in screen:
+                    raise RuntimeError("Resumed TUI rejected its launch settings: " + screen)
+                return "Continue on the authorized model." in screen
+            wait_for(resumed)
         elif operation == "quit":
             break
         elif operation != "capture":

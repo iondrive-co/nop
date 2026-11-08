@@ -153,8 +153,8 @@ object Spawn {
     ): AgentCommand {
         val argv = mutableListOf(
             CliTools.resolve(Provider.OpenAI),
-            // A remote TUI rejects permission flags when resuming. CodexLaunch shares this
-            // config value with the backend and the TUI that chooses a fresh thread's sandbox.
+            // CodexLaunch gives permission settings to the backend and to fresh terminal clients;
+            // a resumed remote client must restore the thread's saved permissions instead.
             "-c",
             "sandbox_mode=\"danger-full-access\"",
             "-c",

@@ -49,10 +49,10 @@ internal object CodexLaunch {
             if (arg == "-c") {
                 val setting = command.argv[index++]
                 server += listOf(arg, setting)
-                // The client reads its own display settings and chooses a fresh thread's sandbox.
-                // Config values also work on resume, where permission flags are rejected.
+                // The client chooses a fresh thread's sandbox. A remote resume restores the
+                // thread's permissions and rejects even a sandbox passed as a config override.
                 val key = setting.substringBefore('=')
-                if (key == "sandbox_mode" || key.startsWith("tui.") || key.startsWith("notice.")) {
+                if ((key == "sandbox_mode" && !command.isResume) || key.startsWith("tui.") || key.startsWith("notice.")) {
                     terminal += listOf(arg, setting)
                 }
             } else terminal += arg
