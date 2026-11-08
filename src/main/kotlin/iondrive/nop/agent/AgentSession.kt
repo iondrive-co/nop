@@ -300,9 +300,10 @@ class AgentSession(
         // streams and filed when it ends — and the transcript is what tells the agent's words from
         // the vendor's (see [QuotaEcho]). A real wall has already ended the turn, so a moment's
         // wait costs it nothing.
+        val firedOn = run
         SwingUtilities.invokeLater {
-            val firedOn = run
-            javax.swing.Timer(QUOTA_SETTLE_MS) { if (run === firedOn) onQuotaWall(hit) }
+            if (run !== firedOn || ended) return@invokeLater
+            javax.swing.Timer(QUOTA_SETTLE_MS) { if (run === firedOn && !ended) onQuotaWall(hit) }
                 .apply { isRepeats = false }
                 .start()
         }
@@ -409,7 +410,12 @@ class AgentSession(
     }
 
     /** True once the current run has ended and the post-exit choices belong on screen. */
-    val ended: Boolean get() = endedAt > 0
+    val ended: Boolean get() = endedAt > 0 || switching
+
+    /** Close delivery before stopping the outgoing run or writing its handoff. */
+    @Volatile
+    internal var switching: Boolean = false
+        private set
 
     /**
      * When the current run ended, or 0 while it is still going.
@@ -683,9 +689,12 @@ class AgentSession(
         val wasStarted = run.session.isStarted
         val prevColors = run.session.themeColors
         val from = run.account.provider.id
+        switching = true
         stopResumeWait()
+        run.session.killAndWait()
         endRun(reason)
         run.session.dispose()
+        CodexLaunch.cleanup(run.command)
         log.append(
             AgentEvent.ProviderSwitched(
                 from = from,
@@ -698,6 +707,7 @@ class AgentSession(
         runIndex += 1
         run = start(account, seed, resumeId, seededFromHandoff)
         endedAt = 0
+        switching = false
         // The new CLI has said nothing yet. What the last one was doing is not what this one is.
         live = Activity.Running
         activitySince = System.currentTimeMillis()
@@ -772,11 +782,14 @@ class AgentSession(
         reason: EndReason = EndReason.Switched,
         draft: HandoverDraft? = null,
     ): Handoff.Written {
+        switching = true
+        stopResumeWait()
+        run.session.killAndWait()
         endRun(reason)
         // The draft was shown while this run was still going, so the summary is built now, from
         // everything up to the end, at the path the user's prompt already names. If something else
         // took that name meanwhile, the summary goes to the next free one and the prompt follows it.
-        val at = draft?.path?.takeIf { !Files.exists(it) } ?: Handoff.nextPath(sessionId)
+        val at = draft?.path?.takeIf { Handoff.isAvailable(it) } ?: Handoff.nextPath(sessionId)
         val written = Handoff.write(sessionId, log.events(), target.provider, at)
         val seed = draft?.prompt
             ?.replace(draft.path.toAbsolutePath().toString(), written.path.toAbsolutePath().toString())
@@ -1184,6 +1197,10 @@ class AgentSession(
 
     internal fun submitAgentMessage(text: String, entered: (Boolean) -> Unit, messageId: String = UUID.randomUUID().toString(), retrySince: Long? = null) {
         val current = run
+        if (ended || current.endReason != null) {
+            entered(false)
+            return
+        }
         val conversation = current.nativeSessionId
         if (current.account.provider != Provider.OpenAI) {
             current.session.submit(text, entered)
@@ -1199,10 +1216,14 @@ class AgentSession(
         kotlin.concurrent.thread(isDaemon = true, name = "agent-message-control") {
             val sent = runCatching {
                 CodexControl.send(current.account, conversation, text, UUID.nameUUIDFromBytes(messageId.toByteArray()).toString(), authorized, retrySince,
-                    current.command.env[CodexLaunch.SOCKET_ENV])
+                    current.command.env[CodexLaunch.SOCKET_ENV], stillCurrent = { run === current && !ended && current.endReason == null })
             }
             SwingUtilities.invokeLater {
                 current.session.submitting = false
+                if (run !== current || ended || current.endReason != null) {
+                    entered(false)
+                    return@invokeLater
+                }
                 if (sent.isSuccess) {
                     current.userPromptSubmitted = true
                     sent.getOrNull()?.conversation?.let {
@@ -1317,7 +1338,8 @@ class AgentSession(
             // UI and nowhere else — and the screen tail is the fallback a handoff is built from
             // when the provider's transcript cannot be read. The title is where the CLI says
             // whether it is working, which is what the tab's mark shows — see [activity].
-            outputTap = { text ->
+            outputTap = output@ { text ->
+                if (switching || run.tracker !== tracker) return@output
                 quotaWatcher.feed(text)
                 log.appendScreenTail(QuotaWatcher.stripAnsi(text))
                 var titleChanged = false
@@ -1470,7 +1492,7 @@ class AgentSession(
         // on still being the current run, so a dying TUI a switch has already replaced cannot end
         // the one that took its place.
         terminal.onExit = { code ->
-            if (run === newRun && newRun.endReason == null) {
+            if (run === newRun && newRun.endReason == null && !switching) {
                 endRun(EndReason.Exited)
                 // A clean exit is the user leaving; anything else is the CLI falling over, and the
                 // tab is where the evidence of that is. Off this thread before the tab goes, for

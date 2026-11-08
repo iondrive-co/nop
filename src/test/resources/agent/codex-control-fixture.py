@@ -116,17 +116,30 @@ try:
             wait_for(lambda: "Select Model" in capture())
         elif operation == "close_picker":
             keys("Escape")
+        elif operation == "resume":
+            rollouts = list((home / ".codex/sessions").glob("**/*.jsonl"))
+            assert len(rollouts) == 1, rollouts
+            conversation = json.loads(rollouts[0].read_text().splitlines()[0])["payload"]["id"]
+            resumed_socket = str(root / "resumed.sock")
+            resumed_command = [arg.replace(socket, resumed_socket) for arg in command]
+            subprocess.run(tmux + ["new-window", shlex.join(resumed_command + ["resume", conversation])],
+                           env=env, check=True)
+            wait_for(lambda: "Continue on the authorized model." in capture())
         elif operation == "quit":
             break
         elif operation != "capture":
             raise RuntimeError("Unknown fixture operation")
         contexts = []
+        turns_started = 0
         for rollout in (home / ".codex/sessions").glob("**/*.jsonl"):
             for record in rollout.read_text().splitlines():
                 event = json.loads(record)
                 if event.get("type") == "turn_context":
                     contexts.append(event["payload"])
-        print(json.dumps({"screen": capture(), "requests": requests, "contexts": contexts}), flush=True)
+                if event.get("type") == "event_msg" and event.get("payload", {}).get("type") == "task_started":
+                    turns_started += 1
+        print(json.dumps({"screen": capture(), "requests": requests, "contexts": contexts,
+                          "turns_started": turns_started}), flush=True)
 finally:
     subprocess.run(tmux + ["kill-server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run([binary, "app-server", "daemon", "stop"], env=env, timeout=20,

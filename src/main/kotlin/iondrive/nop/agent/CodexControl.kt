@@ -31,11 +31,14 @@ internal object CodexControl {
         authorized: ConversationModel?,
         retrySince: Long? = null,
         socket: String? = null,
+        stillCurrent: () -> Boolean = { true },
     ): Observation = connect(account, socket = socket) { rpc ->
-        send(rpc, conversation, text, messageId, authorized, retrySince)
+        send(rpc, conversation, text, messageId, authorized, retrySince, stillCurrent)
     }
 
-    internal fun send(rpc: Rpc, conversationId: String?, text: String, messageId: String, authorized: ConversationModel?, retrySince: Long? = null): Observation {
+    internal fun send(rpc: Rpc, conversationId: String?, text: String, messageId: String, authorized: ConversationModel?, retrySince: Long? = null,
+                      stillCurrent: () -> Boolean = { true }): Observation {
+        check(stillCurrent()) { "The receiving agent run has ended" }
         val conversation = conversationId ?: loadedThread(rpc)
         var observed = observe(rpc, conversation)
         if (authorized != null && (observed.model != authorized.model ||
@@ -57,9 +60,11 @@ internal object CodexControl {
                 choice.reasoning?.let { put("effort", it) }
             }
         }
+        check(stillCurrent()) { "The receiving agent run has ended" }
         try {
             rpc.request("turn/start", params)
         } catch (refusal: Refused) {
+            check(stillCurrent()) { "The receiving agent run has ended" }
             // Even a turn the vendor will not start can receive context for its next request.
             rpc.request("thread/inject_items", buildJsonObject {
                 put("threadId", conversation)

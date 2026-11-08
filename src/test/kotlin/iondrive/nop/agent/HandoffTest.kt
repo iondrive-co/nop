@@ -2,6 +2,7 @@ package iondrive.nop.agent
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -167,8 +168,11 @@ class HandoffTest {
     // -- Shaped for whoever is reading it --
 
     @Test
-    fun `Codex is given the previous reasoning, which it uses well`() {
-        assertTrue("[Reasoning]: Only the Vultr path is wired up." in summary(Provider.OpenAI))
+    fun `reasoning is omitted for every recipient`() {
+        for (target in Provider.entries) {
+            assertFalse("[Reasoning]" in summary(target))
+            assertFalse("Only the Vultr path is wired up." in summary(target))
+        }
     }
 
     /**
@@ -203,6 +207,71 @@ class HandoffTest {
         assertTrue("(earlier turns omitted)" in text)
         assertTrue("turn 4000 of a very long session" in text, "the tail is where the work got to")
         assertTrue(text.length < 40_000, "summary was ${text.length} chars")
+    }
+
+    @Test
+    fun `the entire handoff stays bounded with huge tasks file lists and closing messages`() {
+        val events = log() + listOf(AgentEvent.UserMessage("Keep all release controls. " + "detail ".repeat(9000), at())) +
+            (1..900).map { AgentEvent.ToolStarted("edit-$it", "Edit", mapOf("file_path" to "/workspace/module-$it.kt"), at()) } +
+            AgentEvent.AssistantMessage(listOf(Block.Text("Current result " + "verbose ".repeat(9000) + "next: verify parser")), at = at())
+        for (target in Provider.entries) {
+            val text = summary(target, events)
+            assertTrue(text.length <= 10_000, "whole packet was ${text.length} characters")
+            assertTrue("next: verify parser" in text)
+            assertTrue("Keep all release controls." in text)
+            assertTrue("earlier files omitted" in text)
+            assertTrue(text.endsWith("</previous_session>"))
+        }
+    }
+
+    @Test
+    fun `startup context and earlier handoff seeds are not the original task`() {
+        val events = listOf(
+            AgentEvent.UserMessage("# AGENTS.md instructions for /workspace\nRead the project rules.", at()),
+            AgentEvent.UserMessage("<environment_context>sample</environment_context>", at()),
+            AgentEvent.UserMessage("Continue the task handed over from another CLI. Read an old file.", at()),
+            AgentEvent.UserMessage("Repair the syntax scanner", at()),
+        )
+        val text = summary(events = events)
+        assertTrue("## Original Task\nRepair the syntax scanner" in text)
+        assertFalse("AGENTS.md instructions" in text)
+        assertFalse("Read an old file" in text)
+    }
+
+    @Test
+    fun `agent messages never become user instructions`() {
+        val text = summary(events = log() + AgentEvent.UserMessage(
+            "[Message via nop from service \"Build bell\", not the user; no reply.]\n\nInspect a result.", at()))
+        assertFalse("## Recent User Instructions" in text)
+        assertTrue("[Agent/service message]" in text)
+    }
+
+    @Test
+    fun `a successful exact retry removes the old failure from remaining work`() {
+        val events = log() + listOf(
+            AgentEvent.ToolStarted("retry", "Bash", mapOf("command" to "make test"), at()),
+            AgentEvent.ToolFinished("retry", "now passed", exitCode = 0, at = at()),
+        )
+        assertFalse("2 failed" in summary(events = events).substringAfter("## Remaining Work").substringBefore("## Files Modified"))
+    }
+
+    @Test
+    fun `a call interrupted by the switch has an unknown outcome`() {
+        val text = summary(events = log() + AgentEvent.ToolStarted("pending-parser", "Bash", mapOf("command" to "make check-parser"), at()))
+        assertTrue("1 tool call(s) had no recorded finish; their outcomes are unknown" in text)
+        assertTrue("outcome not recorded" in text)
+    }
+
+    @Test
+    fun `retrying only one command does not erase a failed multi-command call`() {
+        val events = log() + listOf(
+            AgentEvent.ToolStarted("combined", "Bash", mapOf("command" to "gradle build"), at()),
+            AgentEvent.ToolStarted("combined", "Bash", mapOf("command" to "gradle test"), at()),
+            AgentEvent.ToolFinished("combined", "combined build and tests failed", isError = true, exitCode = 1, at = at()),
+            AgentEvent.ToolStarted("single-retry", "Bash", mapOf("command" to "gradle test"), at()),
+            AgentEvent.ToolFinished("single-retry", "tests passed", exitCode = 0, at = at()),
+        )
+        assertTrue("combined build and tests failed" in summary(events = events))
     }
 
     // -- The degraded path --
@@ -252,7 +321,7 @@ class HandoffTest {
             )
             assertEquals(written.text, written.path.toFile().readText())
         } finally {
-            written.path.toFile().delete()
+            written.path.parent.toFile().listFiles()?.forEach { it.delete() }
             written.path.parent.toFile().delete()
         }
     }
@@ -266,7 +335,24 @@ class HandoffTest {
             assertFalse(first.path == second.path, "the earlier handoff was overwritten")
             assertTrue(first.path.toFile().isFile)
         } finally {
-            listOf(first, second).forEach { it.path.toFile().delete() }
+            first.path.parent.toFile().listFiles()?.forEach { it.delete() }
+            first.path.parent.toFile().delete()
+        }
+    }
+
+    @Test
+    fun `deleting a brief does not overwrite its surviving history`() {
+        val id = "sample-${System.nanoTime()}"
+        val first = Handoff.write(id, log(), Provider.OpenAI)
+        val history = first.path.resolveSibling(first.path.fileName.toString().removeSuffix(".md") + "-history.md")
+        try {
+            val original = java.nio.file.Files.readString(history)
+            java.nio.file.Files.delete(first.path)
+            val second = Handoff.write(id, log() + AgentEvent.UserMessage("A new scanner request", at()), Provider.OpenAI)
+            assertNotEquals(first.path, second.path)
+            assertEquals(original, java.nio.file.Files.readString(history))
+        } finally {
+            first.path.parent.toFile().listFiles()?.forEach { it.delete() }
             first.path.parent.toFile().delete()
         }
     }
@@ -305,6 +391,27 @@ class HandoffTest {
         assertTrue(path.toString() in seed)
         assertTrue("Claude Code" in seed, "the new agent should know who it is taking over from")
         assertTrue("Remaining Work" in seed, "the seed points at the section that says what is left")
+        assertTrue("only as needed" in seed)
+        assertFalse("before doing anything else" in seed)
+    }
+
+    @Test
+    fun `the longer history is available without being embedded in the brief`() {
+        val marker = "A very early scanner observation"
+        val events = log() + AgentEvent.AssistantMessage(listOf(Block.Text(marker + " prose".repeat(3000))), at = at()) +
+            AgentEvent.AssistantMessage(listOf(Block.Text("Current result: scanner repaired.")), at = at())
+        val written = Handoff.write("sample-${System.nanoTime()}", events, Provider.OpenAI)
+        try {
+            val history = written.path.resolveSibling(written.path.fileName.toString().removeSuffix(".md") + "-history.md")
+            assertTrue(java.nio.file.Files.exists(history))
+            assertTrue(history.toString() in written.text)
+            assertTrue(marker in java.nio.file.Files.readString(history))
+            assertFalse(marker in written.text)
+            assertTrue(written.text.length <= 10_000)
+        } finally {
+            written.path.parent.toFile().listFiles()?.forEach { it.delete() }
+            written.path.parent.toFile().delete()
+        }
     }
 
     @Test

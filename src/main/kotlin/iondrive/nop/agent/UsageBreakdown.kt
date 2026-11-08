@@ -122,6 +122,7 @@ object UsageBreakdown {
         readings: Map<String, UsageReading>,
         scope: UsageScope,
         now: Instant = Instant.now(),
+        nopSessionsDir: Path = EventLog.sessionsDir(),
     ): Map<String, AccountBreakdown> {
         val historyDuration = Duration.ofDays(30)
         val historyCutoff = now.minus(historyDuration)
@@ -139,7 +140,6 @@ object UsageBreakdown {
         val seenNativeSessionIds = mutableSetOf<String>()
 
         // 1. Scan nop sessions directory (~/.local/share/nop/agent/sessions)
-        val nopSessionsDir = EventLog.sessionsDir()
         if (Files.isDirectory(nopSessionsDir)) {
             val sessionFiles = runCatching {
                 Files.list(nopSessionsDir).use { stream ->
@@ -258,6 +258,7 @@ object UsageBreakdown {
         seenNativeIds: MutableSet<String>,
     ) {
         var currentAccount: String? = null
+        var currentProvider: String? = null
         var currentProject: String? = null
         var sessionTitle: String? = null
         var firstPrompt: String? = null
@@ -279,6 +280,7 @@ object UsageBreakdown {
                             val obj = json.parseToJsonElement(line).jsonObject
                             if (obj["type"]?.jsonPrimitive?.content == "run_started") {
                                 currentAccount = obj["account"]?.jsonPrimitive?.content
+                                currentProvider = obj["provider"]?.jsonPrimitive?.content
                                 obj["nativeSessionId"]?.jsonPrimitive?.content?.let { seenNativeIds.add(it) }
                             }
                         }
@@ -309,7 +311,8 @@ object UsageBreakdown {
                                     val outTok = usageObj?.get("outputTokens")?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
                                     val readTok = usageObj?.get("cacheReadTokens")?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
                                     val createTok = usageObj?.get("cacheCreationTokens")?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                                    val turnTok = inTok + outTok + readTok + createTok
+                                    // Codex's input includes cache reads; Claude reports them separately.
+                                    val turnTok = inTok + outTok + if (currentProvider == "openai") 0L else readTok + createTok
                                     val model = obj["model"]?.jsonPrimitive?.content ?: "unknown"
 
                                     val winStart = windowStartsMs[acc] ?: historyCutoffMs
@@ -503,8 +506,8 @@ object UsageBreakdown {
                                 val lastUsage = payload?.get("info")?.jsonObject?.get("last_token_usage")?.jsonObject
                                 val inTok = lastUsage?.get("input_tokens")?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
                                 val outTok = lastUsage?.get("output_tokens")?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                                val cachedTok = lastUsage?.get("cached_input_tokens")?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                                val tok = inTok + outTok + cachedTok
+                                // Codex input_tokens already includes cached_input_tokens.
+                                val tok = inTok + outTok
 
                                 if (atMs >= windowStartMs) {
                                     currentTokens += tok

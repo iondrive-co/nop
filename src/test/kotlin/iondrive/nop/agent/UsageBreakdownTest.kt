@@ -5,10 +5,49 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.nio.file.Files
+import java.nio.file.attribute.FileTime
 import java.time.Duration
 import java.time.Instant
 
 class UsageBreakdownTest {
+
+    @Test
+    fun `native Codex counts cache as part of input and keeps historical windows separate`(@TempDir dir: Path) {
+        val account = Account("sample-codex", Provider.OpenAI, dir.toString())
+        val now = Instant.parse("2033-04-18T12:00:00Z")
+        val rollouts = Files.createDirectories(dir.resolve(".codex/sessions/2033/04/18"))
+        val file = rollouts.resolve("rollout-example.jsonl")
+        Files.writeString(file, listOf(
+            """{"type":"session_meta","payload":{"id":"thread-larch","cwd":"/workspace/scanner"}}""",
+            """{"type":"turn_context","payload":{"model":"example-model"}}""",
+            """{"type":"event_msg","timestamp":"2033-04-18T11:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":640,"cached_input_tokens":420,"output_tokens":35}}}}""",
+            """{"type":"event_msg","timestamp":"2033-04-17T11:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":280,"cached_input_tokens":180,"output_tokens":15}}}}""",
+        ).joinToString("\n"))
+        Files.setLastModifiedTime(file, FileTime.from(now))
+        val result = UsageBreakdown.compute(listOf(account), emptyMap(), UsageScope.Session5h, now).getValue(account.name)
+        assertEquals(675L, result.currentPeriod.totalTokens)
+        assertEquals(295L, result.historicalPeriod.totalTokens)
+        assertEquals(1, result.currentPeriod.sessions.single().steps)
+    }
+
+    @Test
+    fun `nop logs count Codex cache once and Claude cache separately across a switch`(@TempDir dir: Path) {
+        val now = Instant.parse("2033-04-18T12:00:00Z")
+        val codex = Account("sample-codex", Provider.OpenAI, dir.resolve("cx").toString())
+        val claude = Account("sample-claude", Provider.Anthropic, dir.resolve("cl").toString())
+        val logs = Files.createDirectories(dir.resolve("logs"))
+        Files.writeString(logs.resolve("example.jsonl"), listOf(
+            """{"type":"run_started","account":"sample-codex","provider":"openai"}""",
+            """{"type":"assistant_message","at":${now.toEpochMilli()},"model":"sample","usage":{"inputTokens":640,"outputTokens":35,"cacheReadTokens":420}}""",
+            """{"type":"run_started","account":"sample-claude","provider":"anthropic"}""",
+            """{"type":"assistant_message","at":${now.toEpochMilli()},"model":"sample","usage":{"inputTokens":220,"outputTokens":35,"cacheReadTokens":420,"cacheCreationTokens":10}}""",
+        ).joinToString("\n"))
+        Files.setLastModifiedTime(logs.resolve("example.jsonl"), FileTime.from(now))
+        val results = UsageBreakdown.compute(listOf(codex, claude), emptyMap(), UsageScope.Session5h, now, nopSessionsDir = logs)
+        assertEquals(675L, results.getValue(codex.name).totalTokens)
+        assertEquals(685L, results.getValue(claude.name).totalTokens)
+    }
 
     @Test
     fun testFormatModelName() {

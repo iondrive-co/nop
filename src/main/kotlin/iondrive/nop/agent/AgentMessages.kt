@@ -356,6 +356,7 @@ object AgentMessages {
 
     /** Types [held], out of [s]'s inbox now, into its prompt, and keeps its [Status] as it goes. */
     private fun typeIn(s: AgentSession, held: Held, now: Long) {
+        val receivingRun = s.run
         if (held.attempts++ == 0) held.attemptedAt = now
         s.inFlightMessage = held
         val to = "\"${clean(s.title)}\" (${s.shortId})"
@@ -365,18 +366,20 @@ object AgentMessages {
         Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: " +
             if (s.usesControlDelivery) "sending through Codex's local control socket" else "typing it in")
         typeInto(s, held) { entered ->
-            s.inFlightMessage = null
+            if (s.inFlightMessage === held) s.inFlightMessage = null
             val at = System.currentTimeMillis()
             gone[held.id] = held.sender to if (entered) {
                 Log.info("agent message ${held.id} from ${held.fromId} to ${s.shortId}: submitted")
                 Status(held.id, Status.State.Submitted, if (s.usesControlDelivery) "accepted by $to's local control socket at ${clock(at)}"
                     else "typed into $to's prompt and sent with Enter at ${clock(at)}")
             } else {
-                if (!s.ended && s.account.provider == Provider.OpenAI) {
+                if (s.run !== receivingRun || s.switching || (!s.ended && s.account.provider == Provider.OpenAI)) {
                     held.retryAt = at + 3_000
                     s.inbox.add(0, held)
                     startPump()
-                    Status(held.id, Status.State.Waiting, "retrying delivery to $to's local control socket")
+                    Status(held.id, Status.State.Waiting,
+                        if (s.run !== receivingRun || s.switching) "queued for the replacement agent after the switch"
+                        else "retrying delivery to $to's local control socket")
                 } else {
                     Log.warn("agent message ${held.id} from ${held.fromId} to ${s.shortId}: its CLI stopped before the Enter that sends it")
                     Status(held.id, Status.State.Undeliverable, "typed into $to's prompt, but its CLI stopped before the Enter that sends it")

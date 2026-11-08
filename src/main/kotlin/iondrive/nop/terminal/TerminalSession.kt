@@ -18,6 +18,8 @@ import java.awt.GraphicsEnvironment
 import java.awt.dnd.DnDConstants
 import java.awt.dnd.DropTarget
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import javax.swing.SwingUtilities
 import kotlin.concurrent.thread
@@ -509,6 +511,30 @@ class TerminalSession private constructor(
      */
     fun kill() {
         process?.let { killTree(it) }
+    }
+
+    /** A provider switch cannot start a replacement while the old CLI or its backend still runs. */
+    fun killAndWait() {
+        val old = process ?: return
+        connector?.releasing = true
+        val descendants = if (old.isAlive) killTree(old) else emptyList()
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        check(old.waitFor(5, TimeUnit.SECONDS)) { "The previous terminal process did not exit" }
+        for (child in descendants) {
+            // An orphan can already be a zombie awaiting init's reap; it cannot execute work.
+            fun canRun(): Boolean = child.isAlive && runCatching {
+                Files.readString(Path.of("/proc/${child.pid()}/stat"))
+                    .substringAfterLast(") ").first() != 'Z'
+            }.getOrDefault(true)
+            if (!canRun()) continue
+            val left = deadline - System.nanoTime()
+            if (left > 0) runCatching { child.onExit().get(left, TimeUnit.NANOSECONDS) }
+            check(!canRun()) { "A previous terminal child is still running: ${child.pid()}" }
+        }
+        // Keep the actual exit code, and prevent dispose from signalling the old process group again.
+        exitCode = old.exitValue()
+        process = null
+        running = false
     }
 
     /** Kills the process tree, detaches the widget from its host card, and disposes it. Idempotent. */

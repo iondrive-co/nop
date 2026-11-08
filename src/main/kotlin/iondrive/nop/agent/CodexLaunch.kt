@@ -39,7 +39,11 @@ internal object CodexLaunch {
         while (index < command.argv.size) {
             val arg = command.argv[index++]
             if (arg == "-c") {
-                server += listOf(arg, command.argv[index++])
+                val setting = command.argv[index++]
+                server += listOf(arg, setting)
+                // The TUI chooses a fresh thread's sandbox from its own config. Use a config
+                // value here: a permission flag is rejected when the remote TUI resumes.
+                if (setting.startsWith("sandbox_mode=")) terminal += listOf(arg, setting)
             } else terminal += arg
         }
         return command.copy(

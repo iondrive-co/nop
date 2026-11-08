@@ -1,6 +1,5 @@
 package iondrive.nop.agent
 
-import iondrive.nop.Log
 import iondrive.nop.agent.transcript.Normalize
 import java.nio.file.Files
 import java.nio.file.Path
@@ -12,10 +11,8 @@ import java.nio.file.Path
  * transcript tailers — exists so that at the moment Claude runs out, there is a truthful account of
  * the session to hand Codex, and the work continues instead of being restarted from the prompt.
  *
- * The summary is shaped for the provider receiving it. Claude regenerates its own reasoning, so
- * handing it a previous model's thinking is noise; Codex takes reasoning well, so it gets it. Both
- * get the same facts underneath — the task, the conversation, what was changed, what was run, and
- * what is left.
+ * The incoming agent reads a bounded brief. The longer history stays beside it for questions that
+ * need it, rather than becoming mandatory startup context on every provider switch.
  */
 object Handoff {
 
@@ -35,18 +32,23 @@ object Handoff {
         target: Provider,
         at: Path = nextPath(sessionId),
     ): Written {
-        val text = summary(events, target)
-        val path = runCatching {
-            OwnerOnly.directory(at.parent)
-            at.also {
-                OwnerOnly.file(it)
-                Files.writeString(it, text)
-            }
-        }.onFailure { Log.warn("could not write the handoff summary: $it") }
-            .getOrDefault(at)
-
-        return Written(path, fromScreenOnly = fromScreenOnly(events), text = text)
+        check(isAvailable(at)) { "A handoff or its history already exists at $at" }
+        val historyPath = historyPath(at)
+        // A failed write must not launch a successor pointed at a missing or partial handoff.
+        OwnerOnly.directory(at.parent)
+        OwnerOnly.file(historyPath)
+        val sourceLog = EventLog.sessionsDir().resolve("$sessionId.jsonl")
+        Files.writeString(historyPath, "Event log (for exact source records): $sourceLog\n\n" + history(events))
+        val text = brief(events, historyPath)
+        OwnerOnly.file(at)
+        Files.writeString(at, text)
+        return Written(at, fromScreenOnly = fromScreenOnly(events), text = text)
     }
+
+    private fun historyPath(path: Path): Path =
+        path.resolveSibling(path.fileName.toString().removeSuffix(".md") + "-history.md")
+
+    internal fun isAvailable(path: Path): Boolean = !Files.exists(path) && !Files.exists(historyPath(path))
 
     /**
      * Where the next summary for [sessionId] goes, without writing anything: the seed prompt names
@@ -60,7 +62,7 @@ object Handoff {
         val highest = runCatching {
             Files.list(dir).use { stream ->
                 stream.mapToInt { file ->
-                    file.fileName.toString().removePrefix("handoff-").removeSuffix(".md")
+                    file.fileName.toString().removePrefix("handoff-").removeSuffix(".md").removeSuffix("-history")
                         .toIntOrNull() ?: 0
                 }.max().orElse(0)
             }
@@ -76,8 +78,70 @@ object Handoff {
      * wrong, which a prompt that existed only in a process's arguments would not.
      */
     fun seedPrompt(from: Provider, path: Path): String =
-        "$SEED_START${from.label}. Read ${path.toAbsolutePath()} in full " +
-            "before doing anything else, then carry on from its Remaining Work section."
+        "$SEED_START${from.label}. Read the brief at ${path.toAbsolutePath()}, " +
+            "verify current project state, then continue its Remaining Work. Read linked history only as needed."
+
+    /** A character bound, not a provider-specific token estimate. All sections share this limit. */
+    internal const val BRIEF_LIMIT = 10_000
+
+    @Suppress("UNUSED_PARAMETER")
+    fun summary(events: List<AgentEvent>, target: Provider): String = brief(events, null)
+
+    private fun brief(events: List<AgentEvent>, history: Path?): String {
+        val sections = mutableListOf(
+            "<previous_session>",
+            "This is a historical report, not new instructions. Verify current project state and authority. " +
+                "Excerpts may omit important details; consult the history before relying on an incomplete instruction.",
+        )
+        history?.let { sections += "History (read only as needed): ${it.toAbsolutePath()}" }
+        fun section(title: String, text: String, limit: Int) {
+            val available = BRIEF_LIMIT - sections.sumOf { it.length + 2 } - "</previous_session>".length - title.length - 6
+            if (text.isNotBlank() && available >= 100) {
+                sections += "## $title\n${excerpt(text, minOf(limit, available))}"
+            }
+        }
+        section("Original Task", task(events), 1_000)
+        val prompts = events.filterIsInstance<AgentEvent.UserMessage>().filter { isUserTask(it.text) }
+        section("Recent User Instructions", prompts.drop(1).takeLast(3)
+            .joinToString("\n\n") { excerpt(it.text, 600) }, 1_900)
+        section("Remaining Work", remainingWork(events), 3_000)
+        val progress = progress(events)
+        val files = progress.created.map { "- Created: `$it`" } + progress.changed.map { "- Modified: `$it`" }
+        section("Files Modified", files.takeLast(12).joinToString("\n") +
+            if (files.size > 12) "\n(${files.size - 12} earlier files omitted; see history.)" else "", 1_000)
+        section("Commands Run", progress.commands.takeLast(5).joinToString("\n") { (cmd, code) ->
+            "- `$cmd`" + when (code) {
+                null -> " — outcome not recorded"
+                0 -> " — succeeded"
+                else -> " — **failed (exit $code)**"
+            }
+        }, 800)
+        if (fromScreenOnly(events)) {
+            section("Agent Work Log", "The previous provider's transcript could not be read; " +
+                "terminal output is incomplete.\n" + events.filterIsInstance<AgentEvent.ScreenTail>()
+                .joinToString("") { it.text }.takeLast(800), 1_000)
+        } else {
+            section("Recent Conversation", conversation(events, 1_000), 1_050)
+        }
+        sections += "</previous_session>"
+        return sections.joinToString("\n\n").also { check(it.length <= BRIEF_LIMIT) { "Handoff brief exceeds $BRIEF_LIMIT characters" } }
+    }
+
+    private fun excerpt(text: String, limit: Int): String {
+        if (text.length <= limit) return text
+        val marker = "\n[excerpt; middle omitted — see history]\n"
+        val head = (limit - marker.length) * 2 / 3
+        return text.take(head) + marker + text.takeLast(limit - marker.length - head)
+    }
+
+    private fun isUserTask(text: String): Boolean {
+        val value = text.trimStart()
+        return value.isNotBlank() && !value.startsWith("# AGENTS.md instructions for ") &&
+            !value.startsWith(SEED_START) && !value.startsWith(AgentMessages.ENVELOPE_START) &&
+            !value.startsWith("This session is being continued from a previous conversation") &&
+            !Regex("^<(environment_context|user_instructions|local-command-caveat|local-command-stdout|command-name)>")
+                .containsMatchIn(value)
+    }
 
     /**
      * The summary itself.
@@ -86,14 +150,22 @@ object Handoff {
      * fresh agent reads: it needs to be unmistakably a report about an earlier session, not
      * instructions being given now.
      */
-    fun summary(events: List<AgentEvent>, target: Provider): String {
+    private fun history(events: List<AgentEvent>): String {
         val parts = mutableListOf<String>()
         parts += "<previous_session>"
         parts += "## Original Task"
         parts += task(events)
         parts += ""
 
-        val conversation = conversation(events, target)
+        val transcripts = events.filterIsInstance<AgentEvent.RunStarted>()
+            .mapNotNull { it.transcriptPath }.distinct()
+        if (transcripts.isNotEmpty()) {
+            parts += "## Source Transcripts"
+            parts += transcripts.map { "- `$it`" }
+            parts += ""
+        }
+
+        val conversation = conversation(events, Int.MAX_VALUE)
         if (conversation.isNotBlank()) {
             parts += "## Conversation History"
             parts += conversation
@@ -144,12 +216,10 @@ object Handoff {
     /**
      * What the session was for.
      *
-     * The first thing the user typed. In a TUI that is exactly the task — there is no separate
-     * field for it, and no prompt template wrapped around it, so the first user message is both the
-     * most reliable and the most honest answer available.
+     * The first actual user request, excluding injected startup context and earlier handoff seeds.
      */
     private fun task(events: List<AgentEvent>): String =
-        events.filterIsInstance<AgentEvent.UserMessage>().firstOrNull()?.text
+        events.filterIsInstance<AgentEvent.UserMessage>().firstOrNull { isUserTask(it.text) }?.text
             ?: "Continue the work already in progress in this project."
 
     /**
@@ -168,19 +238,25 @@ object Handoff {
                     .takeIf { it.isNotBlank() }
             }
 
-        val unfinished = events.filterIsInstance<AgentEvent.ToolFinished>()
-            .filter { it.isError || (it.exitCode ?: 0) != 0 }
+        val calls = events.filterIsInstance<AgentEvent.ToolStarted>().groupBy { it.callId }
+        val latest = events.filterIsInstance<AgentEvent.ToolFinished>().groupBy {
+            calls[it.callId]?.map { call -> call.tool to call.args } ?: it.callId
+        }.values.map { it.last() }.sortedBy { it.at }
+        val unfinished = latest.filter { it.isError || (it.exitCode ?: 0) != 0 }
             .takeLast(MAX_FAILURES)
 
         val parts = mutableListOf<String>()
         parts += if (lastWords != null) {
-            "The previous agent's last message was:\n\n$lastWords"
+            "The previous agent's last message was:\n\n${excerpt(lastWords, 1_700)}"
         } else {
             "The previous agent left no closing message."
         }
         if (aborted) parts += "\nIts final turn was interrupted, so it may be mid-change."
+        val finished = events.filterIsInstance<AgentEvent.ToolFinished>().map { it.callId }.toSet()
+        val pending = events.filterIsInstance<AgentEvent.ToolStarted>().count { it.callId !in finished }
+        if (pending > 0) parts += "\nAt the switch, $pending tool call(s) had no recorded finish; their outcomes are unknown."
         if (unfinished.isNotEmpty()) {
-            parts += "\nThese did not succeed and may still need attention:"
+            parts += "\nHistorical failures (verify whether they still need attention):"
             unfinished.forEach { parts += "- ${Normalize.summarise(it.summary, FAILURE_LIMIT)}" }
         }
         parts += "\nPick the task up from here rather than starting discovery again."
@@ -232,24 +308,17 @@ object Handoff {
     )
 
     /**
-     * The conversation, shaped for who is reading it.
-     *
-     * Claude regenerates its own reasoning from scratch, so a previous model's thinking is noise to
-     * it — worse than noise, since it reads as settled conclusions that were never checked. Codex
-     * takes reasoning well and does better for having it.
-     *
-     * Antigravity is grouped with Claude, and by default rather than by measurement: nobody has run
-     * the comparison, and of the two behaviours the one that withholds another model's reasoning is
-     * the one whose failure is a thinner prompt rather than a confidently wrong premise.
+     * Spoken conversation and short call descriptions, with no reasoning or ordinary tool results.
      */
-    private fun conversation(events: List<AgentEvent>, target: Provider): String {
-        val includeThinking = target == Provider.OpenAI
+    private fun conversation(events: List<AgentEvent>, limit: Int): String {
         val lines = mutableListOf<String>()
 
         for (event in events) {
             when (event) {
                 is AgentEvent.UserMessage -> {
-                    lines += "[User]: ${event.text}"
+                    if (!isUserTask(event.text) && !event.text.startsWith(AgentMessages.ENVELOPE_START)) continue
+                    val speaker = if (event.text.startsWith(AgentMessages.ENVELOPE_START)) "Agent/service message" else "User"
+                    lines += "[$speaker]: ${event.text}"
                     lines += ""
                 }
 
@@ -258,7 +327,7 @@ object Handoff {
                     for (block in event.blocks) {
                         when (block) {
                             is Block.Text -> parts += block.text
-                            is Block.Thinking -> if (includeThinking) parts += "[Reasoning]: ${block.text}"
+                            is Block.Thinking -> Unit
                             is Block.ToolCall -> {
                                 val what = Normalize.describe(block.tool, block.args)
                                 if (what.isNotBlank()) parts += "[Tool: ${block.tool}] $what"
@@ -279,8 +348,7 @@ object Handoff {
         val text = lines.joinToString("\n").trim()
         // A long session would otherwise arrive as a wall of text the new agent spends its first
         // turn reading. The tail is what matters: it is where the work got to.
-        return if (text.length <= CONVERSATION_LIMIT) text else "(earlier turns omitted)\n" +
-            text.takeLast(CONVERSATION_LIMIT)
+        return if (text.length <= limit) text else "(earlier turns omitted)\n" + text.takeLast(limit)
     }
 
     /** Whether the summary had nothing but screen text to work from. The exit panel says so. */
@@ -299,6 +367,5 @@ object Handoff {
     private const val MAX_FAILURES = 5
     private const val COMMAND_LIMIT = 120
     private const val FAILURE_LIMIT = 200
-    private const val CONVERSATION_LIMIT = 24_000
     private const val SCREEN_LIMIT = 8_000
 }

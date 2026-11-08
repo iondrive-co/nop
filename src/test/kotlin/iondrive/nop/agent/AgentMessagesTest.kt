@@ -16,6 +16,26 @@ import javax.swing.SwingUtilities
  * asks it for a widget — so every tab here is asleep, which is itself one of the cases.
  */
 class AgentMessagesTest {
+    @Test
+    fun `a message interrupted by handover stays queued for the replacement`(@TempDir dir: Path) {
+        val (from, to) = tabs(dir, "sender" to Provider.Anthropic, "recipient" to Provider.Anthropic)
+        running(to)
+        val typed = typedHere()
+        val held = AgentMessages.Held("sender", from.shortId, dir.toFile(), "A scanner result", "[header]\n\nA scanner result", 1)
+        to.inbox.add(held)
+        onEdt { AgentMessages.deliver(to, held); AgentMessages.pump(System.currentTimeMillis() + 10_000) }
+        assertEquals(1, typed.size)
+        onEdt {
+            to.switchTo(Account("replacement", Provider.Anthropic, dir.resolve("replacement").toString()))
+            val newer = AgentMessages.Held("sender", from.shortId, dir.toFile(), "A newer result", "[header]\n\nA newer result", 2)
+            to.inFlightMessage = newer
+            typed.single().second(false)
+            assertTrue(to.inFlightMessage === newer, "a stale callback must not clear a newer delivery")
+        }
+        assertTrue(held in to.inbox, "a switch must not discard a message awaiting Enter")
+        assertFalse(to.run.session.submitting)
+    }
+
     private val opened = mutableListOf<AgentSessions>()
     private val typeInto = AgentMessages.typeInto
 

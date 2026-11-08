@@ -29,6 +29,26 @@ import javax.swing.SwingUtilities
  */
 @DisabledOnOs(OS.WINDOWS)
 class PtyTerminalSessionTest {
+    @Test
+    fun `provider switch waits for the CLI and its backend to stop`() {
+        val process = ptyProcess("sh", "-c", "sleep 40 & echo backend:$!; wait")
+        val session = TerminalSession.agent(listOf("unused-test-command"), emptyMap(), File("/"), "sample")
+        try {
+            val line = process.inputStream.bufferedReader().readLine()
+            val childPid = line.substringAfter("backend:").trim().toLong()
+            session.javaClass.getDeclaredField("process").apply { isAccessible = true }.set(session, process)
+            session.killAndWait()
+            assertFalse(process.isAlive)
+            val state = runCatching { java.nio.file.Files.readString(java.nio.file.Path.of("/proc/$childPid/stat"))
+                .substringAfterLast(") ").first() }.getOrNull()
+            assertTrue(state == null || state == 'Z', "a backend must not be executing after switch returns")
+        } finally {
+            session.dispose()
+            process.destroyForcibly()
+            process.waitFor(5, TimeUnit.SECONDS)
+        }
+    }
+
 
     private fun ptyProcess(vararg command: String): PtyProcess {
         val env = HashMap(System.getenv())

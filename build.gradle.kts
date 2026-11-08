@@ -19,6 +19,10 @@ plugins {
     kotlin("plugin.serialization") version "2.2.20"
 }
 
+// Explicit source verification for changes the operator intends to release later. Ordinary test
+// runs still rebuild and install the desktop image; no task exclusions are needed for this mode.
+val verificationOnly = providers.gradleProperty("verificationOnly").map { it.toBooleanStrict() }.orElse(false)
+
 kotlin {
     jvmToolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -119,7 +123,7 @@ tasks.test {
     // this step has bitten us — code under test would change but the menu icon still ran the
     // stale jar from build/compose/binaries/main/app/nop/. Up-to-date checks make this a ~1s
     // no-op when nothing has changed.
-    finalizedBy("installDesktopEntry")
+    if (!verificationOnly.get()) finalizedBy("installDesktopEntry")
     // Accounts.dataRoot follows XDG_DATA_HOME. Without this, a test that opens an agent tab writes
     // its session log and project memory into the user's real ~/.local/share/nop/agent.
     environment("XDG_DATA_HOME", layout.buildDirectory.dir("test-data-home").get().asFile.absolutePath)

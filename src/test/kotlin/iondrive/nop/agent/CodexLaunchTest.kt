@@ -12,6 +12,28 @@ import java.nio.file.attribute.PosixFilePermissions
 @EnabledOnOs(OS.LINUX, OS.MAC)
 class CodexLaunchTest {
     @Test
+    fun `remote resumes share sandbox config without permission flags`(@TempDir tmp: Path) {
+        val account = Account(name = "codex-alpha", provider = Provider.OpenAI, home = tmp.toString())
+        val command = CodexLaunch.wrap(Spawn.command(account, tmp.toFile(), resumeId = "thread-fern"), tmp)
+        try {
+            val separator = command.argv.indexOf("--nop-terminal--")
+            val server = command.argv.take(separator)
+            val terminal = command.argv.drop(separator + 1)
+            assertTrue("sandbox_mode=\"danger-full-access\"" in server)
+            assertTrue(Spawn.CODEX_APPROVAL_POLICY in server)
+            assertTrue("approvals_reviewer=\"user\"" in server)
+            assertFalse("--sandbox" in terminal)
+            assertTrue("sandbox_mode=\"danger-full-access\"" in terminal)
+            assertFalse(Spawn.CODEX_APPROVAL_POLICY in terminal)
+            assertEquals(listOf("resume", "thread-fern"), terminal.takeLast(2))
+            assertEquals("--remote", terminal.first())
+            assertTrue(command.isResume)
+        } finally {
+            CodexLaunch.cleanup(command)
+        }
+    }
+
+    @Test
     fun `a long runtime path gets a short owner-only control socket and can be cleaned up`(@TempDir tmp: Path) {
         val long = tmp.resolve("nested-runtime-".repeat(12))
         val command = CodexLaunch.wrap(AgentCommand(

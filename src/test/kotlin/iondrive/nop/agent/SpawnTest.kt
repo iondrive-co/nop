@@ -140,7 +140,7 @@ class SpawnTest {
         val command = Spawn.command(codex(), projectDir)
 
         assertFalse("--dangerously-bypass-approvals-and-sandbox" in command.argv)
-        assertEquals("danger-full-access", command.argv.after("--sandbox"))
+        assertTrue("sandbox_mode=\"danger-full-access\"" in command.argv.configs())
         val policy = command.argv.configs().single { it.startsWith("approval_policy=") }
         for (rejected in listOf("sandbox_approval", "rules", "request_permissions", "skill_approval")) {
             assertTrue("$rejected=false" in policy, "$rejected must be rejected, not asked: $policy")

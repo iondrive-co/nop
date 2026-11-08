@@ -20,7 +20,7 @@ class CodexControlSmokeTest {
         javaClass.getResourceAsStream("/agent/codex-terminal.sh")!!.use { Files.copy(it, root.resolve("codex-terminal.sh")) }
         val binary = Path.of(System.getenv("NOP_CODEX_SMOKE_BINARY"))
         val command = CodexLaunch.wrap(AgentCommand(listOf(
-            binary.toString(), "--sandbox", "danger-full-access", "--no-alt-screen", "-C", root.resolve("work").toString(),
+            binary.toString(), "-c", "sandbox_mode=\"danger-full-access\"", "--no-alt-screen", "-C", root.resolve("work").toString(),
             "-c", Spawn.CODEX_APPROVAL_POLICY, "-c", "approvals_reviewer=\"user\"",
             "-c", "notice.hide_rate_limit_model_nudge=true",
             "-c", "developer_instructions=\"Preserve fixture launch instructions.\"",
@@ -67,6 +67,7 @@ class CodexControlSmokeTest {
             assertTrue("Preserve fixture launch instructions." in operation("capture")["requests"].toString())
             val context = operation("capture")["contexts"]!!.jsonArray.last().jsonObject
             assertTrue(context["approval_policy"].obj()!!["granular"].obj()!!["mcp_elicitations"].bool())
+            assertEquals("danger-full-access", context["sandbox_policy"].obj()!!["type"].str())
             operation("picker")
             deliver("Automated message while picking a model.")
             screen = awaitScreen("Automated message while picking a model.")
@@ -94,6 +95,13 @@ class CodexControlSmokeTest {
                 it.request("thread/read", buildJsonObject { put("threadId", conversation); put("includeTurns", false) })
             }
             assertEquals("test-orchid", state["thread"].obj()!!["model"].str())
+            awaitScreen("Continue on the authorized model.")
+            operation("close_picker")
+            val turnsBeforeResume = operation("capture")["turns_started"]
+            val resumed = operation("resume")
+            assertTrue("Continue on the authorized model." in resumed["screen"].str()!!, resumed.toString())
+            assertEquals(turnsBeforeResume, resumed["turns_started"],
+                "Opening an existing conversation must not submit another prompt")
         } finally {
             runCatching { output.write("""{"op":"quit"}"""); output.newLine(); output.flush() }
             if (!fixture.waitFor(30, TimeUnit.SECONDS)) fixture.destroyForcibly()

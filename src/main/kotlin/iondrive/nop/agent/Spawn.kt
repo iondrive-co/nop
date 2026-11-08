@@ -153,8 +153,10 @@ object Spawn {
     ): AgentCommand {
         val argv = mutableListOf(
             CliTools.resolve(Provider.OpenAI),
-            "--sandbox",
-            "danger-full-access",
+            // A remote TUI rejects permission flags when resuming. CodexLaunch shares this
+            // config value with the backend and the TUI that chooses a fresh thread's sandbox.
+            "-c",
+            "sandbox_mode=\"danger-full-access\"",
             "-c",
             CODEX_APPROVAL_POLICY,
             // The questions that policy lets through go to the person at the keyboard, not to

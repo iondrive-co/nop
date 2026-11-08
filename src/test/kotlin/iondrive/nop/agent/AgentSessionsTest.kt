@@ -22,6 +22,31 @@ import java.time.Duration
  * constructing one is cheap and touches only its event log.
  */
 class AgentSessionsTest {
+    @Test
+    fun `handover kills the old CLI before attempting to write its summary`(@TempDir tmp: Path) {
+        org.junit.jupiter.api.Assumptions.assumeFalse(System.getProperty("os.name").startsWith("Windows"))
+        val session = sessions().open(tmp.toFile(), account("claude-larch"))
+        val old = session.run
+        val process = com.pty4j.PtyProcessBuilder(arrayOf("sh", "-c", "echo ready; exec sleep 40"))
+            .setEnvironment(System.getenv()).start()
+        try {
+            process.inputStream.bufferedReader().readLine()
+            old.session.javaClass.getDeclaredField("process").apply { isAccessible = true }.set(old.session, process)
+            val blocked = Files.writeString(tmp.resolve("blocked"), "not a directory")
+            val draft = session.handoverDraft(account("claude-fern")).copy(path = blocked.resolve("brief.md"))
+            org.junit.jupiter.api.Assertions.assertThrows(Exception::class.java) { session.handOver(draft.target, draft = draft) }
+            assertFalse(process.isAlive, "the outgoing CLI must be dead even when summary writing fails")
+            assertTrue(session.run === old, "a failed summary must not launch a replacement")
+            assertTrue(session.ended, "delivery must stay closed after a failed switch")
+            var accepted: Boolean? = null
+            session.submitAgentMessage("A late notification", { accepted = it })
+            assertEquals(false, accepted)
+        } finally {
+            process.destroyForcibly()
+            process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+    }
+
     private val opened = mutableListOf<AgentSessions>()
 
     @AfterEach
@@ -1300,6 +1325,19 @@ class AgentSessionsTest {
 
         assertNotEquals(draft.path, written.path)
         assertEquals("another handover", java.nio.file.Files.readString(draft.path))
+        assertTrue(written.path.toAbsolutePath().toString() in session.run.command.argv.last())
+    }
+
+    @Test
+    fun `a surviving history also reserves an edited handover path`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-larch"))
+        val draft = session.handoverDraft(account("claude-fern"))
+        val history = draft.path.resolveSibling(draft.path.fileName.toString().removeSuffix(".md") + "-history.md")
+        Files.createDirectories(history.parent)
+        Files.writeString(history, "Keep this earlier history")
+        val written = session.handOver(draft.target, draft = draft)
+        assertNotEquals(draft.path, written.path)
+        assertEquals("Keep this earlier history", Files.readString(history))
         assertTrue(written.path.toAbsolutePath().toString() in session.run.command.argv.last())
     }
 

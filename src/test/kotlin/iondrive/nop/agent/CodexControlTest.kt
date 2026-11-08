@@ -14,6 +14,32 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class CodexControlTest {
+    @Test
+    fun `a delivery whose run ended never writes a control request`() {
+        val output = java.io.ByteArrayOutputStream()
+        val rpc = CodexControl.Rpc(java.io.ByteArrayInputStream(byteArrayOf()), output)
+        assertThrows(IllegalStateException::class.java) {
+            CodexControl.send(rpc, "thread-larch", "A queued notification", "notice-fern", null,
+                stillCurrent = { false })
+        }
+        assertEquals(0, output.size())
+    }
+
+    @Test
+    fun `a run ending during backend inspection cannot start a turn`() {
+        var checks = 0
+        val calls = withServer("sample-model") { rpc ->
+            val failure = assertThrows(IllegalStateException::class.java) {
+                CodexControl.send(rpc, "thread-orchid", "A queued notification", "notice-fern", null,
+                    stillCurrent = { ++checks == 1 })
+            }
+            assertEquals("The receiving agent run has ended", failure.message)
+        }
+        assertEquals(2, checks, "cancellation must be checked again after inspecting the backend")
+        assertEquals(listOf("initialize", "initialized", "thread/read"), calls.map { it["method"].str() })
+        assertFalse(calls.any { it["method"].str() == "turn/start" || it["method"].str() == "thread/inject_items" })
+    }
+
     private fun withServer(model: String, action: (CodexControl.Rpc) -> Unit): List<JsonObject> {
         val input = PipedInputStream(1_048_576)
         val reply = DataOutputStream(PipedOutputStream(input))
@@ -38,7 +64,8 @@ class CodexControlTest {
                 reply.flush()
             }
             while (true) {
-                val first = incoming.readUnsignedByte()
+                val first = incoming.read()
+                if (first == -1) break
                 val second = incoming.readUnsignedByte()
                 assertTrue(second and 0x80 != 0, "client frames must be masked")
                 val length = when (val size = second and 127) {
@@ -62,14 +89,18 @@ class CodexControlTest {
                 // An approval with a colliding id must remain unanswered.
                 send("""{"id":$id,"method":"item/commandExecution/requestApproval","params":{}}""")
                 send("""{"id":$id,"result":$result}""")
-                if (request["method"].str() == "turn/start") break
             }
         }
         thread(isDaemon = true) { server.run() }
         try {
             val rpc = CodexControl.Rpc(input, output)
             rpc.initialize()
-            action(rpc)
+            try {
+                action(rpc)
+            } finally {
+                // Keep the peer alive for control frames until the client finishes its requests.
+                output.close()
+            }
             server.get(5, TimeUnit.SECONDS)
             return calls.toList()
         } finally {
