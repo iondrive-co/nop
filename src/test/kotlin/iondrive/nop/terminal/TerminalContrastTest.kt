@@ -6,9 +6,59 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assertions.assertSame
 import java.awt.Color
 import java.awt.Graphics2D
+import java.awt.Rectangle
 import java.awt.image.BufferedImage
 
 class TerminalContrastTest {
+
+    @Test
+    fun `resetting a translated graphics clip preserves the original repaint bounds`() {
+        val image = BufferedImage(40, 32, BufferedImage.TYPE_INT_RGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color.WHITE
+        graphics.fillRect(0, 0, image.width, image.height)
+        val bounds = Rectangle(8, 8, 16, 12)
+        graphics.clip = bounds
+        val wrapper = ContrastAdjustingGraphics2D(graphics,
+            NopTerminalSettings(Color.WHITE, Color.BLACK, Color.BLUE), paintClip = bounds)
+        try {
+            wrapper.translate(5, 3)
+            wrapper.setClip(null)
+            wrapper.color = Color.BLACK
+            wrapper.fillRect(-100, -100, 200, 200)
+            for (y in 0 until image.height) for (x in 0 until image.width) {
+                assertEquals(if (bounds.contains(x, y)) Color.BLACK.rgb else Color.WHITE.rgb, image.getRGB(x, y))
+            }
+        } finally { wrapper.dispose() }
+    }
+
+    @Test
+    fun `copied and cropped graphics cannot expand their repaint bounds`() {
+        for (cropped in listOf(false, true)) {
+            val image = BufferedImage(40, 32, BufferedImage.TYPE_INT_RGB)
+            val graphics = image.createGraphics()
+            graphics.color = Color.WHITE
+            graphics.fillRect(0, 0, image.width, image.height)
+            val bounds = Rectangle(8, 8, 16, 12)
+            graphics.clip = bounds
+            val wrapper = ContrastAdjustingGraphics2D(graphics,
+                NopTerminalSettings(Color.WHITE, Color.BLACK, Color.BLUE), paintClip = bounds)
+            try {
+                val child = (if (cropped) wrapper.create(4, 3, 10, 12) else wrapper.create()) as Graphics2D
+                try {
+                    child.scale(2.0, 2.0)
+                    child.setClip(null)
+                    child.setClip(-100, -100, 200, 200)
+                    child.color = Color.BLACK
+                    child.fillRect(-100, -100, 200, 200)
+                } finally { child.dispose() }
+                val expected = if (cropped) bounds.intersection(Rectangle(4, 3, 10, 12)) else bounds
+                for (y in 0 until image.height) for (x in 0 until image.width) {
+                    assertEquals(if (expected.contains(x, y)) Color.BLACK.rgb else Color.WHITE.rgb, image.getRGB(x, y))
+                }
+            } finally { wrapper.dispose() }
+        }
+    }
 
     @Test
     fun `relative luminance of white is 1 and black is 0`() {

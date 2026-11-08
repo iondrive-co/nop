@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test
 import java.awt.Color
 import java.awt.Component
 import java.awt.Container
+import java.awt.Rectangle
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelEvent
@@ -136,6 +137,50 @@ class TerminalScrollingTest {
             feed(widget, (1..5).joinToString("") { "New result $it\r\n" })
             paint(widget)
             assertEquals(top, widget.terminalTextBuffer.getLine(model.value).text)
+        } finally { widget.close() }
+    }
+
+    @Test
+    fun `a partial repaint after scrolling preserves pixels outside the requested region`() = onEdt {
+        val widget = terminal()
+        try {
+            feed(widget, (1..70).joinToString("") {
+                "\u001b[48;2;55;55;55m❯ Example question $it\u001b[0m\r\n" +
+                    "  Answer $it with unchanged text.\r\n"
+            } + "\u001b[?25l")
+            val panel = widget.terminalPanel
+            for (scale in listOf(1.0, 1.25, 2.0)) {
+                widget.scrollToBottom()
+                fun frame(): BufferedImage {
+                    val image = BufferedImage((panel.width * scale).toInt(), (panel.height * scale).toInt(), BufferedImage.TYPE_INT_RGB)
+                    image.createGraphics().let { graphics ->
+                        try {
+                            graphics.scale(scale, scale)
+                            panel.paintComponent(graphics)
+                        } finally { graphics.dispose() }
+                    }
+                    return image
+                }
+                val actual = frame()
+                val before = pixels(actual)
+                wheel(widget, -1)
+                val expected = frame()
+                val region = Rectangle(24, 40, 120, 80)
+                actual.createGraphics().let { graphics ->
+                    try {
+                        graphics.scale(scale, scale)
+                        graphics.clip = region
+                        panel.paintComponent(graphics)
+                        assertEquals(region, graphics.clipBounds, "the caller's repaint region is preserved")
+                    } finally { graphics.dispose() }
+                }
+                val painted = Rectangle((region.x * scale).toInt(), (region.y * scale).toInt(),
+                    (region.width * scale).toInt(), (region.height * scale).toInt())
+                for (y in 0 until actual.height) for (x in 0 until actual.width) {
+                    val wanted = if (painted.contains(x, y)) expected.getRGB(x, y) else before[y * actual.width + x]
+                    assertEquals(wanted, actual.getRGB(x, y), "pixel $x,$y at scale $scale")
+                }
+            }
         } finally { widget.close() }
     }
 

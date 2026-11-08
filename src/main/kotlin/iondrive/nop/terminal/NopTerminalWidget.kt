@@ -434,8 +434,15 @@ internal class NopTerminalPanel(
                 super.paintComponent(g)
                 return
             }
-            val wrapper = ContrastAdjustingGraphics2D(g2d, settings, fillColor = userMessages?.let { UserRowFill(it)::fill })
-            super.paintComponent(wrapper)
+            val clip = g2d.clip
+            val wrapper = ContrastAdjustingGraphics2D(g2d, settings,
+                fillColor = userMessages?.let { UserRowFill(it)::fill },
+                paintClip = clip ?: Rectangle(0, 0, width, height))
+            try {
+                super.paintComponent(wrapper)
+            } finally {
+                g2d.clip = clip
+            }
         } finally {
             buffer.unlock()
         }
@@ -602,7 +609,24 @@ internal open class ContrastAdjustingGraphics2D(
     internal var currentColor: Color = delegate.color ?: settings.fg,
     internal var adjustedColor: Color = TerminalContrast.cachedEnsureContrast(currentColor, currentBg),
     private val fillColor: ((y: Int, color: Color) -> Color)? = null,
+    paintClip: Shape? = null,
 ) : Graphics2D() {
+    // Character drawing may replace its own clip, but must stay inside Swing's repaint region.
+    private val paintBounds = paintClip?.let { delegate.transform.createTransformedShape(it) }
+    private var currentPaintClip = paintClip
+
+    init {
+        if (paintClip != null) delegate.clip(paintClip)
+    }
+
+    private inline fun changeTransform(action: () -> Unit) {
+        action()
+        val bounds = paintBounds ?: return
+        val transform = delegate.transform
+        currentPaintClip = if (transform.determinant == 0.0) Rectangle()
+            else transform.createInverse().createTransformedShape(bounds)
+    }
+
     private var activeBrushColor: Color? = null
 
     /** Whether [currentBg] is one [fillColor] swapped in. */
@@ -681,22 +705,25 @@ internal open class ContrastAdjustingGraphics2D(
     }
 
     override fun create(): Graphics =
-        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor, adjustedColor, fillColor)
+        ContrastAdjustingGraphics2D(delegate.create() as Graphics2D, settings, currentBg, currentColor, adjustedColor, fillColor, currentPaintClip)
 
-    override fun create(x: Int, y: Int, width: Int, height: Int): Graphics =
-        ContrastAdjustingGraphics2D(
-            delegate.create(x, y, width, height) as Graphics2D, settings, currentBg, currentColor, adjustedColor,
+    override fun create(x: Int, y: Int, width: Int, height: Int): Graphics {
+        val child = delegate.create(x, y, width, height) as Graphics2D
+        return ContrastAdjustingGraphics2D(
+            child, settings, currentBg, currentColor, adjustedColor,
             fillColor?.let { fill -> { top: Int, color: Color -> fill(top + y, color) } },
+            if (paintBounds != null) child.clip else null,
         )
+    }
 
-    override fun translate(x: Int, y: Int) = delegate.translate(x, y)
-    override fun translate(tx: Double, ty: Double) = delegate.translate(tx, ty)
-    override fun rotate(theta: Double) = delegate.rotate(theta)
-    override fun rotate(theta: Double, x: Double, y: Double) = delegate.rotate(theta, x, y)
-    override fun scale(sx: Double, sy: Double) = delegate.scale(sx, sy)
-    override fun shear(shx: Double, shy: Double) = delegate.shear(shx, shy)
-    override fun transform(Tx: AffineTransform) = delegate.transform(Tx)
-    override fun setTransform(Tx: AffineTransform) { delegate.transform = Tx }
+    override fun translate(x: Int, y: Int) = changeTransform { delegate.translate(x, y) }
+    override fun translate(tx: Double, ty: Double) = changeTransform { delegate.translate(tx, ty) }
+    override fun rotate(theta: Double) = changeTransform { delegate.rotate(theta) }
+    override fun rotate(theta: Double, x: Double, y: Double) = changeTransform { delegate.rotate(theta, x, y) }
+    override fun scale(sx: Double, sy: Double) = changeTransform { delegate.scale(sx, sy) }
+    override fun shear(shx: Double, shy: Double) = changeTransform { delegate.shear(shx, shy) }
+    override fun transform(Tx: AffineTransform) = changeTransform { delegate.transform(Tx) }
+    override fun setTransform(Tx: AffineTransform) = changeTransform { delegate.transform = Tx }
     override fun getTransform(): AffineTransform = delegate.transform
     override fun getPaint(): Paint = currentColor
     override fun setPaint(paint: Paint) {
@@ -720,9 +747,16 @@ internal open class ContrastAdjustingGraphics2D(
     override fun getFontMetrics(f: Font): FontMetrics = delegate.getFontMetrics(f)
     override fun getClipBounds(): Rectangle? = delegate.clipBounds
     override fun clipRect(x: Int, y: Int, width: Int, height: Int) = delegate.clipRect(x, y, width, height)
-    override fun setClip(x: Int, y: Int, width: Int, height: Int) = delegate.setClip(x, y, width, height)
+    override fun setClip(x: Int, y: Int, width: Int, height: Int) {
+        delegate.setClip(x, y, width, height)
+        currentPaintClip?.takeUnless { it.contains(x.toDouble(), y.toDouble(), width.toDouble(), height.toDouble()) }
+            ?.let(delegate::clip)
+    }
     override fun getClip(): Shape? = delegate.clip
-    override fun setClip(clip: Shape?) { delegate.clip = clip }
+    override fun setClip(clip: Shape?) {
+        delegate.clip = clip ?: currentPaintClip
+        if (clip != null) currentPaintClip?.takeUnless { it.contains(clip.bounds2D) }?.let(delegate::clip)
+    }
     override fun copyArea(x: Int, y: Int, width: Int, height: Int, dx: Int, dy: Int) =
         delegate.copyArea(x, y, width, height, dx, dy)
     override fun clearRect(x: Int, y: Int, width: Int, height: Int) {
