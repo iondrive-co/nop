@@ -306,17 +306,22 @@ if (excludedImageTasks.isNotEmpty()) {
     )
 }
 
-// Installs a .desktop entry into ~/.local/share/applications pointing at the createDistributable
-// output, so `nop` appears in the system app launcher without needing to install the .deb.
+// Installs a .desktop entry into ~/.local/share/applications. A release installation keeps its
+// launcher; otherwise the entry points at createDistributable's output.
 // Inputs/outputs are declared so `./gradlew --continuous installDesktopEntry` re-runs on edits.
 tasks.register("installDesktopEntry") {
     group = "distribution"
-    description = "Write ~/.local/share/applications/iondrive.nop.desktop pointing at the local distributable"
+    description = "Write the desktop launcher while preserving release installations"
     dependsOn("createDistributable")
     finalizedBy("installLocalCopy")
 
     val distDir = layout.buildDirectory.dir("compose/binaries/main/app/nop")
     val home = System.getProperty("user.home")
+    val installed = file("$home/.local/opt/nop")
+    val launcher = providers.provider {
+        if (installed.isDirectory && !installed.resolve(".built-from-checkout").isFile) installed.resolve("bin/nop")
+        else distDir.get().asFile.resolve("bin/nop")
+    }
     val desktopFile = file("$home/.local/share/applications/iondrive.nop.desktop")
     // Install at multiple sizes under the hicolor theme so GNOME / KDE / XFCE icon caches can
     // pick the right one. Most desktops look up Icon=iondrive.nop here first; an absolute path
@@ -336,6 +341,7 @@ tasks.register("installDesktopEntry") {
     val isLinkedWorktree = checkout.resolve(".git").isFile
 
     inputs.dir(distDir)
+    inputs.property("launcher", launcher.map { it.absolutePath })
     outputs.files(desktopFile, fallbackIcon, *themedIcons.map { it.second }.toTypedArray())
 
     doLast {
@@ -380,7 +386,7 @@ tasks.register("installDesktopEntry") {
         ImageIO.write(renderTile(128), "PNG", fallbackIcon)
 
         desktopFile.parentFile.mkdirs()
-        val bin = distDir.get().asFile.resolve("bin/nop")
+        val bin = launcher.get()
         // Icon= uses the icon-theme name (iondrive.nop); launchers resolve it against the
         // hicolor PNGs above. StartupWMClass must match the actual WM_CLASS the running window
         // advertises — Compose Desktop / Skiko derive that from the JVM main class name and we
