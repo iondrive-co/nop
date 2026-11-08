@@ -660,9 +660,9 @@ class TerminalSession private constructor(
      *
      * In this order, and each step is load-bearing. The connector is told first, because stopping the
      * reads ends JediTerm's session, and JediTerm closes a connector whose session ends — which would
-     * SIGTERM the program and close its PTY. Then the reads stop, and only after that is the screen
-     * taken, so every byte this nop read is in the replay and every byte it did not is still waiting
-     * in the PTY for the next one. From here on [dispose] leaves the program alone.
+     * SIGTERM the program and close its PTY. Then reads stop and the emulator finishes drawing them,
+     * so the saved history and screen include everything read. Unread output waits in the PTY for
+     * the next nop. From here on [dispose] leaves the program alone.
      */
     fun handOff(): PtyHandoff? {
         val proc = process ?: return null
@@ -672,8 +672,14 @@ class TerminalSession private constructor(
         connector?.handedOver = true
         handedOver = true
         rec.freeze { wakeReader(proc) }
+        val w = widget
+        val drained = (w?.terminalStarter as? TerminalResize)?.awaitStopped() == true
+        val raw = rec.replay()
+        val replay = if (drained) runCatching {
+            TerminalSnapshot.replay(w!!.terminal as com.jediterm.terminal.model.JediTerminal, rec.modePrefix(), raw)
+        }.onFailure { Log.warn("could not snapshot the terminal; preserving its recorded output: $it") }.getOrNull() ?: raw else raw
         val (cols, rows) = Posix.windowSize(fd) ?: (INITIAL_COLUMNS to INITIAL_ROWS)
-        return PtyHandoff(fd = fd, pid = proc.pid(), columns = cols, rows = rows, replay = rec.replay(), process = proc)
+        return PtyHandoff(fd = fd, pid = proc.pid(), columns = cols, rows = rows, replay = replay, process = proc)
     }
 
     /** Records input from both JediTerm and [sendText], with submission only for an Enter key. */

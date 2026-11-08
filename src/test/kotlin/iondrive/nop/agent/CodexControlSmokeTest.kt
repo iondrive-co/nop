@@ -23,6 +23,7 @@ class CodexControlSmokeTest {
             binary.toString(), "-c", "sandbox_mode=\"danger-full-access\"", "--no-alt-screen", "-C", root.resolve("work").toString(),
             "-c", Spawn.CODEX_APPROVAL_POLICY, "-c", "approvals_reviewer=\"user\"",
             "-c", "notice.hide_rate_limit_model_nudge=true",
+            "-c", "tui.terminal_resize_reflow_max_rows=${iondrive.nop.terminal.NopTerminalSettings.SCROLLBACK_LINES}",
             "-c", "developer_instructions=\"Preserve fixture launch instructions.\"",
         ), mapOf("HOME" to root.resolve("home").toString()), null))
         val launch = root.resolve("launch.json")

@@ -524,7 +524,7 @@ class AgentSession(
             noteChange(was, next)
         }
         if (next == Activity.Idle && !legacyCodexUpgradePending && account.provider == Provider.OpenAI &&
-            !usesControlDelivery && run.session.pid() != null && !System.getProperty("os.name").startsWith("Windows", true)
+            CodexLaunch.needsTerminalUpgrade(run.command) && run.session.pid() != null && !System.getProperty("os.name").startsWith("Windows", true)
         ) {
             val current = run
             legacyCodexUpgradePending = true
@@ -532,7 +532,7 @@ class AgentSession(
                 if (run === current && activity == Activity.Idle && resumeWait == null && current.quota == null &&
                     !current.session.mayHoldDraft() && !current.session.modelPickerOpen() && !current.session.submitting
                 ) {
-                    Log.info("moving $shortId's idle Codex terminal onto its private control socket")
+                    Log.info("refreshing $shortId's idle Codex terminal with its control socket and scrollback settings")
                     reopen()
                 } else legacyCodexUpgradePending = false
             }.apply { isRepeats = false; start() }

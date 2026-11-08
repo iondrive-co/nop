@@ -24,10 +24,19 @@ class CodexLaunchTest {
             assertTrue("approvals_reviewer=\"user\"" in server)
             assertFalse("--sandbox" in terminal)
             assertTrue("sandbox_mode=\"danger-full-access\"" in terminal)
+            assertTrue("tui.terminal_resize_reflow_max_rows=${iondrive.nop.terminal.NopTerminalSettings.SCROLLBACK_LINES}" in terminal)
+            assertTrue("notice.hide_rate_limit_model_nudge=true" in terminal)
             assertFalse(Spawn.CODEX_APPROVAL_POLICY in terminal)
             assertEquals(listOf("resume", "thread-fern"), terminal.takeLast(2))
             assertEquals("--remote", terminal.first())
             assertTrue(command.isResume)
+            assertFalse(CodexLaunch.needsTerminalUpgrade(command))
+            val withoutDisplaySetting = command.argv.toMutableList()
+            val limit = withoutDisplaySetting.indexOfLast { it.startsWith("tui.terminal_resize_reflow_max_rows=") }
+            withoutDisplaySetting.removeAt(limit)
+            withoutDisplaySetting.removeAt(limit - 1)
+            assertTrue(CodexLaunch.needsTerminalUpgrade(command.copy(argv = withoutDisplaySetting)),
+                "a backend override cannot configure an adopted terminal's display")
         } finally {
             CodexLaunch.cleanup(command)
         }

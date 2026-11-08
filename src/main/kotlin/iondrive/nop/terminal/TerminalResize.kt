@@ -9,6 +9,7 @@ import com.jediterm.terminal.TtyBasedArrayDataStream
 import com.jediterm.terminal.TtyConnector
 import com.jediterm.terminal.model.JediTerminal
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /** Apply a drag's final size to the buffer and PTY together, limiting full transcript redraws. */
@@ -27,6 +28,17 @@ internal class TerminalResize(
     private var stopped = false
     private var applied: TermSize? = null
     private var revision = 0L
+    private val emulatorStopped = CountDownLatch(1)
+
+    override fun start() {
+        try { super.start() } finally { emulatorStopped.countDown() }
+    }
+
+    /** Freeze closes the reader; wait until its decoded output has reached the terminal model. */
+    fun awaitStopped(): Boolean {
+        cancelResize()
+        return emulatorStopped.await(2, TimeUnit.SECONDS)
+    }
 
     override fun postResize(size: TermSize, origin: RequestOrigin) {
         synchronized(resizeLock) {

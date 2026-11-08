@@ -30,6 +30,41 @@ import javax.swing.SwingUtilities
 @DisabledOnOs(OS.WINDOWS)
 class PtyTerminalSessionTest {
     @Test
+    fun `handover preserves scrollback after more than a megabyte of cursor redraws`() {
+        assumeFalse(GraphicsEnvironment.isHeadless(), "needs a display to build the widget")
+        val script = "i=1; while [ \$i -le 180 ]; do printf 'result-%s\\n' \"\$i\"; i=\$((i+1)); done; " +
+            "i=0; while [ \$i -lt 35000 ]; do printf '\\033[1;1H\\033[38;2;17;43;91mstatus\\033[0m'; i=\$((i+1)); done; " +
+            "printf '\\033[5;1HREADY'; exec sleep 30"
+        val session = TerminalSession.agent(listOf("sh", "-c", script), emptyMap(), File("/"), "sample")
+        var widget: JediTermWidget? = null
+        var restored: NopTerminalWidget? = null
+        try {
+            SwingUtilities.invokeAndWait { widget = session.getOrCreateWidget() }
+            awaitTrue("the fixture has finished redrawing") {
+                var ready = false
+                SwingUtilities.invokeAndWait { ready = "READY" in widget!!.terminalTextBuffer.getScreenLines() }
+                ready
+            }
+            SwingUtilities.invokeAndWait {
+                val old = widget!!.terminalTextBuffer
+                val handoff = session.handOff()!!
+                assertTrue(handoff.process!!.isAlive, "handing over must leave the program running")
+                val next = NopTerminalWidget(handoff.columns, handoff.rows, NopTerminalSettings(java.awt.Color.WHITE, java.awt.Color.BLACK, java.awt.Color.BLUE))
+                restored = next
+                val emulator = com.jediterm.terminal.emulator.JediEmulator(
+                    com.jediterm.terminal.ArrayTerminalDataStream(String(handoff.replay, Charsets.UTF_8).toCharArray()), next.terminal)
+                while (emulator.hasNext()) emulator.next()
+                assertEquals(old.historyLinesCount, next.terminalTextBuffer.historyLinesCount)
+                assertEquals("result-1", next.terminalTextBuffer.getLine(-old.historyLinesCount).text)
+                assertEquals(old.getScreenLines(), next.terminalTextBuffer.getScreenLines())
+            }
+        } finally {
+            session.killAndWait()
+            SwingUtilities.invokeAndWait { session.dispose(); restored?.close() }
+        }
+    }
+
+    @Test
     fun `provider switch waits for the CLI and its backend to stop`() {
         val process = ptyProcess("sh", "-c", "sleep 40 & echo backend:$!; wait")
         val session = TerminalSession.agent(listOf("unused-test-command"), emptyMap(), File("/"), "sample")

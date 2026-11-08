@@ -12,6 +12,14 @@ internal object CodexLaunch {
     const val SOCKET_ENV = "NOP_CODEX_CONTROL_SOCKET"
     private const val DIRECTORY_ENV = "NOP_CODEX_CONTROL_DIRECTORY"
 
+    /** Adopted clients keep their original argv, so they also keep any missing display settings. */
+    fun needsTerminalUpgrade(command: AgentCommand): Boolean {
+        if (command.env[SOCKET_ENV] == null) return true
+        val separator = command.argv.indexOf("--nop-terminal--")
+        val limit = "tui.terminal_resize_reflow_max_rows=${iondrive.nop.terminal.NopTerminalSettings.SCROLLBACK_LINES}"
+        return separator < 0 || limit !in command.argv.drop(separator + 1)
+    }
+
     fun wrap(command: AgentCommand, socketDirectory: Path? = AgentSocket.socketDir()): AgentCommand {
         if (System.getProperty("os.name").startsWith("Windows", true)) return command
         val dir = socketDirectory ?: return command
@@ -41,9 +49,12 @@ internal object CodexLaunch {
             if (arg == "-c") {
                 val setting = command.argv[index++]
                 server += listOf(arg, setting)
-                // The TUI chooses a fresh thread's sandbox from its own config. Use a config
-                // value here: a permission flag is rejected when the remote TUI resumes.
-                if (setting.startsWith("sandbox_mode=")) terminal += listOf(arg, setting)
+                // The client reads its own display settings and chooses a fresh thread's sandbox.
+                // Config values also work on resume, where permission flags are rejected.
+                val key = setting.substringBefore('=')
+                if (key == "sandbox_mode" || key.startsWith("tui.") || key.startsWith("notice.")) {
+                    terminal += listOf(arg, setting)
+                }
             } else terminal += arg
         }
         return command.copy(

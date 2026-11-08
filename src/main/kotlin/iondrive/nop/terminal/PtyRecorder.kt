@@ -94,6 +94,9 @@ class PtyRecorder(private val capacity: Int = DEFAULT_CAPACITY) {
         modes.prefix() + body.copyOfRange(from, body.size)
     }
 
+    /** Modes to apply after restoring a rendered screen and its history. */
+    fun modePrefix(): ByteArray = synchronized(lock) { modes.prefix() }
+
     private fun record(b: ByteArray, off: Int, n: Int) {
         modes.feed(b, off, n)
         // Only the tail of an oversized write can fit, and only the tail is wanted. What is dropped
