@@ -36,7 +36,8 @@ import java.util.concurrent.Executors
  * The hook goes into each account's home, not onto nop's command line, because nop's tabs are not
  * the only runs those homes have: a project's own tooling starts headless `claude -p` and `codex
  * exec` workers on them, and those leak the same way.
- *  - Claude Code: `PreToolUse` in the home's `settings.json`.
+ *  - Claude Code: `PreToolUse` in the home's `settings.json`, beside nop's other Claude hook,
+ *    [QuestionGuard], which is installed with it so that one edit of the file writes both.
  *  - Codex: `PreToolUse` in `.codex/hooks.json`, and its trust in `.codex/config.toml` — Codex
  *    skips any hook not trusted by hash, so nop records the hash Codex would ([codexTrustHash]).
  *  - `agy`: a named hook in `.gemini/config/hooks.json`, its global customisation root. agy has no
@@ -103,19 +104,28 @@ internal object AddressGuard {
             writeIfChanged(addressesFile(root), addressesJson(addresses(config.accounts, userHome)), "rw-------")
             command(it, scriptPath(root))
         }
+        val question = python?.let {
+            QuestionGuard.writeScript(root, it)
+            command(it, QuestionGuard.scriptPath(root))
+        }
         if (command == null) Log.warn("address guard: no python3, so no account gets the hook")
         for (account in accounts) {
-            runCatching { hook(account, command) }
+            runCatching { hook(account, command, question) }
                 .onFailure { Log.warn("address guard: could not hook ${account.name}: $it") }
         }
     }
 
-    /** Puts [command] in front of [account]'s tool calls, or takes nop's hook out when it is null. */
-    internal fun hook(account: Account, command: String?) {
+    /**
+     * Puts [command] in front of [account]'s tool calls, or takes nop's hook out when it is null; and
+     * for Claude, [question] (the [QuestionGuard]) in front of its questions in the same way.
+     */
+    internal fun hook(account: Account, command: String?, question: String? = null) {
         val home = account.homePath
         if (!Files.isDirectory(home)) return
         when (account.provider) {
-            Provider.Anthropic -> editJson(home.resolve("settings.json")) { withClaudeHook(it, command) }
+            Provider.Anthropic -> editJson(home.resolve("settings.json")) {
+                QuestionGuard.withClaudeHook(withClaudeHook(it, command), question)
+            }
             Provider.OpenAI -> hookCodex(home.resolve(".codex"), command)
             Provider.Antigravity -> editJson(home.resolve(".gemini").resolve("config").resolve("hooks.json")) {
                 withAgyHook(it, command)
@@ -132,33 +142,40 @@ internal object AddressGuard {
         put("timeout", TIMEOUT_S)
     }
 
-    private fun isOurs(handler: JsonElement): Boolean = handler.obj()?.get("command").str()?.contains(SCRIPT_NAME) == true
+    private fun isOurs(handler: JsonElement, script: String = SCRIPT_NAME): Boolean =
+        handler.obj()?.get("command").str()?.contains(script) == true
 
     /**
-     * [groups] (a `PreToolUse` list of matcher groups) without any handler of nop's, and with nop's
-     * one group at the end when [handler] is not null. A group left with no handler is dropped.
+     * [groups] (a `PreToolUse` list of matcher groups) without any handler that runs [script], and
+     * with one group for it at the end, on [matcher], when [handler] is not null. A group left with
+     * no handler is dropped.
      */
-    private fun withOurGroup(groups: JsonArray?, handler: JsonObject?): JsonArray = buildJsonArray {
+    private fun withOurGroup(groups: JsonArray?, handler: JsonObject?, script: String, matcher: String): JsonArray = buildJsonArray {
         for (group in groups.orEmpty()) {
             val hooks = group.obj()?.get("hooks").arr()
-            if (hooks == null || hooks.none(::isOurs)) {
+            if (hooks == null || hooks.none { isOurs(it, script) }) {
                 add(group)
                 continue
             }
-            val kept = hooks.filterNot(::isOurs)
+            val kept = hooks.filterNot { isOurs(it, script) }
             if (kept.isNotEmpty()) add(JsonObject(group.obj()!! + ("hooks" to JsonArray(kept))))
         }
         if (handler != null) {
             add(buildJsonObject {
-                put("matcher", MATCHER)
+                put("matcher", matcher)
                 put("hooks", buildJsonArray { add(handler) })
             })
         }
     }
 
-    /** [events] (an object of hook lists by event name) with nop's PreToolUse group in place. */
-    private fun withPreToolUse(events: JsonObject?, handler: JsonObject?): JsonObject? {
-        val groups = withOurGroup(events?.get(PRE_TOOL_USE).arr(), handler)
+    /** [events] (an object of hook lists by event name) with the PreToolUse group for [script] in place. */
+    internal fun withPreToolUse(
+        events: JsonObject?,
+        handler: JsonObject?,
+        script: String = SCRIPT_NAME,
+        matcher: String = MATCHER,
+    ): JsonObject? {
+        val groups = withOurGroup(events?.get(PRE_TOOL_USE).arr(), handler, script, matcher)
         val rest = events.orEmpty() - PRE_TOOL_USE
         return when {
             groups.isNotEmpty() -> JsonObject(events.orEmpty().toMutableMap().apply { put(PRE_TOOL_USE, groups) })
@@ -351,7 +368,7 @@ internal object AddressGuard {
         }
     }
 
-    private fun writeIfChanged(file: Path, text: String, mode: String) {
+    internal fun writeIfChanged(file: Path, text: String, mode: String) {
         if (Files.isRegularFile(file) && runCatching { Files.readString(file) }.getOrNull() == text) return
         OwnerOnly.directory(file.parent)
         val tmp = Files.createTempFile(file.parent, ".${file.fileName}", ".tmp", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(mode)))

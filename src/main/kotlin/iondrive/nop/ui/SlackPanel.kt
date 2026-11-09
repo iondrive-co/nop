@@ -78,6 +78,7 @@ fun SlackPanel(
                 OutlinedButton(onClick = { if (browser == null) session.start() else browser.reload() }) { Text("Retry") }
             }
         }
+        SlackDownloadBar(state.downloads, onDismiss = session::dismissDownloads)
         if (browser != null) {
             val cardId = "slack-${System.identityHashCode(browser)}"
             SwingPanel(

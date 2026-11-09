@@ -60,6 +60,12 @@ public class SlackSidebarSmoke {
                 if (exchange.getRequestURI().getPath().equals("/result")) {
                     results.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
                     exchange.sendResponseHeaders(204, -1);
+                } else if (exchange.getRequestURI().getPath().startsWith(SlackDownloadSmoke.FILES)) {
+                    var body = SlackDownloadSmoke.BODY.getBytes(StandardCharsets.UTF_8);
+                    exchange.getResponseHeaders().set("Content-Type", "text/plain");
+                    exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"report.txt\"");
+                    exchange.sendResponseHeaders(200, body.length);
+                    exchange.getResponseBody().write(body);
                 } else {
                     exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
                     exchange.sendResponseHeaders(200, page.length);
@@ -203,6 +209,7 @@ public class SlackSidebarSmoke {
                 System.out.println("SLACK_TRANSFER " + cycle + " draft and native focus preserved");
             }
             SlackSpellingSmoke.verify(browser, devtools, client);
+            SlackDownloadSmoke.verify(browser, devtools, client, scratch, "http://127.0.0.1:" + server.getAddress().getPort());
         } finally {
             if (devtools != null) devtools.close();
             if (client != null) client.dispose();

@@ -26,12 +26,8 @@ import org.cef.CefClient
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.browser.CefRequestContext
-import org.cef.callback.CefBeforeDownloadCallback
-import org.cef.callback.CefDownloadItem
-import org.cef.callback.CefDownloadItemCallback
 import org.cef.callback.CefSchemeRegistrar
 import org.cef.handler.CefDisplayHandlerAdapter
-import org.cef.handler.CefDownloadHandler
 import org.cef.handler.CefLifeSpanHandlerAdapter
 import org.cef.handler.CefLoadHandler.ErrorCode
 import org.cef.handler.CefLoadHandlerAdapter
@@ -337,6 +333,7 @@ data class SlackBrowserState(
     val canGoForward: Boolean = false,
     val error: String? = null,
     val workspace: SlackWorkspace? = null,
+    val downloads: List<SlackDownload> = emptyList(),
 )
 
 class SlackBrowser internal constructor(private val project: Path, private val initialUrl: String) {
@@ -348,6 +345,9 @@ class SlackBrowser internal constructor(private val project: Path, private val i
     @Volatile private var starting = false
     @Volatile private var appearance = SlackAppearance()
     private val json = Json { ignoreUnknownKeys = true }
+    private val downloads = SlackDownloads({ downloadDirectory() }) { download ->
+        mutableState.update { it.copy(downloads = it.downloads.including(download)) }
+    }
 
     init { start() }
 
@@ -420,6 +420,11 @@ class SlackBrowser internal constructor(private val project: Path, private val i
         mutableState.value.browser?.loadURL(url)
     }
 
+    /** Clears the downloads that have finished from the panel's bar. */
+    fun dismissDownloads() {
+        mutableState.update { state -> state.copy(downloads = state.downloads.filter { it.status == SlackDownload.Status.Running }) }
+    }
+
     fun setAppearance(next: SlackAppearance) {
         if (appearance == next) return
         appearance = next
@@ -459,6 +464,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
         client.addLifeSpanHandler(object : CefLifeSpanHandlerAdapter() {
             override fun onBeforePopup(browser: CefBrowser, frame: CefFrame, targetUrl: String, targetFrameName: String): Boolean {
                 if (handleDesktopLink(targetUrl)) return true
+                if (saveFileLink(browser, targetUrl)) return true
                 if (SlackNavigation.externalLink(browser.url, targetUrl)) {
                     openUrlInBrowser(targetUrl)
                     return true
@@ -472,6 +478,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
                                         userGesture: Boolean, isRedirect: Boolean): Boolean {
                 val url = request.url
                 if (frame.isMain && handleDesktopLink(url)) return true
+                if (frame.isMain && userGesture && !isRedirect && saveFileLink(browser, url)) return true
                 if (frame.isMain && userGesture && !isRedirect && SlackNavigation.externalLink(browser.url, url)) {
                     openUrlInBrowser(url)
                     return true
@@ -481,6 +488,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
             }
             override fun onOpenURLFromTab(browser: CefBrowser, frame: CefFrame, targetUrl: String, userGesture: Boolean): Boolean {
                 if (handleDesktopLink(targetUrl)) return true
+                if (saveFileLink(browser, targetUrl)) return true
                 if (SlackNavigation.externalLink(browser.url, targetUrl)) {
                     openUrlInBrowser(targetUrl)
                     return true
@@ -488,14 +496,18 @@ class SlackBrowser internal constructor(private val project: Path, private val i
                 return false
             }
         })
-        client.addDownloadHandler(object : CefDownloadHandler {
-            override fun onBeforeDownload(browser: CefBrowser, item: CefDownloadItem, suggestedName: String,
-                                          callback: CefBeforeDownloadCallback): Boolean {
-                callback.Continue("", true)
-                return true
-            }
-            override fun onDownloadUpdated(browser: CefBrowser, item: CefDownloadItem, callback: CefDownloadItemCallback) {}
-        })
+        client.addDownloadHandler(downloads)
+    }
+
+    /**
+     * A link to one of Slack's files is saved from this page. Opened as a popup it would get a native
+     * window that no handler here can see, so it would never download, and as a navigation an inline
+     * file would replace the Slack client. The page's cookies sign the request either way.
+     */
+    private fun saveFileLink(browser: CefBrowser, url: String): Boolean {
+        if (!SlackNavigation.fileLink(url)) return false
+        SwingUtilities.invokeLater { if (!closed) browser.startDownload(url) }
+        return true
     }
 
     private fun handleDesktopLink(url: String): Boolean {
@@ -525,6 +537,12 @@ internal object SlackNavigation {
 
     fun isWebUrl(url: String): Boolean = parse(url)?.let {
         it.scheme in setOf("http", "https") && !it.host.isNullOrBlank() && it.userInfo == null
+    } == true
+
+    /** Slack's private file links (`url_private` and `url_private_download`), which only Slack's cookies open. */
+    fun fileLink(url: String): Boolean = parse(url)?.let {
+        it.scheme == "https" && it.host == "files.slack.com" && it.userInfo == null && it.port == -1 &&
+            it.path.orEmpty().startsWith("/files-pri/")
     } == true
 
     fun externalLink(current: String, target: String): Boolean {
