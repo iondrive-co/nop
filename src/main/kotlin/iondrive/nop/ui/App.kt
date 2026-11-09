@@ -2,6 +2,7 @@ package iondrive.nop.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -502,6 +503,11 @@ fun App(
     }
 
     val rootPath = repo?.rootDir ?: projectPath
+    var pinnedFiles by remember(rootPath) { mutableStateOf(Settings.loadPinnedFiles(rootPath)) }
+    fun updatePins(files: List<Path>) {
+        pinnedFiles = files
+        Settings.savePinnedFiles(rootPath, files)
+    }
     // Jump-to-source index: load the previous run's cache for instant clicks while we rebuild,
     // then swap in the fresh version (and persist it) once the walk finishes. The index lives
     // under ~/.config/nop/projects/<slug>/ so the project tree stays free of derived files.
@@ -1756,74 +1762,89 @@ fun App(
                 ratio = hRatio,
                 onRatioChange = { hRatio = it },
                 first = {
-                    ProjectTreePanel(
-                        projectPath = rootPath,
-                        viewState = projectTreeState,
-                        filesRestored = tabsRestored,
-                        status = status,
-                        refreshKey = treeRefreshKey,
-                        openFiles = openFiles,
-                        activeFile = revealFile,
-                        dirtyFiles = dirtyFiles,
-                        revealFile = revealFile,
-                        revealRequest = treeReveal,
-                        onFileClick = { tabsState.open(Tab.FileView(it)) },
-                        onCloseFile = ::closeFile,
-                        onCloseOtherFiles = ::closeOtherFiles,
-                        onCloseAllFiles = ::closeAllFiles,
-                        onDeleteRequest = { pendingDelete = it },
-                        onNewFile = { pendingEntry = TreeEntryDialog.NewFile(FileOperations.parentDirFor(it)) },
-                        onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },
-                        onNewPackage = { pendingEntry = TreeEntryDialog.NewPackage(FileOperations.parentDirFor(it)) },
-                        onCopyFile = { pendingEntry = TreeEntryDialog.CopyFile(it) },
-                        onRenameRequest = { pendingEntry = TreeEntryDialog.Rename(it) },
-                        onClipboardCopy = FileClipboard::copy,
-                        onPasteRequest = ::performPaste,
-                        canPaste = FileClipboard::hasFiles,
-                        onMoveRequest = ::performMove,
-                        onHistoryRequest = { file ->
-                            if (repo != null) {
-                                historySessions.open(file, repo.rootDir.toFile())
-                                showTool(ToolTab.History)
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val pinsHeight = ((29 + pinnedFiles.size * 24).dp).coerceAtMost(maxHeight * 0.4f)
+                        Column(Modifier.fillMaxSize()) {
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                ProjectTreePanel(
+                                    projectPath = rootPath,
+                                    viewState = projectTreeState,
+                                    filesRestored = tabsRestored,
+                                    status = status,
+                                    refreshKey = treeRefreshKey,
+                                    openFiles = openFiles,
+                                    activeFile = revealFile,
+                                    dirtyFiles = dirtyFiles,
+                                    revealFile = revealFile,
+                                    revealRequest = treeReveal,
+                                    onFileClick = { tabsState.open(Tab.FileView(it)) },
+                                    onCloseFile = ::closeFile,
+                                    onCloseOtherFiles = ::closeOtherFiles,
+                                    onCloseAllFiles = ::closeAllFiles,
+                                    onDeleteRequest = { pendingDelete = it },
+                                    onNewFile = { pendingEntry = TreeEntryDialog.NewFile(FileOperations.parentDirFor(it)) },
+                                    onNewDirectory = { pendingEntry = TreeEntryDialog.NewDirectory(FileOperations.parentDirFor(it)) },
+                                    onNewPackage = { pendingEntry = TreeEntryDialog.NewPackage(FileOperations.parentDirFor(it)) },
+                                    onCopyFile = { pendingEntry = TreeEntryDialog.CopyFile(it) },
+                                    onRenameRequest = { pendingEntry = TreeEntryDialog.Rename(it) },
+                                    onClipboardCopy = FileClipboard::copy,
+                                    onPasteRequest = ::performPaste,
+                                    canPaste = FileClipboard::hasFiles,
+                                    onMoveRequest = ::performMove,
+                                    onHistoryRequest = { file ->
+                                        if (repo != null) {
+                                            historySessions.open(file, repo.rootDir.toFile())
+                                            showTool(ToolTab.History)
+                                        }
+                                    },
+                                    onCompareWithRevision = { pendingCompare = it },
+                                    gitEnabled = repo != null,
+                                    blameEnabled = blameEnabled,
+                                    onToggleBlame = { blameEnabled = !blameEnabled },
+                                    wrapLines = wrapLines,
+                                    onToggleWrap = {
+                                        wrapLines = !wrapLines
+                                        Settings.saveWrapLines(wrapLines)
+                                    },
+                                    projectLabel = {
+                                        ProjectMenuLabel(
+                                            recentProjects = recentProjects,
+                                            openProjects = openProjects,
+                                            onOpenProject = onOpenProject,
+                                            onOpenOther = onOpenOtherProject,
+                                        )
+                                    },
+                                    headerExtras = {
+                                        LauncherButton(
+                                            launchers = launchers,
+                                            readOnlyNames = readOnlyNames,
+                                            onRun = { launcher ->
+                                                runSessions.open(TerminalSession.forLauncher(launcher, rootPath.toFile()))
+                                                showSession(ToolTab.Run)
+                                            },
+                                            onNewTerminal = {
+                                                // Same thing the strip's "+" does: shells live in the terminal
+                                                // tabs, so the two ways of asking for one land in one place.
+                                                terminals.openShell(rootPath.toFile())
+                                                showSession(ToolTab.Terminal)
+                                            },
+                                            onAgentAccounts = { showAccounts = true },
+                                            onAdd = { persistLaunchers(stored + it) },
+                                            onDelete = { persistLaunchers(stored - it) },
+                                        )
+                                    },
+                                )
                             }
-                        },
-                        onCompareWithRevision = { pendingCompare = it },
-                        gitEnabled = repo != null,
-                        blameEnabled = blameEnabled,
-                        onToggleBlame = { blameEnabled = !blameEnabled },
-                        wrapLines = wrapLines,
-                        onToggleWrap = {
-                            wrapLines = !wrapLines
-                            Settings.saveWrapLines(wrapLines)
-                        },
-                        projectLabel = {
-                            ProjectMenuLabel(
-                                recentProjects = recentProjects,
-                                openProjects = openProjects,
-                                onOpenProject = onOpenProject,
-                                onOpenOther = onOpenOtherProject,
+                            PinnedFilesPanel(
+                                projectPath = rootPath,
+                                files = pinnedFiles,
+                                activeFile = revealFile,
+                                onOpen = { file -> if (file.isFile) tabsState.open(Tab.FileView(file)) },
+                                onRemove = { updatePins(pinnedFiles - listOf(it)) },
+                                modifier = Modifier.fillMaxWidth().height(pinsHeight),
                             )
-                        },
-                        headerExtras = {
-                            LauncherButton(
-                                launchers = launchers,
-                                readOnlyNames = readOnlyNames,
-                                onRun = { launcher ->
-                                    runSessions.open(TerminalSession.forLauncher(launcher, rootPath.toFile()))
-                                    showSession(ToolTab.Run)
-                                },
-                                onNewTerminal = {
-                                    // Same thing the strip's "+" does: shells live in the terminal
-                                    // tabs, so the two ways of asking for one land in one place.
-                                    terminals.openShell(rootPath.toFile())
-                                    showSession(ToolTab.Terminal)
-                                },
-                                onAgentAccounts = { showAccounts = true },
-                                onAdd = { persistLaunchers(stored + it) },
-                                onDelete = { persistLaunchers(stored - it) },
-                            )
-                        },
-                    )
+                        }
+                    }
                 },
                 second = {
                     // Viewer in the middle, tool panel (Commit/Search/Preview/Run/…) on the right edge,
@@ -1875,6 +1896,11 @@ fun App(
                                 onToggleFileName = {
                                     fileNameCollapsed = !fileNameCollapsed
                                     Settings.saveFileNameCollapsed(fileNameCollapsed)
+                                },
+                                pinnedFiles = pinnedFiles,
+                                onTogglePin = { file ->
+                                    val path = file.toPath().toAbsolutePath().normalize()
+                                    updatePins(if (path in pinnedFiles) pinnedFiles - listOf(path) else pinnedFiles + listOf(path))
                                 },
                                 diffSplitRatio = diffRatio,
                                 onDiffSplitRatioChange = { diffRatio = it },

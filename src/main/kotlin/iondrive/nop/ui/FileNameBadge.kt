@@ -58,6 +58,8 @@ internal data class FileNameBadge(
     val isNew: Boolean,
     val collapsed: Boolean,
     val onToggle: () -> Unit,
+    val pinned: Boolean = false,
+    val onTogglePin: (() -> Unit)? = null,
 )
 
 /**
@@ -159,6 +161,7 @@ internal fun BoxScope.FileNameBadgeOverlay() {
                 maxLines = 1,
             )
         }
+        badge.onTogglePin?.let { PinButton(badge.pinned, it) }
         Tooltip(tooltip = { Text("Hide the file name") }) {
             Box(
                 modifier = Modifier

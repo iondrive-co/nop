@@ -15,6 +15,21 @@ class SettingsTest {
     private val originalRoot: Path = Settings.configRoot
 
     @Test
+    fun `pins survive reloads with unusual filenames and stay in their project`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val first = project.resolve("src/../notes with=punctuation\nand lines.txt")
+        val outside = tmp.resolve("reference.md")
+        Settings.savePinnedFiles(project, listOf(first, outside, first.normalize()))
+        assertEquals(listOf(first.normalize(), outside), Settings.loadPinnedFiles(project))
+        assertEquals(emptyList<Path>(), Settings.loadPinnedFiles(tmp.resolve("other")))
+        Settings.savePinnedFiles(project, listOf(outside))
+        assertEquals(listOf(outside), Settings.loadPinnedFiles(project))
+        Settings.savePinnedFiles(project, emptyList())
+        assertTrue(Settings.loadPinnedFiles(project).isEmpty())
+    }
+
+    @Test
     fun `tree layouts belong to individual tabs and survive workspace changes`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val project = tmp.resolve("project")

@@ -134,6 +134,8 @@ fun TabbedViewerPanel(
     // Whether the file-name box over the view is folded away — see [FileNameBadge].
     fileNameCollapsed: Boolean = false,
     onToggleFileName: () -> Unit = {},
+    pinnedFiles: List<java.nio.file.Path> = emptyList(),
+    onTogglePin: (File) -> Unit = {},
     diffSplitRatio: Float = 0.5f,
     onDiffSplitRatioChange: (Float) -> Unit = {},
     // Ask the app to put up the revision picker for this file; picking one opens a
@@ -158,7 +160,11 @@ fun TabbedViewerPanel(
     RescueEditsOnFailure(editStore)
 
     val fileName = selected?.let { fileNameOf(it, repo) }?.let { (path, isNew) ->
-        FileNameBadge(path, isNew, fileNameCollapsed, onToggleFileName)
+        val file = pinnableFile(selected)
+        FileNameBadge(path, isNew, fileNameCollapsed, onToggleFileName,
+            pinned = file?.toPath() in pinnedFiles,
+            onTogglePin = file?.let { { onTogglePin(it) } },
+        )
     }
 
     // One flag for every view under the strip, so the toggle in the strip means the same thing to a

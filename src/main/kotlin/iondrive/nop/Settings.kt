@@ -487,6 +487,21 @@ object Settings {
         save(map)
     }
 
+    /** Pinned files stay available independently of the project's open viewer tabs. */
+    fun loadPinnedFiles(projectPath: Path): List<Path> = runCatching {
+        treeLayoutJson.decodeFromString<List<String>>(
+            Files.readString(projectDataDir(projectPath).resolve("pins.json")),
+        ).map { Path.of(it).toAbsolutePath().normalize() }.distinct()
+    }.getOrDefault(emptyList())
+
+    fun savePinnedFiles(projectPath: Path, files: List<Path>) {
+        val target = projectDataDir(projectPath).resolve("pins.json")
+        runCatching {
+            Files.createDirectories(target.parent)
+            Files.writeString(target, treeLayoutJson.encodeToString(files.map { it.toAbsolutePath().normalize().toString() }.distinct()))
+        }
+    }
+
     /**
      * Height of the commit-message text area in dp, persisted per-project. Returns null when
      * the user hasn't dragged the handle yet so the caller can fall back to a sensible default.
