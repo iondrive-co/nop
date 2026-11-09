@@ -295,6 +295,12 @@
         event.stopImmediatePropagation();
     }
 
+    // The host supplies spelling for message editors; code and mention descendants keep their opt-outs.
+    function enableSpelling(event) {
+        const editor = event.target?.closest?.('[data-qa="texty_input"][contenteditable="true"]');
+        if (editor && !editor.spellcheck) editor.spellcheck = true;
+    }
+
     // Use Slack's own menu so permissions, edit history and the editor stay native.
     function messageMenu(event) {
         if (!panel || event.shiftKey || event.target.closest?.('a, img, input, textarea, [contenteditable="true"]')) return;
@@ -319,6 +325,9 @@
     document.addEventListener("pointerup", pointerUp, true);
     document.addEventListener("pointercancel", pointerUp, true);
     document.addEventListener("contextmenu", messageMenu, true);
+    document.addEventListener("focusin", enableSpelling, true);
+    document.addEventListener("beforeinput", enableSpelling, true);
+    enableSpelling({ target: document.activeElement });
     window.__nopSlackLayout = {
         refresh: schedule, metadata, setTheme,
         dispose() {
@@ -330,6 +339,8 @@
             document.removeEventListener("pointerup", pointerUp, true);
             document.removeEventListener("pointercancel", pointerUp, true);
             document.removeEventListener("contextmenu", messageMenu, true);
+            document.removeEventListener("focusin", enableSpelling, true);
+            document.removeEventListener("beforeinput", enableSpelling, true);
             if (pending) cancelAnimationFrame(pending);
             clear();
             style.remove(); themeStyle.remove();

@@ -80,6 +80,7 @@ public class SlackSidebarSmoke {
         try {
             // Own profile and native runtime; never open or copy the user's Slack profile.
             var profile = Files.createTempDirectory(scratch, "profile-");
+            SlackSpelling.INSTANCE.prepare(profile);
             var builder = new CefAppBuilder();
             var runtime = scratch.resolve(CefRuntime.INSTANCE.getDirectoryName());
             builder.setInstallDir(runtime.toFile());
@@ -88,7 +89,13 @@ public class SlackSidebarSmoke {
             builder.getCefSettings().cache_path = profile.resolve("Default").toString();
             builder.getCefSettings().log_severity = CefSettings.LogSeverity.LOGSEVERITY_DISABLE;
             builder.addJcefArgs("--disable-gpu", "--no-first-run", "--no-default-browser-check");
+            builder.addJcefArgs("--disable-background-timer-throttling");
+            // Spelling must use the bundled dictionaries, including on a first run without DNS.
+            builder.addJcefArgs("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost");
             builder.setAppHandler(new MavenCefAppHandlerAdapter() {
+                @Override public void onContextInitialized() {
+                    SlackSpelling.INSTANCE.configure(org.cef.browser.CefRequestContext.getGlobalContext());
+                }
                 @Override public void stateHasChanged(CefApp.CefAppState state) {
                     if (state == CefApp.CefAppState.TERMINATED) ended.countDown();
                 }
@@ -98,7 +105,18 @@ public class SlackSidebarSmoke {
             builder.setSkipInstallation(true);
             app = builder.build();
             client = app.createClient();
+            client.addDisplayHandler(new org.cef.handler.CefDisplayHandlerAdapter() {
+                @Override public boolean onConsoleMessage(CefBrowser browser, CefSettings.LogSeverity level,
+                                                           String message, String source, int line) {
+                    if (level == CefSettings.LogSeverity.LOGSEVERITY_ERROR) System.err.println("Fixture script: " + message);
+                    return false;
+                }
+            });
             client.addLoadHandler(new CefLoadHandlerAdapter() {
+                @Override public void onLoadError(CefBrowser browser, CefFrame frame, ErrorCode code,
+                                                   String message, String url) {
+                    System.err.println("Fixture load: " + code + " " + message);
+                }
                 @Override public void onLoadEnd(CefBrowser browser, CefFrame loadedFrame, int status) {
                     if (!loadedFrame.isMain()) return;
                     var wrapped = loadedFrame.getURL().contains("wrapped=1");
@@ -112,6 +130,8 @@ public class SlackSidebarSmoke {
                 frame.add(browser.getUIComponent());
                 frame.setSize(900, 650);
                 frame.setVisible(true);
+                frame.toFront();
+                browser.setFocus(true);
             });
             // Baseline proves that the fixture works before applying nop's script.
             double baselineScale = 1;
@@ -182,6 +202,7 @@ public class SlackSidebarSmoke {
                 }
                 System.out.println("SLACK_TRANSFER " + cycle + " draft and native focus preserved");
             }
+            SlackSpellingSmoke.verify(browser, devtools, client);
         } finally {
             if (devtools != null) devtools.close();
             if (client != null) client.dispose();

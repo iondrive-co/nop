@@ -107,6 +107,13 @@ The SVG icons in src/main/resources/icons are original project assets.
 Spellchecker word list
 ----------------------
 
+- Chromium's SCOWL-derived English Hunspell dictionaries
+  License: permissive SCOWL and contributing word-list licenses
+  Source: https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries/
+  The unmodified Australian, British and American .bdic dictionaries and their complete
+  upstream notices are bundled under src/main/resources/browser/dictionaries/.
+  That directory's README.txt records the upstream revision and file checksums.
+
 - SCOWL (Spell Checker Oriented Word Lists) and Friends
   License: permissive, reproduced below
   Source: http://wordlist.sourceforge.net/

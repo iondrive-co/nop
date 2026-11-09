@@ -25,6 +25,7 @@ import org.cef.CefApp
 import org.cef.CefClient
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
+import org.cef.browser.CefRequestContext
 import org.cef.callback.CefBeforeDownloadCallback
 import org.cef.callback.CefDownloadItem
 import org.cef.callback.CefDownloadItemCallback
@@ -216,6 +217,8 @@ object SlackBrowsers {
         privateDirectory(profile)
         // CEF resolves the root before checking that the profile cache lives below it.
         val profilePath = profile.toRealPath()
+        runCatching { SlackSpelling.prepare(profilePath) }
+            .onFailure { Log.warn("Could not prepare Slack spelling dictionaries: ${it.message}") }
         val builder = CefAppBuilder().apply {
             setInstallDir(root.resolve(CefRuntime.directoryName).toFile())
             setProgressHandler { state, percent ->
@@ -235,6 +238,7 @@ object SlackBrowsers {
                 }
                 override fun onContextInitialized() {
                     SlackSchemeHandler.install(CefApp.getInstance())
+                    SlackSpelling.configure(CefRequestContext.getGlobalContext())
                 }
                 override fun stateHasChanged(state: CefApp.CefAppState) {
                     if (state == CefApp.CefAppState.TERMINATED) terminated.countDown()
