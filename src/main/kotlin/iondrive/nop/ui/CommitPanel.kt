@@ -547,8 +547,6 @@ internal fun ChangeRow(
             }
             Box(modifier = Modifier.weight(1f)) {
                 if (label != change.path) {
-                    // The group's shared directory prefix is stripped from the label; hover for
-                    // the full path.
                     Tooltip(tooltip = { Text(change.path) }) { pathText() }
                 } else {
                     pathText()

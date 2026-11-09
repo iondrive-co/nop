@@ -1,6 +1,7 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import iondrive.nop.index.SearchHit
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
+import org.jetbrains.jewel.ui.component.Tooltip
 
 /** The muted one-liner a results panel shows in place of rows: "Searching…", "No matches". */
 @Composable
@@ -58,7 +60,8 @@ internal fun HitResultsGrid(
     val naturalTextPx = remember(groups) {
         var widest = 0
         for (group in groups) {
-            val label = group.paths.maxByOrNull { it.length }?.let { "${group.labelFor(it)}:0000" }
+            val label = group.paths.asSequence().map { group.labelFor(it) }
+                .maxByOrNull { it.length }?.let { "$it:0000" }
             val code = group.items.maxByOrNull { it.lineText.length }?.lineText
             if (label != null) widest = maxOf(widest, measurer.measure(label, LOCATION_STYLE).size.width)
             if (code != null) widest = maxOf(widest, measurer.measure(code, CODE_STYLE).size.width)
@@ -100,6 +103,7 @@ private fun HitRows(group: PathGroup<SearchHit>, onPick: (path: String, line: In
 private val LOCATION_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 11.sp)
 private val CODE_STYLE = TextStyle(fontFamily = NopFonts.Mono, fontSize = 13.sp)
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun HitRow(hit: SearchHit, label: String, onClick: () -> Unit) {
     val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
@@ -110,7 +114,9 @@ private fun HitRow(hit: SearchHit, label: String, onClick: () -> Unit) {
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 3.dp),
     ) {
-        Text("$label:${hit.line}", color = muted, style = LOCATION_STYLE)
+        Tooltip(tooltip = { Text("${hit.path}:${hit.line}") }) {
+            Text("$label:${hit.line}", color = muted, style = LOCATION_STYLE)
+        }
         Text(
             annotateLine(hit.lineText, hit.matchStart, hit.matchEnd, highlight),
             style = CODE_STYLE,

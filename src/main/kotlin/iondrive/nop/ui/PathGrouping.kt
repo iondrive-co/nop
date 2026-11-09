@@ -12,15 +12,11 @@ data class PathGroup<T>(
     val items: List<T>,
     val paths: List<String>,
 ) {
-    /** Directory prefix (with trailing '/') shared by every member; "" when members span roots. */
-    val commonPrefix: String = commonDirPrefix(paths)
-
     /** Column heading: the group title and its member count, e.g. "ui · 3". */
     val header: String get() = "$title · ${items.size}"
 
-    /** Row label: the path with the group's shared directory prefix stripped. */
-    fun labelFor(path: String): String =
-        if (commonPrefix.isNotEmpty() && path.startsWith(commonPrefix)) path.removePrefix(commonPrefix) else path
+    /** Row label: the file name, with the full path available from the row's tooltip. */
+    fun labelFor(path: String): String = path.substringAfterLast('/')
 }
 
 /**
@@ -147,15 +143,4 @@ object PathGrouping {
         if (dir.isEmpty()) return OTHER_TITLE
         return dir.substringAfterLast('/')
     }
-}
-
-private fun commonDirPrefix(paths: List<String>): String {
-    if (paths.isEmpty()) return ""
-    var prefix: List<String>? = null
-    for (path in paths) {
-        val dirs = path.split('/').dropLast(1)
-        prefix = if (prefix == null) dirs else prefix.zip(dirs).takeWhile { (a, b) -> a == b }.map { it.first }
-        if (prefix.isEmpty()) return ""
-    }
-    return prefix!!.joinToString("/", postfix = "/")
 }

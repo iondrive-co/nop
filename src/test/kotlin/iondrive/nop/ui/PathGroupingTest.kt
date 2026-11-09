@@ -124,21 +124,23 @@ class PathGroupingTest {
     }
 
     @Test
-    fun `labels strip the shared directory prefix`() {
+    fun `labels show file names for members in the same directory`() {
         val groups = group(
             "src/main/kotlin/iondrive/nop/ui/CommitPanel.kt",
             "src/main/kotlin/iondrive/nop/ui/PathGrouping.kt",
         )
         val ui = group(groups, "ui")
-        assertEquals("src/main/kotlin/iondrive/nop/ui/", ui.commonPrefix)
         assertEquals("CommitPanel.kt", ui.labelFor("src/main/kotlin/iondrive/nop/ui/CommitPanel.kt"))
     }
 
     @Test
-    fun `labels keep full path when members share no directory prefix`() {
+    fun `labels show file names when members span directories and roots`() {
         val config = group(group("build.gradle.kts", ".github/workflows/ci.yml"), "config")
-        assertEquals("", config.commonPrefix)
-        assertEquals(".github/workflows/ci.yml", config.labelFor(".github/workflows/ci.yml"))
+        assertEquals("build.gradle.kts", config.labelFor("build.gradle.kts"))
+        assertEquals("ci.yml", config.labelFor(".github/workflows/ci.yml"))
+        val tests = group(group("src/test/kotlin/FirstTest.kt", "src/test/java/SecondTest.java"), "tests")
+        assertEquals("FirstTest.kt", tests.labelFor("src/test/kotlin/FirstTest.kt"))
+        assertEquals("SecondTest.java", tests.labelFor("src/test/java/SecondTest.java"))
     }
 
     @Test
