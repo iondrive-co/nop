@@ -36,6 +36,24 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class JavaDiagnosticsTest {
+    @Test fun `import failures are compact expandable and stay dismissed while retrying`(@TempDir root: Path) {
+        val file = root.resolve("Widget.java").toFile().apply { writeText("class Widget { MissingType value; }") }
+        val detail = "Gradle import failed (exit 8). " + "Dependency information unavailable. ".repeat(30) +
+            "\nSee build/import-fixture.log — press F5 to retry"
+        Viewer(root, Tab.FileView(file), initialStatus = detail).use { viewer ->
+            viewer.await { viewer.shows("Gradle import failed — F5 to retry") }
+            assertTrue(viewer.statusHeight() <= 28f)
+            assertTrue(!viewer.shows("import-fixture.log"))
+            viewer.snapshot(Path.of("build/verification/dependency-status-compact.png"))
+            viewer.click("Details")
+            viewer.await { viewer.shows("import-fixture.log") }
+            viewer.click("Dismiss")
+            viewer.await { !viewer.shows("Gradle import failed") && !viewer.shows("Details") }
+            viewer.project(JavaAnalysisProject(root.toFile(), dependencyStatus = "Gradle import waiting — retrying automatically"))
+            viewer.await { !viewer.shows("Gradle import waiting") && !viewer.hasProblemBar() }
+        }
+    }
+
     @Test fun `dependency import status suppresses unresolved errors until the model is ready`(@TempDir root: Path) {
         val file = root.resolve("Widget.java").toFile().apply { writeText("class Widget { MissingType value; }") }
         Viewer(root, Tab.FileView(file), initialStatus = "Importing Gradle dependencies…").use { viewer ->
@@ -143,6 +161,13 @@ class JavaDiagnosticsTest {
         }
 
         fun shows(text: String) = texts().any { text in it }
+        fun statusHeight(): Float = onEdt {
+            nodes().first { it.config.getOrNull(SemanticsProperties.TestTag) == "dependency-status-bar" }.boundsInRoot.height
+        }
+        fun click(text: String) = onEdt {
+            val node = nodes().first { node -> node.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true }
+            assertTrue(assertNotNull(node.config.getOrNull(SemanticsActions.OnClick)?.action).invoke())
+        }
         fun hasProblemBar() = texts().any { it.startsWith("Line ") }
         fun hasProblemMarker(): Boolean = onEdt {
             scene.render(time).use { image ->

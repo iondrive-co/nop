@@ -108,6 +108,10 @@ internal class NopTerminalWidget(
     init {
         val panel = terminalPanel as NopTerminalPanel
         panel.cursorRow = { terminal.cursorY - 1 }
+        panel.onSynchronizedOutputFinished = {
+            markMessagesSoon()
+            if (!userScrolledUp) scrollToBottom()
+        }
         panel.onScrollInput = {
             settings.nudgeActive()
             userScrolledUp = panel.verticalScrollModel.value < 0
@@ -123,6 +127,7 @@ internal class NopTerminalWidget(
         // Keep scroll at bottom on buffer updates unless the user has explicitly scrolled up
         terminalTextBuffer.addModelListener {
             settings.nudgeActive()
+            if (panel.synchronizedOutput.active) return@addModelListener
             markMessagesSoon()
             if (!userScrolledUp && !scrollScheduled) {
                 scrollScheduled = true
@@ -211,6 +216,7 @@ internal class NopTerminalWidget(
     /** Reads the whole buffer, scrollback and screen, for the user's messages and puts a mark on the scrollbar at each. */
     internal fun markMessages() {
         marksDue.set(false)
+        if ((terminalPanel as NopTerminalPanel).synchronizedOutput.active) return
         val bar = scrollBarRef as? TerminalScrollBar ?: return
         val messages = userMessages ?: return bar.setMarks(emptyList(), 0)
         val buffer = terminalTextBuffer
@@ -256,7 +262,8 @@ internal class NopTerminalWidget(
         NopTerminalPanel(settingsProvider as NopTerminalSettings, textBuffer, styleState)
 
     override fun createTerminalStarter(terminal: JediTerminal, connector: TtyConnector): TerminalStarter =
-        TerminalResize(terminal, connector, typeAheadManager, executorServiceManager)
+        TerminalResize(terminal, connector, typeAheadManager, executorServiceManager,
+            synchronizedOutput = (terminalPanel as NopTerminalPanel).synchronizedOutput)
 
     private companion object {
         /** How long output has to pause for before the scrollbar's marks are read again, at most. */
@@ -273,6 +280,34 @@ internal class NopTerminalPanel(
     textBuffer: TerminalTextBuffer,
     styleState: StyleState,
 ) : TerminalPanel(settings, textBuffer, styleState) {
+
+    var onSynchronizedOutputFinished: (() -> Unit)? = null
+    private var disposed = false
+    internal val synchronizedOutput = SynchronizedOutput(changed = ::synchronizedOutputChanged)
+    private val loadingTimer = Timer(60) { event ->
+        synchronizedOutput.expire()
+        if (synchronizedOutput.active) repaint() else (event.source as Timer).stop()
+    }
+
+    private fun synchronizedOutputChanged(active: Boolean) {
+        SwingUtilities.invokeLater {
+            if (disposed) return@invokeLater
+            if (synchronizedOutput.active) {
+                if (!loadingTimer.isRunning) loadingTimer.start()
+            } else {
+                loadingTimer.stop()
+                if (!active) onSynchronizedOutputFinished?.invoke()
+                repaint()
+            }
+        }
+    }
+
+    override fun dispose() {
+        disposed = true
+        loadingTimer.stop()
+        synchronizedOutput.reset()
+        super.dispose()
+    }
 
     @Volatile
     private var viewingHistory = false
@@ -426,6 +461,10 @@ internal class NopTerminalPanel(
     var cursorRow: () -> Int = { Int.MIN_VALUE }
 
     override fun paintComponent(g: Graphics) {
+        if (synchronizedOutput.active) {
+            if (synchronizedOutput.showProgress) paintLoading(g)
+            return
+        }
         val buffer = terminalTextBuffer
         buffer.lock()
         try {
@@ -446,6 +485,28 @@ internal class NopTerminalPanel(
         } finally {
             buffer.unlock()
         }
+    }
+
+    private fun paintLoading(graphics: Graphics) {
+        val g = graphics.create() as Graphics2D
+        try {
+            g.color = settings.bg
+            g.fillRect(0, 0, width, height)
+            g.font = settings.terminalFont
+            g.color = settings.fg
+            val label = if (userMessages == null) "Loading…" else "Loading conversation…"
+            val barWidth = minOf(280, (width - 48).coerceAtLeast(1))
+            val x = (width - barWidth) / 2
+            val y = height / 2
+            g.drawString(label, (width - g.fontMetrics.stringWidth(label)) / 2, y - 12)
+            g.color = Color(settings.fg.red, settings.fg.green, settings.fg.blue, 45)
+            g.fillRoundRect(x, y, barWidth, 4, 4, 4)
+            g.clipRect(x, y, barWidth, 4)
+            g.color = settings.link
+            val segment = maxOf(1, barWidth / 3)
+            val position = ((synchronizedOutput.elapsed % 1_200) * (barWidth + segment) / 1_200).toInt() - segment
+            g.fillRoundRect(x + position, y, segment, 4, 4, 4)
+        } finally { g.dispose() }
     }
 
     /**

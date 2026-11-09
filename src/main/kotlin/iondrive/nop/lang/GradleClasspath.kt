@@ -18,6 +18,8 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
+internal class GradleImportDeferredException(message: String) : IOException(message)
+
 @Serializable
 data class GradleJavaSourceSet(
     val projectDir: String,
@@ -70,6 +72,23 @@ class GradleClasspath(
             snapshot?.artifacts.orEmpty().filterNot { File(it).isFile }.joinToString(separator = "|", prefix = "|")
     }
 
+    /** Wait for a launcher's build admission guard without bypassing it. */
+    internal suspend fun loadWhenAvailable(
+        files: List<String>,
+        refresh: Int = 0,
+        retryDelayMillis: Long = 30_000,
+        onDeferred: (GradleImportDeferredException) -> Unit,
+    ): GradleJavaModel? {
+        while (true) {
+            try {
+                return load(files, refresh)
+            } catch (deferred: GradleImportDeferredException) {
+                onDeferred(deferred)
+                delay(retryDelayMillis)
+            }
+        }
+    }
+
     /** [refresh] changes only on an explicit refresh; normal source edits reuse the imported model. */
     suspend fun load(files: List<String>, refresh: Int = 0): GradleJavaModel? = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -102,6 +121,10 @@ class GradleClasspath(
                 model
             } catch (cancelled: CancellationException) {
                 throw cancelled
+            } catch (deferred: GradleImportDeferredException) {
+                attempted = null
+                failure = null
+                throw deferred
             } catch (error: Exception) {
                 attempted = request
                 failure = error
@@ -158,6 +181,10 @@ class GradleClasspath(
                     stream.readBytes().toString(Charsets.UTF_8).trim()
                 }
                 val detail = tail.substringAfter("* What went wrong:", tail).substringBefore("* Try:").trim().take(1200)
+                if (process.exitValue() == 3 && detail.contains("Gradle not started:", ignoreCase = true) &&
+                    detail.contains("build", ignoreCase = true) && detail.contains("running", ignoreCase = true)) {
+                    throw GradleImportDeferredException("$detail\nSee ${log.absolutePath}")
+                }
                 throw IOException("Gradle import failed (exit ${process.exitValue()}). $detail\nSee ${log.absolutePath}")
             }
             return json.decodeFromString<GradleJavaModel>(Files.readString(output))

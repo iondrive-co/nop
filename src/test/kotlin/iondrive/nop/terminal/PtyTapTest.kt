@@ -114,4 +114,29 @@ class PtyTapTest {
 
             assertTrue("plain" in connector.drainToEof())
         }
+
+    @Test
+    fun `restoring history holds painting until its last chunk without delaying live output`() =
+        assertTimeoutPreemptively(Duration.ofSeconds(10)) {
+            val history = (1..30).joinToString("\r\n") { "Recorded row $it" }
+            val changes = mutableListOf<Boolean>()
+            val output = SynchronizedOutput(changes::add)
+            val live = StringBuilder()
+            val process = ptyProcess("sh", "-c", "printf 'Live prompt'")
+            val connector = PtyTtyConnector(process, replay = history.toByteArray(), replayState = output::replay,
+                tap = { live.append(it) })
+            try {
+                val drawn = StringBuilder()
+                val chunk = CharArray(7)
+                while (true) {
+                    val size = connector.read(chunk, 0, chunk.size)
+                    if (size < 0) break
+                    drawn.append(chunk, 0, size)
+                    assertEquals(drawn.length <= history.length, output.active)
+                }
+                assertEquals(history + "Live prompt", drawn.toString())
+                assertEquals("Live prompt", live.toString(), "restored history must stay outside the live tap")
+                assertEquals(listOf(true, false), changes)
+            } finally { process.destroyForcibly() }
+        }
 }

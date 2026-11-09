@@ -117,7 +117,7 @@ fun FileSearchDialog(
                 state = state,
                 modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
             )
-            status?.let { Text(it) }
+            status?.let { DependencyStatusBar(it) }
             if (results.isEmpty()) {
                 val muted = if (JewelTheme.isDark) Color(0xFF8B8F99) else Color(0xFF7A7E87)
                 Text(

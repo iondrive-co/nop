@@ -279,7 +279,7 @@ fun DiffView(
     // The working side of a diff is an editor like any other, and stops reaching disk the same way.
     if (edit != null) SaveStatusStrip(edit, onSaved = savedCallback)
     javaDiagnostics.status?.let {
-        Text(it, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+        DependencyStatusBar(it)
     }
     javaDiagnostics.result?.let { analysis ->
         analysis.failure?.let {

@@ -19,8 +19,12 @@ internal class TerminalResize(
     typeAhead: TerminalTypeAheadManager,
     private val executors: TerminalExecutorServiceManager,
     private val delayMs: Long = 150,
+    private val synchronizedOutput: SynchronizedOutput? = null,
 ) : TerminalStarter(
-    terminalModel, connector, TtyBasedArrayDataStream(connector, typeAhead::onTerminalStateChanged), typeAhead, executors,
+    terminalModel, connector,
+    TtyBasedArrayDataStream(connector, typeAhead::onTerminalStateChanged).let {
+        if (synchronizedOutput == null) it else SynchronizedOutputStream(it, synchronizedOutput)
+    }, typeAhead, executors,
 ) {
     private val resizeLock = Any()
     private var pending: ScheduledFuture<*>? = null
@@ -31,7 +35,7 @@ internal class TerminalResize(
     private val emulatorStopped = CountDownLatch(1)
 
     override fun start() {
-        try { super.start() } finally { emulatorStopped.countDown() }
+        try { super.start() } finally { synchronizedOutput?.reset(); emulatorStopped.countDown() }
     }
 
     /** Freeze closes the reader; wait until its decoded output has reached the terminal model. */
@@ -80,6 +84,7 @@ internal class TerminalResize(
     }
 
     private fun cancelResize() {
+        synchronizedOutput?.reset()
         synchronized(resizeLock) {
             stopped = true
             revision++

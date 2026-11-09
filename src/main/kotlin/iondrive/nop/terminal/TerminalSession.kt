@@ -640,6 +640,7 @@ class TerminalSession private constructor(
             // The replay is history, so it skips [outputTap] — a quota wall in it is one the last nop
             // has already dealt with — but the paste mode it leaves on is the program's mode now.
             replayTap = { text -> noteBracketedPaste(text) },
+            replayState = { active -> (w.terminalPanel as? NopTerminalPanel)?.synchronizedOutput?.replay(active) },
             tap = { text ->
                 noteBracketedPaste(text)
                 outputTap?.invoke(text)

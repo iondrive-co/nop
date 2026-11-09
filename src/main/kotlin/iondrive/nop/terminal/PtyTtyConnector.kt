@@ -43,6 +43,8 @@ class PtyTtyConnector(
      */
     replay: ByteArray? = null,
     private val replayTap: ((String) -> Unit)? = null,
+    /** Holds painting while a handed-over terminal restores its history, including nested redraws. */
+    private val replayState: ((Boolean) -> Unit)? = null,
     /** False queues a physical key until an automated paste has sent its own Enter. */
     private val acceptInput: ((ByteArray) -> Boolean)? = null,
     /**
@@ -106,12 +108,15 @@ class PtyTtyConnector(
             throw it
         }
         replayReader?.let { r ->
+            runCatching { replayState?.invoke(true) }
             val n = r.read(buf, offset, length)
             if (n > 0) {
                 replayTap?.let { listener -> runCatching { listener(String(buf, offset, n)) } }
                 return n
             }
             replayReader = null
+            // The reader asks again only after the emulator has consumed the preceding chunk.
+            runCatching { replayState?.invoke(false) }
         }
         val read = try {
             super.read(buf, offset, length)

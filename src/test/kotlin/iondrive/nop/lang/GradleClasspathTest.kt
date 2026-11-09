@@ -1,6 +1,7 @@
 package iondrive.nop.lang
 
 import iondrive.nop.index.JavaLibraryIndex
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -221,6 +222,62 @@ class GradleClasspathTest {
         assertFailsWith<java.io.IOException> { importer.load(listOf("build.gradle"), refresh = 1) }
         assertEquals(3, Files.readAllLines(root.resolve("wrapper-calls")).size)
         assertFalse(Files.exists(root.resolve("cache/model.json")))
+    }
+
+    @Test fun `busy launcher retries automatically until admission is available`(@TempDir root: Path) = runBlocking {
+        write(root, "build.gradle", "")
+        write(root, "gradlew", """
+            #!/bin/sh
+            printf '.\n' >> wrapper-calls
+            if [ ! -f admitted ]; then
+                echo 'Gradle not started: a build is still running; retry later.'
+                exit 3
+            fi
+            for argument do
+                case "${'$'}argument" in
+                    -Dnop.gradle.output=*) output=${'$'}{argument#*=} ;;
+                esac
+            done
+            printf '{"sourceSets":[],"inputs":[]}' > "${'$'}output"
+        """.trimIndent())
+        val importer = GradleClasspath(root.toFile(), root.resolve("cache"))
+        var waits = 0
+        val model = withTimeout(5000) {
+            importer.loadWhenAvailable(listOf("build.gradle"), refresh = 1, retryDelayMillis = 10) {
+                assertTrue(it.message.orEmpty().contains("retry later"))
+                if (++waits == 2) write(root, "admitted", "")
+            }
+        }
+        assertNotNull(model)
+        assertEquals(2, waits)
+        assertEquals(3, Files.readAllLines(root.resolve("wrapper-calls")).size)
+        assertEquals(model, importer.load(listOf("build.gradle"), refresh = 1))
+        assertEquals(3, Files.readAllLines(root.resolve("wrapper-calls")).size)
+    }
+
+    @Test fun `waiting for a busy launcher is cancelled without starting another attempt`(@TempDir root: Path) = runBlocking {
+        write(root, "build.gradle", "")
+        write(root, "gradlew", "#!/bin/sh\nprintf '.\\n' >> wrapper-calls\necho 'Gradle not started: a build remains running.'\nexit 3\n")
+        val importer = GradleClasspath(root.toFile(), root.resolve("cache"))
+        val waiting = CompletableDeferred<Unit>()
+        val job = launch { importer.loadWhenAvailable(emptyList()) { waiting.complete(Unit) } }
+        withTimeout(5000) { waiting.await() }
+        job.cancelAndJoin()
+        assertEquals(1, Files.readAllLines(root.resolve("wrapper-calls")).size)
+    }
+
+    @Test fun `exit three without an admission refusal remains a normal import failure`(@TempDir root: Path) = runBlocking {
+        write(root, "build.gradle", "")
+        write(root, "gradlew", "#!/bin/sh\nprintf '.\\n' >> wrapper-calls\necho 'Fixture model export failed'\nexit 3\n")
+        val importer = GradleClasspath(root.toFile(), root.resolve("cache"))
+        repeat(2) {
+            val error = assertFailsWith<java.io.IOException> {
+                importer.loadWhenAvailable(emptyList(), retryDelayMillis = 10) { error("Unexpected deferred import") }
+            }
+            assertFalse(error is GradleImportDeferredException)
+            assertTrue(error.message.orEmpty().contains("Fixture model export failed"))
+        }
+        assertEquals(1, Files.readAllLines(root.resolve("wrapper-calls")).size)
     }
 
     @Test fun `timeout and cancellation terminate the import client and its child`(@TempDir root: Path) = runBlocking {

@@ -536,7 +536,9 @@ fun App(
         if (!hasJava) return@LaunchedEffect
         gradleStatus = if (GradleClasspath.isGradleProject(rootPath.toFile())) "Importing Gradle dependencies…" else null
         try {
-            gradleModel = gradleImporter.load(fileIndex.files, gradleRefreshKey)
+            gradleModel = gradleImporter.loadWhenAvailable(fileIndex.files, gradleRefreshKey) { deferred ->
+                gradleStatus = "Gradle import waiting — retrying automatically\n${deferred.message}"
+            }
             gradleStatus = null
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
