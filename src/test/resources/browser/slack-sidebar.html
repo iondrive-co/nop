@@ -214,6 +214,16 @@ window.runFixture = async function () {
                 if (state.endsWith('--unread')) check(theme + ' unread channels stay bold', getComputedStyle(name).fontWeight === '700');
             }
             link.className = 'p-channel_sidebar__link';
+            // Slack's two forms of the draft pencil (an icon, or a button listing the drafts), beside a
+            // suffix of the same generic kind that has to stay.
+            link.insertAdjacentHTML('beforeend', '<span class="p-channel_sidebar__suffix_generic" data-qa="sidebar-channel-draft-icon-suffix">&#9998;</span>' +
+                '<button class="p-channel_sidebar__draft_menu_trigger" data-qa="sidebar-channel-draft-icon-suffix" tabindex="-1">&#9998;</button>' +
+                '<span class="p-channel_sidebar__suffix_generic" data-qa="fixture-other-suffix">1</span>');
+            const pencils = [...link.querySelectorAll('[data-qa="sidebar-channel-draft-icon-suffix"]')];
+            const other = link.querySelector('[data-qa="fixture-other-suffix"]');
+            check(theme + ' draft pencils are hidden', pencils.length === 2 && pencils.every(element => getComputedStyle(element).display === 'none'));
+            check(theme + ' other channel suffixes stay', getComputedStyle(other).display !== 'none');
+            [...pencils, other].forEach(element => element.remove());
         }
         function checkToolbar(theme) {
             const sample = document.createElement('div');

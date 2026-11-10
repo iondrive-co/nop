@@ -60,6 +60,12 @@
         ${scope} .p-channel_sidebar__link { color: var(--nop-foreground) !important; }
         ${scope} .p-channel_sidebar__link:hover { background: var(--nop-hover) !important; }
         ${scope} .p-channel_sidebar__link--selected { background: var(--nop-selection) !important; }
+        /* Slack's pencil beside a channel that has a draft, as a plain icon or as the button that lists
+           them. Drafts nobody typed (nop 1.7.2 and 1.7.3) keep it showing for good, so it is hidden;
+           Slack's "Drafts & sent" still lists every draft. */
+        ${scope} :is([data-qa="sidebar-channel-draft-icon-suffix"], .p-channel_sidebar__draft_menu_trigger) {
+            display: none !important;
+        }
         ${scope} .p-ia4_channel_list > .p-autoclog__hook:has(> [data-qa="upgrades-kit-upgrade-button"]),
         ${scope} .p-sidebar_text_filter_input_header { display: none !important; }
         ${scope} :is(a, .c-link) { color: var(--nop-accent) !important; }
