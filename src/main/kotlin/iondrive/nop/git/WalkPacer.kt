@@ -23,15 +23,25 @@ class WalkPacer(
     /** Whether enough time has passed since the last walk to start another. */
     fun due(): Boolean = nowMs() - lastEndMs >= lastCostMs * multiple
 
+    /** How long until [due], in milliseconds: zero once it is. */
+    fun waitMs(): Long = (lastEndMs + lastCostMs * multiple - nowMs()).coerceAtLeast(0L)
+
+    /** The clock [record] wants a walk's start and end read from. */
+    fun now(): Long = nowMs()
+
+    /** Records a walk that ran from [startMs] to [endMs], for the next [due]. */
+    fun record(startMs: Long, endMs: Long) {
+        lastCostMs = endMs - startMs
+        lastEndMs = endMs
+    }
+
     /** Runs [body] as a walk, timing it for the next [due]. */
     fun <T> walk(body: () -> T): T {
         val start = nowMs()
         try {
             return body()
         } finally {
-            val end = nowMs()
-            lastCostMs = end - start
-            lastEndMs = end
+            record(start, nowMs())
         }
     }
 }

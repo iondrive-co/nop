@@ -62,6 +62,7 @@ import iondrive.nop.git.WalkPacer
 import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.AccessFrequency
 import iondrive.nop.index.FileIndex
+import iondrive.nop.index.IndexBuilds
 import iondrive.nop.index.Indexer
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JavaLibraryIndex
@@ -83,11 +84,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
@@ -625,12 +628,9 @@ fun App(
     // *project* has changed. Without this an upgrade would leave every existing project with an
     // empty jump index and no event that would ever refill it.
     var symbolCacheUsable by remember(rootPath) { mutableStateOf(false) }
-    // Re-key on fsRefreshKey so files added/removed while nop stays open show up in the
-    // double-shift search and jump-to-source. fsRefreshKey bumps on manual Refresh and whenever
-    // the git poll sees the working tree change (e.g. a new untracked file) — exactly the moments
-    // the index can go out of date. The staleness probe below gates the actual rebuild, so an
-    // unchanged tree pays only a stat-only walk per refresh, not a full re-read of every file.
-    LaunchedEffect(rootPath, fsRefreshKey) {
+    // Brings the jump-to-source and double-shift indexes up to date with the tree, seeding them
+    // from the on-disk cache the first time. [stop] says the project has closed; see Indexer.build.
+    suspend fun refreshIndexes(stop: () -> Boolean) {
         val indexFile = Settings.projectDataDir(rootPath).resolve("index.tsv")
         val filesIndexFile = Settings.projectDataDir(rootPath).resolve("files.txt")
         if (!indexCacheSeeded) {
@@ -641,8 +641,8 @@ fun App(
             }
             val cachedFiles = withContext(Dispatchers.IO) { FileIndex.load(filesIndexFile) }
             if (cachedFiles.files.isNotEmpty()) fileIndex = cachedFiles
-            // Set only after the load completes: if a refresh cancels this effect mid-seed, the
-            // relaunch should re-seed rather than skip with a half-loaded index.
+            // Set only after the load completes: a refresh cut off mid-seed seeds again rather than
+            // carrying on with a half-loaded index.
             indexCacheSeeded = true
         }
 
@@ -657,9 +657,9 @@ fun App(
             runCatching { Files.getLastModifiedTime(filesIndexFile).toMillis() }.getOrDefault(0L)
         }
         val cacheFresh = cacheReady && cacheStamp > 0L && withContext(Dispatchers.IO) {
-            !Indexer.isStale(rootPath, cacheStamp, fileIndex.files.size)
+            !Indexer.isStale(rootPath, cacheStamp, fileIndex.files.size, stop)
         }
-        if (cacheFresh) return@LaunchedEffect
+        if (cacheFresh) return
 
         // Java files unchanged since the cache keep their entries rather than being parsed again
         // (see Indexer.build) — the in-memory index is the cache's contents or a later build's, so
@@ -668,7 +668,7 @@ fun App(
         val previousSymbols = symbolIndex.takeIf { symbolCacheUsable }
         // The symbol walk lists every file as it goes, which is the file index: one walk, not two.
         val walked = ArrayList<String>()
-        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath, previousSymbols, cacheStamp, walked) }
+        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath, previousSymbols, cacheStamp, walked, stop) }
         symbolIndex = freshSymbols
         val freshFiles = withContext(Dispatchers.Default) { FileIndex.of(walked) }
         fileIndex = freshFiles
@@ -682,6 +682,32 @@ fun App(
         }
         // What we just wrote is by definition current, so later refreshes can trust the probe again.
         symbolCacheUsable = true
+    }
+    // Refreshed on every fsRefreshKey so files added/removed while nop stays open show up in the
+    // double-shift search and jump-to-source. fsRefreshKey bumps on manual Refresh and whenever
+    // the git poll sees the working tree change (e.g. a new untracked file) — exactly the moments
+    // the index can go out of date. The staleness probe in refreshIndexes gates the actual rebuild,
+    // so an unchanged tree pays only a stat-only walk per refresh, not a full re-read of every file.
+    //
+    // One collector per project rather than an effect keyed on fsRefreshKey: a key change cancels
+    // the effect, but a blocking walk cannot see that, so every bump would start one more walk
+    // beside the ones still running. Here a refresh runs to its end, bumps made meanwhile collapse
+    // into one more refresh after it, and IndexBuilds makes refreshes take turns across projects
+    // and spaces a costly tree's. Closing the project stops a walk at its next directory. Keyed on
+    // projectPath too, because fsRefreshKey is remembered per projectPath and a collector started
+    // under one would go on watching that project's key.
+    LaunchedEffect(rootPath, projectPath) {
+        val effect = coroutineContext.job
+        val stop = { !effect.isActive }
+        snapshotFlow { fsRefreshKey }.conflate().collect {
+            try {
+                IndexBuilds.shared.inTurn(rootPath) { refreshIndexes(stop) }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.error("index refresh of $rootPath failed", t)
+            }
+        }
     }
     val launcherStore = remember(rootPath) { LauncherStore(rootPath) }
     var stored by remember(rootPath) { mutableStateOf<List<Launcher>>(emptyList()) }

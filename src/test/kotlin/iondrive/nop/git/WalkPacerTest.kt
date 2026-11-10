@@ -1,5 +1,6 @@
 package iondrive.nop.git
 
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -27,6 +28,20 @@ class WalkPacerTest {
         val pacer = WalkPacer(nowMs = { now })
         pacer.walk { now += 20 }
         now += 3_000
+        assertTrue(pacer.due())
+    }
+
+    @Test
+    fun `waitMs counts down to due`() {
+        var now = 1_000L
+        val pacer = WalkPacer(multiple = 4, nowMs = { now })
+        pacer.record(now, now + 500)
+        now += 500
+        assertEquals(2_000L, pacer.waitMs())
+        now += 1_500
+        assertEquals(500L, pacer.waitMs())
+        now += 900
+        assertEquals(0L, pacer.waitMs())
         assertTrue(pacer.due())
     }
 

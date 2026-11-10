@@ -67,6 +67,15 @@ class FileIndexTest {
     }
 
     @Test
+    fun `save then load round-trips names outside ascii and keeps no trailing blank`(@TempDir tmp: Path) {
+        val target = tmp.resolve("files.txt")
+        val original = FileIndex(listOf("docs/naïve café.md", "src/日本.kt", "z.txt"))
+        FileIndex.save(target, original)
+        assertEquals("docs/naïve café.md\nsrc/日本.kt\nz.txt", target.toFile().readText(Charsets.UTF_8))
+        assertEquals(original.files, FileIndex.load(target).files)
+    }
+
+    @Test
     fun `load returns empty when the cache file is missing`(@TempDir tmp: Path) {
         val loaded = FileIndex.load(tmp.resolve("does-not-exist.txt"))
         assertEquals(emptyList<String>(), loaded.files)

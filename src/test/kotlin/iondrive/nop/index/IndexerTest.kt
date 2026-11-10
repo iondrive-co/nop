@@ -3,9 +3,11 @@ package iondrive.nop.index
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.util.concurrent.CancellationException
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -342,5 +344,46 @@ class IndexerTest {
         c.writeText("package q; class C extends p.A { void n2() {} }")
         c.toFile().setLastModified(future)
         assertEquals(Indexer.build(tmp).all(), Indexer.build(tmp, previous, since = cacheStamp).all())
+    }
+
+    private fun tenDirectories(tmp: Path) {
+        for (i in 0 until 10) {
+            val dir = tmp.resolve("d$i")
+            dir.createDirectories()
+            dir.resolve("f.kt").writeText("fun f$i() = $i\n")
+        }
+    }
+
+    @Test fun `a build stops at the next directory once asked`(@TempDir tmp: Path) {
+        tenDirectories(tmp)
+        var asked = 0
+        val walked = ArrayList<String>()
+        assertFailsWith<CancellationException> {
+            Indexer.build(tmp, files = walked, stop = { ++asked > 3 })
+        }
+        assertEquals(4, asked)
+        assertTrue(walked.size < 10, "the walk went on after stop: $walked")
+    }
+
+    @Test fun `a build stops before parsing java once asked`(@TempDir tmp: Path) {
+        tmp.resolve("A.java").writeText("class A { void m() {} }")
+        var stopping = false
+        assertFailsWith<CancellationException> {
+            Indexer.build(tmp, stop = { stopping.also { stopping = true } })
+        }
+    }
+
+    @Test fun `a build that is never stopped is the same as one without stop`(@TempDir tmp: Path) {
+        tenDirectories(tmp)
+        assertEquals(Indexer.build(tmp).all(), Indexer.build(tmp, stop = { false }).all())
+    }
+
+    @Test fun `the staleness probe stops once asked`(@TempDir tmp: Path) {
+        tenDirectories(tmp)
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        assertFailsWith<CancellationException> {
+            Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 10, stop = { true })
+        }
+        assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 10, stop = { false }))
     }
 }

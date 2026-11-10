@@ -56,17 +56,28 @@ class FileIndex(val files: List<String> = emptyList()) {
             return rr.relativize(rp).toString().replace(File.separatorChar, '/')
         }
 
+        /**
+         * Read and written a line at a time: a project with millions of files on disk has a list of
+         * hundreds of megabytes, and held whole as one string it needs that much again in a single
+         * contiguous block of the heap, which a busy heap often cannot find even with room to spare.
+         */
         fun load(path: Path): FileIndex {
             if (!Files.isRegularFile(path)) return FileIndex()
-            val text = runCatching { Files.readString(path) }.getOrNull() ?: return FileIndex()
-            val files = text.lineSequence().filter { it.isNotBlank() }.toList()
+            val files = runCatching {
+                Files.newBufferedReader(path).useLines { lines -> lines.filterTo(ArrayList()) { it.isNotBlank() } }
+            }.getOrNull() ?: return FileIndex()
             return FileIndex(files)
         }
 
         fun save(path: Path, index: FileIndex) {
             runCatching {
                 Files.createDirectories(path.parent)
-                Files.writeString(path, index.files.joinToString("\n"))
+                Files.newBufferedWriter(path).use { out ->
+                    index.files.forEachIndexed { i, file ->
+                        if (i > 0) out.write('\n'.code)
+                        out.write(file)
+                    }
+                }
             }
         }
     }

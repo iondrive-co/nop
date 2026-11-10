@@ -5,6 +5,7 @@ import iondrive.nop.lang.JavaParse
 import iondrive.nop.lang.JavaSymbols
 import java.io.File
 import java.nio.file.Path
+import java.util.concurrent.CancellationException
 
 /**
  * Walks a project tree and extracts cross-file definitions into a [SymbolIndex].
@@ -42,18 +43,23 @@ object Indexer {
      * Given [files], it also collects the project-relative path of every file the walk reaches —
      * the same list [FileIndex.build] walks the tree for, so a caller that wants both pays for one
      * walk instead of two. On a large project the walk is half of what a rebuild costs.
+     *
+     * [stop] is asked at every directory and before every Java parse; once it answers true the build
+     * throws [CancellationException]. A blocking build ignores its coroutine's cancellation, and on a
+     * tree of millions of files it would otherwise walk on to the end for a project already closed.
      */
     fun build(
         projectRoot: Path,
         previous: SymbolIndex? = null,
         since: Long = 0L,
         files: MutableList<String>? = null,
+        stop: () -> Boolean = { false },
     ): SymbolIndex {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return SymbolIndex()
         val out = mutableListOf<IndexEntry>()
         val javaFiles = mutableListOf<File>()
-        walk(rootFile, rootFile, "", out, javaFiles, files)
+        walk(rootFile, rootFile, "", out, javaFiles, files, stop)
         val known = if (previous != null && since > 0L) javaEntriesByFile(previous) else emptyMap()
         val reused = mutableListOf<IndexEntry>()
         val toParse = javaFiles.filter { file ->
@@ -61,7 +67,7 @@ object Indexer {
             if (kept != null) reused += kept
             kept == null
         }
-        out += (reused + indexJavaFiles(rootFile, toParse))
+        out += (reused + indexJavaFiles(rootFile, toParse, stop))
             // The walk visits directories in whatever order the filesystem hands them over, and the
             // parallel batch adds a second source of nondeterminism on top. Sorting makes a rebuild
             // produce a byte-identical cache file for an unchanged project, which is worth having
@@ -89,11 +95,14 @@ object Indexer {
      * tree dropped before the next file is read, which is what keeps a whole-project index inside a
      * 512 MB heap.
      */
-    private fun indexJavaFiles(root: File, files: List<File>): List<IndexEntry> {
+    private fun indexJavaFiles(root: File, files: List<File>, stop: () -> Boolean): List<IndexEntry> {
         if (files.isEmpty()) return emptyList()
         if (!JavaParse.available) return emptyList()
         return files.parallelStream()
-            .map { file -> javaEntries(root, file) }
+            .map { file ->
+                stopIfAsked(root, stop)
+                javaEntries(root, file)
+            }
             .collect(java.util.stream.Collectors.toList())
             .flatten()
     }
@@ -131,14 +140,17 @@ object Indexer {
      * [since] is epoch millis — pass the cache file's last-modified time. A pure deletion that
      * leaves mtimes untouched on a filesystem that doesn't update directory mtimes is the one
      * case this can miss; the manual Refresh and the next real change both recover from it.
+     *
+     * [stop] is asked at every directory, as in [build].
      */
-    fun isStale(projectRoot: Path, since: Long, cachedFileCount: Int): Boolean {
+    fun isStale(projectRoot: Path, since: Long, cachedFileCount: Int, stop: () -> Boolean = { false }): Boolean {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return true
         var count = 0
         val stack = ArrayDeque<File>()
         stack.addLast(rootFile)
         while (stack.isNotEmpty()) {
+            stopIfAsked(rootFile, stop)
             val dir = stack.removeLast()
             val children = dir.listFiles() ?: continue
             for (f in children) {
@@ -169,7 +181,9 @@ object Indexer {
         out: MutableList<IndexEntry>,
         javaFiles: MutableList<File>,
         files: MutableList<String>?,
+        stop: () -> Boolean,
     ) {
+        stopIfAsked(root, stop)
         val children = dir.listFiles() ?: return
         for (f in children) {
             if (f.name in IGNORED_DIR_NAMES) continue
@@ -177,12 +191,16 @@ object Indexer {
             val rel = prefix + f.name
             if (f.isDirectory) {
                 indexDirectory(root, f, out)
-                walk(root, f, "$rel/", out, javaFiles, files)
+                walk(root, f, "$rel/", out, javaFiles, files, stop)
             } else if (f.isFile) {
                 files?.add(rel)
                 if (f.extension.equals("java", ignoreCase = true)) javaFiles += f else indexFile(f, rel, out)
             }
         }
+    }
+
+    private fun stopIfAsked(root: File, stop: () -> Boolean) {
+        if (stop()) throw CancellationException("index walk of $root stopped")
     }
 
     // ---- directory-shaped definitions ---------------------------------------------------------
