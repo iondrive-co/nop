@@ -4,7 +4,13 @@ import com.jediterm.terminal.TerminalDataStream
 import com.jediterm.terminal.ArrayTerminalDataStream
 import java.util.ArrayDeque
 
-/** Holds a program's synchronized redraw until its final screen has reached the emulator. */
+/**
+ * Whether a program's synchronized update (DEC mode 2026) is still on its way to the emulator, so the
+ * terminal can go on showing the last finished frame instead of the update half drawn.
+ *
+ * [changed] is called on the thread that made the change, before any of the update's output is
+ * emulated when it becomes active, and after the last of it when it ends.
+ */
 internal class SynchronizedOutput(
     private val changed: (Boolean) -> Unit = {},
     private val clock: () -> Long = { System.nanoTime() / 1_000_000 },
@@ -16,8 +22,8 @@ internal class SynchronizedOutput(
     private var modeEnabled = false
     private var replaying = false
 
-    val showProgress: Boolean get() = active && clock() - startedAt >= 150
-    val elapsed: Long get() = clock() - startedAt
+    /** Milliseconds since the update now in progress began. */
+    val age: Long get() = clock() - startedAt
 
     @Synchronized fun begin() {
         modeEnabled = true
@@ -34,8 +40,15 @@ internal class SynchronizedOutput(
     @Synchronized fun replay(enabled: Boolean) { replaying = enabled; update() }
     @Synchronized fun reset() { modeEnabled = false; replaying = false; update() }
 
-    /** A crashed program or a lost reset sequence must not leave the terminal hidden. */
-    @Synchronized fun expire() { if (active && clock() - lastOutputAt >= 2_000) reset() }
+    /**
+     * A crashed program or a lost reset sequence must not leave the terminal held: an update ends
+     * once its program has written nothing for [SILENCE_MS], or after [LONGEST_MS] whatever it writes,
+     * as a shell carries on writing after a program that died part way through an update.
+     */
+    @Synchronized fun expire() {
+        val now = clock()
+        if (active && (now - lastOutputAt >= SILENCE_MS || now - startedAt >= LONGEST_MS)) reset()
+    }
 
     private fun update() {
         val enabled = modeEnabled || replaying
@@ -44,6 +57,13 @@ internal class SynchronizedOutput(
         if (enabled) startedAt = clock()
         active = enabled
         changed(enabled)
+    }
+
+    private companion object {
+        const val SILENCE_MS = 2_000L
+
+        /** Well past the few seconds a slow machine takes over a CLI printing its 20,000-row scrollback again. */
+        const val LONGEST_MS = 30_000L
     }
 }
 

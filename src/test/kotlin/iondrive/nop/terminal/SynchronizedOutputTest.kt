@@ -4,11 +4,14 @@ import com.jediterm.terminal.ArrayTerminalDataStream
 import com.jediterm.terminal.TtyBasedArrayDataStream
 import com.jediterm.terminal.TtyConnector
 import com.jediterm.terminal.emulator.JediEmulator
+import com.jediterm.terminal.ui.TerminalPanel
 import com.jediterm.terminal.util.CharUtils
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.Color
+import java.awt.event.MouseWheelEvent
 import java.awt.image.BufferedImage
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.SwingUtilities
 
 class SynchronizedOutputTest {
@@ -32,25 +35,35 @@ class SynchronizedOutputTest {
     }
 
     @Test
-    fun `quick redraws need no indicator and a broken frame expires after output stops`() {
+    fun `an update whose program stops writing expires so the terminal is painted again`() {
         var now = 0L
         val changes = mutableListOf<Boolean>()
         val output = SynchronizedOutput(changes::add) { now }
         output.begin()
-        assertFalse(output.showProgress)
-        now = 200
-        assertTrue(output.showProgress)
         repeat(5) {
             now += 1_000
             output.touch()
             output.expire()
             assertTrue(output.active, "a long redraw continues while output arrives")
         }
+        assertEquals(5_000, output.age)
         now += 2_001
         output.expire()
         assertFalse(output.active)
         output.end()
         assertEquals(listOf(true, false), changes)
+
+        output.begin()
+        repeat(29) {
+            now += 1_000
+            output.touch()
+            output.expire()
+        }
+        assertTrue(output.active)
+        now += 1_000
+        output.touch()
+        output.expire()
+        assertFalse(output.active, "output that never finishes its update is shown after all")
     }
 
     @Test
@@ -110,34 +123,86 @@ class SynchronizedOutputTest {
     }
 
     @Test
-    fun `a history redraw stays hidden until complete and retains every scrollback row`() = onEdt {
-        val widget = widget()
+    fun `a long redraw leaves the last finished frame on screen until it is complete`() {
+        lateinit var widget: NopTerminalWidget
+        lateinit var panel: NopTerminalPanel
+        onEdt {
+            widget = widget()
+            panel = widget.terminalPanel as NopTerminalPanel
+            feed(panel, "Previous screen\u001b[?25l")
+            assertTrue(repaintDue(panel), "ordinary output is painted on the next tick")
+            feed(panel, "\u001b[?2026h\u001b[3J\u001b[2J\u001b[H" + (1..300).joinToString("") { "Example reply $it\r\n" } +
+                "Current prompt")
+            assertFalse(repaintDue(panel), "nothing is painted while the redraw is in progress, not even output from before it")
+        }
         try {
-            val panel = widget.terminalPanel as NopTerminalPanel
-            fun feed(text: String) {
-                val emulator = JediEmulator(SynchronizedOutputStream(ArrayTerminalDataStream(text.toCharArray()), panel.synchronizedOutput), widget.terminal)
-                while (emulator.hasNext()) emulator.next()
+            Thread.sleep(150)
+            onEdt {
+                assertTrue(pixels(paint(panel)).all { it == Color.WHITE.rgb },
+                    "a paint Swing asks for part way through a long redraw shows the background, not the rows printed so far")
+                feed(panel, "\u001b[?2026l")
+                assertTrue(repaintDue(panel), "the finished redraw is painted on the next tick")
             }
-            feed("Previous screen\u001b[?25l")
-            val image = BufferedImage(panel.width, panel.height, BufferedImage.TYPE_INT_RGB)
-            fun paint() { image.createGraphics().let { try { panel.paintComponent(it) } finally { it.dispose() } } }
-            paint()
-            val before = pixels(image)
-            feed("\u001b[?2026h\u001b[2J\u001b[H" + (1..300).joinToString("") { "Example reply $it\r\n" } + "Current prompt")
-            val rows = (-widget.terminalTextBuffer.historyLinesCount until widget.terminalTextBuffer.height)
-                .map { widget.terminalTextBuffer.getLine(it).text }
-            paint()
-            val during = pixels(image)
-            feed("\u001b[?2026l")
-            paint()
-            assertFalse(before.contentEquals(pixels(image)))
-            assertFalse(during.contentEquals(pixels(image)), "the in-progress redraw must not reveal partial history")
-            assertEquals(rows, (-widget.terminalTextBuffer.historyLinesCount until widget.terminalTextBuffer.height)
-                .map { widget.terminalTextBuffer.getLine(it).text })
-            assertTrue(screen(widget).contains("Current prompt"))
-            assertEquals(0, panel.verticalScrollModel.value)
-        } finally { widget.close() }
+            onEdt {
+                val buffer = widget.terminalTextBuffer
+                assertEquals(0, panel.verticalScrollModel.value)
+                assertTrue(screen(widget).contains("Current prompt"))
+                assertEquals("Example reply 1", buffer.getLine(-buffer.historyLinesCount).text.trimEnd())
+            }
+        } finally { onEdt { widget.close() } }
     }
+
+    @Test
+    fun `a reader scrolled up stays as far above the bottom when the conversation is printed again`() {
+        val conversation = (1..300).joinToString("") { "Example reply $it\r\n" } + "Current prompt"
+        lateinit var widget: NopTerminalWidget
+        lateinit var panel: NopTerminalPanel
+        var before = 0
+        var reading = ""
+        onEdt {
+            widget = widget()
+            panel = widget.terminalPanel as NopTerminalPanel
+            feed(panel, conversation)
+            paint(panel)
+        }
+        // After the scroll to the bottom a new terminal queues for itself.
+        onEdt {
+            repeat(10) { wheel(panel, -1) }
+            paint(panel)
+            before = panel.verticalScrollModel.value
+            reading = widget.terminalTextBuffer.getLine(before).text
+        }
+        try {
+            assertTrue(before < -20 && before > -widget.terminalTextBuffer.historyLinesCount)
+            onEdt { feed(panel, "\u001b[?2026h\u001b[3J\u001b[2J\u001b[H" + conversation + "\u001b[?2026l") }
+            onEdt {
+                assertEquals(before, panel.verticalScrollModel.value, "not thrown to the top of the reprinted scrollback")
+                assertEquals(reading, widget.terminalTextBuffer.getLine(panel.verticalScrollModel.value).text)
+                assertTrue(widget.userScrolledUp)
+            }
+        } finally { onEdt { widget.close() } }
+    }
+
+    private fun feed(panel: NopTerminalPanel, text: String) {
+        val widget = SwingUtilities.getAncestorOfClass(NopTerminalWidget::class.java, panel) as NopTerminalWidget
+        val emulator = JediEmulator(SynchronizedOutputStream(ArrayTerminalDataStream(text.toCharArray()), panel.synchronizedOutput), widget.terminal)
+        while (emulator.hasNext()) emulator.next()
+    }
+
+    private fun paint(panel: NopTerminalPanel): BufferedImage {
+        val image = BufferedImage(panel.width, panel.height, BufferedImage.TYPE_INT_RGB)
+        image.createGraphics().let { try { panel.paintComponent(it) } finally { it.dispose() } }
+        return image
+    }
+
+    private fun wheel(panel: NopTerminalPanel, rotation: Int) {
+        panel.dispatchEvent(MouseWheelEvent(panel, MouseWheelEvent.MOUSE_WHEEL, System.currentTimeMillis(),
+            0, 20, 20, 0, false, MouseWheelEvent.WHEEL_UNIT_SCROLL, 3, rotation))
+    }
+
+    /** Whether JediTerm's timer will paint the terminal on its next tick. */
+    private fun repaintDue(panel: TerminalPanel): Boolean =
+        (TerminalPanel::class.java.getDeclaredField("needRepaint").apply { isAccessible = true }.get(panel) as AtomicBoolean).get()
 
     private fun widget() = NopTerminalWidget(48, 12, NopTerminalSettings(Color.WHITE, Color.BLACK, Color.BLUE)).apply {
         terminalPanel.setSize(terminalPanel.preferredSize)

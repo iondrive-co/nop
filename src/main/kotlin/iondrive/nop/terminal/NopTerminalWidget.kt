@@ -10,13 +10,16 @@ import com.jediterm.terminal.TextStyle
 import com.jediterm.terminal.TtyConnector
 import com.jediterm.terminal.model.JediTerminal
 import com.jediterm.terminal.model.StyleState
+import com.jediterm.terminal.model.TerminalLine
 import com.jediterm.terminal.model.TerminalTextBuffer
+import com.jediterm.terminal.model.TextBufferChangesListener
 import com.jediterm.terminal.ui.JediTermWidget
 import com.jediterm.terminal.ui.TerminalPanel
 import com.jediterm.terminal.ui.TerminalAction
 import com.jediterm.terminal.ui.TerminalActionProvider
 import com.jediterm.terminal.ui.hyperlinks.LinkInfoEx
 import com.jediterm.terminal.ui.settings.SettingsProvider
+import iondrive.nop.Log
 import java.awt.Color
 import java.awt.Composite
 import java.awt.Dimension
@@ -108,9 +111,17 @@ internal class NopTerminalWidget(
     init {
         val panel = terminalPanel as NopTerminalPanel
         panel.cursorRow = { terminal.cursorY - 1 }
-        panel.onSynchronizedOutputFinished = {
+        panel.onSynchronizedOutputFinished = { rowsAboveBottom ->
             markMessagesSoon()
-            if (!userScrolledUp) scrollToBottom()
+            when {
+                // The conversation was printed again from the top: the reader stays as far above
+                // the bottom as before, or, at the bottom, stays there.
+                rowsAboveBottom != null && rowsAboveBottom > 0 -> {
+                    panel.showRowsAboveBottom(rowsAboveBottom)
+                    userScrolledUp = panel.verticalScrollModel.value < 0
+                }
+                rowsAboveBottom != null || !userScrolledUp -> scrollToBottom()
+            }
         }
         panel.onScrollInput = {
             settings.nudgeActive()
@@ -281,30 +292,71 @@ internal class NopTerminalPanel(
     styleState: StyleState,
 ) : TerminalPanel(settings, textBuffer, styleState) {
 
-    var onSynchronizedOutputFinished: (() -> Unit)? = null
+    /**
+     * Called on the event thread once a synchronized update has been emulated. When the update
+     * cleared the scrollback to print it again, it is passed how many rows above the bottom the
+     * reader was, 0 at the bottom; otherwise null.
+     */
+    var onSynchronizedOutputFinished: ((rowsAboveBottom: Int?) -> Unit)? = null
     private var disposed = false
+
+    /** A repaint asked for during an update, owed as soon as the update is complete. */
+    private val repaintHeld = AtomicBoolean(false)
     internal val synchronizedOutput = SynchronizedOutput(changed = ::synchronizedOutputChanged)
-    private val loadingTimer = Timer(60) { event ->
-        synchronizedOutput.expire()
-        if (synchronizedOutput.active) repaint() else (event.source as Timer).stop()
+
+    /** JediTerm's own flag for a repaint on its timer's next tick, which its timer reads and clears. */
+    private val repaintDue: AtomicBoolean? = runCatching {
+        TerminalPanel::class.java.getDeclaredField("needRepaint").apply { isAccessible = true }.get(this) as AtomicBoolean
+    }.onFailure { Log.warn("terminal repaints cannot be held for synchronized output: $it") }.getOrNull()
+
+    /** Ends an update whose program stopped writing before it finished it. */
+    private val expiryTimer = Timer(EXPIRY_CHECK_MS) { synchronizedOutput.expire() }
+
+    /**
+     * How many rows above the bottom the reader was when the update in progress cleared the
+     * scrollback, or null while no update has.
+     */
+    @Volatile
+    private var rebuiltFrom: Int? = null
+
+    /**
+     * Every repaint of the terminal JediTerm asks for comes through here, to be painted on its
+     * timer's next tick. During a synchronized update the request is held until the update is
+     * complete, so the screen keeps the last finished frame: a CLI that prints its whole conversation
+     * again, as Codex does on every resize and resume, is otherwise seen scrolling through it from
+     * the top for as long as the emulator takes to read it.
+     */
+    override fun repaint() {
+        // The superclass constructor calls this before the fields here are assigned.
+        val output: SynchronizedOutput? = synchronizedOutput
+        if (output != null && output.active) {
+            repaintHeld.set(true)
+            return
+        }
+        super.repaint()
     }
 
+    /** Runs on the thread that started or finished the update, before or after the emulator reads it. */
     private fun synchronizedOutputChanged(active: Boolean) {
-        SwingUtilities.invokeLater {
-            if (disposed) return@invokeLater
-            if (synchronizedOutput.active) {
-                if (!loadingTimer.isRunning) loadingTimer.start()
-            } else {
-                loadingTimer.stop()
-                if (!active) onSynchronizedOutputFinished?.invoke()
-                repaint()
+        if (active) {
+            // A repaint the timer has not got to yet would otherwise draw the update's first rows.
+            if (repaintDue?.getAndSet(false) == true) repaintHeld.set(true)
+            SwingUtilities.invokeLater { if (!disposed && synchronizedOutput.active) expiryTimer.start() }
+        } else {
+            val rowsAboveBottom = rebuiltFrom
+            rebuiltFrom = null
+            if (repaintHeld.getAndSet(false)) super.repaint()
+            SwingUtilities.invokeLater {
+                if (disposed) return@invokeLater
+                if (!synchronizedOutput.active) expiryTimer.stop()
+                onSynchronizedOutputFinished?.invoke(rowsAboveBottom)
             }
         }
     }
 
     override fun dispose() {
         disposed = true
-        loadingTimer.stop()
+        expiryTimer.stop()
         synchronizedOutput.reset()
         super.dispose()
     }
@@ -317,12 +369,39 @@ internal class NopTerminalPanel(
 
     init {
         verticalScrollModel.addChangeListener { viewingHistory = verticalScrollModel.value < 0 }
+        terminalTextBuffer.addChangesListener(object : TextBufferChangesListener {
+            override fun historyCleared() {
+                if (!synchronizedOutput.active || rebuiltFrom != null) return
+                // What the reader was looking at is about to be printed again, at the same distance
+                // from the bottom, so that distance is what to keep rather than a position in rows
+                // that are going away.
+                val pending = pendingHistoryScroll.getAndSet(0)
+                rebuiltFrom = if (viewingHistory) -(verticalScrollModel.value + pending) else 0
+            }
+            override fun linesChanged(fromIndex: Int) = Unit
+            override fun linesDiscardedFromHistory(lines: List<TerminalLine>) = Unit
+            override fun widthResized() = Unit
+        })
+    }
+
+    /** Shows the rows [rows] above the bottom, or as near as the scrollback reaches. */
+    fun showRowsAboveBottom(rows: Int) {
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            if (buffer.isUsingAlternateBuffer) return
+            val model = verticalScrollModel
+            val history = buffer.historyLinesCount
+            model.setRangeProperties(-minOf(rows, history), model.extent, -history, model.maximum, false)
+        } finally { buffer.unlock() }
     }
 
     override fun scrollArea(scrollRegionTop: Int, scrollRegionSize: Int, dy: Int) {
         // Only new primary-history rows move a view already reading that history. Accumulating
-        // offsets at the live screen applies old output to the user's next scroll instead.
-        val followsHistory = viewingHistory && !terminalTextBuffer.isUsingAlternateBuffer && scrollRegionTop == 1 && dy < 0
+        // offsets at the live screen applies old output to the user's next scroll instead. Rows
+        // printed again after the scrollback was cleared are placed when the update finishes.
+        val followsHistory = viewingHistory && rebuiltFrom == null && !terminalTextBuffer.isUsingAlternateBuffer &&
+            scrollRegionTop == 1 && dy < 0
         if (followsHistory) pendingHistoryScroll.addAndGet(dy)
         super.scrollArea(scrollRegionTop, scrollRegionSize, 0)
     }
@@ -461,8 +540,16 @@ internal class NopTerminalPanel(
     var cursorRow: () -> Int = { Int.MIN_VALUE }
 
     override fun paintComponent(g: Graphics) {
-        if (synchronizedOutput.active) {
-            if (synchronizedOutput.showProgress) paintLoading(g)
+        // Repaints are held during an update (see [repaint]), so a paint now is Swing's own: the
+        // terminal was shown, uncovered or resized. A short update is all but finished and is
+        // painted as it stands. A long one is still part way through printing the scrollback, and
+        // the last finished frame is already gone from the screen, so it gets the bare background
+        // until the update is complete.
+        if (synchronizedOutput.active && synchronizedOutput.age >= LIVE_PAINT_MS) {
+            g.color = settings.bg
+            g.fillRect(0, 0, width, height)
+            repaintHeld.set(true)
+            if (!synchronizedOutput.active && repaintHeld.getAndSet(false)) super.repaint()
             return
         }
         val buffer = terminalTextBuffer
@@ -485,28 +572,6 @@ internal class NopTerminalPanel(
         } finally {
             buffer.unlock()
         }
-    }
-
-    private fun paintLoading(graphics: Graphics) {
-        val g = graphics.create() as Graphics2D
-        try {
-            g.color = settings.bg
-            g.fillRect(0, 0, width, height)
-            g.font = settings.terminalFont
-            g.color = settings.fg
-            val label = if (userMessages == null) "Loading…" else "Loading conversation…"
-            val barWidth = minOf(280, (width - 48).coerceAtLeast(1))
-            val x = (width - barWidth) / 2
-            val y = height / 2
-            g.drawString(label, (width - g.fontMetrics.stringWidth(label)) / 2, y - 12)
-            g.color = Color(settings.fg.red, settings.fg.green, settings.fg.blue, 45)
-            g.fillRoundRect(x, y, barWidth, 4, 4, 4)
-            g.clipRect(x, y, barWidth, 4)
-            g.color = settings.link
-            val segment = maxOf(1, barWidth / 3)
-            val position = ((synchronizedOutput.elapsed % 1_200) * (barWidth + segment) / 1_200).toInt() - segment
-            g.fillRoundRect(x + position, y, segment, 4, 4, 4)
-        } finally { g.dispose() }
     }
 
     /**
@@ -557,6 +622,14 @@ internal class NopTerminalPanel(
                 verticalScrollModel.value = 0
             }
         }
+    }
+
+    private companion object {
+        /** How long an update can have been going on and still be painted as it stands. */
+        const val LIVE_PAINT_MS = 100L
+
+        /** How often a held update checks whether its program has stopped writing. */
+        const val EXPIRY_CHECK_MS = 250
     }
 }
 
