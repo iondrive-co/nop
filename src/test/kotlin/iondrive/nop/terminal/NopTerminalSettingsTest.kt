@@ -213,11 +213,15 @@ class NopTerminalSettingsTest {
         val s = settings()
         val widget = NopTerminalWidget(80, 24, s)
         val model = widget.terminalPanel.verticalScrollModel
-        model.setRangeProperties(-10, 24, -100, 24, false)
-        assertEquals(-10, model.value)
+        // One task on the UI thread, where the widget's own repaint and scroll timers run: off it,
+        // one of them can move the model between setting it and reading it back.
+        javax.swing.SwingUtilities.invokeAndWait {
+            model.setRangeProperties(-10, 24, -100, 24, false)
+            assertEquals(-10, model.value)
 
-        widget.scrollToBottom()
-        assertEquals(0, model.value, "scrollToBottom should reset scroll to 0")
+            widget.scrollToBottom()
+            assertEquals(0, model.value, "scrollToBottom should reset scroll to 0")
+        }
     }
 
     @Test
