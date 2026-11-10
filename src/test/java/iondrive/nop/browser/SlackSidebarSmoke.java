@@ -127,7 +127,8 @@ public class SlackSidebarSmoke {
                     if (!loadedFrame.isMain()) return;
                     var wrapped = loadedFrame.getURL().contains("wrapped=1");
                     if (wrapped) browser.setZoomLevel(SlackBrowsersKt.getSlackZoomLevel());
-                    browser.executeJavaScript((wrapped ? script : "") + "\nwindow.runFixture();", loadedFrame.getURL(), 0);
+                    // Only the sidebar fixture has a test to run; the other checks load pages of their own.
+                    browser.executeJavaScript((wrapped ? script : "") + "\nwindow.runFixture?.();", loadedFrame.getURL(), 0);
                 }
             });
             String origin = "http://127.0.0.1:" + server.getAddress().getPort() + "/client/TEXAMPLE";
@@ -210,6 +211,7 @@ public class SlackSidebarSmoke {
             }
             SlackSpellingSmoke.verify(browser, devtools, client);
             SlackDownloadSmoke.verify(browser, devtools, client, scratch, "http://127.0.0.1:" + server.getAddress().getPort());
+            SlackDraftTidySmoke.verify(browser, devtools, client, scratch);
         } finally {
             if (devtools != null) devtools.close();
             if (client != null) client.dispose();

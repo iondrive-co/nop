@@ -32,6 +32,8 @@ import org.cef.handler.CefLifeSpanHandlerAdapter
 import org.cef.handler.CefLoadHandler.ErrorCode
 import org.cef.handler.CefLoadHandlerAdapter
 import org.cef.handler.CefRequestHandlerAdapter
+import org.cef.handler.CefResourceRequestHandler
+import org.cef.misc.BoolRef
 import org.cef.network.CefCookieManager
 import org.cef.network.CefRequest
 import java.net.URI
@@ -60,6 +62,7 @@ object SlackBrowsers {
     private val mutableKnownWorkspaces = MutableStateFlow(loadWorkspaces())
     val knownWorkspaces = mutableKnownWorkspaces.asStateFlow()
     private val projectStore = SlackProjectStore(Settings::projectDataDir)
+    internal val draftTidy = SlackDraftTidy(::dataDirectory)
     private class ProjectState(var tabs: SlackWorkspaceTabs) {
         val workspaces = MutableStateFlow(tabs.open)
         val attention = MutableStateFlow<Map<String, SlackAttention>>(emptyMap())
@@ -364,7 +367,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
                         val next = app.createClient()
                         configure(next)
                         val browser = try {
-                            next.createBrowser(initialUrl, false, false)
+                            next.createBrowser(SlackBrowsers.draftTidy.firstUrl(initialUrl), false, false)
                         } catch (failure: Throwable) {
                             next.dispose()
                             throw failure
@@ -444,7 +447,7 @@ class SlackBrowser internal constructor(private val project: Path, private val i
         })
         client.addLoadHandler(object : CefLoadHandlerAdapter() {
             override fun onLoadEnd(browser: CefBrowser, frame: CefFrame, httpStatusCode: Int) {
-                if (frame.isMain && !browser.isPopup && SlackNavigation.isAppUrl(frame.url)) {
+                if (frame.isMain && !browser.isPopup && SlackNavigation.isAppUrl(frame.url) && !SlackDraftTidy.isPage(frame.url)) {
                     browser.zoomLevel = slackZoomLevel
                     browser.executeJavaScript(slackLayoutScript + "\n" + themeScript(), frame.url, 0)
                 }
@@ -486,6 +489,10 @@ class SlackBrowser internal constructor(private val project: Path, private val i
                 if (SlackNavigation.isWebUrl(url) || url == "about:blank") return false
                 return true
             }
+            override fun getResourceRequestHandler(browser: CefBrowser?, frame: CefFrame?, request: CefRequest,
+                                                   isNavigation: Boolean, isDownload: Boolean, requestInitiator: String?,
+                                                   disableDefaultHandling: BoolRef?): CefResourceRequestHandler? =
+                SlackBrowsers.draftTidy.resourceRequestHandler(request)
             override fun onOpenURLFromTab(browser: CefBrowser, frame: CefFrame, targetUrl: String, userGesture: Boolean): Boolean {
                 if (handleDesktopLink(targetUrl)) return true
                 if (saveFileLink(browser, targetUrl)) return true
