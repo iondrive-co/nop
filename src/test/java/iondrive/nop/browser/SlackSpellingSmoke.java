@@ -16,7 +16,10 @@ import java.util.Vector;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
-/** Real Chromium spelling and editing in invented, dynamically mounted Slack composers. */
+/**
+ * Real Chromium spelling and editing in invented, dynamically mounted Slack composers. Slack sets
+ * spellcheck on its composer from its own "Enable spellcheck" preference, and nop must never change it.
+ */
 final class SlackSpellingSmoke {
     private record SpellingMenu(String word, List<String> suggestions, List<String> labels) {}
 
@@ -36,10 +39,12 @@ final class SlackSpellingSmoke {
             }
         });
         try {
+            composerLeftAlone(calls);
             for (String surface : List.of("channel", "thread", "edit")) {
+                // A composer as Slack mounts it with its spelling preference on.
                 evaluate(calls, "document.querySelector('.p-view_contents--primary').innerHTML = " +
                     new Gson().toJson("<div id='spelling-editor' data-qa='texty_input' contenteditable='true' " +
-                        "spellcheck='false' style='font-size:20px;line-height:2;padding:20px'>" +
+                        "spellcheck='true' style='font-size:20px;line-height:2;padding:20px'>" +
                         "<strong>Keep formatting</strong> <span id='spelling-word'>Draft</span> " +
                         "<span id='spelling-mention' contenteditable='false' spellcheck='false'>@Avery</span> " +
                         "<code id='spelling-code' spellcheck='false'>mispeling</code></div>") + "; true");
@@ -48,9 +53,6 @@ final class SlackSpellingSmoke {
                     "range.selectNodeContents(document.querySelector('#spelling-word')); " +
                     "const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);})(), true");
                 calls.call("Input.insertText", "{\"text\":\"mispeling \"}", 5, TimeUnit.SECONDS);
-                if (!evaluate(calls, "document.querySelector('#spelling-editor').spellcheck").equals("true")) {
-                    throw new AssertionError("Message spelling not enabled on " + surface);
-                }
                 var menu = waitForTypo(calls, menus, "spelling-editor", "mispeling");
                 if (!menu.suggestions.contains("misspelling") || !menu.labels.contains("misspelling") ||
                     !menu.labels.contains("Add to dictionary")) {
@@ -82,6 +84,44 @@ final class SlackSpellingSmoke {
             }
         } finally {
             client.removeContextMenuHandler();
+        }
+    }
+
+    /**
+     * With Slack's spelling preference off, its composer says spellcheck="false". Focusing it and typing
+     * must not make nop write any attribute there: Slack's editor observes them all, and nop turning
+     * spellcheck on at focus came with Slack saving drafts nobody had typed.
+     */
+    private static void composerLeftAlone(DevToolsCalls calls) throws Exception {
+        evaluate(calls, "document.querySelector('.p-view_contents--primary').innerHTML = " +
+            new Gson().toJson("<div id='slack-composer' data-qa='texty_input' contenteditable='true' spellcheck='false' " +
+                "style='font-size:20px;line-height:2;padding:20px'><p>Draft</p></div>") + "; " +
+            "window.composerAttributeWrites = []; new MutationObserver(records => window.composerAttributeWrites.push(" +
+            "...records.filter(r => r.type === 'attributes').map(r => r.target.id + ' ' + r.attributeName)))" +
+            ".observe(document.querySelector('#slack-composer'), {attributes: true, subtree: true}); true");
+        click(calls, "slack-composer");
+        evaluate(calls, "(() => {const editor = document.querySelector('#slack-composer'); editor.focus(); " +
+            "const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false); " +
+            "const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);})(), true");
+        calls.call("Input.insertText", "{\"text\":\" typed\"}", 5, TimeUnit.SECONDS);
+        Thread.sleep(300);
+        if (!evaluate(calls, "document.querySelector('#slack-composer').textContent").endsWith("typed")) {
+            throw new AssertionError("Typing did not reach the composer");
+        }
+        var writes = evaluate(calls, "JSON.stringify(window.composerAttributeWrites)");
+        if (!writes.equals("[]")) throw new AssertionError("nop wrote to Slack's composer: " + writes);
+        if (!evaluate(calls, "document.querySelector('#slack-composer').getAttribute('spellcheck')").equals("false")) {
+            throw new AssertionError("nop overrode Slack's spelling preference");
+        }
+        System.out.println("SLACK_SPELLING composer left as Slack set it");
+    }
+
+    private static void click(DevToolsCalls calls, String id) throws Exception {
+        var point = JsonParser.parseString(evaluate(calls, "JSON.stringify((() => {const r = document.querySelector('#" + id +
+            "').getBoundingClientRect(); return {x: r.x + r.width - 4, y: r.y + r.height / 2};})())")).getAsJsonObject();
+        String position = "\"x\":" + point.get("x") + ",\"y\":" + point.get("y") + ",\"button\":\"left\",\"clickCount\":1";
+        for (String type : List.of("mousePressed", "mouseReleased")) {
+            calls.call("Input.dispatchMouseEvent", "{\"type\":\"" + type + "\"," + position + "}", 5, TimeUnit.SECONDS);
         }
     }
 

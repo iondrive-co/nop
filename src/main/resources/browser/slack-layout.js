@@ -295,11 +295,9 @@
         event.stopImmediatePropagation();
     }
 
-    // The host supplies spelling for message editors; code and mention descendants keep their opt-outs.
-    function enableSpelling(event) {
-        const editor = event.target?.closest?.('[data-qa="texty_input"][contenteditable="true"]');
-        if (editor && !editor.spellcheck) editor.spellcheck = true;
-    }
+    // Nothing here writes to Slack's message editor: its Quill instance observes every attribute of
+    // the composer, and turning spellcheck on there whenever it was focused (1.7.2) came with Slack
+    // saving drafts nobody had typed. Spelling follows Slack's own "Enable spellcheck" preference.
 
     // Use Slack's own menu so permissions, edit history and the editor stay native.
     function messageMenu(event) {
@@ -325,9 +323,6 @@
     document.addEventListener("pointerup", pointerUp, true);
     document.addEventListener("pointercancel", pointerUp, true);
     document.addEventListener("contextmenu", messageMenu, true);
-    document.addEventListener("focusin", enableSpelling, true);
-    document.addEventListener("beforeinput", enableSpelling, true);
-    enableSpelling({ target: document.activeElement });
     window.__nopSlackLayout = {
         refresh: schedule, metadata, setTheme,
         dispose() {
@@ -339,8 +334,6 @@
             document.removeEventListener("pointerup", pointerUp, true);
             document.removeEventListener("pointercancel", pointerUp, true);
             document.removeEventListener("contextmenu", messageMenu, true);
-            document.removeEventListener("focusin", enableSpelling, true);
-            document.removeEventListener("beforeinput", enableSpelling, true);
             if (pending) cancelAnimationFrame(pending);
             clear();
             style.remove(); themeStyle.remove();
