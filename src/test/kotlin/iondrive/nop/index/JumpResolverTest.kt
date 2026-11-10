@@ -3,7 +3,10 @@ package iondrive.nop.index
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 
 class JumpResolverTest {
 
@@ -41,6 +44,19 @@ class JumpResolverTest {
     @Test
     fun `resolves a leading-dot dotfile`() {
         assertEquals(File(root, ".gitignore"), fileJump("edit .gitignore", 8)?.file)
+    }
+
+    @Test
+    fun `an exact path to a file the index leaves out resolves, inside the project only`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project")
+        Files.createDirectories(project.resolve("scratch/run"))
+        Files.writeString(project.resolve("scratch/run/out.txt"), "x")
+        Files.writeString(tmp.resolve("outside.txt"), "x")
+        val listed = FileIndex(listOf("src/App.kt"))
+
+        val hit = JumpResolver.resolve(emptySymbols, project.toFile(), null, "see scratch/run/out.txt now", 8, listed)
+        assertEquals(project.resolve("scratch/run/out.txt").toAbsolutePath().normalize(), hit?.file?.toPath())
+        assertNull(JumpResolver.resolve(emptySymbols, project.toFile(), null, "see ../outside.txt now", 8, listed))
     }
 
     @Test

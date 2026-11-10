@@ -1,5 +1,6 @@
 package iondrive.nop.index
 
+import iondrive.nop.Log
 import iondrive.nop.lang.JavaDeclKind
 import iondrive.nop.lang.JavaParse
 import iondrive.nop.lang.JavaSymbols
@@ -19,6 +20,13 @@ object Indexer {
         ".git", ".idea", ".gradle", ".vscode",
         "node_modules", "build", "out", "target", "dist", ".next", "__pycache__",
     )
+
+    /**
+     * Most files one walk lists. Past it the walk stops and the log says so: the index then lacks
+     * the rest of the project, where a list with no end would take the heap with it. Far above any
+     * source tree once ignored directories and linked directories are left out.
+     */
+    internal const val MAX_FILES = 1_000_000
 
     private val YAML_EXT = setOf("yml", "yaml")
     private val TS_EXT = setOf("ts", "tsx", "js", "jsx", "mjs", "cjs")
@@ -44,9 +52,13 @@ object Indexer {
      * the same list [FileIndex.build] walks the tree for, so a caller that wants both pays for one
      * walk instead of two. On a large project the walk is half of what a rebuild costs.
      *
+     * The walk leaves out build directories by name, the directories git ignores whole
+     * ([ignoredDirectories]), and links to directories ([ProjectWalk]), and lists at most
+     * [maxFiles] files.
+     *
      * [stop] is asked at every directory and before every Java parse; once it answers true the build
      * throws [CancellationException]. A blocking build ignores its coroutine's cancellation, and on a
-     * tree of millions of files it would otherwise walk on to the end for a project already closed.
+     * large tree it would otherwise walk on to the end for a project already closed.
      */
     fun build(
         projectRoot: Path,
@@ -54,12 +66,15 @@ object Indexer {
         since: Long = 0L,
         files: MutableList<String>? = null,
         stop: () -> Boolean = { false },
+        maxFiles: Int = MAX_FILES,
     ): SymbolIndex {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return SymbolIndex()
         val out = mutableListOf<IndexEntry>()
         val javaFiles = mutableListOf<File>()
-        walk(rootFile, rootFile, "", out, javaFiles, files, stop)
+        val walk = Walk(rootFile, ignoredDirectories(rootFile), maxFiles, stop)
+        walk.visit(rootFile, "", out, javaFiles, files)
+        if (walk.full) Log.warn("index of $rootFile stopped at $maxFiles files; the rest of it is not indexed")
         val known = if (previous != null && since > 0L) javaEntriesByFile(previous) else emptyMap()
         val reused = mutableListOf<IndexEntry>()
         val toParse = javaFiles.filter { file ->
@@ -141,28 +156,39 @@ object Indexer {
      * leaves mtimes untouched on a filesystem that doesn't update directory mtimes is the one
      * case this can miss; the manual Refresh and the next real change both recover from it.
      *
-     * [stop] is asked at every directory, as in [build].
+     * It leaves out what [build] leaves out, and stops counting where [build] stops listing, so a
+     * project's count agrees with its cached list. [stop] is asked at every directory, as in [build].
      */
-    fun isStale(projectRoot: Path, since: Long, cachedFileCount: Int, stop: () -> Boolean = { false }): Boolean {
+    fun isStale(
+        projectRoot: Path,
+        since: Long,
+        cachedFileCount: Int,
+        stop: () -> Boolean = { false },
+        maxFiles: Int = MAX_FILES,
+    ): Boolean {
         val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
         if (!rootFile.isDirectory) return true
+        val skipped = ignoredDirectories(rootFile)
         var count = 0
-        val stack = ArrayDeque<File>()
-        stack.addLast(rootFile)
+        val stack = ArrayDeque<Pair<File, String>>()
+        stack.addLast(rootFile to "")
         while (stack.isNotEmpty()) {
             stopIfAsked(rootFile, stop)
-            val dir = stack.removeLast()
+            val (dir, prefix) = stack.removeLast()
             val children = dir.listFiles() ?: continue
             for (f in children) {
                 if (f.name in IGNORED_DIR_NAMES) continue
                 if (ProjectWalk.skips(rootFile, f)) continue
+                val rel = prefix + f.name
                 if (f.isDirectory) {
+                    if (rel in skipped) continue
                     if (f.lastModified() > since) return true
-                    stack.addLast(f)
+                    stack.addLast(f to "$rel/")
                 } else if (f.isFile) {
                     if (f.lastModified() > since) return true
                     count++
                     if (count > cachedFileCount) return true
+                    if (count >= maxFiles) return count != cachedFileCount
                 }
             }
         }
@@ -170,31 +196,61 @@ object Indexer {
     }
 
     /**
-     * [prefix] is [dir]'s path relative to [root] with a trailing `/`, or empty for the root itself.
-     * Children come from `listFiles` on a normalised root, so a child's relative path is the prefix
-     * and its name — the answer [relPath] would give, without two path normalisations per file.
+     * The directories under [root] that git ignores whole, as project-relative paths, or none when
+     * git cannot say: no repository, or no git.
+     *
+     * They are where run output, caches and scratch copies of the tree pile up, and one of them can
+     * hold many times the files of the rest of the project, so the walks leave them out; the project
+     * tree still shows them. git answers because only git applies every rule that decides this (see
+     * [SearchScope]), and with `--directory` it names an ignored directory without listing what is in
+     * it, which costs about what the project's own status does.
      */
-    private fun walk(
-        root: File,
-        dir: File,
-        prefix: String,
-        out: MutableList<IndexEntry>,
-        javaFiles: MutableList<File>,
-        files: MutableList<String>?,
-        stop: () -> Boolean,
+    internal fun ignoredDirectories(root: File): Set<String> =
+        GitLsFiles.run(root.toPath(), listOf("--others", "--ignored", "--exclude-standard", "--directory", "--", ".")) {
+            Log.warn("project index of $root: $it, so the directories git ignores are indexed too")
+        }.orEmpty().filter { it.endsWith('/') }.mapTo(HashSet()) { it.removeSuffix("/") }
+
+    /** One [build]'s walk of [root]: what it leaves out, and how many files it has listed so far. */
+    private class Walk(
+        val root: File,
+        val skipped: Set<String>,
+        val maxFiles: Int,
+        val stop: () -> Boolean,
     ) {
-        stopIfAsked(root, stop)
-        val children = dir.listFiles() ?: return
-        for (f in children) {
-            if (f.name in IGNORED_DIR_NAMES) continue
-            if (ProjectWalk.skips(root, f)) continue
-            val rel = prefix + f.name
-            if (f.isDirectory) {
-                indexDirectory(root, f, out)
-                walk(root, f, "$rel/", out, javaFiles, files, stop)
-            } else if (f.isFile) {
-                files?.add(rel)
-                if (f.extension.equals("java", ignoreCase = true)) javaFiles += f else indexFile(f, rel, out)
+        var listed = 0
+
+        /** Whether the walk has listed [maxFiles] and lists nothing more. */
+        val full: Boolean get() = listed >= maxFiles
+
+        /**
+         * [prefix] is [dir]'s path relative to [root] with a trailing `/`, or empty for the root
+         * itself. Children come from `listFiles` on a normalised root, so a child's relative path is
+         * the prefix and its name — the answer [relPath] would give, without two path normalisations
+         * per file.
+         */
+        fun visit(
+            dir: File,
+            prefix: String,
+            out: MutableList<IndexEntry>,
+            javaFiles: MutableList<File>,
+            files: MutableList<String>?,
+        ) {
+            stopIfAsked(root, stop)
+            val children = dir.listFiles() ?: return
+            for (f in children) {
+                if (full) return
+                if (f.name in IGNORED_DIR_NAMES) continue
+                if (ProjectWalk.skips(root, f)) continue
+                val rel = prefix + f.name
+                if (f.isDirectory) {
+                    if (rel in skipped) continue
+                    indexDirectory(root, f, out)
+                    visit(f, "$rel/", out, javaFiles, files)
+                } else if (f.isFile) {
+                    listed++
+                    files?.add(rel)
+                    if (f.extension.equals("java", ignoreCase = true)) javaFiles += f else indexFile(f, rel, out)
+                }
             }
         }
     }

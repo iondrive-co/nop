@@ -82,11 +82,11 @@ class FileIndexTest {
     }
 
     /**
-     * A link out to bulk data on a network share would cost a round trip per file on every refresh.
-     * A link that stays inside the project is followed.
+     * A link out to bulk data on a network share would cost a round trip per file on every refresh,
+     * and one to a directory inside the project names files listed already where they live.
      */
     @Test
-    fun `build does not follow a link out of the project but follows one within it`(@TempDir tmp: Path) {
+    fun `build follows no link to a directory, in the project or out of it`(@TempDir tmp: Path) {
         val project = tmp.resolve("project")
         val elsewhere = tmp.resolve("share")
         Files.createDirectories(elsewhere.resolve("bulk"))
@@ -97,7 +97,7 @@ class FileIndexTest {
         Files.createSymbolicLink(project.resolve("alias"), project.resolve("src"))
 
         val idx = FileIndex.build(project)
-        assertEquals(listOf("alias/Main.kt", "src/Main.kt"), idx.files)
+        assertEquals(listOf("src/Main.kt"), idx.files)
     }
 
     /**
@@ -124,7 +124,7 @@ class FileIndexTest {
         assertEquals(listOf("sub/kept.txt"), FileIndex.build(tmp).files)
     }
 
-    /** Neither link points at a directory holding it; the loop only shows on going through both. */
+    /** Neither link points at a directory holding it; the loop would only show going through both. */
     @Test
     fun `build does not go round two links that lead to each other`(@TempDir tmp: Path) {
         Files.createDirectories(tmp.resolve("x"))
@@ -134,22 +134,22 @@ class FileIndexTest {
         Files.createSymbolicLink(tmp.resolve("x/to-y"), tmp.resolve("y"))
         Files.createSymbolicLink(tmp.resolve("y/to-x"), tmp.resolve("x"))
 
-        assertEquals(
-            listOf("x/f.txt", "x/to-y/g.txt", "y/g.txt", "y/to-x/f.txt"),
-            FileIndex.build(tmp).files,
-        )
+        assertEquals(listOf("x/f.txt", "y/g.txt"), FileIndex.build(tmp).files)
     }
 
-    /** Two links to one directory are not a loop, and neither is a link beside what it names. */
+    /**
+     * Stage directories that link back to the tree's own directories, one stage per job: walked, each
+     * stage would list the linked trees again, and a few dozen stages make millions of paths.
+     */
     @Test
-    fun `build still follows a link to a directory that does not hold it`(@TempDir tmp: Path) {
+    fun `build lists what links name once, where it lives`(@TempDir tmp: Path) {
         Files.createDirectories(tmp.resolve("a"))
         Files.createDirectories(tmp.resolve("shared"))
         Files.writeString(tmp.resolve("shared/s.txt"), "")
         Files.createSymbolicLink(tmp.resolve("a/one"), tmp.resolve("shared"))
         Files.createSymbolicLink(tmp.resolve("a/two"), tmp.resolve("shared"))
 
-        assertEquals(listOf("a/one/s.txt", "a/two/s.txt", "shared/s.txt"), FileIndex.build(tmp).files)
+        assertEquals(listOf("shared/s.txt"), FileIndex.build(tmp).files)
     }
 
     @Test
@@ -197,7 +197,7 @@ class FileIndexTest {
         assertEquals(FileIndex.build(project).files, FileIndex.of(walked).files)
         assertEquals(
             listOf(
-                ".claude/settings.json", "alias/app/Main.kt", "README.md", "roles/web/tasks/main.yml",
+                ".claude/settings.json", "README.md", "roles/web/tasks/main.yml",
                 "src/main/java/app/Tool.java", "src/main/kotlin/app/Main.kt",
             ),
             FileIndex.of(walked).files,

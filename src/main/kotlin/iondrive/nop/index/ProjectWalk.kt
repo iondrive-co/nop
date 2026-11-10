@@ -4,45 +4,28 @@ import java.io.File
 import java.nio.file.Files
 
 /**
- * The rule the project walks share about symbolic links: one that points out of the project is
- * not followed.
+ * The rule the project walks share about symbolic links: a link to a directory is not walked, and a
+ * link to a file is listed unless it points out of the project.
  *
- * A link out of the tree says the thing it names lives somewhere else, and the somewhere else can
- * be anything — often a network share of bulk data, where every refresh's staleness walk and every
- * rebuild would pay a round trip per file for data no index or search is going to use. A link that
- * stays inside the project is followed; what it names is part of the project either way.
+ * A link to a directory inside the project names files the walk reaches anyway, at the path where
+ * they live, so walking it lists them again under a second name. Tools that stage work by linking
+ * a tree's directories back into a scratch copy of it (`stage/data -> ../../data`, one stage per
+ * job) turn that into the whole tree again for every stage: a project of two hundred thousand files
+ * walked as millions of paths, more than a heap holds. A link to a directory outside the project
+ * says the thing it names lives somewhere else, often a network share of bulk data, where every
+ * refresh would pay a round trip per file for data no index or search is going to use.
  *
- * The target is resolved from the link's own text, without touching it. Asking the filesystem
- * would mean a round trip to exactly the share the rule is there to stay off. The one thing this
- * misses is a link inside the project that points at a second link which then leaves; that one is
- * followed.
- *
- * A link back to a directory the walk came through is not followed either, the check `find -L`
- * makes. The walk would go round until the kernel gave up at 40 links in a path, listing the tree
- * under that directory forty times over, at ever longer paths. A link from `var/dev/job/stage/var`
- * to `var` turned a hundred thousand files into four million paths, and those filled a 2 GB heap.
+ * A link to a file costs one entry, so it is listed, except one leading out of the project, which is
+ * not followed onto someone else's disk either. Its target is resolved from the link's own text,
+ * without touching it: asking the filesystem would mean a round trip to exactly the share the rule is
+ * there to stay off.
  */
 internal object ProjectWalk {
     /** True when a walk of [root] should not go through [f]. */
-    fun skips(root: File, f: File): Boolean = leavesProject(root, f) || loopsBack(root, f)
-
-    /**
-     * True when [f] is a symbolic link to a directory on the way from [root] down to it. Compared by
-     * real path, because a loop made of several links shows only once they are resolved; that costs
-     * nothing on the share [leavesProject] stays off, since [skips] has ruled out links to it first.
-     */
-    private fun loopsBack(root: File, f: File): Boolean {
+    fun skips(root: File, f: File): Boolean {
         val path = f.toPath()
-        if (!Files.isSymbolicLink(path) || !Files.isDirectory(path)) return false
-        val target = runCatching { path.toRealPath() }.getOrNull() ?: return false
-        val top = root.toPath()
-        var dir = path.parent
-        while (dir != null) {
-            if (runCatching { dir.toRealPath() }.getOrNull() == target) return true
-            if (dir == top) return false
-            dir = dir.parent
-        }
-        return false
+        if (!Files.isSymbolicLink(path)) return false
+        return leavesProject(root, f) || Files.isDirectory(path)
     }
 
     /** True when [f] is a symbolic link whose target lies outside [root]. */

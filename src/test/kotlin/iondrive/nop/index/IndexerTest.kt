@@ -2,8 +2,10 @@ package iondrive.nop.index
 
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CancellationException
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
@@ -376,6 +378,58 @@ class IndexerTest {
     @Test fun `a build that is never stopped is the same as one without stop`(@TempDir tmp: Path) {
         tenDirectories(tmp)
         assertEquals(Indexer.build(tmp).all(), Indexer.build(tmp, stop = { false }).all())
+    }
+
+    private fun git(dir: Path, vararg args: String) {
+        val p = ProcessBuilder(listOf("git", "-C", dir.toString()) + args).redirectErrorStream(true).start()
+        p.inputStream.readAllBytes()
+        check(p.waitFor(30, TimeUnit.SECONDS) && p.exitValue() == 0) { "git ${args.toList()} failed" }
+    }
+
+    /**
+     * Jobs that stage work in a scratch copy of the tree with links back to its directories, one
+     * stage per job. Walked, every stage lists the linked directories again.
+     */
+    @Test fun `stage directories linking back into the project are not walked again`(@TempDir tmp: Path) {
+        tmp.resolve("data/d.json").also { it.parent.createDirectories() }.writeText("{}\n")
+        tmp.resolve("docs/x.md").also { it.parent.createDirectories() }.writeText("# x\n")
+        for (job in 1..3) {
+            val stage = tmp.resolve("runs/$job/stage").createDirectories()
+            Files.createSymbolicLink(stage.resolve("data"), tmp.resolve("data"))
+            Files.createSymbolicLink(stage.resolve("docs"), Path.of("../../../docs"))
+        }
+        val walked = mutableListOf<String>()
+        Indexer.build(tmp, files = walked)
+        assertEquals(listOf("data/d.json", "docs/x.md"), walked.sorted())
+    }
+
+    @Test fun `directories git ignores whole are left out of the walk and the probe`(@TempDir tmp: Path) {
+        git(tmp, "init", "-q")
+        tmp.resolve(".gitignore").writeText("scratch/\n")
+        tmp.resolve("src/a.kt").also { it.parent.createDirectories() }.writeText("fun a() = 1\n")
+        val churn = tmp.resolve("scratch/run/b.kt").also { it.parent.createDirectories() }
+        churn.writeText("fun b() = 2\n")
+
+        val walked = mutableListOf<String>()
+        val index = Indexer.build(tmp, files = walked)
+        assertEquals(listOf(".gitignore", "src/a.kt"), walked.sorted())
+        assertTrue(index.lookup("b").isEmpty())
+        assertEquals(1, index.lookup("a").size)
+
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        // Output written into an ignored directory must not make the project look changed.
+        churn.toFile().setLastModified(future)
+        churn.parent.toFile().setLastModified(future)
+        assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = walked.size))
+    }
+
+    @Test fun `a walk stops at its file cap and the probe counts to the same cap`(@TempDir tmp: Path) {
+        tenDirectories(tmp)
+        val walked = mutableListOf<String>()
+        Indexer.build(tmp, files = walked, maxFiles = 4)
+        assertEquals(4, walked.size)
+        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 4, maxFiles = 4))
     }
 
     @Test fun `the staleness probe stops once asked`(@TempDir tmp: Path) {

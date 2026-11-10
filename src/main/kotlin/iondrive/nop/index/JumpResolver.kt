@@ -228,6 +228,8 @@ object JumpResolver {
         fun hit(path: String) = JumpTarget(File(projectRoot, path), 1)
 
         files.firstOrNull { it == token }?.let { return hit(it) }
+        // A full path to a file the index leaves out, in a directory git ignores, is still a file.
+        if (token.contains('/')) onDiskInProject(projectRoot, token)?.let { return JumpTarget(it, 1) }
         if (token.contains('/')) {
             files.firstOrNull { it.endsWith("/$token") }?.let { return hit(it) }
         }
@@ -243,5 +245,13 @@ object JumpResolver {
             }?.let { return hit(it) }
         }
         return null
+    }
+
+    /** [rel] under [projectRoot] when it is a file there, and does not climb out of the project. */
+    private fun onDiskInProject(projectRoot: File, rel: String): File? {
+        val root = projectRoot.toPath().toAbsolutePath().normalize()
+        val path = runCatching { root.resolve(rel).normalize() }.getOrNull() ?: return null
+        if (!path.startsWith(root)) return null
+        return path.toFile().takeIf { it.isFile }
     }
 }

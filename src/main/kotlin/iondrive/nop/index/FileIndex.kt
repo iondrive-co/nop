@@ -6,8 +6,9 @@ import java.nio.file.Path
 
 /**
  * Flat list of project-relative file paths used to power the double-shift file search dialog.
- * Built from the same filtered walk as [Indexer] so search results stay consistent with what the
- * project tree displays. Persisted alongside the symbol index under the project's data dir.
+ * Built from the same filtered walk as [Indexer]: everything on disk except build directories, the
+ * directories git ignores whole, and links to directories. Persisted alongside the symbol index
+ * under the project's data dir.
  */
 class FileIndex(val files: List<String> = emptyList()) {
 
@@ -21,7 +22,7 @@ class FileIndex(val files: List<String> = emptyList()) {
             val rootFile = projectRoot.toAbsolutePath().normalize().toFile()
             if (!rootFile.isDirectory) return FileIndex()
             val out = ArrayList<String>()
-            walk(rootFile, rootFile, out)
+            walk(rootFile, rootFile, Indexer.ignoredDirectories(rootFile), out)
             return of(out)
         }
 
@@ -35,15 +36,16 @@ class FileIndex(val files: List<String> = emptyList()) {
          */
         fun of(paths: Collection<String>): FileIndex = FileIndex(paths.sortedWith(String.CASE_INSENSITIVE_ORDER))
 
-        private fun walk(root: File, dir: File, out: MutableList<String>) {
+        private fun walk(root: File, dir: File, skipped: Set<String>, out: MutableList<String>) {
             val children = dir.listFiles() ?: return
             for (f in children) {
-                // Dotfiles and dot-directories (.claude, .github, …) are indexed; only the curated
-                // build/VCS names in IGNORED_DIR_NAMES are pruned, mirroring the project tree.
+                // Dotfiles and dot-directories (.claude, .github, …) are indexed; the curated
+                // build/VCS names in IGNORED_DIR_NAMES and the directories git ignores are pruned.
                 if (f.name in IGNORED_DIR_NAMES) continue
                 if (ProjectWalk.skips(root, f)) continue
                 if (f.isDirectory) {
-                    walk(root, f, out)
+                    if (relPath(root, f) in skipped) continue
+                    walk(root, f, skipped, out)
                 } else if (f.isFile) {
                     out += relPath(root, f)
                 }
