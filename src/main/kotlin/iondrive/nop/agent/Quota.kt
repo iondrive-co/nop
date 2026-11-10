@@ -17,12 +17,17 @@ import java.time.ZoneId
  * [resetsIn] is set only for a refusal that timed itself — `agy` ends its with "Resets in 7m31s" —
  * and is null for the CLIs that give a clock time or nothing at all. It is what tells a wall apart
  * from the windows an account's usage reading covers: see [AgentSession.onQuotaWall].
+ *
+ * [resetsAt] is the clock time the CLI printed for its window turning over — Claude Code's
+ * "resets 10:10am (Europe/London)" — and says only when the wall ends, not which allowance it is,
+ * so it times a wait without weighing in on whether to hand over.
  */
 data class QuotaHit(
     val kind: String,
     val line: String,
     val matched: String = "",
     val resetsIn: Duration? = null,
+    val resetsAt: Instant? = null,
 )
 
 /**
@@ -90,6 +95,7 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 line = line,
                 matched = match.value,
                 resetsIn = resetsInFrom(line),
+                resetsAt = resetsAtFrom(line),
             ),
         )
     }
@@ -340,9 +346,9 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
          * Only on the line the phrase was found on. This is read as the vendor naming the allowance
          * it refused against — [AgentSession.onQuotaWall] lets it outrank a usage reading that knows
          * nothing about that allowance — so the looser a shape it were allowed to take, the more of
-         * the agent's own output could wear it. Claude Code's "resets 8:10pm" is deliberately not
-         * matched: it is a clock time for a provider where the account's own reading says when the
-         * window turns over anyway.
+         * the agent's own output could wear it. Claude Code's "resets 8:10pm" is not matched here: it
+         * names one of the windows the account's reading covers, so it is no evidence of another
+         * allowance. It is read for timing alone, by [resetsAtFrom].
          */
         internal fun resetsInFrom(
             text: String,
@@ -362,16 +368,8 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
 
             return TRY_AGAIN_AT.findAll(text).firstNotNullOfOrNull { match ->
                 val (hStr, mStr, meridiem) = match.destructured
-                val rawHour = hStr.toIntOrNull() ?: return@firstNotNullOfOrNull null
-                val minute = mStr.toIntOrNull() ?: return@firstNotNullOfOrNull null
-                if (rawHour !in 1..12 || minute !in 0..59) return@firstNotNullOfOrNull null
-                val hour = when {
-                    meridiem.equals("am", ignoreCase = true) -> if (rawHour == 12) 0 else rawHour
-                    else -> if (rawHour == 12) 12 else rawHour + 12
-                }
-                val targetTime = LocalTime.of(hour, minute)
-                val currentZdt = now.atZone(zone)
-                val todayTarget = currentZdt.with(targetTime)
+                val time = clockTime(hStr, mStr, meridiem) ?: return@firstNotNullOfOrNull null
+                val todayTarget = now.atZone(zone).with(time)
                 val targetInstant = todayTarget.toInstant()
                 when {
                     targetInstant.isAfter(now) -> Duration.between(now, targetInstant)
@@ -380,6 +378,58 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
                 }
             }
         }
+
+        /**
+         * The clock time a wall says its window resets at — Claude Code's "resets 10:10am
+         * (Europe/London)" — or null when the line gives none.
+         *
+         * Read in the zone the CLI names in brackets, else [zone]. The time is the next one at or
+         * before which the window can turn over: today's, or tomorrow's when today's is long gone. A
+         * time passed within the last [RECENTLY_PASSED] is returned as it is, in the past, because
+         * the screen can still show a wall drawn before its reset, and that wall is over now rather
+         * than a day from now.
+         *
+         * A wall that names a date as well ("resets Nov 14 at 3pm") is not read: the time alone
+         * would be the wrong day.
+         */
+        internal fun resetsAtFrom(
+            text: String,
+            now: Instant = Instant.now(),
+            zone: ZoneId = ZoneId.systemDefault(),
+        ): Instant? = RESETS_AT.findAll(text).firstNotNullOfOrNull { match ->
+            val (hStr, mStr, meridiem, zoneName) = match.destructured
+            val time = clockTime(hStr, mStr.ifEmpty { "00" }, meridiem) ?: return@firstNotNullOfOrNull null
+            val wallZone = zoneName.takeIf { it.isNotEmpty() }
+                ?.let { runCatching { ZoneId.of(it) }.getOrNull() } ?: zone
+            val today = now.atZone(wallZone).with(time)
+            val todayInstant = today.toInstant()
+            when {
+                !todayInstant.isBefore(now) -> todayInstant
+                Duration.between(todayInstant, now) <= RECENTLY_PASSED -> todayInstant
+                else -> today.plusDays(1).toInstant()
+            }
+        }
+
+        /** A 12-hour clock reading as a time of day, or null when it is no such time. */
+        private fun clockTime(hours: String, minutes: String, meridiem: String): LocalTime? {
+            val rawHour = hours.toIntOrNull() ?: return null
+            val minute = minutes.toIntOrNull() ?: return null
+            if (rawHour !in 1..12 || minute !in 0..59) return null
+            val hour = when {
+                meridiem.equals("am", ignoreCase = true) -> if (rawHour == 12) 0 else rawHour
+                else -> if (rawHour == 12) 12 else rawHour + 12
+            }
+            return LocalTime.of(hour, minute)
+        }
+
+        /** "resets 10:10am", "resets 3pm", each optionally followed by "(Area/City)". */
+        private val RESETS_AT = Regex(
+            """\bresets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b(?:\s*\(([A-Za-z0-9_+\-]+(?:/[A-Za-z0-9_+\-]+)*)\))?""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /** How long after its time a wall's reset still counts as the one just gone, not tomorrow's. */
+        private val RECENTLY_PASSED: Duration = Duration.ofHours(12)
 
         /** The countdown's shape. Every part is optional; [resetsInFrom] rejects a match with none. */
         private val RESETS_IN = Regex(

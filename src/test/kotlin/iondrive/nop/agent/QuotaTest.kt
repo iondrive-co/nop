@@ -349,5 +349,57 @@ class QuotaTest {
         val resetsIn = QuotaWatcher.resetsInFrom(line, now, zone)
         assertEquals(Duration.ofHours(2).plusMinutes(15), resetsIn)
     }
+
+    @Test
+    fun `the reset time on a wall is read in the zone it names`() {
+        // 13:05 in Lisbon (UTC+1 in June) is 12:05Z; the wall says 4:20pm there, 15:20Z.
+        val now = Instant.parse("2026-06-15T12:05:00Z")
+        val line = "You've hit your session limit · resets 4:20pm (Europe/Lisbon)"
+        assertEquals(Instant.parse("2026-06-15T15:20:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
+    }
+
+    @Test
+    fun `a reset time with no zone is read in the local one and may name a whole hour`() {
+        val now = Instant.parse("2026-06-15T08:00:00Z")
+        val line = "You've hit your usage limit · resets 11am"
+        assertEquals(Instant.parse("2026-06-15T11:00:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
+    }
+
+    @Test
+    fun `the watcher puts the reset time on the hit and leaves the countdown alone`() {
+        val hit = fire("You've hit your session limit · resets 7:45pm (Asia/Tokyo)\n")
+        assertNotNull(hit)
+        assertNotNull(hit!!.resetsAt)
+        assertNull(hit.resetsIn, "a clock time is no countdown: it says nothing about another allowance")
+    }
+
+    @Test
+    fun `a reset time just gone is the wall that just lifted, not tomorrow's`() {
+        val now = Instant.parse("2026-06-15T18:30:00Z")
+        val line = "You've hit your session limit · resets 6:10pm"
+        assertEquals(Instant.parse("2026-06-15T18:10:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
+    }
+
+    @Test
+    fun `a reset time long gone today is tomorrow's`() {
+        val now = Instant.parse("2026-06-15T23:30:00Z")
+        val line = "You've hit your session limit · resets 2am"
+        assertEquals(Instant.parse("2026-06-16T02:00:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
+    }
+
+    @Test
+    fun `a wall without a clock time, or with a date, gives no reset time`() {
+        val now = Instant.parse("2026-06-15T12:00:00Z")
+        assertNull(QuotaWatcher.resetsAtFrom("Individual quota reached. Resets in 7m31s.", now, ZoneOffset.UTC))
+        assertNull(QuotaWatcher.resetsAtFrom("You've hit your weekly limit · resets Jun 18 at 3pm", now, ZoneOffset.UTC))
+        assertNull(QuotaWatcher.resetsAtFrom("You've hit your usage limit", now, ZoneOffset.UTC))
+    }
+
+    @Test
+    fun `an unknown zone name falls back to the local zone`() {
+        val now = Instant.parse("2026-06-15T08:00:00Z")
+        val line = "You've hit your usage limit · resets 9:30am (Nowhere/Place)"
+        assertEquals(Instant.parse("2026-06-15T09:30:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
+    }
 }
 

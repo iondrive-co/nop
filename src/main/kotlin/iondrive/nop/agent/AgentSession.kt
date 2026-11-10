@@ -950,7 +950,12 @@ class AgentSession(
         // carry on once the window has reset. Ahead of the short wait above being needed, since this
         // covers it — a CLI that resumes by itself is noticed and not typed at.
         if (resumesAfterReset(current.account)) {
-            val resetAt = hit.resetsIn?.let { now.plus(it) } ?: spentUntil(current.account)?.takeIf { it.isAfter(now) }
+            // The wall's own clock time ahead of the account's reading: the reading can be missing
+            // or stale, and then a wait with no reset to go by would check, and type into the CLI,
+            // every few minutes while the CLI itself sits waiting for the time it printed.
+            val resetAt = hit.resetsIn?.let { now.plus(it) }
+                ?: hit.resetsAt?.let { maxOf(it, now) }
+                ?: spentUntil(current.account)?.takeIf { it.isAfter(now) }
             Log.info(
                 "agent quota wall on ${current.account.name} ($why); waiting " +
                     (resetAt?.let { "for its reset at $it" } ?: "${RESUME_RECHECK.toMinutes()} min, as nothing says when it resets") +

@@ -555,6 +555,31 @@ class AgentSessionsTest {
     }
 
 
+    /**
+     * A Claude wall prints when it resets and Claude Code waits for that time by itself. With no
+     * usage reading to go by, nop has to wait for that same time, not check every few minutes and
+     * type into a CLI that is still walled.
+     */
+    @Test
+    fun `a wall that prints its reset time is waited out to that time without a reading`(@TempDir tmp: Path) {
+        val claude = Account("claude-alpha", Provider.Anthropic, "/homes/claude-alpha", resumeAfterReset = true)
+        val state = sessions()
+        state.resumesAfterReset = { from -> listOf(claude).resumesAfterReset(from) }
+        state.hasRunOut = { null }
+        state.spentUntil = { null }
+        val session = state.open(tmp.toFile(), claude)
+
+        val now = java.time.Instant.parse("2026-06-15T07:14:00Z")
+        val resets = java.time.Instant.parse("2026-06-15T08:10:00Z")
+        val line = "You've hit your session limit · resets 8:10am (UTC)"
+        session.onQuotaWall(QuotaHit("usage limit", line, matched = "You've hit your session limit", resetsAt = resets), now)
+
+        assertEquals(resets, session.resumeWait?.resumeAt, "the wall's own reset, not the 15-minute recheck")
+        assertEquals(true, session.resumeWait?.resetKnown)
+        assertEquals("claude-alpha", session.account.name)
+        assertFalse(session.ended)
+    }
+
     /** A wall reported for a run that is already over is news about nothing. */
     @Test
     fun `a wall hit after the run has ended changes nothing`(@TempDir tmp: Path) {
