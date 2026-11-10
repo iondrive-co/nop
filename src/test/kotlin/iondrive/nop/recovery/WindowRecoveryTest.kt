@@ -56,6 +56,23 @@ class WindowRecoveryTest {
         assertTrue(WindowRecovery.showingIn(window).isEmpty())
     }
 
+    /** A full heap is the process's: the tab on screen did not cause it and must not be held back for it. */
+    @Test
+    fun `an out-of-memory failure blames no tab and never gives the window up`() {
+        WindowRecovery.showing(window, "file:/repo/tools/guard.py")
+        repeat(6) {
+            val outcome = WindowRecovery.failed(
+                window,
+                WindowRecovery.generation(window),
+                IllegalStateException("drawing", OutOfMemoryError("Java heap space")),
+            )
+            assertEquals(Outcome.REBUILT, outcome)
+            now += 1_000
+        }
+        assertNull(Quarantine.entry("file:/repo/tools/guard.py"))
+        assertNull(WindowRecovery.brokenReason(window))
+    }
+
     @Test
     fun `the same failure repeated by the dying window is one failure`() {
         WindowRecovery.showing(window, "file:/a")

@@ -99,6 +99,8 @@ object RestartInPlace {
             // The other caller is already on its way into the exec.
             while (true) Thread.sleep(1_000)
         }
+        // The project worker is this process's own, and the next one starts its own.
+        iondrive.nop.worker.ProjectWorker.stop()
         val handed = p.out.pids
         val strays = ProcessHandle.current().children().map { it.pid() }.filter { it !in handed }.toList()
         val manifest = runCatching { Handover.write(p.out, strays) }

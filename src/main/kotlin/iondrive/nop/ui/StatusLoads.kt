@@ -1,9 +1,9 @@
 package iondrive.nop.ui
 
-import iondrive.nop.git.GitRepo
 import iondrive.nop.git.GitStatus
 import iondrive.nop.git.RepoWatcher
 import iondrive.nop.git.WalkPacer
+import iondrive.nop.worker.ProjectWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -22,8 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
  * the walk runs here on a supervisor scope, records its result on completion, and lets a returning view
  * open directly on the loaded file list rather than starting a new walk.
  *
- * The walk runs against a [GitRepo] of its own (the view closes its own on the way out); a view arriving
- * while one is running joins it rather than starting a second; and the result is kept per repository.
+ * The walk runs in the project worker ([ProjectWorker]), not against the view's repository; a view
+ * arriving while one is running joins it rather than starting a second; and the result is kept per
+ * repository.
  */
 internal object StatusLoads {
     /** A status walk's answer, with the HEAD it was read against and the watcher generation when it was taken. */
@@ -66,15 +67,9 @@ internal object StatusLoads {
         val pacer = pacer(k)
         val load = synchronized(inFlight) {
             inFlight[k] ?: scope.async(start = CoroutineStart.LAZY) {
-                val repo = GitRepo.discover(k) ?: error("$k is no longer a git repository")
-                val (status, headSha) = pacer.walk {
-                    repo.use {
-                        val s = it.loadStatus()
-                        val h = it.headSha()
-                        it.releaseObjectCaches()
-                        s to h
-                    }
-                }
+                // In the project worker, where a tree too big for the heap costs that process and
+                // not this one (see ProjectWorker).
+                val (status, headSha) = pacer.walk { ProjectWorker.status(k) }
                 val gen = watcher?.generation(k) ?: RepoWatcher.UNKNOWN
                 remember(k, status, headSha, gen)
                 status

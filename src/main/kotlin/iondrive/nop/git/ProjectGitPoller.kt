@@ -1,6 +1,7 @@
 package iondrive.nop.git
 
 import iondrive.nop.Log
+import iondrive.nop.worker.ProjectWorker
 import java.nio.file.Path
 
 /**
@@ -98,14 +99,18 @@ class ProjectGitPoller(
             project.walked = true
             project.lastWalkMs = now
             project.lastGeneration = generation
-            dirty[project.path] = runCatching { repo.hasChanges() }
-                .onFailure { Log.error("project git poll: status for ${project.path} failed", it) }
-                .getOrDefault(false)
-            // The walk loaded the pack indexes to compare against HEAD, and nothing will look an
-            // object up here again for at least [backgroundIntervalMs]. Holding them across that gap
-            // for every project in the bar was most of nop's heap: three large checkouts alone kept
-            // ~60 MB resident between walks they make perhaps once a minute.
-            repo.releaseObjectCaches()
+            // In the project worker: the walk's cost is set by the size of the tree, and a tree
+            // too big for the heap should cost that process, not this one (see ProjectWorker).
+            dirty[project.path] = try {
+                ProjectWorker.dirty(repo.rootDir)
+            } catch (e: ProjectWorker.Unavailable) {
+                // No worker to ask just now: say nothing about this project, and look again next time.
+                project.lastGeneration = RepoWatcher.UNKNOWN
+                continue
+            } catch (e: Exception) {
+                Log.error("project git poll: status for ${project.path} failed", e)
+                false
+            }
         }
         return dirty
     }

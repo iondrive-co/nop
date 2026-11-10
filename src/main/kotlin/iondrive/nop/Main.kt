@@ -49,6 +49,7 @@ import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.recovery.BrokenWindow
+import iondrive.nop.recovery.HeapRecovery
 import iondrive.nop.recovery.LaunchJournal
 import iondrive.nop.recovery.LocalWindowId
 import iondrive.nop.recovery.WindowRecovery
@@ -93,6 +94,8 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 // The size a window opens at when no saved geometry says otherwise.
@@ -106,6 +109,9 @@ private const val PROJECT_GIT_POLL_MS = 3000L
 
 // How long nop has to have been up, windows and all, before a newly installed version counts as working.
 private const val HEALTHY_AFTER_MS = 10_000L
+
+/** How long a thread that saw the heap run out waits for the UI thread to start the restart. */
+private const val HEAP_RESTART_WAIT_S = 10L
 
 @OptIn(FlowPreview::class, ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
@@ -126,6 +132,9 @@ fun main(args: Array<String>) {
             println(iondrive.nop.update.UpdateProbe.answer())
             exitProcess(0)
         }
+        // Before the log's startup line, the single-instance check and any window: a worker is a
+        // part of the nop that started it, not a nop of its own.
+        LaunchArgs.Worker -> exitProcess(iondrive.nop.worker.WorkerProcess.serve(System.`in`, System.out))
         // Allowed from inside an agent's session, since it is what an agent should do instead of
         // starting a nop itself. It asks, and starts nothing.
         LaunchArgs.Restart -> exitProcess(requestRestart())
@@ -152,6 +161,10 @@ fun main(args: Array<String>) {
     // First thing, before any UI: route uncaught throwables to ~/.config/nop/nop.log. Without this
     // a crash on the AWT thread takes the window down and leaves no trace anywhere findable.
     Log.install(args)
+    // An OutOfMemoryError can land in any thread and leave it broken; the heap watcher restarts nop
+    // in place instead, once the windows exist to hand over (see HeapRecovery.restart below).
+    Log.onThrowable = HeapRecovery::outOfMemory
+    HeapRecovery.install()
     // What the runtime on disk is now, to tell later whether it was replaced under this nop.
     iondrive.nop.update.RuntimeFiles.note()
 
@@ -539,6 +552,20 @@ fun main(args: Array<String>) {
                 SwingUtilities.invokeLater { restartNow() }
                 true
             }
+            // A full heap is no window's fault: no recovery is recorded, so nothing is held back at
+            // the next start. Asked from whatever thread saw the heap run out; decided on this one.
+            HeapRecovery.restart = {
+                val decide = FutureTask {
+                    if (Restart.launcher() == null || !Handover.supported || RestartInPlace.runsThatStop().isNotEmpty()) {
+                        false
+                    } else {
+                        restartNow()
+                        true
+                    }
+                }
+                if (SwingUtilities.isEventDispatchThread()) decide.run() else SwingUtilities.invokeLater(decide)
+                runCatching { decide.get(HEAP_RESTART_WAIT_S, TimeUnit.SECONDS) }.getOrDefault(false)
+            }
         }
 
         // Per-project "has uncommitted changes" flags backing the dirty dot on each project tab,
@@ -702,6 +729,9 @@ fun main(args: Array<String>) {
     // Either way this launch ended rather than died — unless it is restarting to recover a window,
     // which the next launch has to know about to not do the same again.
     if (!restartingToRecover) LaunchJournal.stopped()
+    // Ended here rather than left to see its input close: a restart replaces this process without
+    // closing what it holds, and the worker would wait on a pipe nothing writes to again.
+    iondrive.nop.worker.ProjectWorker.stop()
     if (RestartInPlace.pending != null) RestartInPlace.carryOut()
     exitProcess(0)
 }

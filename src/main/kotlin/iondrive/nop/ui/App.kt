@@ -63,7 +63,8 @@ import iondrive.nop.history.LocalHistory
 import iondrive.nop.index.AccessFrequency
 import iondrive.nop.index.FileIndex
 import iondrive.nop.index.IndexBuilds
-import iondrive.nop.index.Indexer
+import iondrive.nop.worker.ProjectWork
+import iondrive.nop.worker.ProjectWorker
 import iondrive.nop.index.JumpResolver
 import iondrive.nop.index.JavaLibraryIndex
 import iondrive.nop.index.SymbolIndex
@@ -100,7 +101,6 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.attribute.FileTime
 import javax.swing.JPanel
 
 // How often the commit panel re-checks git state on its own, so changes from editing, branch
@@ -482,7 +482,7 @@ fun App(
         // polledGeneration alone means the change is still pending, so a later tick picks it up.
         if (!statusPacer.due()) return
         val fresh = withContext(Dispatchers.IO) {
-            statusPacer.walk { runCatching { repo.loadStatus() }.getOrNull() }
+            statusPacer.walk { runCatching { ProjectWorker.status(repo.rootDir).status }.getOrNull() }
         } ?: return
         val freshStashes = withContext(Dispatchers.IO) { runCatching { repo.stashList() }.getOrDefault(stashes) }
         // Read HEAD too: a merge or pull that leaves the same files dirty shows up nowhere in the
@@ -646,42 +646,37 @@ fun App(
             indexCacheSeeded = true
         }
 
-        // Skip the full rebuild (walk + read + regex every file) when the on-disk cache is still
-        // fresh — i.e. nothing under the project changed since the cache was written. The
-        // freshness probe is a stat-only walk, far cheaper than a rebuild, so a project that
-        // hasn't changed since the last index pays almost nothing per refresh. Gated on the file
-        // index alone (not symbols): files.txt and index.tsv are written together, so a populated
-        // file cache implies the symbol cache is as current as the project allows.
+        // The project worker probes the tree and, unless the cache on disk is still current, builds
+        // the index and writes it there (see ProjectWork.index). The walk is the part of this whose
+        // size the project decides, so it happens in that process; this one only reads the result.
+        // The probe is gated on the file index alone (not symbols): files.txt and index.tsv are
+        // written together, so a populated file cache implies the symbol cache is as current as the
+        // project allows. Java files unchanged since the cache keep their entries; an unusable cache
+        // gives nothing to reuse.
+        val dataDir = Settings.projectDataDir(rootPath)
         val cacheReady = fileIndex.files.isNotEmpty() && symbolCacheUsable
         val cacheStamp = withContext(Dispatchers.IO) {
             runCatching { Files.getLastModifiedTime(filesIndexFile).toMillis() }.getOrDefault(0L)
         }
-        val cacheFresh = cacheReady && cacheStamp > 0L && withContext(Dispatchers.IO) {
-            !Indexer.isStale(rootPath, cacheStamp, fileIndex.files.size, stop)
+        val indexed = withContext(Dispatchers.IO) {
+            ProjectWorker.index(
+                rootPath,
+                dataDir,
+                checkFresh = cacheReady,
+                reusePrevious = symbolCacheUsable,
+                since = cacheStamp,
+                cachedFiles = fileIndex.files.size,
+                stop = stop,
+            )
         }
-        if (cacheFresh) return
-
-        // Java files unchanged since the cache keep their entries rather than being parsed again
-        // (see Indexer.build) — the in-memory index is the cache's contents or a later build's, so
-        // it is current as of cacheStamp. An unusable cache gives nothing to reuse.
-        val buildStarted = System.currentTimeMillis()
-        val previousSymbols = symbolIndex.takeIf { symbolCacheUsable }
-        // The symbol walk lists every file as it goes, which is the file index: one walk, not two.
-        val walked = ArrayList<String>()
-        val freshSymbols = withContext(Dispatchers.IO) { Indexer.build(rootPath, previousSymbols, cacheStamp, walked, stop) }
-        symbolIndex = freshSymbols
-        val freshFiles = withContext(Dispatchers.Default) { FileIndex.of(walked) }
+        if (indexed == ProjectWork.Indexed.Fresh) return
+        val (freshSymbols, freshFiles) = withContext(Dispatchers.IO) {
+            SymbolIndex.load(indexFile) to FileIndex.load(filesIndexFile)
+        }
+        if (freshSymbols != null) symbolIndex = freshSymbols
         fileIndex = freshFiles
-        withContext(Dispatchers.IO) {
-            SymbolIndex.save(indexFile, freshSymbols)
-            FileIndex.save(filesIndexFile, freshFiles)
-            // Stamp the cache with when the build *started*: a file saved while it ran may have been
-            // read before the save, and must look newer than the cache to the probe and to the next
-            // incremental build, which both take this mtime as "current as of".
-            runCatching { Files.setLastModifiedTime(filesIndexFile, FileTime.fromMillis(buildStarted)) }
-        }
-        // What we just wrote is by definition current, so later refreshes can trust the probe again.
-        symbolCacheUsable = true
+        // What was just written is by definition current, so later refreshes can trust the probe again.
+        symbolCacheUsable = freshSymbols != null
     }
     // Refreshed on every fsRefreshKey so files added/removed while nop stays open show up in the
     // double-shift search and jump-to-source. fsRefreshKey bumps on manual Refresh and whenever

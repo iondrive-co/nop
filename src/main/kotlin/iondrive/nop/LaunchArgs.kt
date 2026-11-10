@@ -52,6 +52,13 @@ sealed interface LaunchArgs {
      */
     data object UpdateProbe : LaunchArgs
 
+    /**
+     * Do the project work nop's windows hand off — git status, the dirty check, the project index —
+     * answering requests on stdin until it closes (see [iondrive.nop.worker.ProjectWorker]). Not in
+     * the usage: only nop starts it, and nothing else may share its line.
+     */
+    data object Worker : LaunchArgs
+
     /** Not something nop can do; [why] is what to say before the usage. */
     data class Invalid(val why: String) : LaunchArgs
 
@@ -59,6 +66,7 @@ sealed interface LaunchArgs {
         fun parse(args: Array<String>, isDirectory: (Path) -> Boolean = Files::isDirectory, exists: (Path) -> Boolean = Files::exists): LaunchArgs {
             if (args.size == 2 && args[0] == Handover.ADOPT_FLAG) return Adopt(Paths.get(args[1]))
             if (args.size == 1 && args[0] == iondrive.nop.update.UpdateProbe.FLAG) return UpdateProbe
+            if (args.size == 1 && args[0] == iondrive.nop.worker.WorkerProcess.FLAG) return Worker
             if (args.any { it == "-h" || it == "--help" }) return Help
             val projects = mutableListOf<Path>()
             var options = true

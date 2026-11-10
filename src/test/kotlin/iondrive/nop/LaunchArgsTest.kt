@@ -73,4 +73,11 @@ class LaunchArgsTest {
         assertTrue(LaunchArgs.parse(arrayOf(flag)) is LaunchArgs.Invalid)
         assertTrue(LaunchArgs.parse(arrayOf(flag, manifest.toString(), tmp.toString())) is LaunchArgs.Invalid)
     }
+
+    @Test
+    fun `the project worker flag stands alone`(@TempDir tmp: Path) {
+        val flag = iondrive.nop.worker.WorkerProcess.FLAG
+        assertEquals(LaunchArgs.Worker, LaunchArgs.parse(arrayOf(flag)))
+        assertTrue(LaunchArgs.parse(arrayOf(flag, tmp.toString())) is LaunchArgs.Invalid)
+    }
 }

@@ -41,8 +41,16 @@ object Log {
 
     fun warn(message: String) = write("WARN ", message)
 
-    fun error(message: String, t: Throwable? = null) =
+    /**
+     * Shown every throwable logged with [error] or caught by the crash handler, after it is written:
+     * how an OutOfMemoryError, which can land in any thread, reaches the code that recovers from it.
+     */
+    @Volatile var onThrowable: ((Throwable) -> Unit)? = null
+
+    fun error(message: String, t: Throwable? = null) {
         write("ERROR", if (t == null) message else "$message\n${formatTrace(t)}")
+        if (t != null) runCatching { onThrowable?.invoke(t) }
+    }
 
     /**
      * Installs the process-wide crash handler and logs a startup line. Call once from main() before

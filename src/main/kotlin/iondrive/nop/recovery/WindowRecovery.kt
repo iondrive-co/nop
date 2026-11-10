@@ -135,6 +135,14 @@ object WindowRecovery {
         }
         r.rescues.clear()
 
+        // The heap is the whole process's, so nothing on screen is to blame and the window's ladder is
+        // no measure of it. The window is drawn again; HeapRecovery, told by the log line above, is
+        // what clears the heap.
+        if (HeapRecovery.isOutOfMemory(t)) {
+            rebuild(id)
+            return Outcome.REBUILT
+        }
+
         val now = clock()
         while (r.failures.isNotEmpty() && now - r.failures.first() > LADDER_MS) r.failures.removeFirst()
         r.failures.addLast(now)
