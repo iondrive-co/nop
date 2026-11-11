@@ -3,6 +3,7 @@ package iondrive.nop.agent.transcript
 import iondrive.nop.Log
 import iondrive.nop.agent.AgentEvent
 import iondrive.nop.agent.EventLog
+import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -132,7 +133,9 @@ class TranscriptFollower(
 
     private var file: Path? = null
     private var offset: Long = 0
-    private var partial: String = ""
+
+    /** The bytes of a line still being written, held undecoded so a character cut in two survives. */
+    private val partial = ByteArrayOutputStream()
 
     fun start() {
         thread = thread(isDaemon = true, name = "agent-tailer") {
@@ -172,7 +175,7 @@ class TranscriptFollower(
     @Synchronized
     fun position(): Pair<Path, Long>? {
         val f = file ?: return null
-        return f to (offset - partial.toByteArray(StandardCharsets.UTF_8).size).coerceAtLeast(0)
+        return f to (offset - partial.size()).coerceAtLeast(0)
     }
 
     /**
@@ -206,7 +209,7 @@ class TranscriptFollower(
             drain(current)
             file = next
             offset = 0
-            partial = ""
+            partial.reset()
             onLocated(next, 0)
             drain(next)
             return
@@ -219,7 +222,7 @@ class TranscriptFollower(
         if (size < offset) {
             // The file shrank: it was rewritten rather than appended to, so start over.
             offset = 0
-            partial = ""
+            partial.reset()
         }
         if (size == offset) return
 
@@ -235,9 +238,17 @@ class TranscriptFollower(
         if (bytes.isEmpty()) return
         offset += bytes.size
 
-        val text = partial + String(bytes, StandardCharsets.UTF_8)
-        val complete = text.substringBeforeLast('\n', missingDelimiterValue = "")
-        partial = if ('\n' in text) text.substringAfterLast('\n') else text
+        // Only whole lines are decoded. Bytes after the last line break wait for the rest of their
+        // line, and nothing already read is looked at again.
+        val lastBreak = bytes.lastIndexOf(NEWLINE)
+        if (lastBreak < 0) {
+            partial.write(bytes)
+            return
+        }
+        partial.write(bytes, 0, lastBreak)
+        val complete = String(partial.toByteArray(), StandardCharsets.UTF_8)
+        partial.reset()
+        partial.write(bytes, lastBreak + 1, bytes.size - lastBreak - 1)
 
         complete.lineSequence().forEach { line ->
             if (line.isBlank()) return@forEach
@@ -250,6 +261,7 @@ class TranscriptFollower(
 
     private companion object {
         const val POLL_MS = 250L
+        const val NEWLINE = '\n'.code.toByte()
 
         /** Cap per pass, so catching up on a long transcript can't allocate it all at once. */
         const val MAX_READ = 4L * 1024 * 1024

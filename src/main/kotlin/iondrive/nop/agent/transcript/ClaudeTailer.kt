@@ -117,7 +117,7 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
                 // session.
                 .filter { path ->
                     val id = path.sessionId()
-                    path != current && id !in left && !run.foreign(id)
+                    path != current && id !in left && !run.foreign(id) && !knownHeadless(path)
                 }
                 // One stat each, carried through to the comparison rather than redone for every
                 // pair `max` looks at.
@@ -320,8 +320,18 @@ class ClaudeTailer(private val configDir: Path) : Tailer {
         return null
     }
 
-    private fun projectDir(run: RunContext): Path =
-        configDir.resolve("projects").resolve(slug(run.projectDir))
+    private var projectDirOf: Pair<Path, Path>? = null
+
+    /** Worked out once per project: [switched] needs it on every pass of the tailer. */
+    private fun projectDir(run: RunContext): Path {
+        projectDirOf?.takeIf { it.first == run.projectDir }?.let { return it.second }
+        val dir = configDir.resolve("projects").resolve(slug(run.projectDir))
+        projectDirOf = run.projectDir to dir
+        return dir
+    }
+
+    /** A transcript the TUI is known not to have written. What wrote a file never changes. */
+    private fun knownHeadless(path: Path): Boolean = entrypoints[path].let { it != null && it != INTERACTIVE }
 
     private fun newestSince(dir: Path, since: Long, foreign: (String) -> Boolean): Path? = runCatching {
         Files.list(dir).use { stream ->

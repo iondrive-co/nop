@@ -228,28 +228,44 @@ class ActivityTracker {
         said = TitleSignal.read(text)
     }
 
-    fun onOutput(text: String): Boolean {
-        if (text.isEmpty()) return false
-        val clean = QuotaWatcher.stripAnsi(text)
+    fun onOutput(text: String): Boolean = text.isNotEmpty() && onOutputPlain(QuotaWatcher.stripAnsi(text))
+
+    /** [onOutput] for output already through [QuotaWatcher.stripAnsi], which other readers need too. */
+    fun onOutputPlain(clean: String): Boolean {
         recentOutput.append(clean)
         if (recentOutput.length > RECENT_OUTPUT_WINDOW) {
             recentOutput.delete(0, recentOutput.length - RECENT_OUTPUT_WINDOW)
         }
         if (hasQueuedQuestion) return false
+        val newStart = (recentOutput.length - clean.length).coerceAtLeast(0)
         // Every pass leaves the window holding no question (finding one sets the flag, and clearing
         // the flag clears the window), so only a match the new text completes can be news: one that
-        // starts at most [LOOKBACK] before it. Searching all of it again on every frame a TUI
-        // redraws is what this saves.
-        val from = (recentOutput.length - clean.length - LOOKBACK).coerceAtLeast(0)
+        // starts at most [LOOKBACK] before it, and ends in a word the patterns end in.
+        val from = (newStart - LOOKBACK).coerceAtLeast(0)
+        val endingFrom = (newStart - LONGEST_ENDING).coerceAtLeast(0)
+        val queued = recentOutput.containsIgnoringCase("answer", endingFrom) ||
+            recentOutput.containsIgnoringCase("input", endingFrom)
         // A permission prompt only ever holds a tool call, so outside one the same words are the
         // agent talking about a prompt, not showing one.
-        if (QUEUED_QUESTION.find(recentOutput, from) != null ||
-            (open.isNotEmpty() && PERMISSION_PROMPT.find(recentOutput, if (promptUnread) 0 else from) != null)
+        val prompt = open.isNotEmpty() && (promptUnread || recentOutput.containsIgnoringCase("yes", endingFrom))
+        if (queued && QUEUED_QUESTION.find(recentOutput, from) != null ||
+            prompt && PERMISSION_PROMPT.find(recentOutput, if (promptUnread) 0 else from) != null
         ) {
             hasQueuedQuestion = true
             return true
         }
         if (open.isNotEmpty()) promptUnread = false
+        return false
+    }
+
+    private fun StringBuilder.containsIgnoringCase(word: String, from: Int): Boolean {
+        var i = from
+        while (i + word.length <= length) {
+            var j = 0
+            while (j < word.length && this[i + j].equals(word[j], ignoreCase = true)) j++
+            if (j == word.length) return true
+            i++
+        }
         return false
     }
 
@@ -376,5 +392,8 @@ class ActivityTracker {
 
         /** How far before the newest output a question may start: room for a prompt and its answers. */
         private const val LOOKBACK = 512
+
+        /** The longest word [QUEUED_QUESTION] or [PERMISSION_PROMPT] ends in, less one. */
+        private const val LONGEST_ENDING = 5
     }
 }

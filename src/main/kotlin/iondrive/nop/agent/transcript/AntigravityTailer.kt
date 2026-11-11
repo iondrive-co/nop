@@ -39,11 +39,13 @@ import java.time.Instant
  */
 class AntigravityTailer(
     private val home: Path,
+    /** Whether a conversation's lock is still open at the descriptor that last held it. */
+    private val stillHeld: (home: Path, conversation: String, holder: Path) -> Boolean = ::lockStillHeld,
     /**
-     * The conversations a process tree holds a presence lock for, or null when it cannot be told.
-     * Replaceable so a test can stand in for `/proc`.
+     * The presence locks a process tree holds, or null when it cannot be told. Replaceable so a test
+     * can stand in for `/proc`.
      */
-    private val held: (home: Path, pid: Long) -> List<String>? = ::heldConversations,
+    private val held: (home: Path, pid: Long) -> HeldLocks? = ::heldConversations,
 ) : Tailer {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -55,6 +57,9 @@ class AntigravityTailer(
 
     /** When the presence locks were last read, so a quiet run does not walk `/proc` every pass. */
     private var heldCheckedAt = 0L
+
+    /** Which descriptor holds each lock the last look at the process tree found. */
+    private var holders: Map<String, Path> = emptyMap()
 
     /**
      * Calls made in the model turn last read and not answered yet, oldest first. The transcript
@@ -90,6 +95,13 @@ class AntigravityTailer(
     override fun switched(run: RunContext, current: Path): Path? {
         val now = System.currentTimeMillis()
         if (now - heldCheckedAt < HELD_CHECK_MS) return null
+        // Holding a lock is all that keeps a run in its conversation (see [conversationOf]), so one
+        // look at the descriptor that held it settles this for as long as it still does.
+        val currentId = conversationId
+        if (currentId != null && holders[currentId]?.let { stillHeld(home, currentId, it) } == true && !run.foreign(currentId)) {
+            heldCheckedAt = now
+            return null
+        }
         val id = conversationOf(run, current = conversationId) ?: return null
         if (id == conversationId) return null
         val transcript = Antigravity.conversationTranscript(home, id)
@@ -113,7 +125,8 @@ class AntigravityTailer(
             val pid = pidOf() ?: return null
             val locks = held(home, pid)
             if (locks != null) {
-                val mine = locks.filterNot { run.foreign(it) }
+                holders = locks.holders
+                val mine = locks.conversations.filterNot { run.foreign(it) }
                 if (current != null && current in mine) return current
                 return mine.maxByOrNull { Antigravity.conversationTranscript(home, it).modifiedAt() }
                     ?: run.nativeSessionId?.takeIf { current == null }
@@ -284,23 +297,62 @@ class AntigravityTailer(
  * The conversations [pid] and the processes under it hold a presence lock for in [home], or null
  * when the process cannot be inspected (no `/proc`, or it has gone).
  */
-internal fun heldConversations(home: Path, pid: Long): List<String>? {
-    val root = Path.of("/proc", pid.toString(), "fd")
-    if (!Files.isDirectory(root)) return null
-    val presence = Antigravity.presenceDir(home).let { dir ->
-        runCatching { dir.toRealPath() }.getOrElse { dir.toAbsolutePath().normalize() }
-    }
-    val pids = listOf(pid) + runCatching {
-        ProcessHandle.of(pid).map { handle -> handle.descendants().map { it.pid() }.toList() }.orElse(emptyList())
-    }.getOrDefault(emptyList())
-    val ids = linkedSetOf<String>()
-    for (p in pids) {
+internal fun heldConversations(home: Path, pid: Long): HeldLocks? {
+    if (!Files.isDirectory(Path.of("/proc", pid.toString(), "fd"))) return null
+    val presence = presenceDirectory(home)
+    val holders = linkedMapOf<String, Path>()
+    for (p in processTree(pid)) {
         val fds = runCatching { Files.list(Path.of("/proc", p.toString(), "fd")).use { it.toList() } }.getOrNull() ?: continue
         for (fd in fds) {
             val target = runCatching { Files.readSymbolicLink(fd) }.getOrNull() ?: continue
             val name = target.fileName?.toString() ?: continue
-            if (target.parent == presence && name.endsWith(".lock")) ids += name.removeSuffix(".lock")
+            if (target.parent == presence && name.endsWith(".lock")) holders.putIfAbsent(name.removeSuffix(".lock"), fd)
         }
     }
-    return ids.toList()
+    return HeldLocks(holders.keys.toList(), holders)
+}
+
+/**
+ * The conversations a process tree holds a presence lock for, and for each the file descriptor under
+ * `/proc` that holds it (see [lockStillHeld]).
+ */
+class HeldLocks(val conversations: List<String>, val holders: Map<String, Path> = emptyMap())
+
+/** Whether [fd] is still [conversation]'s presence lock in [home]. */
+internal fun lockStillHeld(home: Path, conversation: String, fd: Path): Boolean = runCatching {
+    Files.readSymbolicLink(fd) == presenceDirectory(home).resolve("$conversation.lock")
+}.getOrDefault(false)
+
+private fun presenceDirectory(home: Path): Path = Antigravity.presenceDir(home).let { dir ->
+    runCatching { dir.toRealPath() }.getOrElse { dir.toAbsolutePath().normalize() }
+}
+
+/**
+ * [pid] and every process under it.
+ *
+ * By walking each process's own `children`, not [ProcessHandle.descendants]: that reads the status of
+ * every process on the machine to answer, which on a busy one costs more than following a run's
+ * whole transcript. Each process's threads each have a `children` file of their own. A kernel built
+ * without them leaves the walk to ProcessHandle.
+ */
+private fun processTree(pid: Long): List<Long> {
+    if (!Files.isRegularFile(Path.of("/proc", pid.toString(), "task", pid.toString(), "children"))) {
+        return listOf(pid) + runCatching {
+            ProcessHandle.of(pid).map { handle -> handle.descendants().map { it.pid() }.toList() }.orElse(emptyList())
+        }.getOrDefault(emptyList())
+    }
+    val seen = linkedSetOf(pid)
+    val queue = ArrayDeque(listOf(pid))
+    while (queue.isNotEmpty()) {
+        val p = queue.removeFirst()
+        val tasks = runCatching { Files.list(Path.of("/proc", p.toString(), "task")).use { it.toList() } }.getOrNull() ?: continue
+        for (task in tasks) {
+            val children = runCatching { Files.readString(task.resolve("children")) }.getOrNull() ?: continue
+            for (child in children.split(' ').filter { it.isNotBlank() }) {
+                val id = child.toLongOrNull() ?: continue
+                if (seen.add(id)) queue.addLast(id)
+            }
+        }
+    }
+    return seen.toList()
 }

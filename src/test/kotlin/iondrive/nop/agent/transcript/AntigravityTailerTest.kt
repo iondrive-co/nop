@@ -45,7 +45,7 @@ class AntigravityTailerTest {
 
     /** A tailer whose process holds whatever [locks] says at the moment it is asked. */
     private fun tailer(home: Path, locks: () -> List<String>?) =
-        AntigravityTailer(home) { _, pid -> if (pid == agyPid) locks() else null }
+        AntigravityTailer(home) { _, pid -> if (pid == agyPid) locks()?.let { HeldLocks(it) } else null }
 
     private fun transcript(home: Path, id: String, vararg rows: String, modifiedAt: Long = startedAt): Path {
         val file = Antigravity.conversationTranscript(home, id)
@@ -191,9 +191,57 @@ class AntigravityTailerTest {
         Files.createDirectories(dir)
         Files.createFile(dir.resolve("conv-unheld.lock"))
         FileChannel.open(dir.resolve("conv-held.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use {
-            val held = heldConversations(tmp, ProcessHandle.current().pid())!!
+            val held = heldConversations(tmp, ProcessHandle.current().pid())!!.conversations
             assertTrue("conv-held" in held)
             assertFalse("conv-unheld" in held)
+        }
+    }
+
+    @Test
+    fun `a lock still open needs no further look at the process tree`(@TempDir tmp: Path) {
+        val id = "conv-held"
+        transcript(tmp, id)
+        var walks = 0
+        var holding = true
+        val fd = tmp.resolve("fd-3")
+        val tailer = AntigravityTailer(tmp, stillHeld = { _, conversation, holder -> holding && conversation == id && holder == fd }) { _, _ ->
+            walks++
+            HeldLocks(listOf(id), mapOf(id to fd))
+        }
+        assertEquals(Antigravity.conversationTranscript(tmp, id), tailer.locate(run(tmp, pid = { agyPid })))
+        assertEquals(1, walks)
+        for (i in 1..3) {
+            Thread.sleep(1100)
+            assertNull(tailer.switched(run(tmp, pid = { agyPid }), Antigravity.conversationTranscript(tmp, id)))
+        }
+        assertEquals(1, walks, "a lock that has not moved was looked up again")
+        holding = false
+        Thread.sleep(1100)
+        assertNull(tailer.switched(run(tmp, pid = { agyPid }), Antigravity.conversationTranscript(tmp, id)))
+        assertEquals(2, walks, "a lock that may have moved must be looked for")
+    }
+
+    /** The real `/proc` reader: holding through a descendant, and letting go. */
+    @Test
+    fun `a held lock is found on a child process, and its descriptor stops answering when closed`(@TempDir tmp: Path) {
+        if (!Files.isDirectory(Path.of("/proc/self/fd"))) return
+        val dir = Antigravity.presenceDir(tmp)
+        Files.createDirectories(dir)
+        val lock = dir.resolve("conv-child.lock").also { Files.createFile(it) }
+        val child = ProcessBuilder("sh", "-c", "exec 9<'$lock'; sleep 30").start()
+        try {
+            val parent = ProcessHandle.current().pid()
+            val held = (1..50).firstNotNullOfOrNull {
+                Thread.sleep(100)
+                heldConversations(tmp, parent)?.takeIf { "conv-child" in it.conversations }
+            }!!
+            val fd = held.holders.getValue("conv-child")
+            assertTrue(lockStillHeld(tmp, "conv-child", fd))
+            assertFalse(lockStillHeld(tmp, "another", fd))
+            child.destroyForcibly().waitFor()
+            assertFalse(lockStillHeld(tmp, "conv-child", fd))
+        } finally {
+            child.destroyForcibly()
         }
     }
 

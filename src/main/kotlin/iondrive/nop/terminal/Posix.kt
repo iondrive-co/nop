@@ -88,12 +88,15 @@ internal object Posix {
     /** Whether [fd] is open in this process. */
     fun isOpen(fd: Int): Boolean = c.fcntl(fd, F_GETFD, 0) != -1
 
+    /** A `struct pollfd` per thread, since every read of a terminal polls and a [Memory] is costly to make. */
+    private val pollFd = ThreadLocal.withInitial { Memory(8) }
+
     /**
      * Waits up to [timeoutMs] for [fd] to have something to read — or to have hung up, which a read
      * then reports. False on a timeout.
      */
     fun awaitReadable(fd: Int, timeoutMs: Int): Boolean {
-        val pfd = Memory(8)
+        val pfd = pollFd.get()
         pfd.setInt(0, fd)
         pfd.setShort(4, POLLIN)
         pfd.setShort(6, 0)

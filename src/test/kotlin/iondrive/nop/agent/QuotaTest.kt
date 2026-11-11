@@ -19,6 +19,96 @@ import java.time.ZoneOffset
  */
 class QuotaTest {
 
+    private val walls = listOf(
+        "You've hit your usage limit",
+        "You have reached your limit",
+        "approaching your usage limit · resets at 5pm",
+        "5-hour limit reached",
+        "Weekly limit reached",
+        "insufficientquota",
+        "insufficient_quota",
+        "rate_limit_exceeded",
+        "ratelimitexceeded",
+        "usage_limit_exceeded",
+        "billing_hard_limit_reached",
+        "You exceeded your current quota",
+        "You have exceeded your rate limit",
+        "credit_balance is insufficient",
+        "rate limit exceeded",
+        "Individual quota reached.",
+        "quota exceeded",
+        "quota has been exceeded",
+        "insufficient credits",
+        "insufficient quota",
+        "out of credits",
+        "credits exhausted",
+        "usage limit exceeded",
+        "billing limit reached",
+        "payment required",
+        "account has been suspended",
+        "account disabled",
+        "too many requests",
+        "resource exhausted",
+        "429 Too Many Requests",
+    )
+
+    private val overloads = listOf(
+        "The selected model is at capacity",
+        "The model is at capacity",
+        "the API is overloaded",
+        "overloaded_error",
+        "temporarily overloaded",
+        "model capacity exhausted",
+        "image generation quota exceeded",
+    )
+
+    /** Ordinary output that holds the patterns' words in the wrong company. */
+    private val nearMisses = listOf(
+        "raised the connection limit to 64",
+        "the position limit was reached before the fill",
+        "quota for the new tenant",
+        "insufficient funds in the account",
+        "the feature was disabled for the account page",
+        "many of the requests were retried",
+        "resets the counter on each pass",
+        "rate limit of 5 requests per second",
+        "capacity for 12 more",
+    )
+
+    /**
+     * [QuotaWatcher] with its shortcut taken out: only the two patterns, over the same window. What
+     * the shortcut is allowed to change is the cost of a decision and never the decision.
+     */
+    private class ByThePatterns {
+        private val tail = StringBuilder()
+        var matched: String? = null
+            private set
+
+        fun feed(text: String) {
+            if (matched != null || text.isEmpty()) return
+            val clean = QuotaWatcher.stripAnsi(text)
+            tail.append(clean)
+            if (tail.length > 4096) tail.delete(0, tail.length - 4096)
+            val from = (tail.length - clean.length - 512).coerceAtLeast(0)
+            val window = tail.toString()
+            if (QuotaWatcher.OVERLOAD.find(window, from) != null) {
+                tail.setLength(0)
+                return
+            }
+            matched = QuotaWatcher.QUOTA.find(window, from)?.value
+        }
+    }
+
+    private fun assertAgreesWithThePatterns(chunks: List<String>, what: String) {
+        val (watcher, hits) = watch()
+        val reference = ByThePatterns()
+        chunks.forEach {
+            watcher.feed(it)
+            reference.feed(it)
+        }
+        assertEquals(reference.matched, hits.firstOrNull()?.matched, what)
+    }
+
     private fun watch(): Pair<QuotaWatcher, MutableList<QuotaHit>> {
         val hits = mutableListOf<QuotaHit>()
         return QuotaWatcher { hits += it } to hits
@@ -94,6 +184,81 @@ class QuotaTest {
         )
 
         ordinary.forEach { assertNull(fire(it), "fired on ordinary output: $it") }
+    }
+
+    @Test
+    fun `the shortcut changes nothing for any phrase split at any point`() {
+        val phrases = walls + overloads + nearMisses
+        for (phrase in phrases) {
+            for (variant in listOf(phrase, phrase.replace(" ", "\n    "), phrase.replace(" ", "   ").uppercase())) {
+                for (cut in 0..variant.length) {
+                    val chunks = listOf("noise ".repeat(100), variant.substring(0, cut), variant.substring(cut), "\ntail")
+                    assertAgreesWithThePatterns(chunks, "cut at $cut: $variant")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `the shortcut changes nothing however output is chunked and coloured`() {
+        val rng = java.util.Random(20261111)
+        repeat(400) { round ->
+            val text = buildString {
+                repeat(rng.nextInt(30) + 1) {
+                    val pool = when {
+                        rng.nextInt(10) == 0 -> walls + overloads
+                        rng.nextInt(2) == 0 -> nearMisses
+                        else -> listOf("  building index for segment ${rng.nextInt(99)}", "✻ Thinking…", "limit", "your", "reached")
+                    }
+                    var phrase = pool[rng.nextInt(pool.size)]
+                    if (rng.nextBoolean()) phrase = phrase.replace(" ", " \u001b[38;5;${rng.nextInt(255)}m")
+                    append(phrase).append(if (rng.nextBoolean()) "\n" else " ")
+                }
+            }
+            var i = 0
+            val chunks = buildList {
+                while (i < text.length) {
+                    val end = minOf(text.length, i + 1 + rng.nextInt(120))
+                    add(text.substring(i, end))
+                    i = end
+                }
+            }
+            assertAgreesWithThePatterns(chunks, "round $round")
+        }
+    }
+
+    /** The word before an ending can sit on the row before, however far a TUI has padded it out. */
+    @Test
+    fun `an ending and the word before it may be separated by a whole padded row`() {
+        assertNotNull(fire("You've hit your" + " ".repeat(160) + "\n" + " ".repeat(4) + "usage limit"))
+        assertNotNull(fire("rate limit" + " ".repeat(120) + "\nexceeded"))
+    }
+
+    @Test
+    fun `an ending on another line from the rest of its phrase does not reach the patterns' dot`() {
+        val (watcher, hits) = watch()
+        watcher.feed("approaching your usage limit\nresets at 5pm")
+        assertEquals(0, hits.size)
+        val (again, moreHits) = watch()
+        again.feed("approaching your\nusage limit · resets at 5pm")
+        assertEquals(1, moreHits.size, "whitespace before the limit may break the line; only the .* after it may not")
+    }
+
+    @Test
+    fun `stripping escapes by hand removes what the pattern removed`() {
+        val pattern = Regex("\u001b\\[[0-9;?]*[a-zA-Z]|\u001b[()][B0]|\u001b[=>]|\r")
+        val pieces = listOf("\u001b", "[", "?", "25", "h", ";", "(", ")", "B", "0", "=", ">", "\r", "a", " ", "m", "é", "\n")
+        val rng = java.util.Random(7)
+        repeat(4000) {
+            val text = buildString { repeat(rng.nextInt(14)) { append(pieces[rng.nextInt(pieces.size)]) } }
+            assertEquals(pattern.replace(text, ""), QuotaWatcher.stripAnsi(text), text.map { it.code }.toString())
+        }
+    }
+
+    @Test
+    fun `text with no escapes in it comes back without being copied`() {
+        val text = "plain terminal output"
+        assertTrue(text === QuotaWatcher.stripAnsi(text))
     }
 
     @Test
@@ -187,48 +352,15 @@ class QuotaTest {
     }
 
     /**
-     * The cheap pre-filter in [QuotaWatcher.feed] skips both patterns unless the window holds one
-     * of a handful of plain words. That is only safe while every branch of both patterns contains
-     * one, so this feeds a line per branch and would fail the moment a pattern gained a word the
-     * anchor list does not know — which is exactly the mistake that would make a real quota wall
-     * silently stop being noticed.
+     * The cheap test in [QuotaWatcher.feedPlain] skips both patterns unless the new text ends one
+     * of a handful of words with the word its branch needs before it. That is only safe while
+     * every branch has an entry, so this feeds a line per branch and would fail the moment a
+     * pattern gained an ending the table does not know — which is exactly the mistake that would
+     * make a real quota wall silently stop being noticed.
      */
     @Test
-    fun `every phrase the watcher fires on carries an anchor`() {
-        val perBranch = listOf(
-            "You've hit your usage limit",
-            "You have reached your limit",
-            "approaching your usage limit · resets at 5pm",
-            "5-hour limit reached",
-            "Weekly limit reached",
-            "insufficientquota",
-            "insufficient_quota",
-            "rate_limit_exceeded",
-            "ratelimitexceeded",
-            "usage_limit_exceeded",
-            "billing_hard_limit_reached",
-            "You exceeded your current quota",
-            "You have exceeded your rate limit",
-            "credit_balance is insufficient",
-            "rate limit exceeded",
-            "Individual quota reached.",
-            "quota exceeded",
-            "quota has been exceeded",
-            "insufficient credits",
-            "insufficient quota",
-            "out of credits",
-            "credits exhausted",
-            "usage limit exceeded",
-            "billing limit reached",
-            "payment required",
-            "account has been suspended",
-            "account disabled",
-            "too many requests",
-            "resource exhausted",
-            "429 Too Many Requests",
-        )
-
-        perBranch.forEach { assertNotNull(fire(it), "the pre-filter swallowed a real wall: $it") }
+    fun `every phrase the watcher fires on gets past the test`() {
+        walls.forEach { assertNotNull(fire(it), "the pre-filter swallowed a real wall: $it") }
     }
 
     /**
@@ -238,18 +370,8 @@ class QuotaTest {
      * the text actually reached the pattern.
      */
     @Test
-    fun `every phrase the watcher stands down on carries an anchor`() {
-        val perBranch = listOf(
-            "The selected model is at capacity",
-            "The model is at capacity",
-            "the API is overloaded",
-            "overloaded_error",
-            "temporarily overloaded",
-            "model capacity exhausted",
-            "image generation quota exceeded",
-        )
-
-        perBranch.forEach { text ->
+    fun `every phrase the watcher stands down on gets past the test`() {
+        overloads.forEach { text ->
             val (watcher, hits) = watch()
             watcher.feed(text)
             assertTrue(hits.isEmpty(), "fired on a transient overload: $text")

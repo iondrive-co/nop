@@ -50,32 +50,30 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
     @Volatile
     private var fired = false
 
+    /** Takes a slice of raw terminal output. See [feedPlain]. */
+    fun feed(text: String) = feedPlain(stripAnsi(text))
+
     /**
-     * Takes a slice of terminal output.
+     * Takes a slice of terminal output that has been through [stripAnsi] already, for a caller whose
+     * other readers need the same plain text.
      *
      * Called from the connector's read path, which is the thread feeding the terminal, so it does as
-     * little as possible: strip escapes, keep the last few KiB, and run two regexes over it.
+     * little as possible: keep the last few KiB, and look only at what the new text could have
+     * completed.
      */
-    fun feed(text: String) = synchronized(this) {
-        if (fired || text.isEmpty()) return
-        val clean = stripAnsi(text)
+    fun feedPlain(clean: String) = synchronized(this) {
+        if (fired || clean.isEmpty()) return
         tail.append(clean)
         if (tail.length > WINDOW) tail.delete(0, tail.length - WINDOW)
+        val newStart = (tail.length - clean.length).coerceAtLeast(0)
 
         // Every feed leaves the window holding no match — it fired, it was cleared, or it was
-        // looked at and found to hold none — so a match can only be one the new text completes,
-        // which ends inside it and starts at most [LOOKBACK] before it. Searching from there rather
-        // than from the top is what keeps an anchor word sitting in the window (a project whose
-        // output is full of "limit") from costing both full alternations over all of it again on
-        // every frame the TUI redraws until the word scrolls out.
-        val from = (tail.length - clean.length - LOOKBACK).coerceAtLeast(0)
+        // looked at and found to hold none — so the only match worth looking for is one the new
+        // text finished. That is cheap to rule out: it would end in one of the words in [ENDINGS],
+        // with the right word in front of it, in the new text or straddling its start.
+        if (!tail.mayEndAMatch((newStart - LONGEST_ENDING).coerceAtLeast(0))) return
 
-        // Nothing below can match text that does not hold one of [ANCHORS], and this is the path
-        // every chunk of output from every agent takes. Without it each read runs two thirty-branch
-        // alternations, almost all of it spent deciding that ordinary output is ordinary. Scanning
-        // for plain words touches each character once and allocates nothing.
-        if (!tail.holdsAnAnchor(from)) return
-
+        val from = (newStart - LOOKBACK).coerceAtLeast(0)
         val window = tail.toString()
         // Overload first, and deliberately. "The model is at capacity" matches several of the quota
         // patterns below but means the opposite thing: it is transient, the CLI retries by itself,
@@ -124,31 +122,23 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
     }
 
     /**
-     * Whether the window, from [from] on, holds any word that [OVERLOAD] or [QUOTA] would need in
-     * order to match there.
+     * Whether a match of [OVERLOAD] or [QUOTA] can end in the window from [from] on.
      *
-     * Every branch of both patterns contains at least one of [ANCHORS], so text with none of
-     * them cannot match either — which is the overwhelming majority of terminal output. Kept
-     * honest by `every phrase the watcher fires on carries an anchor`, which feeds one line per
-     * branch through [feed] and would fail the moment a pattern gained a word this does not know.
+     * Every branch of both patterns ends in a word listed in [ENDINGS], and only an ending preceded
+     * by the word its branch puts there can be one. Ordinary output has the words on their own ("the
+     * limit order", "was disabled") and is settled here; `QuotaTest` runs every branch and random
+     * output through this and through the bare patterns and fails if the two ever disagree.
      *
-     * Compares lower-cased needles against lower-cased haystack characters rather than lower-casing
-     * the window, because allocating a copy of the window per read is among the costs this exists
-     * to remove. [ANCHOR_STARTS] makes the common character a single array lookup.
+     * Each character costs one array lookup, and nothing here allocates: this is the path every chunk
+     * of output from every agent takes.
      */
-    private fun StringBuilder.holdsAnAnchor(from: Int): Boolean {
+    private fun StringBuilder.mayEndAMatch(from: Int): Boolean {
         for (i in from until length) {
             val c = this[i]
-            // One array lookup per character, and nothing else: [BY_FIRST] is indexed by the raw
-            // character and holds both cases, so the scan never has to case-fold. Folding here
-            // instead — Char.lowercaseChar() on all 4,096 — costs more than the regexes this is
-            // meant to replace, which is a mistake worth leaving a note about.
             if (c.code >= BY_FIRST.size) continue
             val bucket = BY_FIRST[c.code] ?: continue
-            for (anchor in bucket) {
-                if (!matchesAt(i, anchor.word)) continue
-                val near = anchor.near ?: return true
-                if (hasWordBefore(near, i)) return true
+            for (ending in bucket) {
+                if (matchesAt(i, ending.word) && ending.isPreceded(this, i)) return true
             }
         }
         return false
@@ -158,31 +148,58 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
     private fun StringBuilder.matchesAt(at: Int, word: String): Boolean {
         if (at + word.length > length) return false
         for (j in 1 until word.length) {
-            if (this[at + j].lowercaseChar() != word[j]) return false
+            if (lowerAscii(this[at + j]) != word[j]) return false
         }
         return true
     }
 
     /**
-     * Whether [word] begins within [NEAR] characters before [before] and is followed by whitespace,
-     * which is what [Anchor.near] means.
+     * A word that can end a match, with what must stand before it.
      *
-     * The whitespace is not fussiness: without it "too" matches inside "tool", and
-     * `"tool_use":{"web_search_requests` — which an agent's own output is full of — would make
-     * every window look like a rate-limit notice. Measured against real output it was the
-     * difference between 68% and 4.7% of windows paying for the full match. The patterns this
-     * mirrors all say `too\s+many`, so requiring the space is reading them exactly.
+     * [after] is the word its branch puts directly in front, whitespace apart. [onLine] is for the
+     * two branches joined with `.*`, whose earlier word may be anywhere before it on the line. An
+     * ending with neither is a single token, rare enough to send straight to the patterns.
      */
-    private fun StringBuilder.hasWordBefore(word: String, before: Int): Boolean {
-        var i = (before - NEAR).coerceAtLeast(0)
-        while (i < before) {
-            if (this[i].lowercaseChar() == word[0] && matchesAt(i, word)) {
-                val after = i + word.length
-                if (after < length && this[after].isWhitespace()) return true
+    private class Ending(
+        val word: String,
+        val after: Array<String>? = null,
+        val onLine: String? = null,
+    ) {
+        fun isPreceded(text: StringBuilder, at: Int): Boolean {
+            val words = after
+            if (words != null) return words.any { text.hasWordEndingAt(lastBefore(text, at), it) }
+            val needle = onLine ?: return true
+            var i = at - 1
+            val floor = (at - LOOKBACK).coerceAtLeast(0)
+            while (i >= floor && text[i] != '\n') {
+                if (lowerAscii(text[i]) == needle[0] && text.hasWordStartingAt(i, needle)) return true
+                i--
             }
-            i++
+            return false
         }
-        return false
+
+        /** The index just past the last non-whitespace character before [at]. */
+        private fun lastBefore(text: StringBuilder, at: Int): Int {
+            var i = at
+            val floor = (at - LOOKBACK).coerceAtLeast(0)
+            while (i > floor && isRegexSpace(text[i - 1])) i--
+            return i
+        }
+
+        private fun StringBuilder.hasWordEndingAt(end: Int, word: String): Boolean {
+            val start = end - word.length
+            return start >= 0 && hasWordStartingAt(start, word)
+        }
+
+        private fun StringBuilder.hasWordStartingAt(at: Int, word: String): Boolean {
+            if (at + word.length > length) return false
+            for (j in word.indices) if (lowerAscii(this[at + j]) != word[j]) return false
+            return true
+        }
+
+        /** What `\\s` matches without the UNICODE_CHARACTER_CLASS flag. */
+        private fun isRegexSpace(c: Char): Boolean =
+            c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\u000C' || c == '\r'
     }
 
     companion object {
@@ -197,56 +214,105 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
         private const val LOOKBACK = 512
 
         /**
-         * One word from every branch of [OVERLOAD] and [QUOTA], lower-cased.
+         * The word each branch of [OVERLOAD] and [QUOTA] ends in, lower-cased, with what its branch
+         * puts before it (see [Ending]).
          *
-         * A word rather than a phrase because the patterns join their words with `\s+`, so no
-         * two-word literal survives a message that happens to be spaced differently.
-         *
-         * Chosen to be *rare*, not merely sufficient, because a word that turns up in an agent's
-         * ordinary output puts every window back on the slow path. The first version used
-         * "account" and "requests", which read as specific enough and are in fact the working
-         * vocabulary of the project this was measured on: 68% of its windows carried one. Naming
-         * the two words the account branch actually needs, and pairing "requests" with the "too"
-         * its own patterns demand, took that to 4.7%.
-         *
-         * Adding a pattern means adding its word here. The tests named in [holdsAnAnchor]'s
-         * neighbours are what catch forgetting to.
+         * A bare word would not do: "limit", "reached" and "exceeded" are everyday words in an agent's
+         * output, and every chunk carrying one would pay for both full alternations. Only the pairing
+         * makes them rare. Adding a pattern means adding its ending here.
          */
-        private val ANCHORS = arrayOf(
-            Anchor("limit"), Anchor("quota"), Anchor("credit"), Anchor("exhaust"),
-            Anchor("payment"), Anchor("capacity"), Anchor("overload"),
-            // `account (has been )?(suspended|disabled)` — the two endings, rather than the common
-            // noun in front of them.
-            Anchor("suspended"), Anchor("disabled"),
-            // `too\s+many\s+requests`, both branches of it. "requests" alone is ordinary output.
-            Anchor("requests", near = "too"),
+        private val ENDINGS = arrayOf(
+            Ending("limit", after = arrayOf("your", "usage", "session", "weekly", "rate")),
+            Ending("quota", after = arrayOf("current", "insufficient", "generation")),
+            Ending("reached", after = arrayOf("limit", "quota")),
+            Ending("exceeded", after = arrayOf("limit", "quota", "been")),
+            Ending("exhausted", after = arrayOf("capacity", "credit", "credits", "resource")),
+            Ending("capacity", after = arrayOf("at")),
+            Ending("overloaded", after = arrayOf("is", "temporarily")),
+            Ending("credit", after = arrayOf("insufficient", "of")),
+            Ending("required", after = arrayOf("payment")),
+            Ending("suspended", after = arrayOf("account", "been")),
+            Ending("disabled", after = arrayOf("account", "been")),
+            Ending("requests", after = arrayOf("many")),
+            // The two branches that join their words with `.*`.
+            Ending("resets", onLine = "limit"),
+            Ending("insufficient", onLine = "credit_balance"),
+            // Whole tokens, which end in no separate word.
+            Ending("overloaded_error"),
+            Ending("insufficientquota"),
+            Ending("insufficient_quota"),
+            Ending("rate_limit_exceeded"),
+            Ending("ratelimitexceeded"),
+            Ending("usage_limit_exceeded"),
+            Ending("billing_hard_limit_reached"),
         )
 
-        /** A word a pattern needs, and optionally another that must sit just before it. */
-        private class Anchor(val word: String, val near: String? = null)
-
-        /** How far back [hasWordBefore] looks. "too many requests" spans nine. */
-        private const val NEAR = 32
+        private val LONGEST_ENDING = ENDINGS.maxOf { it.word.length }
 
         /**
-         * The anchors that can begin at a given character, indexed by the raw character so the
-         * scan never case-folds. Both cases point at the same bucket.
+         * The endings that can begin at a given character, indexed by the raw character so the scan
+         * never case-folds. Both cases point at the same bucket.
          */
-        private val BY_FIRST: Array<Array<Anchor>?> = arrayOfNulls<Array<Anchor>>(128).also { table ->
-            ANCHORS.groupBy { it.word[0] }.forEach { (first, group) ->
+        private val BY_FIRST: Array<Array<Ending>?> = arrayOfNulls<Array<Ending>>(128).also { table ->
+            ENDINGS.groupBy { it.word[0] }.forEach { (first, group) ->
                 val bucket = group.toTypedArray()
                 table[first.code] = bucket
                 table[first.uppercaseChar().code] = bucket
             }
         }
 
-        /**
-         * Escape sequences, so a limit message split by a colour change still reads as one phrase.
-         * Deliberately narrow: this text is only ever matched against, never shown.
-         */
-        private val ANSI = Regex("\\[[0-9;?]*[a-zA-Z]|[()][B0]|[=>]|\r")
+        private fun lowerAscii(c: Char): Char = if (c in 'A'..'Z') c + 32 else c
 
-        fun stripAnsi(text: String): String = ANSI.replace(text, "")
+        /**
+         * [text] with escape sequences removed, so a limit message split by a colour change still
+         * reads as one phrase: `ESC [ params letter`, the charset selections `ESC ( B` and `ESC ( 0`
+         * (and with `)`), `ESC =`, `ESC >`, and carriage returns. Deliberately narrow, since this text
+         * is only ever matched against, never shown. By hand rather than with a pattern because it
+         * runs over every chunk of every agent's output; text with nothing to remove is returned as
+         * it is.
+         */
+        fun stripAnsi(text: String): String {
+            var i = 0
+            while (i < text.length && text[i] != ESC && text[i] != '\r') i++
+            if (i == text.length) return text
+            val out = StringBuilder(text.length)
+            var from = 0
+            while (i < text.length) {
+                val c = text[i]
+                val end = when (c) {
+                    '\r' -> i + 1
+                    ESC -> sequenceEnd(text, i)
+                    else -> -1
+                }
+                if (end < 0) {
+                    i++
+                    continue
+                }
+                out.append(text, from, i)
+                from = end
+                i = end
+            }
+            out.append(text, from, text.length)
+            return out.toString()
+        }
+
+        /** Where the sequence [stripAnsi] removes at the ESC at [at] ends, or -1 if none is there. */
+        private fun sequenceEnd(text: String, at: Int): Int {
+            val next = text.getOrNull(at + 1) ?: return -1
+            when (next) {
+                '[' -> {
+                    var i = at + 2
+                    while (i < text.length && (text[i] in '0'..'9' || text[i] == ';' || text[i] == '?')) i++
+                    val letter = text.getOrNull(i) ?: return -1
+                    return if (letter in 'a'..'z' || letter in 'A'..'Z') i + 1 else -1
+                }
+                '(', ')' -> return if (text.getOrNull(at + 2) == 'B' || text.getOrNull(at + 2) == '0') at + 3 else -1
+                '=', '>' -> return at + 2
+            }
+            return -1
+        }
+
+        private const val ESC = '\u001b'
 
         /**
          * The phrase in [text] that says an account is out, or null — the test [feed] puts to the
@@ -267,7 +333,7 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
          * left. Both would be the worst bug this feature could have, which is a session killed for
          * working.
          */
-        private val OVERLOAD = Regex(
+        internal val OVERLOAD = Regex(
             listOf(
                 """selected\s+model\s+is\s+at\s+capacity""",
                 """\bmodel\s+is\s+at\s+capacity\b""",
@@ -287,7 +353,7 @@ class QuotaWatcher(private val onHit: (QuotaHit) -> Unit) {
          *
          * Every pattern is specific on purpose. A false positive kills a session that was working.
          */
-        private val QUOTA = Regex(
+        internal val QUOTA = Regex(
             listOf(
                 // Claude Code's own TUI wording. The qualifiers are listed rather than left open
                 // because the sentence is the one place a limit on something else would read the

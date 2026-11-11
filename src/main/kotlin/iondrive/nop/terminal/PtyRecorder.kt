@@ -104,11 +104,18 @@ class PtyRecorder(private val capacity: Int = DEFAULT_CAPACITY) {
         val skip = (n - capacity).coerceAtLeast(0)
         if (skip > 0) wrapped = true
         val ring = ring ?: ByteArray(capacity).also { ring = it }
-        for (i in off + skip until off + n) {
-            ring[head] = b[i]
-            head = (head + 1) % capacity
-            if (size < capacity) size++ else wrapped = true
+        var from = off + skip
+        var left = n - skip
+        while (left > 0) {
+            val run = minOf(left, capacity - head)
+            System.arraycopy(b, from, ring, head, run)
+            head = (head + run) % capacity
+            from += run
+            left -= run
         }
+        val total = size + (n - skip)
+        if (total > capacity) wrapped = true
+        size = minOf(total, capacity)
     }
 
     private fun cleanStart(body: ByteArray): Int {
@@ -142,7 +149,17 @@ internal class DecModes {
     private val params = StringBuilder()
 
     fun feed(b: ByteArray, off: Int, n: Int) {
-        for (i in off until off + n) step(b[i].toInt() and 0xff)
+        var i = off
+        val end = off + n
+        while (i < end) {
+            // Text cannot change a mode, and text is nearly everything a program writes.
+            if (phase == 0) {
+                while (i < end && b[i] != ESC_BYTE) i++
+                if (i == end) return
+            }
+            step(b[i].toInt() and 0xff)
+            i++
+        }
     }
 
     private fun step(ch: Int) {
@@ -188,6 +205,7 @@ internal class DecModes {
 
     private companion object {
         const val ESC = 0x1b
+        const val ESC_BYTE: Byte = 0x1b
         const val MAX_PARAMS = 64
         val SCREENS = setOf(47, 1047, 1049)
         /** Autowrap and a visible cursor. */

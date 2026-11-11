@@ -17,6 +17,38 @@ import java.nio.file.Path
  * long the question waits. The titles here are the shapes the CLIs really write.
  */
 class ActivityTest {
+    @Test
+    fun `a queued question is seen however the read cuts its last word`() {
+        for (text in listOf("alt + ↑ to answer", "• Queued follow-up inputs")) {
+            for (cut in 1 until text.length) {
+                val tracker = ActivityTracker()
+                // Either read may be the one to complete it: "input" is whole before its "s" arrives.
+                val first = tracker.onOutput(text.substring(0, cut))
+                assertTrue(first || tracker.onOutput(text.substring(cut)), "missed at $cut")
+            }
+        }
+    }
+
+    @Test
+    fun `a permission prompt split across reads is seen while a call is open, and only then`() {
+        val prompt = "Do you want to proceed?\n ❯ 1. Yes"
+        for (cut in 1 until prompt.length) {
+            val tracker = ActivityTracker()
+            tracker.onEvent(AgentEvent.ToolStarted("c1", "Bash", emptyMap(), 0))
+            tracker.onOutput(prompt.substring(0, cut))
+            assertTrue(tracker.onOutput(prompt.substring(cut)), "missed at $cut")
+        }
+        assertFalse(ActivityTracker().onOutput(prompt))
+    }
+
+    @Test
+    fun `a prompt already on screen when its call opens is read at the next output`() {
+        val tracker = ActivityTracker()
+        tracker.onOutput("Do you want to proceed?\n ❯ 1. Yes")
+        tracker.onEvent(AgentEvent.ToolStarted("c1", "Bash", emptyMap(), 0))
+        assertTrue(tracker.onOutput("✻"))
+    }
+
     private val esc = "\u001b"
     private val bel = "\u0007"
 

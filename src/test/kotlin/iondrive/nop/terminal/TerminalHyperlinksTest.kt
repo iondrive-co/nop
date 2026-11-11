@@ -9,6 +9,7 @@ import com.jediterm.terminal.ui.hyperlinks.LinkInfoEx
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.awt.Color
@@ -199,6 +200,27 @@ class TerminalHyperlinksTest {
         }
         info.navigate()
         assertEquals(listOf(longUrl), opened)
+    }
+
+    @Test
+    fun `a row with no url of its own and nothing above it to continue stays out of the links`() {
+        val opened = mutableListOf<String>()
+        val widget = linkedWidget(40, opened)
+        feed(widget, "plain output\r\n  indented output\r\n")
+        repeat(2) { row -> assertFalse(widget.terminalTextBuffer.getLine(row).entries.any { it.style is HyperlinkStyle }) }
+    }
+
+    @Test
+    fun `an indented row continuing a url above it is still linked`() {
+        val opened = mutableListOf<String>()
+        val width = 30
+        val widget = linkedWidget(width, opened)
+        // The agent's own wrap: the URL runs to the right gutter and carries on, indented, below.
+        val first = longUrl.substring(0, width - 1)
+        val second = longUrl.substring(width - 1, width + 40)
+        feed(widget, "$first\r\n  $second\r\n")
+        val continuation = widget.terminalTextBuffer.getLine(1)
+        assertTrue(continuation.getStyleAt(3) is HyperlinkStyle, "the wrapped half of the link was not linked")
     }
 
     @Test

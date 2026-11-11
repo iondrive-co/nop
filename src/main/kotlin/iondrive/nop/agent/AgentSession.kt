@@ -1345,14 +1345,16 @@ class AgentSession(
             // whether it is working, which is what the tab's mark shows — see [activity].
             outputTap = output@ { text ->
                 if (switching || run.tracker !== tracker) return@output
-                quotaWatcher.feed(text)
-                log.appendScreenTail(QuotaWatcher.stripAnsi(text))
+                // Stripped once here, for all three of its readers.
+                val clean = QuotaWatcher.stripAnsi(text)
+                quotaWatcher.feedPlain(clean)
+                log.appendScreenTail(clean)
                 var titleChanged = false
                 titles.feed(text)?.let { title ->
                     synchronized(tracker) { tracker.onTitle(title, System.currentTimeMillis()) }
                     titleChanged = true
                 }
-                val questionChanged = synchronized(tracker) { tracker.onOutput(text) }
+                val questionChanged = synchronized(tracker) { tracker.onOutputPlain(clean) }
                 if (titleChanged || questionChanged) {
                     SwingUtilities.invokeLater { refreshActivity(tracker) }
                 }

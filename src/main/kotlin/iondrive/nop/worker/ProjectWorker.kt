@@ -33,7 +33,29 @@ internal object ProjectWorker {
     }
 
     /** The environment a worker starts with: nop's own, less what only nop's own process should carry. */
-    @Volatile internal var workerEnvironment: () -> Map<String, String> = { Restart.successorEnvironment(System.getenv()) }
+    @Volatile internal var workerEnvironment: () -> Map<String, String> = {
+        boundedToWorkerCpus(Restart.successorEnvironment(System.getenv()), Runtime.getRuntime().availableProcessors())
+    }
+
+    /**
+     * The worker told it has a fraction of the machine's processors. One worker serves every project
+     * and session of this nop, and the JVM sizes its garbage collector, its compilers and the Java
+     * parser's thread pool from this one number: by default a large index build would take most of a
+     * machine that is also running the agents the index is for.
+     *
+     * Set through the environment because the worker is started by nop's launcher, which reads its
+     * JVM options from the application's own configuration; the JVM's notice that it honoured this
+     * goes to the worker's stderr, which is discarded.
+     */
+    internal fun boundedToWorkerCpus(env: Map<String, String>, processors: Int): Map<String, String> {
+        val cpus = (processors / 4).coerceIn(MIN_WORKER_CPUS, MAX_WORKER_CPUS)
+        val options = listOfNotNull(env[JVM_OPTIONS]?.takeIf { it.isNotBlank() }, "-XX:ActiveProcessorCount=$cpus")
+        return env + (JVM_OPTIONS to options.joinToString(" "))
+    }
+
+    private const val JVM_OPTIONS = "JAVA_TOOL_OPTIONS"
+    private const val MIN_WORKER_CPUS = 2
+    private const val MAX_WORKER_CPUS = 4
 
     internal var idleMs: Long = IDLE_MS
 

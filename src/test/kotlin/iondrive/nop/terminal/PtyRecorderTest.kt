@@ -19,6 +19,39 @@ class PtyRecorderTest {
 
     private fun String.bytes() = toByteArray(Charsets.UTF_8)
 
+    @Test
+    fun `what wrapped around the ring is replayed in order, whatever the read sizes were`() {
+        val capacity = 64
+        val bytes = ByteArray(1000) { i -> ('a'.code + i % 26).toByte() }
+        for (chunk in listOf(1, 5, 63, 64, 65, 199)) {
+            val recorder = PtyRecorder(capacity = capacity)
+            bytes.indices.chunked(chunk).forEach { run -> recorder.seed(bytes.sliceArray(run)) }
+            assertEquals(String(bytes.copyOfRange(bytes.size - capacity, bytes.size)), String(recorder.replay()), "chunks of $chunk")
+        }
+    }
+
+    @Test
+    fun `an output that fits replays from its start`() {
+        val recorder = PtyRecorder(capacity = 64)
+        recorder.seed("hello".bytes())
+        recorder.seed(" world".bytes())
+        assertEquals("hello world", String(recorder.replay()))
+    }
+
+    @Test
+    fun `a mode switched in a sequence split across reads is kept`() {
+        val recorder = PtyRecorder(capacity = 64)
+        val text = "plain text\u001b[?2004h more plain text".bytes()
+        for (cut in text.indices) {
+            val split = PtyRecorder(capacity = 64)
+            split.seed(text.copyOfRange(0, cut))
+            split.seed(text.copyOfRange(cut, text.size))
+            assertEquals("\u001b[?2004h", String(split.modePrefix()), "cut at $cut")
+        }
+        recorder.seed(text)
+        assertEquals("\u001b[?2004h", String(recorder.modePrefix()))
+    }
+
     private fun PtyRecorder.through(text: String) {
         val input = wrap(text.bytes().inputStream())
         val buf = ByteArray(64)

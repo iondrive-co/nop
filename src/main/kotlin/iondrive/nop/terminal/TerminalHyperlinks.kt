@@ -133,15 +133,25 @@ internal class CellStylePreservingLinks(
 ) : AsyncHyperlinkFilter {
 
     override fun apply(lineInfo: AsyncHyperlinkFilter.LineInfo): CompletableFuture<LinkResult?> {
-        val text = lineInfo.line ?: return CompletableFuture.completedFuture(null)
-        val originalLines = linesOf(lineInfo) ?: return CompletableFuture.completedFuture(links.apply(text))
+        val originalLines = linesOf(lineInfo)
+            ?: return CompletableFuture.completedFuture(lineInfo.line?.let(links::apply))
         buffer.lock()
         try {
+            val holdsUrlStart = holdsUrlStart(originalLines)
+            // A line with no URL of its own can only be part of one by continuing it from the row
+            // above, and a continuation row is an indented one (see [wrapsInto]). Almost every line
+            // that reaches here is settled by this, from the cells as they stand: JediTerm builds
+            // the line's text on request, so asking for it only to find no URL is the cost to avoid.
+            if (!holdsUrlStart && !startsIndented(originalLines.first())) return CompletableFuture.completedFuture(null)
             val width = buffer.width
+            if (!holdsUrlStart && !continuesRowAbove(originalLines.first(), width)) {
+                return CompletableFuture.completedFuture(null)
+            }
+            val text = lineInfo.line ?: return CompletableFuture.completedFuture(null)
             // Same staleness check JediTerm makes before it writes: the lines must still spell [text].
             if (joined(originalLines, width) != text) return CompletableFuture.completedFuture(null)
             val lines = surroundingRows(originalLines, width)
-            if (!text.contains("http", true) && lines.none { it.text.contains("http", true) }) {
+            if (!holdsUrlStart && lines.none { it.text.contains("http", true) }) {
                 return CompletableFuture.completedFuture(null)
             }
             val mapped = LinkRows(lines, width)
@@ -167,14 +177,46 @@ internal class CellStylePreservingLinks(
         return CompletableFuture.completedFuture(null)
     }
 
+    /** Whether "http", in any case, runs through [lines]' cells, across style changes and wrapped rows alike. */
+    private fun holdsUrlStart(lines: List<TerminalLine>): Boolean {
+        var matched = 0
+        for (line in lines) for (entry in line.entries) {
+            val cells = entry.text
+            for (i in 0 until cells.length) {
+                val c = cells[i]
+                matched = when {
+                    c == URL_START[matched] || c == URL_START_UPPER[matched] -> matched + 1
+                    c == URL_START[0] || c == URL_START_UPPER[0] -> 1
+                    else -> 0
+                }
+                if (matched == URL_START.length) return true
+            }
+        }
+        return false
+    }
+
+    /** Whether [line] begins with a blank cell, which JediTerm may hold as NUL as well as a space. */
+    private fun startsIndented(line: TerminalLine): Boolean {
+        val first = line.entries.firstOrNull()?.text ?: return false
+        return first.length > 0 && (first[0] == ' ' || first[0] == '\u0000')
+    }
+
+    /** Where [line] is in the buffer: screen rows from 0, history rows below that, or null. */
+    private fun rowOf(line: TerminalLine): Int? {
+        val row = buffer.findScreenLineIndex(line)
+        if (row >= 0) return row
+        val historyIndex = buffer.historyLinesStorage.indexOf(line)
+        return if (historyIndex < 0) null else historyIndex - buffer.historyLinesCount
+    }
+
+    private fun continuesRowAbove(line: TerminalLine, width: Int): Boolean {
+        val row = rowOf(line) ?: return false
+        return row > -buffer.historyLinesCount && wrapsInto(buffer.getLine(row - 1), line, width)
+    }
+
     /** Include agent-drawn wraps, which use cursor moves/newlines rather than terminal autowrap. */
     private fun surroundingRows(original: List<TerminalLine>, width: Int): List<TerminalLine> {
-        var first = buffer.findScreenLineIndex(original.first())
-        if (first < 0) {
-            val historyIndex = buffer.historyLinesStorage.indexOf(original.first())
-            if (historyIndex < 0) return original
-            first = historyIndex - buffer.historyLinesCount
-        }
+        var first = rowOf(original.first()) ?: return original
         var last = first + original.size - 1
         // Bound work on each terminal write, including output containing very long unbroken tokens.
         val limit = 64
@@ -229,6 +271,9 @@ internal class CellStylePreservingLinks(
     }
 
     companion object {
+        private const val URL_START = "http"
+        private const val URL_START_UPPER = "HTTP"
+
         private val linesField: Field? = runCatching {
             Class.forName("com.jediterm.terminal.model.hyperlinks.TextProcessing\$LineInfoImpl")
                 .getDeclaredField("myLinesToProcess")
@@ -248,6 +293,8 @@ internal class CellStylePreservingLinks(
 /** A terminal wrap, or an indented continuation after a row reaching the agent's right gutter. */
 private fun wrapsInto(previous: TerminalLine, next: TerminalLine, width: Int): Boolean {
     if (previous.isWrapped) return true
+    // Answers most rows without the text of the row, which each read would rebuild.
+    if (previous.length() < width - 3) return false
     val end = previous.text.trimEnd(' ').length
     val text = next.text
     return end >= width - 3 && text.startsWith(' ') && text.isNotBlank()

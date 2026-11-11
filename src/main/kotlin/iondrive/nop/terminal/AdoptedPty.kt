@@ -45,6 +45,8 @@ class AdoptedPty(
         }
     }
 
+    private var readBuffer = ByteArray(8192)
+
     private val input = object : InputStream() {
         override fun read(): Int {
             val one = ByteArray(1)
@@ -53,7 +55,8 @@ class AdoptedPty(
 
         override fun read(b: ByteArray, off: Int, len: Int): Int {
             if (len == 0) return 0
-            val buf = ByteArray(len)
+            // One reader per terminal, so this buffer is its alone and need not be made per read.
+            val buf = readBuffer.takeIf { it.size >= len } ?: ByteArray(len).also { readBuffer = it }
             while (true) {
                 if (closed || interrupted) return -1
                 // A bounded wait, so [interruptReads] and [close] are noticed without a wake-up pipe.

@@ -136,6 +136,17 @@ class ProjectWorkerTest {
     }
 
     @Test
+    fun `a worker sizes itself to a fraction of the machine, whatever options it inherited`() {
+        fun cpus(env: Map<String, String>, processors: Int) =
+            ProjectWorker.boundedToWorkerCpus(env, processors).getValue("JAVA_TOOL_OPTIONS")
+        assertEquals("-XX:ActiveProcessorCount=4", cpus(emptyMap(), 16))
+        assertEquals("-XX:ActiveProcessorCount=4", cpus(emptyMap(), 96))
+        assertEquals("-XX:ActiveProcessorCount=2", cpus(emptyMap(), 2))
+        assertEquals("-Xint -XX:ActiveProcessorCount=4", cpus(mapOf("JAVA_TOOL_OPTIONS" to "-Xint"), 16))
+        assertEquals("kept", ProjectWorker.boundedToWorkerCpus(mapOf("OTHER" to "kept"), 8)["OTHER"])
+    }
+
+    @Test
     fun `a worker that dies fails its request at once, and is not started again straight away`() {
         ProjectWorker.command = { listOf("sh", "-c", "exit 3") }
         ProjectWorker.workerEnvironment = { System.getenv() }
