@@ -72,16 +72,19 @@ fun modelOptionsFor(account: Account, discovered: List<String>): List<String> {
 
 /**
  * Prepares the list of accounts to offer for handover from [currentAccount], ensuring the account
- * itself is included (with its active model if running) alongside any configured [accounts].
+ * itself is included alongside any configured [accounts].
+ *
+ * The tab's running model is offered first on its own account and on every other account of the
+ * same provider, so a tab set to a cheaper model stays on it when its work moves between accounts.
+ * Each account's own model applied before: a Sonnet tab handed from one Claude account to another
+ * came back on that account's Opus (the hermes Data tab, November 2026). Another provider's
+ * accounts keep their own model, since a model name never carries across providers.
  */
 fun handoverAccountsFor(currentAccount: Account, accounts: List<Account>): List<Account> {
     val base = if (accounts.any { it.name == currentAccount.name }) accounts else listOf(currentAccount) + accounts
+    val running = currentAccount.model?.takeIf { it != DEFAULT_CHOICE && it.isNotBlank() } ?: return base
     return base.map {
-        if (it.name == currentAccount.name && currentAccount.model != null) {
-            it.copy(model = currentAccount.model)
-        } else {
-            it
-        }
+        if (it.name == currentAccount.name || it.provider == currentAccount.provider) it.copy(model = running) else it
     }
 }
 

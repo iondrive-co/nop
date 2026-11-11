@@ -122,6 +122,26 @@ class HandoverPanelTest {
     }
 
     @Test
+    fun `handoverAccountsFor carries the running model to accounts of the same provider only`() {
+        val current = account("claude-alpha", model = "claude-sonnet-5-5")
+        val sibling = account("claude-bravo", model = "claude-opus-5-5")
+        val other = account("codex", provider = Provider.OpenAI, model = "gpt-6.1-sol")
+        val result = handoverAccountsFor(current, listOf(current, sibling, other)).associate { it.name to it.model }
+
+        assertEquals("claude-sonnet-5-5", result["claude-bravo"])
+        assertEquals("gpt-6.1-sol", result["codex"])
+    }
+
+    @Test
+    fun `handoverAccountsFor leaves each account's model when the tab runs its default`() {
+        val current = account("claude-alpha", model = null)
+        val sibling = account("claude-bravo", model = "claude-opus-5-5")
+        val result = handoverAccountsFor(current, listOf(current, sibling))
+
+        assertEquals("claude-opus-5-5", result.first { it.name == "claude-bravo" }.model)
+    }
+
+    @Test
     fun `handoverAccountsFor includes current account when missing from accounts list`() {
         val current = account("claude-alpha")
         val other = account("codex", provider = Provider.OpenAI)
