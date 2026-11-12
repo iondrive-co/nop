@@ -23,7 +23,7 @@ internal class TerminalResize(
 ) : TerminalStarter(
     terminalModel, connector,
     TtyBasedArrayDataStream(connector, typeAhead::onTerminalStateChanged).let {
-        if (synchronizedOutput == null) it else SynchronizedOutputStream(it, synchronizedOutput)
+        if (synchronizedOutput == null) it else SynchronizedOutputStream(it, synchronizedOutput, reply = { text -> connector.write(text) })
     }, typeAhead, executors,
 ) {
     private val resizeLock = Any()

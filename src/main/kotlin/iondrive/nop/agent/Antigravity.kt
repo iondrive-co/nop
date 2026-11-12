@@ -55,9 +55,12 @@ internal object Antigravity {
      * One conversation's own record: every prompt, model turn, tool call and tool result in it, a
      * JSON row per step.
      */
-    fun conversationTranscript(home: Path, conversationId: String): Path =
-        cliDir(home).resolve("brain").resolve(conversationId).resolve(".system_generated").resolve("logs")
-            .resolve("transcript.jsonl")
+    fun conversationTranscript(home: Path, conversationId: String): Path {
+        val logs = cliDir(home).resolve("brain").resolve(conversationId).resolve(".system_generated").resolve("logs")
+        // The short transcript elides the middle of long replies and tool results.
+        return logs.resolve("transcript_full.jsonl").takeIf { Files.isRegularFile(it) }
+            ?: logs.resolve("transcript.jsonl")
+    }
 
     /** Where a running CLI holds `<conversation id>.lock` open for the conversation it is in. */
     fun presenceDir(home: Path): Path = cliDir(home).resolve("presence")

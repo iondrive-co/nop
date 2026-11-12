@@ -19,7 +19,8 @@ import java.time.Instant
 /**
  * Reads an Antigravity run from the conversation's own transcript.
  *
- * `agy` writes one per conversation, at `brain/<id>/.system_generated/logs/transcript.jsonl`: a
+ * `agy` writes one per conversation, at `brain/<id>/.system_generated/logs/transcript_full.jsonl`
+ * (or `transcript.jsonl` when the full format is unavailable): a
  * row per step, carrying the user's prompt (`USER_INPUT`), each model turn with its reasoning and
  * tool calls (`PLANNER_RESPONSE`), and each tool's result (`GENERIC`). That is everything a handoff
  * needs, in a file that belongs to exactly one conversation — so nothing in it can be another

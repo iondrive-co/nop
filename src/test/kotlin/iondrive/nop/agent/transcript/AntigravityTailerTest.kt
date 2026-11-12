@@ -74,6 +74,20 @@ class AntigravityTailerTest {
 
     // ── which conversation is this run's ──
 
+    @Test
+    fun `long replies are read in full when both transcript formats exist`(@TempDir tmp: Path) {
+        val short = transcript(tmp, "conv-mine", """{"type":"PLANNER_RESPONSE","content":"Opening ... Closing"}""")
+        val full = short.resolveSibling("transcript_full.jsonl")
+        val body = "Opening " + "A complete paragraph. ".repeat(2_000) + "Closing"
+        Files.writeString(full, """{"type":"PLANNER_RESPONSE","content":"$body"}""" + "\n")
+        val tailer = tailer(tmp) { listOf("conv-mine") }
+
+        val located = tailer.locate(run(tmp))!!
+        assertEquals(full, located)
+        val message = tailer.parse(Files.readString(located).trim()).filterIsInstance<AgentEvent.AssistantMessage>().single()
+        assertEquals(body, message.blocks.filterIsInstance<Block.Text>().single().text)
+    }
+
     /**
      * Two tabs on one project, one account. The sibling's conversation is the newest one on disk
      * and the last one the shared history mentions; this run's process holds the lock for its own.

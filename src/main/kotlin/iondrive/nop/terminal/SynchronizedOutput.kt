@@ -37,6 +37,9 @@ internal class SynchronizedOutput(
         update()
     }
 
+    /** DECRQM reports the program's mode, independently of a terminal restoration. */
+    @Synchronized fun modeStatus(): Int = if (modeEnabled) 1 else 2
+
     @Synchronized fun replay(enabled: Boolean) { replaying = enabled; update() }
     @Synchronized fun reset() { modeEnabled = false; replaying = false; update() }
 
@@ -74,6 +77,7 @@ internal class SynchronizedOutput(
 internal class SynchronizedOutputStream(
     private val source: TerminalDataStream,
     private val output: SynchronizedOutput,
+    private val reply: (String) -> Unit = {},
 ) : TerminalDataStream {
     private val pending = ArrayDeque<Char>()
     private var state = 0
@@ -103,6 +107,12 @@ internal class SynchronizedOutputStream(
                 }
                 val last = control.last()
                 val parameters = control.dropLast(1).toString()
+                // Programs that negotiate synchronized updates need the capability report before
+                // they will bracket redraws. The mode is handled here rather than by JediTerm.
+                if (last == 'p' && parameters == "?2026$") {
+                    reply("\u001b[?2026;${output.modeStatus()}\$y")
+                    continue
+                }
                 if ((last == 'h' || last == 'l') && parameters.startsWith('?')) {
                     val modes = parameters.substring(1).split(';')
                     if ("2026" in modes) {

@@ -16,6 +16,23 @@ import javax.swing.SwingUtilities
 
 class SynchronizedOutputTest {
     @Test
+    fun `programs can negotiate synchronized redraws and query their current mode`() {
+        val output = SynchronizedOutput()
+        val reports = mutableListOf<String>()
+        val query = "\u001b[?2026\$p"
+        val text = query + "\u001b[?2026h" + query + "reply" + "\u001b[?2026l" + query + "!"
+        val stream = SynchronizedOutputStream(ArrayTerminalDataStream(text.toCharArray()), output, reports::add)
+        val visible = buildString { while (!stream.isEmpty) append(stream.char) }
+
+        assertEquals("reply!", visible, "negotiation and mode controls must not appear as message text")
+        assertEquals(listOf("\u001b[?2026;2\$y", "\u001b[?2026;1\$y", "\u001b[?2026;2\$y"), reports)
+        assertFalse(output.active)
+
+        output.replay(true)
+        assertEquals(2, output.modeStatus(), "holding restoration is independent of the program's requested mode")
+    }
+
+    @Test
     fun `a handed-over terminal stays hidden through recorded redraw boundaries`() {
         val output = SynchronizedOutput()
         output.replay(true)
@@ -111,11 +128,14 @@ class SynchronizedOutputTest {
     @Test
     fun `mode text in titles and string controls does not hide the terminal`() {
         val output = SynchronizedOutput()
-        for (text in listOf("\u001b]2;example \u001b[?2026h\u0007", "\u001bPexample \u001b[?2026h\u001b\\")) {
-            val stream = SynchronizedOutputStream(ArrayTerminalDataStream(text.toCharArray()), output)
+        val replies = mutableListOf<String>()
+        for (text in listOf("\u001b]2;example \u001b[?2026h\u0007", "\u001bPexample \u001b[?2026h\u001b\\",
+            "\u001b]2;example \u001b[?2026\$p\u0007", "\u001bPexample \u001b[?2026\$p\u001b\\")) {
+            val stream = SynchronizedOutputStream(ArrayTerminalDataStream(text.toCharArray()), output, replies::add)
             repeat(text.length) { stream.char }
             assertFalse(output.active)
         }
+        assertTrue(replies.isEmpty(), "a query quoted inside a string control is not a request")
         val begin = "\u001b[?25;2026h"
         val stream = SynchronizedOutputStream(ArrayTerminalDataStream(begin.toCharArray()), output)
         while (!stream.isEmpty) stream.char
