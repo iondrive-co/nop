@@ -372,24 +372,17 @@ class NopTerminalSettingsTest {
             ),
         )
 
-        val fills = mutableListOf<Triple<Int, Int, Color>>()
         val img = java.awt.image.BufferedImage(800, 400, java.awt.image.BufferedImage.TYPE_INT_ARGB)
         val g2d = img.createGraphics()
-        val recording = object : ContrastAdjustingGraphics2D(g2d, s) {
-            override fun fillRect(x: Int, y: Int, width: Int, height: Int) {
-                fills.add(Triple(x, width, color))
-                super.fillRect(x, y, width, height)
-            }
-        }
-
-        panel.paintComponent(recording)
+        try { panel.paintComponent(g2d) } finally { g2d.dispose(); widget.close() }
 
         val expectedBg = Color(0x26, 0x75, 0xBF)
-        val selectionFills = fills.filter { it.third == expectedBg }
-        assertTrue(selectionFills.isNotEmpty(), "Selection background color should be filled")
-        val totalSelectedWidth = selectionFills.sumOf { it.second }
-        assertTrue(totalSelectedWidth > 150, "Selection fill should span plain text and the hyperlink")
-        val linkColor = s.hyperlinkColor.foreground!!.toColor()
-        assertFalse(fills.any { it.third == linkColor }, "Hyperlink should not use its link foreground as background")
+        val selectedRow = (0 until img.height).maxBy { y ->
+            (0 until img.width).count { x -> img.getRGB(x, y) == expectedBg.rgb }
+        }
+        val selectedWidth = (0 until img.width).count { x -> img.getRGB(x, selectedRow) == expectedBg.rgb }
+        assertTrue(selectedWidth > 150, "Selection background must span plain text and the hyperlink")
+        val linkX = panel.getFontMetrics(s.terminalFont).charWidth('W') * 10
+        assertEquals(expectedBg.rgb, img.getRGB(linkX, selectedRow), "Selected link background must match selected plain text")
     }
 }

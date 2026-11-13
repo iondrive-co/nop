@@ -146,20 +146,23 @@ class SynchronizedOutputTest {
     fun `a long redraw leaves the last finished frame on screen until it is complete`() {
         lateinit var widget: NopTerminalWidget
         lateinit var panel: NopTerminalPanel
+        lateinit var before: IntArray
         onEdt {
             widget = widget()
             panel = widget.terminalPanel as NopTerminalPanel
             feed(panel, "Previous screen\u001b[?25l")
+            before = pixels(paint(panel))
             assertTrue(repaintDue(panel), "ordinary output is painted on the next tick")
             feed(panel, "\u001b[?2026h\u001b[3J\u001b[2J\u001b[H" + (1..300).joinToString("") { "Example reply $it\r\n" } +
                 "Current prompt")
             assertFalse(repaintDue(panel), "nothing is painted while the redraw is in progress, not even output from before it")
+            assertArrayEquals(before, pixels(paint(panel)), "an immediate expose must keep the completed frame")
         }
         try {
             Thread.sleep(150)
             onEdt {
-                assertTrue(pixels(paint(panel)).all { it == Color.WHITE.rgb },
-                    "a paint Swing asks for part way through a long redraw shows the background, not the rows printed so far")
+                assertArrayEquals(before, pixels(paint(panel)),
+                    "a paint Swing asks for during a long redraw must keep the completed frame")
                 feed(panel, "\u001b[?2026l")
                 assertTrue(repaintDue(panel), "the finished redraw is painted on the next tick")
             }

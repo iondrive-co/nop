@@ -48,6 +48,8 @@ import java.awt.event.MouseWheelEvent
 import java.awt.font.FontRenderContext
 import java.awt.font.GlyphVector
 import java.awt.geom.AffineTransform
+import kotlin.math.ceil
+import kotlin.math.hypot
 import java.awt.image.BufferedImage
 import java.awt.image.BufferedImageOp
 import java.awt.image.ImageObserver
@@ -299,6 +301,14 @@ internal class NopTerminalPanel(
      */
     var onSynchronizedOutputFinished: ((rowsAboveBottom: Int?) -> Unit)? = null
     private var disposed = false
+    private data class CompletedFrame(
+        val image: BufferedImage,
+        val scaleX: Double,
+        val scaleY: Double,
+        val width: Int,
+        val height: Int,
+    )
+    private var completedFrame: CompletedFrame? = null
 
     /** A repaint asked for during an update, owed as soon as the update is complete. */
     private val repaintHeld = AtomicBoolean(false)
@@ -356,6 +366,7 @@ internal class NopTerminalPanel(
 
     override fun dispose() {
         disposed = true
+        discardCompletedFrame()
         expiryTimer.stop()
         synchronizedOutput.reset()
         super.dispose()
@@ -369,6 +380,9 @@ internal class NopTerminalPanel(
 
     init {
         verticalScrollModel.addChangeListener { viewingHistory = verticalScrollModel.value < 0 }
+        addHierarchyListener { event ->
+            if (event.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && !isShowing) discardCompletedFrame()
+        }
         terminalTextBuffer.addChangesListener(object : TextBufferChangesListener {
             override fun historyCleared() {
                 if (!synchronizedOutput.active || rebuiltFrom != null) return
@@ -540,38 +554,83 @@ internal class NopTerminalPanel(
     var cursorRow: () -> Int = { Int.MIN_VALUE }
 
     override fun paintComponent(g: Graphics) {
-        // Repaints are held during an update (see [repaint]), so a paint now is Swing's own: the
-        // terminal was shown, uncovered or resized. A short update is all but finished and is
-        // painted as it stands. A long one is still part way through printing the scrollback, and
-        // the last finished frame is already gone from the screen, so it gets the bare background
-        // until the update is complete.
-        if (synchronizedOutput.active && synchronizedOutput.age >= LIVE_PAINT_MS) {
-            g.color = settings.bg
-            g.fillRect(0, 0, width, height)
-            repaintHeld.set(true)
-            if (!synchronizedOutput.active && repaintHeld.getAndSet(false)) super.repaint()
-            return
-        }
+        if (paintHeldFrame(g)) return
         val buffer = terminalTextBuffer
         buffer.lock()
         try {
+            // The program can begin an update between the first check and acquiring the buffer.
+            if (paintHeldFrame(g)) return
             flushPendingScroll()
-            val g2d = g as? Graphics2D ?: run {
-                super.paintComponent(g)
-                return
-            }
-            val clip = g2d.clip
-            val wrapper = ContrastAdjustingGraphics2D(g2d, settings,
-                fillColor = userMessages?.let { UserRowFill(it)::fill },
-                paintClip = clip ?: Rectangle(0, 0, width, height))
-            try {
-                super.paintComponent(wrapper)
-            } finally {
-                g2d.clip = clip
+            val frame = frameFor(g)
+            if (frame == null) {
+                discardCompletedFrame()
+                paintTerminal(g)
+            } else {
+                val graphics = frame.image.createGraphics()
+                try {
+                    graphics.scale(frame.scaleX, frame.scaleY)
+                    paintTerminal(graphics)
+                } finally { graphics.dispose() }
+                completedFrame = frame
+                drawCompletedFrame(g, frame)
             }
         } finally {
             buffer.unlock()
         }
+    }
+
+    /** An expose must restore the completed pixels, including a clipped portion of a history table. */
+    private fun paintHeldFrame(g: Graphics): Boolean {
+        if (!synchronizedOutput.active) return false
+        val frame = completedFrame
+        // A newly shown or oversized terminal can still paint immutable history without a cache.
+        if (frame == null && rebuiltFrom == null && !terminalTextBuffer.isUsingAlternateBuffer &&
+            verticalScrollModel.value + terminalTextBuffer.height <= 0) return false
+        val graphics = g.create()
+        try {
+            graphics.color = settings.bg
+            graphics.fillRect(0, 0, width, height)
+            if (frame != null) drawCompletedFrame(graphics, frame)
+        } finally { graphics.dispose() }
+        repaintHeld.set(true)
+        if (!synchronizedOutput.active && repaintHeld.getAndSet(false)) super.repaint()
+        return true
+    }
+
+    private fun frameFor(g: Graphics): CompletedFrame? {
+        val transform = (g as? Graphics2D)?.transform ?: return null
+        val scaleX = hypot(transform.scaleX, transform.shearY)
+        val scaleY = hypot(transform.shearX, transform.scaleY)
+        val pixelWidth = ceil(width * scaleX).toInt()
+        val pixelHeight = ceil(height * scaleY).toInt()
+        if (pixelWidth <= 0 || pixelHeight <= 0 || pixelWidth.toLong() * pixelHeight > MAX_FRAME_PIXELS) return null
+        return completedFrame?.takeIf {
+            it.width == width && it.height == height && it.scaleX == scaleX && it.scaleY == scaleY
+        } ?: CompletedFrame(BufferedImage(pixelWidth, pixelHeight, BufferedImage.TYPE_INT_RGB), scaleX, scaleY, width, height)
+    }
+
+    private fun drawCompletedFrame(g: Graphics, frame: CompletedFrame) {
+        val graphics = g.create()
+        try {
+            graphics.clipRect(0, 0, width, height)
+            if (graphics is Graphics2D) {
+                graphics.drawImage(frame.image, AffineTransform.getScaleInstance(1 / frame.scaleX, 1 / frame.scaleY), null)
+            } else graphics.drawImage(frame.image, 0, 0, frame.width, frame.height, null)
+        } finally { graphics.dispose() }
+    }
+
+    private fun discardCompletedFrame() {
+        completedFrame?.image?.flush()
+        completedFrame = null
+    }
+
+    private fun paintTerminal(g: Graphics) {
+        val graphics = g as? Graphics2D ?: run { super.paintComponent(g); return }
+        val clip = graphics.clip
+        val wrapper = ContrastAdjustingGraphics2D(graphics, settings,
+            fillColor = userMessages?.let { UserRowFill(it)::fill },
+            paintClip = clip ?: Rectangle(0, 0, width, height))
+        try { super.paintComponent(wrapper) } finally { graphics.clip = clip }
     }
 
     /**
@@ -625,8 +684,8 @@ internal class NopTerminalPanel(
     }
 
     private companion object {
-        /** How long an update can have been going on and still be painted as it stands. */
-        const val LIVE_PAINT_MS = 100L
+        /** Bound the optional completed-frame image to a 4K display; hidden terminals release it. */
+        const val MAX_FRAME_PIXELS = 8L * 1024 * 1024
 
         /** How often a held update checks whether its program has stopped writing. */
         const val EXPIRY_CHECK_MS = 250

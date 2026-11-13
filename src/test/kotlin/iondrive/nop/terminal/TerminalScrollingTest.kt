@@ -19,6 +19,72 @@ import javax.swing.SwingUtilities
 
 class TerminalScrollingTest {
     @Test
+    fun `refreshing table rows during offscreen synchronized output preserves the entire table`() {
+        for (scale in listOf(1.0, 1.25, 2.0)) assertTableRefreshStable(scale)
+    }
+
+    private fun assertTableRefreshStable(scale: Double) {
+        lateinit var widget: NopTerminalWidget
+        lateinit var expected: IntArray
+        lateinit var image: BufferedImage
+        lateinit var visibleRows: List<String>
+        lateinit var table: List<String>
+        onEdt {
+            widget = terminal()
+            table = listOf(
+                "┌──────────────┬─────────┐",
+                "│ Example item │ Count   │",
+                "├──────────────┼─────────┤",
+                "│ Amber        │ 12      │",
+                "│ Birch        │ 34      │",
+                "│ Cedar        │ 56      │",
+                "│ Dune         │ 78      │",
+                "│ Elm          │ 90      │",
+                "└──────────────┴─────────┘",
+            )
+            feed(widget, ((1..40).map { "Earlier line $it" } + table +
+                (1..41).map { "Later line $it" }).joinToString("\r\n") + "\r\n\u001b[?25l")
+            paint(widget)
+        }
+        onEdt {
+            wheel(widget, -13)
+            image = paint(widget, scale)
+            expected = pixels(image)
+            val buffer = widget.terminalTextBuffer
+            val origin = widget.terminalPanel.verticalScrollModel.value
+            visibleRows = (origin until origin + buffer.height).map { buffer.getLine(it).text }
+            assertEquals(table.first(), visibleRows.first())
+            val panel = widget.terminalPanel as NopTerminalPanel
+            val output = "\u001b[?2026hNew output below the visible table\r\n"
+            val emulator = JediEmulator(SynchronizedOutputStream(ArrayTerminalDataStream(output.toCharArray()), panel.synchronizedOutput), widget.terminal)
+            while (emulator.hasNext()) emulator.next()
+            panel.flushPendingScroll()
+        }
+        try {
+            // An expose or partial Swing repaint can arrive while the program's frame is open.
+            Thread.sleep(150)
+            onEdt {
+                val panel = widget.terminalPanel as NopTerminalPanel
+                panel.synchronizedOutput.touch()
+                assertTrue(panel.synchronizedOutput.active)
+                assertTrue(panel.synchronizedOutput.age >= 100)
+                image.createGraphics().let { graphics ->
+                    try {
+                        graphics.scale(scale, scale)
+                        graphics.clip = Rectangle(0, 40, panel.width, 80)
+                        panel.paintComponent(graphics)
+                    } finally { graphics.dispose() }
+                }
+                val buffer = widget.terminalTextBuffer
+                val origin = panel.verticalScrollModel.value
+                assertEquals(visibleRows, (origin until origin + buffer.height).map { buffer.getLine(it).text },
+                    "the writer is changing only rows below the table")
+                assertArrayEquals(expected, pixels(image), "refreshing a table must not erase its rows")
+            }
+        } finally { onEdt { widget.close() } }
+    }
+
+    @Test
     fun `output received at the bottom does not become an extra scroll on the next wheel event`() = onEdt {
         val widget = terminal()
         try {
@@ -200,11 +266,11 @@ class TerminalScrollingTest {
         while (emulator.hasNext()) emulator.next()
     }
 
-    private fun paint(widget: NopTerminalWidget): BufferedImage {
+    private fun paint(widget: NopTerminalWidget, scale: Double = 1.0): BufferedImage {
         val panel = widget.terminalPanel
-        val image = BufferedImage(panel.width, panel.height, BufferedImage.TYPE_INT_RGB)
+        val image = BufferedImage((panel.width * scale).toInt(), (panel.height * scale).toInt(), BufferedImage.TYPE_INT_RGB)
         image.createGraphics().let { graphics ->
-            try { panel.paintComponent(graphics) } finally { graphics.dispose() }
+            try { graphics.scale(scale, scale); panel.paintComponent(graphics) } finally { graphics.dispose() }
         }
         return image
     }
