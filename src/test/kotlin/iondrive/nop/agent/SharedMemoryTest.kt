@@ -1,6 +1,5 @@
 package iondrive.nop.agent
 
-import iondrive.nop.agent.SharedMemory.Category
 import iondrive.nop.agent.SharedMemory.Scope
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -15,7 +14,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 
 /**
- * The memory every agent nop runs shares: a file per project and three for every project. What
+ * The memory every agent nop runs shares: a file per project and a directory of topic files for every project. What
  * matters is that each run is told the right files, that nop never writes over what is in them, that
  * an entry only goes in by saying who it is for, and that one claimed for every project is turned
  * away when it plainly belongs to one.
@@ -28,14 +27,15 @@ class SharedMemoryTest {
         SharedMemory.globalProblems(entry, projects, home, onPath)
 
     @Test
-    fun `the instructions name the project's file and the three shared ones`(@TempDir tmp: Path) {
+    fun `the instructions name the project's file and the user file, and say the other topics are read on a question`(@TempDir tmp: Path) {
         val project = tmp.resolve("shop")
 
         val text = SharedMemory.instructions(project, tmp)
 
         assertTrue(SharedMemory.projectFile(project, tmp).toString() in text, text)
-        Category.entries.forEach { assertTrue(SharedMemory.file(it, tmp).toString() in text, it.title) }
-        assertTrue("Read these before you start" in text)
+        assertTrue(SharedMemory.file(SharedMemory.USER_TOPIC, tmp).toString() in text)
+        assertFalse("hardware" in text, "nop names no topic file but user.md")
+        assertTrue("Read these before you start" in text && "do not read them at the start" in text, text)
         assertTrue("nop-msg remember project" in text && "nop-msg remember all" in text)
     }
 
@@ -60,8 +60,8 @@ class SharedMemoryTest {
 
         SharedMemory.ensure(project, tmp)
 
-        assertTrue(Files.readString(SharedMemory.file(Category.User, tmp)).startsWith("# User Information\n"))
-        assertTrue(Files.readString(SharedMemory.file(Category.Software, tmp)).startsWith("# Software and Agent Information\n"))
+        assertTrue(Files.readString(SharedMemory.file(SharedMemory.USER_TOPIC, tmp)).startsWith("# User\n"))
+        assertFalse(Files.exists(SharedMemory.file("hardware-os", tmp)), "other topics exist only once something is filed under them")
         val own = SharedMemory.projectFile(project, tmp)
         assertTrue("Project: $project" in Files.readString(own))
         assertEquals("r--------", PosixFilePermissions.toString(Files.getPosixFilePermissions(own)))
@@ -69,7 +69,7 @@ class SharedMemoryTest {
 
     @Test
     fun `a memory that already exists is never rewritten`(@TempDir tmp: Path) {
-        val file = SharedMemory.file(Category.Hardware, tmp)
+        val file = SharedMemory.file("hardware-os", tmp)
         Files.writeString(file, "- ptah: never pkill xfwm4\n")
 
         SharedMemory.ensure(null, tmp)
@@ -82,11 +82,11 @@ class SharedMemoryTest {
         val project = tmp.resolve("shop")
 
         assertFalse(SharedMemory.remember(project, Scope.Project, "Run the fixtures with -Dslow", emptyList(), tmp).isError)
-        assertFalse(SharedMemory.remember(project, Scope.All(Category.User), "- Wants a script, not a\n command list", emptyList(), tmp).isError)
-        SharedMemory.remember(project, Scope.All(Category.User), "Wants a script, not a command list", emptyList(), tmp)
+        assertFalse(SharedMemory.remember(project, Scope.All(SharedMemory.USER_TOPIC), "- Wants a script, not a\n command list", emptyList(), tmp).isError)
+        SharedMemory.remember(project, Scope.All(SharedMemory.USER_TOPIC), "Wants a script, not a command list", emptyList(), tmp)
 
         assertTrue(Files.readString(SharedMemory.projectFile(project, tmp)).endsWith("\n- Run the fixtures with -Dslow\n"))
-        val user = Files.readString(SharedMemory.file(Category.User, tmp))
+        val user = Files.readString(SharedMemory.file(SharedMemory.USER_TOPIC, tmp))
         assertEquals(1, user.lines().count { it == "- Wants a script, not a command list" }, user)
     }
 
@@ -106,11 +106,11 @@ class SharedMemoryTest {
     @Test
     fun `an entry for every project that is about one is refused, and nothing is written`(@TempDir tmp: Path) {
         val project = tmp.resolve("shop")
-        val outcome = SharedMemory.remember(project, Scope.All(Category.Software), "In $project, run gradle with --offline", emptyList(), tmp)
+        val outcome = SharedMemory.remember(project, Scope.All("tools"), "In $project, run gradle with --offline", emptyList(), tmp)
 
         assertTrue(outcome.isError, outcome.text)
         assertTrue("remember project" in outcome.text, outcome.text)
-        val software = SharedMemory.file(Category.Software, tmp)
+        val software = SharedMemory.file("tools", tmp)
         assertFalse(Files.exists(software) && "gradle" in Files.readString(software))
     }
 
@@ -149,11 +149,13 @@ class SharedMemoryTest {
     }
 
     @Test
-    fun `the scope is project, or all and a category`() {
+    fun `the scope is project, or all and a topic`() {
         assertEquals(Scope.Project to 1, SharedMemory.parseScope(listOf("project", "x")))
-        assertEquals(Scope.All(Category.Hardware) to 2, SharedMemory.parseScope(listOf("all", "hardware")))
+        assertEquals(Scope.All("hardware-os") to 2, SharedMemory.parseScope(listOf("all", "Hardware-OS")))
         assertEquals(null, SharedMemory.parseScope(listOf("all")))
-        assertEquals(null, SharedMemory.parseScope(listOf("all", "misc")))
+        assertEquals(Scope.All("misc") to 2, SharedMemory.parseScope(listOf("all", "misc")))
+        assertEquals(null, SharedMemory.parseScope(listOf("all", "../etc")))
+        assertEquals(null, SharedMemory.parseScope(listOf("all", "projects")))
         assertEquals(null, SharedMemory.parseScope(listOf("everywhere")))
     }
 

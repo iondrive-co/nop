@@ -45,7 +45,7 @@ import javax.swing.SwingUtilities
  *
  *     <ticket>
  *     list                        or    send                    or    remember | forget    or    status
- *                                       <id or title>                 project | all <category>    <message id>
+ *                                       <id or title>                 project | all <topic>    <message id>
  *                                       <message, to the end>         <entry, to the end>
  *
  * The answer is `ok` or `error` on its first line, then text. A send's text ends with the message's
@@ -203,7 +203,7 @@ object AgentSocket {
             "service-register" -> tools.registerService(caller, lines.getOrNull(2)?.trim().orEmpty())
             "remember", "forget" -> {
                 val scope = SharedMemory.parseScope(lines.getOrNull(2)?.trim().orEmpty().split(' ').filter { it.isNotEmpty() })?.first
-                    ?: return false to "say who it is for: `project`, or `all <${SharedMemory.Category.entries.joinToString("|") { it.id }}>`"
+                    ?: return false to "say who it is for: `project`, or `all <topic>`, a file name in the shared memory directory without .md (a topic is lowercase letters, digits and -)"
                 tools.memory(caller, lines[1].trim() == "forget", scope, lines.getOrNull(3).orEmpty())
             }
             else -> return false to "unknown request; nop-msg takes `list`, `send`, `status`, `remember`, `forget` or `service-register`"
@@ -338,8 +338,8 @@ object AgentSocket {
         |#   nop-msg send <id or title> < file        the same, with the message on stdin
         |#   nop-msg status <message id>              where a message you sent has got to
         |#   nop-msg remember project <text...>       add a line to this project's memory
-        |#   nop-msg remember all <category> <text...> add a line to every project's (user|hardware|software)
-        |#   nop-msg forget project|all <category> <text...>  take that line out again
+        |#   nop-msg remember all <topic> <text...> add a line to every project's (user, or a topic)
+        |#   nop-msg forget project|all <topic> <text...>  take that line out again
         |#   nop-msg service-register <name>          let a program message this project's tabs as <name>
         |usage() { sed -n '5,12s/^# *//p' "${'$'}0" >&2; exit 2; }
         |if [ -z "${'$'}NOP_SOCKET" ] || [ -z "${'$'}NOP_AGENT_TICKET" ]; then
@@ -380,7 +380,7 @@ object AgentSocket {
         |        case "${'$'}1" in
         |            project) scope=project; shift ;;
         |            all) [ ${'$'}# -ge 2 ] || usage; scope="all ${'$'}2"; shift 2 ;;
-        |            *) echo "nop-msg: say who it is for: project, or all <user|hardware|software>" >&2; exit 2 ;;
+        |            *) echo "nop-msg: say who it is for: project, or all <topic>" >&2; exit 2 ;;
         |        esac
         |        if [ ${'$'}# -gt 0 ]; then
         |            msg=${'$'}*

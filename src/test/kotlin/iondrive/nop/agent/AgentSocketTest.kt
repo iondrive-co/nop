@@ -103,17 +103,17 @@ class AgentSocketTest {
         val tools = Recorder()
         assertTrue(AgentSocket.handle("${tab.agentTicket}\nremember\nproject\nbuild with -x\n", { tab }, tools).first)
         assertTrue(AgentSocket.handle("${tab.agentTicket}\nremember\nall user\nlikes scripts\n", { tab }, tools).first)
-        assertTrue(AgentSocket.handle("${tab.agentTicket}\nforget\nall software\nold line", { tab }, tools).first)
+        assertTrue(AgentSocket.handle("${tab.agentTicket}\nforget\nall tools\nold line", { tab }, tools).first)
         assertEquals(
             listOf(
                 Triple(false, SharedMemory.Scope.Project, "build with -x\n"),
-                Triple(false, SharedMemory.Scope.All(SharedMemory.Category.User), "likes scripts\n"),
-                Triple(true, SharedMemory.Scope.All(SharedMemory.Category.Software), "old line"),
+                Triple(false, SharedMemory.Scope.All(SharedMemory.USER_TOPIC), "likes scripts\n"),
+                Triple(true, SharedMemory.Scope.All("tools"), "old line"),
             ),
             tools.memory,
         )
         assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nall\nno category\n", { tab }, tools).first)
-        assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nall misc\nwrong category\n", { tab }, tools).first)
+        assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nall ../x\nwrong topic\n", { tab }, tools).first)
         assertFalse(AgentSocket.handle("${tab.agentTicket}\nremember\nsomewhere\nno scope\n", { tab }, tools).first)
     }
 

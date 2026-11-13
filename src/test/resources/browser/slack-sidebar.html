@@ -119,7 +119,12 @@ window.runFixture = async function () {
     const checks = [];
     const measurements = {};
     const check = (name, pass) => checks.push({name, pass: !!pass});
-    const settle = () => new Promise(resolve => setTimeout(resolve, 100));
+    // The layout script reacts on requestAnimationFrame, which a busy or unfocused Xvfb window can
+    // delay past a fixed 100 ms: wait for two frames as well (and give up on them after 2 s).
+    const settle = () => new Promise(resolve => setTimeout(() => {
+        const give = setTimeout(resolve, 2000);
+        requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(give); resolve(); }));
+    }, 100));
     const visible = key => {
         const row = [...list.children].find(element => element.dataset.key === key);
         if (!row || getComputedStyle(row).display === 'none') return false;

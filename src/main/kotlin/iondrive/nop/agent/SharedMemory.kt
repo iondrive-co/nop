@@ -18,14 +18,17 @@ import java.security.MessageDigest
  * learns is invisible to the next session opened on another account, and the same mistake happens
  * twice.
  *
- * There are two kinds of file. Each project has its own, which only that project's runs are told
- * about. Three more hold what is true whatever the project — about the user, about the machine's
- * hardware and OS, and about its software and the agents that run on it ([Category]). One file for everything grew into a
+ * There are two tiers. Each project has its own file, which only that project's runs are told
+ * about. Everything true whatever the project goes in a directory of topic files — `user.md`,
+ * `hardware-os.md`, `claude-code.md`, whatever the people using this nop have found worth
+ * keeping. nop does not define them: a topic is a file name, anyone can add one, and no two
+ * installs need the same set. Only `user.md` is read at the start of a run; the rest only grow,
+ * so a run reads one when it has a question in that area. One file for everything grew into a
  * log of every project's details that every run in every project had to read.
  *
  * Agents never write the files themselves; they are read-only on disk. An entry goes in through
  * `nop-msg remember`, which has to say whether it is for this project or for all of them, and an
- * entry for all of them has to name its [Category] and pass [globalProblems] — mechanical checks
+ * entry for all of them has to name its topic and pass [globalProblems] — mechanical checks
  * that turn away what plainly belongs to one project. Telling agents what not to write was tried,
  * and did not hold.
  *
@@ -37,23 +40,18 @@ import java.security.MessageDigest
  */
 object SharedMemory {
 
-    /** The three files that hold what is true in every project. */
-    enum class Category(val id: String, val title: String, val fileName: String, val holds: String) {
-        User("user", "User Information", "user.md", "who the user is and how they want agents to work with them"),
-        Hardware("hardware", "Hardware and OS Information", "hardware-os.md", "this machine: its hardware, devices, OS, mounts and system services"),
-        Software("software", "Software and Agent Information", "software-agents.md", "the programs on this machine and how they behave here, and the agents: their CLIs, accounts and limits, nop, shell tools"),
-        ;
+    /** The one shared file every run reads at start: who the user is and how they want agents to work. */
+    const val USER_TOPIC = "user"
 
-        companion object {
-            fun of(id: String): Category? = entries.firstOrNull { it.id.equals(id, ignoreCase = true) }
-        }
-    }
-
-    /** Where an entry goes: the caller's project, or one of the files for every project. */
+    /** Where an entry goes: the caller's project, or a topic file for every project. */
     sealed interface Scope {
         data object Project : Scope
-        data class All(val category: Category) : Scope
+        data class All(val topic: String) : Scope
     }
+
+    /** A topic is a short lowercase file name; `projects` is the directory of project files. */
+    fun topic(word: String?): String? =
+        word?.lowercase()?.takeIf { TOPIC.matches(it) && it != PROJECTS }
 
     /** Where a run finds its project's memory file, for `agy`, whose instructions can't name it. */
     const val PROJECT_ENV = "NOP_PROJECT_MEMORY"
@@ -64,7 +62,7 @@ object SharedMemory {
      */
     fun dir(): Path = Accounts.dataRoot().resolve("memory")
 
-    fun file(category: Category, dir: Path = dir()): Path = dir.resolve(category.fileName)
+    fun file(topic: String, dir: Path = dir()): Path = dir.resolve("$topic.md")
 
     /**
      * [project]'s memory: named for the directory, so it can be found by eye, and for a hash of the
@@ -89,12 +87,15 @@ object SharedMemory {
     ): String {
         val projectLine = project?.let { "this project's memory: ${projectFile(it, dir)}" }
             ?: "this project's memory: the file named by \$$PROJECT_ENV"
-        val globals = Category.entries.joinToString("\n") { "- ${file(it, dir)} (${it.title}: ${it.holds})" }
-        val ids = Category.entries.joinToString("|") { it.id }
         return """
         |nop agent memory. Read these before you start on the user's first request:
         |- $projectLine
-        |$globals
+        |- ${file(USER_TOPIC, dir)} (who the user is and how they want agents to work with them)
+        |
+        |Every other file in $dir is a topic that holds what is true in every project: `ls` it to
+        |see which. They are long and keep growing, so do not read them at the start. When you have
+        |a question in an area (a program, a device, a service, an agent CLI), `ls` the topics, then
+        |grep -i the likely file for the question's words and read the lines that match.
         |
         |Every agent nop runs shares these files: Claude, Codex and Antigravity, on every account.
         |They are how what one session learns reaches the next. Your CLI's own memory is kept per
@@ -103,7 +104,9 @@ object SharedMemory {
         |The files are read-only. Add a line with `nop-msg remember` when you learn something
         |another session would need, and say who it is for:
         |    nop-msg remember project <text>        for sessions in this project only
-        |    nop-msg remember all <$ids> <text>     for sessions in every project
+        |    nop-msg remember all <topic> <text>     for sessions in every project; <topic> is the name of
+        |                                          a file there without .md, or a new short lowercase
+        |                                          name (letters, digits, -) when none fits
         |An entry for all projects is checked by nop, and refused if it mentions a project's paths
         |or names, commits, or the session it was written in; a refusal says what to change. To fix
         |or drop a line, `nop-msg forget project|all <category> <the line's text>`, then remember the
@@ -122,18 +125,19 @@ object SharedMemory {
     }
 
     /**
-     * Creates the three files for every project and [project]'s own, each with a heading that says
-     * what it is, the first time a run is started. An existing file is never touched.
+     * Creates `user.md` and [project]'s own file, each with a heading that says what it is, the first
+     * time a run is started. An existing file is never touched; any other topic file is created by
+     * the first entry for it.
      */
     fun ensure(project: Path?, dir: Path = dir()) {
-        Category.entries.forEach { create(file(it, dir), "# ${it.title}\n\nFor every project: ${it.holds}.\n\n") }
+        create(file(USER_TOPIC, dir), topicHeading(USER_TOPIC))
         project?.let { create(projectFile(it, dir), projectHeading(it)) }
     }
 
-    /** Reads [scope] from what follows `remember`/`forget`: `project`, or `all <category>`. */
+    /** Reads [scope] from what follows `remember`/`forget`: `project`, or `all <topic>`. */
     fun parseScope(words: List<String>): Pair<Scope, Int>? = when (words.firstOrNull()?.lowercase()) {
         "project" -> Scope.Project to 1
-        "all" -> words.getOrNull(1)?.let(Category::of)?.let { Scope.All(it) to 2 }
+        "all" -> topic(words.getOrNull(1))?.let { Scope.All(it) to 2 }
         else -> null
     }
 
@@ -262,7 +266,12 @@ object SharedMemory {
 
     private fun target(project: Path, scope: Scope, dir: Path): Path = when (scope) {
         Scope.Project -> projectFile(project, dir).also { create(it, projectHeading(project)) }
-        is Scope.All -> file(scope.category, dir).also { ensure(null, dir) }
+        is Scope.All -> file(scope.topic, dir).also { create(it, topicHeading(scope.topic)) }
+    }
+
+    private fun topicHeading(topic: String) = when (topic) {
+        USER_TOPIC -> "# User\n\nFor every project: who the user is and how they want agents to work with them.\n\n"
+        else -> "# $topic\n\nFor every project.\n\n"
     }
 
     private fun projectHeading(project: Path) =
@@ -305,6 +314,7 @@ object SharedMemory {
 
     private const val RULE_FILE = "nop-shared-memory.md"
     private const val PROJECTS = "projects"
+    private val TOPIC = Regex("[a-z0-9][a-z0-9-]{0,39}")
     private const val PROJECT_LINE = "Project:"
     private const val MAX_ENTRY = 500
 
