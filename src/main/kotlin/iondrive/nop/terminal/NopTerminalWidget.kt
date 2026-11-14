@@ -131,7 +131,7 @@ internal class NopTerminalWidget(
         }
         (scrollBarRef as? TerminalScrollBar)?.apply {
             beforeScrollInput = panel::flushPendingScroll
-            afterScrollInput = panel.onScrollInput
+            afterScrollInput = { panel.invalidateHistoryAnchor(); panel.onScrollInput?.invoke() }
         }
         addHierarchyListener { e ->
             if (e.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && isShowing) markMessagesSoon()
@@ -312,6 +312,9 @@ internal class NopTerminalPanel(
 
     /** A repaint asked for during an update, owed as soon as the update is complete. */
     private val repaintHeld = AtomicBoolean(false)
+    /** The emulator can finish before the EDT restores the reader's position. */
+    private val finishingUpdate = AtomicBoolean(false)
+    private val updateGeneration = AtomicInteger()
     internal val synchronizedOutput = SynchronizedOutput(changed = ::synchronizedOutputChanged)
 
     /** JediTerm's own flag for a repaint on its timer's next tick, which its timer reads and clears. */
@@ -328,6 +331,10 @@ internal class NopTerminalPanel(
      */
     @Volatile
     private var rebuiltFrom: Int? = null
+    private data class HistoryAnchor(val rows: List<String>, val index: Int, val width: Int)
+    private var rebuildAnchor: HistoryAnchor? = null
+    /** Keep the painted rows even if several redraws arrive before the EDT can paint again. */
+    @Volatile private var visibleAnchor: HistoryAnchor? = null
 
     /**
      * Every repaint of the terminal JediTerm asks for comes through here, to be painted on its
@@ -339,7 +346,7 @@ internal class NopTerminalPanel(
     override fun repaint() {
         // The superclass constructor calls this before the fields here are assigned.
         val output: SynchronizedOutput? = synchronizedOutput
-        if (output != null && output.active) {
+        if (output != null && (output.active || finishingUpdate.get())) {
             repaintHeld.set(true)
             return
         }
@@ -349,17 +356,24 @@ internal class NopTerminalPanel(
     /** Runs on the thread that started or finished the update, before or after the emulator reads it. */
     private fun synchronizedOutputChanged(active: Boolean) {
         if (active) {
+            updateGeneration.incrementAndGet()
+            finishingUpdate.set(true)
             // A repaint the timer has not got to yet would otherwise draw the update's first rows.
             if (repaintDue?.getAndSet(false) == true) repaintHeld.set(true)
             SwingUtilities.invokeLater { if (!disposed && synchronizedOutput.active) expiryTimer.start() }
         } else {
-            val rowsAboveBottom = rebuiltFrom
+            val generation = updateGeneration.get()
+            val rowsAboveBottom = rebuildAnchor?.let(::findHistoryAnchor) ?: rebuiltFrom
             rebuiltFrom = null
-            if (repaintHeld.getAndSet(false)) super.repaint()
+            rebuildAnchor = null
             SwingUtilities.invokeLater {
                 if (disposed) return@invokeLater
                 if (!synchronizedOutput.active) expiryTimer.stop()
                 onSynchronizedOutputFinished?.invoke(rowsAboveBottom)
+                if (generation == updateGeneration.get() && !synchronizedOutput.active) {
+                    finishingUpdate.set(false)
+                    if (repaintHeld.getAndSet(false)) super.repaint()
+                }
             }
         }
     }
@@ -379,6 +393,7 @@ internal class NopTerminalPanel(
     var onScrollInput: (() -> Unit)? = null
 
     init {
+        synchronizedOutput.beforeScreenClear = ::captureHistoryAnchor
         verticalScrollModel.addChangeListener { viewingHistory = verticalScrollModel.value < 0 }
         addHierarchyListener { event ->
             if (event.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && !isShowing) discardCompletedFrame()
@@ -396,6 +411,52 @@ internal class NopTerminalPanel(
             override fun linesDiscardedFromHistory(lines: List<TerminalLine>) = Unit
             override fun widthResized() = Unit
         })
+    }
+
+    /** Capture the visible content before an erase, while the old history and screen still exist. */
+    private fun captureHistoryAnchor() {
+        if (rebuiltFrom != null) return
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            if (buffer.isUsingAlternateBuffer) return
+            val pending = pendingHistoryScroll.getAndSet(0)
+            val origin = if (viewingHistory) (verticalScrollModel.value + pending).coerceIn(-buffer.historyLinesCount, 0) else 0
+            rebuiltFrom = -origin
+            if (origin < 0) {
+                rebuildAnchor = visibleAnchor?.takeIf { it.width == buffer.width } ?: historyAnchor(origin)
+            }
+        } finally { buffer.unlock() }
+    }
+
+    private fun historyAnchor(origin: Int): HistoryAnchor? {
+        val buffer = terminalTextBuffer
+        if (origin >= 0 || origin < -buffer.historyLinesCount) return null
+        val rows = (origin until origin + minOf(5, buffer.height)).map { buffer.getLine(it).text.trimEnd() }
+        return if (rows.any { it.isNotBlank() }) HistoryAnchor(rows, buffer.historyLinesCount + origin, buffer.width) else null
+    }
+
+    fun invalidateHistoryAnchor() { visibleAnchor = null }
+
+    /** Locate the same rows after a redraw; appended text must not advance a reader through a table. */
+    private fun findHistoryAnchor(anchor: HistoryAnchor): Int? {
+        val buffer = terminalTextBuffer
+        buffer.lock()
+        try {
+            if (buffer.isUsingAlternateBuffer || buffer.width != anchor.width) return null
+            val history = buffer.historyLinesCount
+            var best: Int? = null
+            var distance = Int.MAX_VALUE
+            for (row in -history..0) {
+                if (row + anchor.rows.size > buffer.height) break
+                if (buffer.getLine(row).text.trimEnd() != anchor.rows.first()) continue
+                if (anchor.rows.indices.drop(1).any { buffer.getLine(row + it).text.trimEnd() != anchor.rows[it] }) continue
+                val delta = kotlin.math.abs(history + row - anchor.index)
+                if (delta < distance) { best = -row; distance = delta }
+                if (delta == 0) break
+            }
+            return best
+        } finally { buffer.unlock() }
     }
 
     /** Shows the rows [rows] above the bottom, or as near as the scrollback reaches. */
@@ -435,13 +496,16 @@ internal class NopTerminalPanel(
 
     override fun processMouseWheelEvent(event: MouseWheelEvent) {
         flushPendingScroll()
+        invalidateHistoryAnchor()
         super.processMouseWheelEvent(event)
         onScrollInput?.invoke()
     }
 
     override fun processKeyEvent(event: KeyEvent) {
         flushPendingScroll()
+        val origin = verticalScrollModel.value
         super.processKeyEvent(event)
+        if (verticalScrollModel.value != origin) invalidateHistoryAnchor()
         onScrollInput?.invoke()
     }
 
@@ -463,7 +527,9 @@ internal class NopTerminalPanel(
             event.consume()
             return
         }
+        val origin = verticalScrollModel.value
         super.processMouseEvent(event)
+        if (verticalScrollModel.value != origin) invalidateHistoryAnchor()
         onScrollInput?.invoke()
     }
 
@@ -473,7 +539,9 @@ internal class NopTerminalPanel(
             event.consume()
             return
         }
+        val origin = verticalScrollModel.value
         super.processMouseMotionEvent(event)
+        if (verticalScrollModel.value != origin) invalidateHistoryAnchor()
         if (event.id == MouseEvent.MOUSE_DRAGGED) onScrollInput?.invoke()
     }
 
@@ -574,6 +642,7 @@ internal class NopTerminalPanel(
                 completedFrame = frame
                 drawCompletedFrame(g, frame)
             }
+            visibleAnchor = historyAnchor(myClientScrollOrigin)
         } finally {
             buffer.unlock()
         }
@@ -581,7 +650,7 @@ internal class NopTerminalPanel(
 
     /** An expose must restore the completed pixels, including a clipped portion of a history table. */
     private fun paintHeldFrame(g: Graphics): Boolean {
-        if (!synchronizedOutput.active) return false
+        if (!synchronizedOutput.active && !finishingUpdate.get()) return false
         val frame = completedFrame
         // A newly shown or oversized terminal can still paint immutable history without a cache.
         if (frame == null && rebuiltFrom == null && !terminalTextBuffer.isUsingAlternateBuffer &&
@@ -593,7 +662,7 @@ internal class NopTerminalPanel(
             if (frame != null) drawCompletedFrame(graphics, frame)
         } finally { graphics.dispose() }
         repaintHeld.set(true)
-        if (!synchronizedOutput.active && repaintHeld.getAndSet(false)) super.repaint()
+        if (!synchronizedOutput.active && !finishingUpdate.get() && repaintHeld.getAndSet(false)) super.repaint()
         return true
     }
 

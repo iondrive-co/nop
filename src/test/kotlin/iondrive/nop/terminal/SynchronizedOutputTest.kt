@@ -16,6 +16,84 @@ import javax.swing.SwingUtilities
 
 class SynchronizedOutputTest {
     @Test
+    fun `a growing conversation redraw keeps the same table rows visible`() = growingRedraw(false, 1)
+
+    @Test
+    fun `Antigravity erases before its frame without clearing the visible table`() = growingRedraw(true, 1)
+
+    @Test
+    fun `queued Antigravity redraws keep the visible table until scrolling is restored`() = growingRedraw(true, 4)
+
+    private fun growingRedraw(clearBeforeFrame: Boolean, redraws: Int) {
+        val conversation = (1..120).joinToString("\r\n") { "Table row $it | Example | Value" } + "\r\nCurrent prompt"
+        lateinit var widget: NopTerminalWidget
+        lateinit var panel: NopTerminalPanel
+        lateinit var before: List<String>
+        lateinit var beforePixels: IntArray
+        fun visible(): List<String> {
+            val buffer = widget.terminalTextBuffer
+            val origin = panel.verticalScrollModel.value
+            return (origin until origin + buffer.height).map { buffer.getLine(it).text }
+        }
+        onEdt {
+            widget = widget()
+            panel = widget.terminalPanel as NopTerminalPanel
+            panel.synchronizedOutput.clearsStartUpdates = clearBeforeFrame
+            feed(panel, conversation)
+            paint(panel)
+        }
+        try {
+            onEdt {
+                repeat(10) { wheel(panel, -1) }
+                beforePixels = pixels(paint(panel))
+                before = visible()
+            }
+            onEdt {
+                repeat(redraws) { redraw ->
+                    val clear = "\u001b[2J\u001b[3J\u001b[H"
+                    feed(panel, if (clearBeforeFrame) clear else "\u001b[?2026h$clear")
+                    assertArrayEquals(beforePixels, pixels(paint(panel)), "erases must preserve the last visible table")
+                    feed(panel, (if (clearBeforeFrame) "\u001b[?2026h" else "") + conversation +
+                        (1..15 * (redraw + 1)).joinToString("") { "\r\nNew result $it" } + "\u001b[?2026l")
+                    assertArrayEquals(beforePixels, pixels(paint(panel)), "painting must wait for scroll restoration on the EDT")
+                }
+            }
+            onEdt {
+                assertArrayEquals(beforePixels, pixels(paint(panel)), "the completed redraw must display the same table")
+                assertEquals(before, visible(), "new text below the table must not move the reader past its rows")
+                assertTrue(widget.userScrolledUp)
+            }
+        } finally { onEdt { widget.close() } }
+    }
+
+    @Test
+    fun `ordinary erases are immediate and Antigravity erases expire if no frame follows`() {
+        var now = 0L
+        val output = SynchronizedOutput(clock = { now })
+        var captures = 0
+        output.beforeScreenClear = { captures++ }
+        fun erase(control: String) {
+            val stream = SynchronizedOutputStream(ArrayTerminalDataStream(control.toCharArray()), output)
+            assertEquals(control, buildString { while (!stream.isEmpty) append(stream.char) })
+        }
+        erase("\u001b[2J")
+        assertFalse(output.active)
+        assertEquals(0, captures)
+        output.clearsStartUpdates = true
+        erase("\u001b[2J")
+        assertTrue(output.active)
+        assertEquals(1, captures)
+        output.begin()
+        output.end()
+        assertFalse(output.active, "the program's frame end also releases the preceding erase")
+        erase("\u001b[J")
+        assertTrue(output.active)
+        now += 2_001
+        output.expire()
+        assertFalse(output.active, "a missing native frame must not hold the terminal forever")
+    }
+
+    @Test
     fun `programs can negotiate synchronized redraws and query their current mode`() {
         val output = SynchronizedOutput()
         val reports = mutableListOf<String>()
@@ -164,9 +242,10 @@ class SynchronizedOutputTest {
                 assertArrayEquals(before, pixels(paint(panel)),
                     "a paint Swing asks for during a long redraw must keep the completed frame")
                 feed(panel, "\u001b[?2026l")
-                assertTrue(repaintDue(panel), "the finished redraw is painted on the next tick")
+                assertArrayEquals(before, pixels(paint(panel)), "the completed frame waits for EDT scroll restoration")
             }
             onEdt {
+                assertFalse(before.contentEquals(pixels(paint(panel))), "the finished redraw becomes visible after scroll restoration")
                 val buffer = widget.terminalTextBuffer
                 assertEquals(0, panel.verticalScrollModel.value)
                 assertTrue(screen(widget).contains("Current prompt"))

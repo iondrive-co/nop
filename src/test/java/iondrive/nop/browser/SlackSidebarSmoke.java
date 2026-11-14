@@ -175,6 +175,10 @@ public class SlackSidebarSmoke {
             }
             evaluate(devtools, "window.fixtureIdentity = crypto.randomUUID(); " +
                 "document.querySelector('.p-view_contents--primary').innerHTML = '<input id=transfer-draft value=Draft style=margin:40px;width:200px;height:40px>'; true");
+            // Exercise asynchronous focus deterministically: keys sent immediately after the first
+            // click would go to the page. The click and all keyboard input must still reach Chromium.
+            evaluate(devtools, "document.querySelector('#transfer-draft').addEventListener('mousedown', event => {" +
+                "event.preventDefault(); setTimeout(() => event.target.focus(), 400);}, {once:true}); true");
             var identity = evaluate(devtools, "window.fixtureIdentity");
             for (int cycle = 0; cycle < 4; cycle++) {
                 final JFrame destination = cycle % 2 == 0 ? floating : frame;
@@ -188,6 +192,11 @@ public class SlackSidebarSmoke {
                 });
                 robot.delay(500);
                 if (!evaluate(devtools, "window.fixtureIdentity").equals(identity)) throw new AssertionError("Browser page was replaced during transfer");
+                String previous = "Draft" + "x".repeat(cycle);
+                String draft = evaluate(devtools, "document.querySelector('#transfer-draft').value");
+                if (!draft.equals(previous)) {
+                    throw new AssertionError("Draft lost during browser transfer " + cycle + "; expected=" + previous + "; actual=" + draft);
+                }
                 // Real pointer and keyboard input checks the native child, not only its Java wrapper.
                 var bounds = JsonParser.parseString(evaluate(devtools,
                     "JSON.stringify((() => {const r = document.querySelector('#transfer-draft').getBoundingClientRect(); return {x:r.x+20,y:r.y+20};})())")).getAsJsonObject();
@@ -198,15 +207,17 @@ public class SlackSidebarSmoke {
                     point.y + (int) Math.round(bounds.get("y").getAsDouble() * zoom));
                 robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
                 robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+                // A Robot click returns before Chromium has handled it. Typing before the input
+                // receives focus can send the keys to the page instead, especially on a busy runner.
+                awaitValue(devtools, "document.hasFocus() && document.activeElement === document.querySelector('#transfer-draft')",
+                    "true", "Native input did not receive focus after browser transfer " + cycle);
                 robot.keyPress(KeyEvent.VK_END);
                 robot.keyRelease(KeyEvent.VK_END);
                 robot.keyPress(KeyEvent.VK_X);
                 robot.keyRelease(KeyEvent.VK_X);
-                robot.delay(200);
                 String expected = "Draft" + "x".repeat(cycle + 1);
-                if (!evaluate(devtools, "document.querySelector('#transfer-draft').value").equals(expected)) {
-                    throw new AssertionError("Draft or keyboard focus lost on browser transfer " + cycle);
-                }
+                awaitValue(devtools, "document.querySelector('#transfer-draft').value", expected,
+                    "Native keyboard input lost after browser transfer " + cycle);
                 System.out.println("SLACK_TRANSFER " + cycle + " draft and native focus preserved");
             }
             SlackSpellingSmoke.verify(browser, devtools, client);
@@ -223,6 +234,19 @@ public class SlackSidebarSmoke {
                 ended.await(5, TimeUnit.SECONDS);
             }
         }
+    }
+
+    private static void awaitValue(DevToolsCalls devtools, String expression, String expected, String failure) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        String actual;
+        do {
+            actual = evaluate(devtools, expression);
+            if (actual.equals(expected)) return;
+            Thread.sleep(25);
+        } while (System.nanoTime() < deadline);
+        String state = evaluate(devtools, "JSON.stringify({focused:document.hasFocus(),active:document.activeElement?.id || " +
+            "document.activeElement?.tagName,draft:document.querySelector('#transfer-draft')?.value})");
+        throw new AssertionError(failure + "; expected=" + expected + "; actual=" + actual + "; state=" + state);
     }
 
     private static String evaluate(DevToolsCalls devtools, String expression) throws Exception {

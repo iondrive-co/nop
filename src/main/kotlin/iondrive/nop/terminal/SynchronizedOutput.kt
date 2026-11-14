@@ -22,6 +22,15 @@ internal class SynchronizedOutput(
     private var modeEnabled = false
     private var replaying = false
 
+    /** Antigravity emits its erase commands before the synchronized frame that repaints them. */
+    var clearsStartUpdates: Boolean = false
+    var beforeScreenClear: (() -> Unit)? = null
+
+    fun eraseInDisplay(mode: Int) {
+        if (clearsStartUpdates) begin()
+        if (active && (mode == 2 || mode == 3)) beforeScreenClear?.invoke()
+    }
+
     /** Milliseconds since the update now in progress began. */
     val age: Long get() = clock() - startedAt
 
@@ -107,6 +116,10 @@ internal class SynchronizedOutputStream(
                 }
                 val last = control.last()
                 val parameters = control.dropLast(1).toString()
+                if (last == 'J') {
+                    val mode = if (parameters.isEmpty()) 0 else parameters.toIntOrNull()
+                    if (mode != null && mode in 0..3) output.eraseInDisplay(mode)
+                }
                 // Programs that negotiate synchronized updates need the capability report before
                 // they will bracket redraws. The mode is handled here rather than by JediTerm.
                 if (last == 'p' && parameters == "?2026$") {
