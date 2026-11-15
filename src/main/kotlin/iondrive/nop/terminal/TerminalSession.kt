@@ -203,6 +203,11 @@ class TerminalSession private constructor(
     private var bracketedPaste = false
 
     private var widget: JediTermWidget? = null
+    var onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null
+        set(value) {
+            field = value
+            (widget as? NopTerminalWidget)?.onBranchHere = value
+        }
     private val commandCopies = nopPrompts?.let { TerminalCommands() }
     private var commandHistory: CommandHistory? = null
 
@@ -286,6 +291,7 @@ class TerminalSession private constructor(
         // that drawing: a terminal of any other size would wrap it into nonsense before the panel
         // has even been laid out.
         val w = NopTerminalWidget(adopted?.columns ?: INITIAL_COLUMNS, adopted?.rows ?: INITIAL_ROWS, s)
+        w.onBranchHere = onBranchHere
         (w.terminalPanel as NopTerminalPanel).synchronizedOutput.clearsStartUpdates =
             env["AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS"] == "1"
         commandCopies?.let(w::showCommandCopies)

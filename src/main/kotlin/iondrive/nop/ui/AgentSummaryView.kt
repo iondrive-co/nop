@@ -1,6 +1,8 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.ContextMenuArea
+import androidx.compose.foundation.ContextMenuItem
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,7 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -38,6 +40,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.layout.onSizeChanged
 import iondrive.nop.agent.ConversationSummary
 import iondrive.nop.agent.ConversationSummaryState
 import kotlinx.coroutines.Dispatchers
@@ -53,7 +58,7 @@ import java.time.format.DateTimeFormatter
 
 /** A read-only snapshot; only opening it or pressing Refresh reads the conversation again. */
 @Composable
-internal fun AgentSummaryView(state: ConversationSummaryState, log: Path) {
+internal fun AgentSummaryView(state: ConversationSummaryState, log: Path, onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null) {
     LaunchedEffect(state, state.revision) {
         if (state.snapshot == null && state.error == null) {
             val result = withContext(Dispatchers.IO) { runCatching { ConversationSummary.read(log) } }
@@ -100,13 +105,14 @@ internal fun AgentSummaryView(state: ConversationSummaryState, log: Path) {
             snapshot.messages.isEmpty() -> Box(Modifier.fillMaxSize().padding(16.dp)) {
                 Text("No recorded messages yet. Refresh after the agent has written its reply.", color = AgentMuted)
             }
-            else -> key(state.revision) { SummaryMessages(snapshot, state) }
+            else -> key(state.revision) { SummaryMessages(snapshot, state, onBranchHere) }
         }
     }
 }
 
 @Composable
-private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSummaryState) {
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSummaryState, onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)?) {
     val isDark = JewelTheme.isDark
     val userAccent = if (isDark) Color(0xFF98B7DF) else Color(0xFF4B6E9E)
     val incomingAccent = if (isDark) Color(0xFFC0A5D8) else Color(0xFF7C6199)
@@ -152,29 +158,49 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
                 contentPadding = PaddingValues(start = 16.dp, end = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                items(snapshot.messages) { message ->
+                itemsIndexed(snapshot.messages) { index, message ->
+                    var clickFraction = 0f
+                    var messageHeight = 1
                     val accent = when {
                         message.assistant -> replyAccent
                         message.speaker == "You" -> userAccent
                         else -> incomingAccent
                     }
-                    Column(
-                        Modifier.fillMaxWidth()
-                            .background(accent.copy(alpha = if (isDark) 0.09f else 0.055f), RoundedCornerShape(6.dp))
-                            .drawBehind {
-                                drawLine(
-                                    color = accent.copy(alpha = 0.45f),
-                                    start = Offset(0f, 8.dp.toPx()),
-                                    end = Offset(0f, size.height - 8.dp.toPx()),
-                                    strokeWidth = 2.dp.toPx(),
-                                    cap = StrokeCap.Round,
-                                )
+                    ContextMenuArea(items = {
+                        if (onBranchHere == null) emptyList() else listOf(ContextMenuItem("Branch Here") {
+                            val rows = snapshot.messages.map { entry ->
+                                listOf(entry.speaker + ":") + entry.text.lines().flatMap { line ->
+                                    if (line.isEmpty()) listOf("") else line.chunked(charactersPerLine)
+                                } + ""
                             }
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text(message.speaker, fontWeight = FontWeight.SemiBold, color = accent)
-                        if (message.assistant) MarkdownContent(message.text) else Text(message.text)
+                            val lines = rows.flatten()
+                            val before = rows.take(index).sumOf { it.size }
+                            val row = before + (clickFraction * rows[index].lastIndex).toInt()
+                            onBranchHere(iondrive.nop.agent.ConversationClick(lines, row))
+                        })
+                    }) {
+                        Column(
+                            Modifier.fillMaxWidth()
+                                .onSizeChanged { messageHeight = it.height.coerceAtLeast(1) }
+                                .onPointerEvent(PointerEventType.Press) { event ->
+                                    clickFraction = (event.changes.first().position.y / messageHeight).coerceIn(0f, 1f)
+                                }
+                                .background(accent.copy(alpha = if (isDark) 0.09f else 0.055f), RoundedCornerShape(6.dp))
+                                .drawBehind {
+                                    drawLine(
+                                        color = accent.copy(alpha = 0.45f),
+                                        start = Offset(0f, 8.dp.toPx()),
+                                        end = Offset(0f, size.height - 8.dp.toPx()),
+                                        strokeWidth = 2.dp.toPx(),
+                                        cap = StrokeCap.Round,
+                                    )
+                                }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(message.speaker, fontWeight = FontWeight.SemiBold, color = accent)
+                            if (message.assistant) MarkdownContent(message.text) else Text(message.text)
+                        }
                     }
                 }
             }

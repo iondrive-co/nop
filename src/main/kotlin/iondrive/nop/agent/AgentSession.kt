@@ -770,6 +770,16 @@ class AgentSession(
         Backup.requestSoon()
     }
 
+    /** Keeps the original tab and native history available while a branch becomes active. */
+    fun shelveForBranch() {
+        switching = true
+        try {
+            stopResumeWait()
+            run.session.killAndWait()
+            endRun(EndReason.Switched)
+        } finally { switching = false }
+    }
+
     /**
      * The prompt a handover to [target] would start it with, for the user to edit before
      * [handOver] sends it. Nothing is written yet: the summary is built when the handover happens.

@@ -103,6 +103,10 @@ internal class NopTerminalWidget(
         (terminalPanel as NopTerminalPanel).showCommandCopies(commands)
     }
 
+    var onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)?
+        get() = (terminalPanel as NopTerminalPanel).onBranchHere
+        set(value) { (terminalPanel as NopTerminalPanel).onBranchHere = value }
+
     /** Set while a [markTimer] run is on its way, so a burst of output asks for one. */
     private val marksDue = AtomicBoolean(false)
 
@@ -510,6 +514,7 @@ internal class NopTerminalPanel(
     }
 
     private var commandCopies: CommandCopyMenu? = null
+    var onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null
     private var copyMenuShown = false
 
     fun showCommandCopies(commands: TerminalCommands) {
@@ -518,7 +523,7 @@ internal class NopTerminalPanel(
 
     override fun processMouseEvent(event: MouseEvent) {
         flushPendingScroll()
-        if (commandCopies != null && (SwingUtilities.isRightMouseButton(event) || event.isPopupTrigger)) {
+        if ((commandCopies != null || onBranchHere != null) && (SwingUtilities.isRightMouseButton(event) || event.isPopupTrigger)) {
             if (event.id == MouseEvent.MOUSE_PRESSED) copyMenuShown = false
             if (event.isPopupTrigger || (event.id == MouseEvent.MOUSE_CLICKED && !copyMenuShown)) {
                 if (!copyMenuShown) commandCopyPopup(event).show(this, event.x, event.y)
@@ -563,6 +568,17 @@ internal class NopTerminalPanel(
         return createPopupMenu(provider).apply {
             isLightWeightPopupEnabled = false
             commandCopies?.addTo(this, buffer, row, column, cursorRow())
+            onBranchHere?.let { branch ->
+                val click = run {
+                    buffer.lock()
+                    try {
+                        val top = -buffer.historyLinesCount
+                        iondrive.nop.agent.ConversationClick((top until buffer.height).map { buffer.getLine(it).text }, row - top)
+                    } finally { buffer.unlock() }
+                }
+                insert(javax.swing.JMenuItem("Branch Here").apply { addActionListener { branch(click) } }, 0)
+                insert(JPopupMenu.Separator(), 1)
+            }
         }
     }
 

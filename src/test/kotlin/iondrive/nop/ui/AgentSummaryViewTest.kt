@@ -45,6 +45,7 @@ class AgentSummaryViewTest {
         val log: Path,
         val state: ConversationSummaryState = ConversationSummaryState(),
         private val dark: Boolean = false,
+        private val onBranch: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null,
     ) : AutoCloseable {
         var visible by mutableStateOf(true)
         private var time = 0L
@@ -55,7 +56,7 @@ class AgentSummaryViewTest {
         private val scene = onEdt {
             ImageComposeScene(900, 650, Density(1f), coroutineContext = Dispatchers.Swing) {
                 IntUiTheme(isDark = dark) {
-                    if (visible) AgentSummaryView(state, log)
+                    if (visible) AgentSummaryView(state, log, onBranchHere = onBranch)
                 }
             }
         }
@@ -81,6 +82,17 @@ class AgentSummaryViewTest {
         }
 
         fun clickScrollbar() = click(Offset(896f, 500f))
+
+        fun branchAt(text: String) {
+            val node = nodes().single { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true }
+            val at = node.boundsInRoot.center
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isSecondaryPressed = true), button = PointerButton.Secondary) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Secondary) }
+            settle()
+            val action = nodes().single { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == "Branch Here" } == true }
+            click(action.boundsInRoot.center)
+        }
 
         /** Presses the scrollbar track and holds it for [millis], the pointer still, before letting go. */
         fun holdScrollbar(millis: Long) {
@@ -127,6 +139,24 @@ class AgentSummaryViewTest {
             EventQueue.invokeAndWait { result = runCatching(block) }
             return result!!.getOrThrow()
         }
+    }
+
+    @Test
+    fun `right clicking a summary reply offers branching with the clicked conversation position`() {
+        val state = ConversationSummaryState().apply {
+            snapshot = ConversationSummary(listOf(
+                ConversationSummary.Message("You", "Describe the orchard.", false, 1),
+                ConversationSummary.Message("Agent", "The orchard has an eastern path.", true, 2),
+                ConversationSummary.Message("You", "Describe the greenhouse.", false, 3),
+            ), 1)
+        }
+        var captured: iondrive.nop.agent.ConversationClick? = null
+        Reader(dir.resolve("unused.jsonl"), state, onBranch = { captured = it }).use { reader ->
+            reader.settle()
+            reader.branchAt("The orchard has an eastern path.")
+        }
+        assertNotNull(captured)
+        assertTrue(captured!!.lines[captured!!.row].contains("orchard"), captured.toString())
     }
 
     @Test

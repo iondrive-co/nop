@@ -127,6 +127,20 @@ class AgentSessions {
         if (id == null || _sessions.any { it.sessionId == id }) selectedId = id
     }
 
+    /** The caller creates the native branch off the UI thread before shelving the source. */
+    fun branch(source: AgentSession, point: ConversationBranchPoint, nativeId: String?, question: String): AgentSession {
+        require(question.isNotBlank())
+        check(source in _sessions) { "The original conversation has been closed." }
+        val index = _sessions.indexOf(source)
+        source.shelveForBranch()
+        return open(source.projectDir, point.account, seed = question, resumeId = nativeId,
+            baselineSha = source.baselineSha, title = "${source.title} · branch", titleByUser = true).also {
+            it.log.append(AgentEvent.ConversationBranched(source.sessionId, point.conversation, point.boundary, System.currentTimeMillis()))
+            close(source.sessionId)
+            move(_sessions.indexOf(it), index)
+        }
+    }
+
     /**
      * Whether [restore] has already run for this project. Once per nop run, not once per look at the
      * project: this collection outlives the composition that draws it (see [AgentSessionStore]), so

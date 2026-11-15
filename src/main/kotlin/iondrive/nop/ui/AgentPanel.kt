@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +41,15 @@ fun AgentPanel(
     onSettings: () -> Unit,
 ) {
     val selected = state.selected
+    var branch by remember { mutableStateOf<Pair<iondrive.nop.agent.AgentSession, iondrive.nop.agent.ConversationClick>?>(null) }
+    DisposableEffect(selected, selected?.run) {
+        val terminal = selected?.session
+        if (selected != null) terminal?.onBranchHere = { click -> branch = selected to click }
+        onDispose { terminal?.onBranchHere = null }
+    }
+    branch?.let { (source, click) ->
+        ConversationBranchDialog(source, click, state, accounts, onClose = { branch = null })
+    }
     if (selected == null) {
         AgentPicker(
             accounts = accounts,
@@ -103,7 +113,7 @@ fun AgentPanel(
         }
         Box(modifier = Modifier.weight(1f)) {
             if (selected.summary.shown) {
-                AgentSummaryView(selected.summary, selected.log.file)
+                AgentSummaryView(selected.summary, selected.log.file, onBranchHere = { branch = selected to it })
             } else {
                 TerminalView(selected, cards)
             }

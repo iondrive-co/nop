@@ -92,6 +92,14 @@ sealed interface AgentEvent {
     @Serializable @SerialName("user_message")
     data class UserMessage(val text: String, override val at: Long) : AgentEvent
 
+    @Serializable @SerialName("conversation_branched")
+    data class ConversationBranched(
+        val sourceSession: String,
+        val sourceConversation: String,
+        val boundary: String?,
+        override val at: Long,
+    ) : AgentEvent
+
     @Serializable @SerialName("model_observed")
     data class ModelObserved(val model: String, val reasoning: String? = null, override val at: Long) : AgentEvent
 

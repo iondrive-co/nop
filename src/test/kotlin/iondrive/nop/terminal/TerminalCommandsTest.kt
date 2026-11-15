@@ -23,6 +23,8 @@ import javax.swing.JButton
 import javax.swing.JFrame
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class TerminalCommandsTest {
@@ -194,6 +196,25 @@ class TerminalCommandsTest {
             assertTrue(items.map { it.text }.containsAll(listOf("Copy command", "Copy", "Paste", "Open Link", "Copy Link Address")))
             items.single { it.text == "Open Link" }.doClick(0)
             assertEquals(listOf("https://docs.example.test/start"), opened)
+        } finally { widget.close() }
+    }
+
+    @Test
+    fun `branch menu captures the clicked history before further terminal output`() = onEdt {
+        val widget = terminal(72, 12, TerminalCommands())
+        var captured: iondrive.nop.agent.ConversationClick? = null
+        widget.onBranchHere = { captured = it }
+        try {
+            feed(widget, "An earlier orchard answer.\r\nA later greenhouse question.\r\n")
+            paint(widget)
+            val menu = popup(widget, 0, 5)
+            assertFalse(menu.isLightWeightPopupEnabled)
+            assertTrue(menu.components.filterIsInstance<javax.swing.JMenuItem>().map { it.text }.containsAll(listOf("Branch Here", "Copy", "Paste")))
+            feed(widget, "Further output after the click.\r\n")
+            menu.components.filterIsInstance<javax.swing.JMenuItem>().single { it.text == "Branch Here" }.doClick(0)
+            assertNotNull(captured)
+            assertEquals("An earlier orchard answer.", captured!!.lines[captured!!.row])
+            assertFalse(captured!!.lines.any { it.contains("Further output") })
         } finally { widget.close() }
     }
 
