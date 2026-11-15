@@ -1379,11 +1379,7 @@ class AgentSession(
         )
         newRun.startupPrompt = seed ?: carried?.startupPrompt
         if (log.hadHistory && (resumeId != null || carried != null)) {
-            kotlin.concurrent.thread(isDaemon = true, name = "agent-command-history") {
-                runCatching { ConversationSummary.read(log.file) }.onSuccess { history ->
-                    terminal.recordAssistantTexts(history.messages.filter { it.assistant }.map { it.text })
-                }
-            }
+            terminal.restoreCommandHistory { consume -> ConversationSummary.forEachAssistantText(log.file, consume) }
         }
         if (!seed.isNullOrBlank()) {
             newRun.userPromptSubmitted = true

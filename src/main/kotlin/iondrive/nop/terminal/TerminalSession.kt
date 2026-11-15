@@ -73,7 +73,7 @@ class TerminalSession private constructor(
     private val nopPrompts: List<String>? = null,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
-    var running: Boolean by mutableStateOf(false)
+    var running: Boolean by mutableStateOf(adopted?.pty?.isAlive == true)
         internal set
 
     /**
@@ -204,6 +204,23 @@ class TerminalSession private constructor(
 
     private var widget: JediTermWidget? = null
     private val commandCopies = nopPrompts?.let { TerminalCommands() }
+    private var commandHistory: CommandHistory? = null
+
+    /** Register disk history without reading it during restart's tab registration. */
+    internal fun restoreCommandHistory(read: ((String) -> Unit) -> Unit) {
+        val copies = commandCopies ?: return
+        commandHistory = CommandHistory {
+            var changed = false
+            read { text ->
+                if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                if (copies.addMessage(text)) changed = true
+            }
+            if (changed) SwingUtilities.invokeLater { widget?.repaint() }
+        }
+    }
+
+    var isDisposed: Boolean = false
+        private set
 
     /** Original assistant text, received from the transcript rather than reconstructed from PTY output. */
     internal fun recordAssistantText(text: String) {
@@ -218,7 +235,7 @@ class TerminalSession private constructor(
     }
     private var settings: NopTerminalSettings? = null
     @Volatile
-    private var process: PtyProcess? = null
+    private var process: PtyProcess? = adopted?.pty
     private var connector: PtyTtyConnector? = null
 
     /**
@@ -262,6 +279,7 @@ class TerminalSession private constructor(
         fg: Color = DEFAULT_FG,
         link: Color = DEFAULT_LINK,
     ): JediTermWidget {
+        check(!isDisposed) { "terminal has been disposed" }
         widget?.let { return it }
         val s = NopTerminalSettings(bg, fg, link)
         // An adopted program drew its screen at the size the last nop gave it, and the replay is
@@ -316,6 +334,7 @@ class TerminalSession private constructor(
             Log.warn("failed to start terminal process: ${it.message}")
             running = false
         }
+        commandHistory?.start()
         return w
     }
 
@@ -543,6 +562,8 @@ class TerminalSession private constructor(
 
     /** Kills the process tree, detaches the widget from its host card, and disposes it. Idempotent. */
     fun dispose() {
+        isDisposed = true
+        commandHistory?.close()
         connector?.releasing = true
         killProcess()
         widget?.let { w ->
@@ -719,7 +740,12 @@ class TerminalSession private constructor(
     private fun killProcess() {
         // A program handed to the next nop is not this one's to kill: the exec that follows carries it
         // across, still running.
-        if (!handedOver) process?.let { killTree(it) }
+        if (!handedOver) process?.let {
+            killTree(it)
+            // A tab can be closed between registration and its first frame. There is no widget
+            // or connector yet to close this inherited master on its behalf.
+            if (widget == null && it === adopted?.pty) runCatching { it.inputStream.close() }
+        }
         process = null
         running = false
     }

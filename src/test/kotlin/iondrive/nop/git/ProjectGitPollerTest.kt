@@ -3,12 +3,77 @@ package iondrive.nop.git
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
+import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 
 class ProjectGitPollerTest {
+    @Test
+    fun `closing does not wait for a busy worker and discards its late answer`(@TempDir tmp: Path) {
+        val project = initRepo(tmp / "sample")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val background = Executors.newSingleThreadExecutor()
+        RepoWatcher().use { watcher ->
+            val poller = ProjectGitPoller(watcher, readDirty = {
+                entered.countDown()
+                check(release.await(15, TimeUnit.SECONDS))
+                true
+            })
+            try {
+                poller.retain(listOf(project))
+                val sweep = background.submit<Map<Path, Boolean>> { poller.sweep(emptySet()) }
+                assertTrue(entered.await(10, TimeUnit.SECONDS))
+                assertTimeoutPreemptively(Duration.ofSeconds(1)) { poller.close() }
+                release.countDown()
+                assertEquals(emptyMap<Path, Boolean>(), sweep.get(10, TimeUnit.SECONDS))
+                poller.retain(listOf(project))
+                assertEquals(emptyMap<Path, Boolean>(), poller.sweep(emptySet()), "closed pollers stay closed")
+            } finally {
+                release.countDown()
+                background.shutdownNow()
+                poller.close()
+            }
+        }
+    }
+
+    @Test
+    fun `closing and reopening a tab cannot apply the previous tab's pending status`(@TempDir tmp: Path) {
+        val project = initRepo(tmp / "sample")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val background = Executors.newSingleThreadExecutor()
+        RepoWatcher().use { watcher ->
+            ProjectGitPoller(watcher, readDirty = {
+                entered.countDown()
+                check(release.await(15, TimeUnit.SECONDS))
+                true
+            }).use { poller ->
+                try {
+                    poller.retain(listOf(project))
+                    val sweep = background.submit<Map<Path, Boolean>> { poller.sweep(emptySet()) }
+                    assertTrue(entered.await(10, TimeUnit.SECONDS))
+                    assertTimeoutPreemptively(Duration.ofSeconds(1)) {
+                        poller.retain(emptyList())
+                        poller.retain(listOf(project))
+                    }
+                    release.countDown()
+                    assertEquals(emptyMap<Path, Boolean>(), sweep.get(10, TimeUnit.SECONDS))
+                    assertEquals(mapOf(project to true), poller.sweep(emptySet()))
+                } finally {
+                    release.countDown()
+                    background.shutdownNow()
+                }
+            }
+        }
+    }
+
     @Test
     fun `the first sweep reports every project and a quiet sweep reports none`(@TempDir tmp: Path) {
         val clean = initRepo(tmp / "clean")

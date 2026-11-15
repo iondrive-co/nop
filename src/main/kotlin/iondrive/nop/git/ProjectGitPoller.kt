@@ -31,8 +31,11 @@ class ProjectGitPoller(
     private val watcher: RepoWatcher,
     private val backgroundIntervalMs: Long = BACKGROUND_INTERVAL_MS,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val readDirty: (Path) -> Boolean = ProjectWorker::dirty,
 ) : AutoCloseable {
     private val projects = LinkedHashMap<Path, Project>()
+    private val sweepLock = Any()
+    private var closed = false
 
     private class Project(val path: Path) {
         var repo: GitRepo? = null
@@ -53,6 +56,7 @@ class ProjectGitPoller(
      */
     @Synchronized
     fun retain(paths: Collection<Path>) {
+        if (closed) return
         val keep = paths.toSet()
         for (path in projects.keys.toList()) {
             if (path in keep) continue
@@ -72,52 +76,56 @@ class ProjectGitPoller(
      * The projects in [active] are skipped: each is the tab in front of one of nop's windows, and
      * that window's own panel owns its status.
      */
-    @Synchronized
-    fun sweep(active: Set<Path>): Map<Path, Boolean> {
+    fun sweep(active: Set<Path>): Map<Path, Boolean> = synchronized(sweepLock) {
         val dirty = mutableMapOf<Path, Boolean>()
         val now = nowMs()
-        for (project in projects.values) {
-            val repo = repoFor(project, now) ?: continue
-            if (project.path in active) {
-                // A project on screen: keep its watches current every tick, because its panel
-                // reads the same watcher and wants an edit to show up in seconds. Its status is that
-                // panel's to load, so there is nothing else to do for it here.
+        val snapshot = synchronized(this) { projects.values.toList() }
+        for (project in snapshot) {
+            val root = synchronized(this) prepare@{
+                if (closed || projects[project.path] !== project) return@prepare null
+                val repo = repoFor(project, now) ?: return@prepare null
+                if (project.path in active) {
+                    // A project on screen: its panel owns status, but still needs fresh watches.
+                    watcher.sync(repo)
+                    return@prepare null
+                }
+                if (project.walked && now - project.lastWalkMs < backgroundIntervalMs) return@prepare null
+                // Re-registering is a tree walk too, so background projects do it at the interval.
                 watcher.sync(repo)
-                continue
-            }
-            if (project.walked && now - project.lastWalkMs < backgroundIntervalMs) continue
-            // Behind the interval, not in front of it: re-registering is itself a tree walk whenever
-            // directories have appeared, so a background checkout busily creating them would defeat
-            // the limit if this ran every tick.
-            watcher.sync(repo)
-            val generation = watcher.generation(repo.rootDir)
-            // Read the generation *before* walking and store that: a change landing during the walk
-            // leaves a higher count behind and so is picked up next tick rather than being taken as
-            // already covered.
-            val quiet = generation != RepoWatcher.UNKNOWN && generation == project.lastGeneration
-            if (project.walked && quiet) continue
-            project.walked = true
-            project.lastWalkMs = now
-            project.lastGeneration = generation
+                val generation = watcher.generation(repo.rootDir)
+                // A change during the walk must leave a newer generation for the next sweep.
+                val quiet = generation != RepoWatcher.UNKNOWN && generation == project.lastGeneration
+                if (project.walked && quiet) return@prepare null
+                project.walked = true
+                project.lastWalkMs = now
+                project.lastGeneration = generation
+                repo.rootDir
+            } ?: continue
             // In the project worker: the walk's cost is set by the size of the tree, and a tree
             // too big for the heap should cost that process, not this one (see ProjectWorker).
-            dirty[project.path] = try {
-                ProjectWorker.dirty(repo.rootDir)
+            // Never hold the map lock while waiting for it: retain/close run on the UI thread.
+            val changed = try {
+                readDirty(root)
             } catch (e: ProjectWorker.Unavailable) {
                 // No worker to ask just now: say nothing about this project, and look again next time.
-                project.lastGeneration = RepoWatcher.UNKNOWN
+                synchronized(this) { project.lastGeneration = RepoWatcher.UNKNOWN }
                 continue
             } catch (e: Exception) {
                 Log.error("project git poll: status for ${project.path} failed", e)
                 false
             }
+            synchronized(this) {
+                // A tab closed (or closed and reopened) while the worker was answering.
+                if (!closed && projects[project.path] === project) dirty[project.path] = changed
+            }
         }
-        return dirty
+        dirty
     }
 
     /** Closes every open repository. The borrowed [RepoWatcher] is the caller's to close. */
     @Synchronized
     override fun close() {
+        closed = true
         for (project in projects.values) {
             project.repo?.let { repo -> runCatching { repo.close() } }
         }

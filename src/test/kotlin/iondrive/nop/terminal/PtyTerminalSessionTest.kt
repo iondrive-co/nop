@@ -30,6 +30,31 @@ import javax.swing.SwingUtilities
 @DisabledOnOs(OS.WINDOWS)
 class PtyTerminalSessionTest {
     @Test
+    fun `an adopted terminal owns its process before its widget is attached`() {
+        assumeTrue(System.getProperty("os.name").startsWith("Linux"))
+        val child = ptyProcess("sh", "-c", "printf 'ready\\n'; exec sleep 30") as com.pty4j.unix.UnixPtyProcess
+        // pty4j's fork initially inherits the JVM's signal handler. Let it exec before signalling.
+        assertEquals("ready", child.inputStream.bufferedReader().readLine().trim())
+        // pty4j still owns the original in this JVM; the adopted session gets its own descriptor.
+        val fd = com.sun.jna.NativeLibrary.getInstance("c").getFunction("dup").invokeInt(arrayOf(child.pty.masterFD))
+        assertTrue(fd >= 0)
+        val adopted = Adopted(AdoptedPty(fd, child.pid()), 90, 28, "saved output".toByteArray())
+        val session = TerminalSession.shell(File("/"), adopted)
+        try {
+            assertFalse(session.isStarted, "window creation must not be required to own the child")
+            assertTrue(session.running)
+            assertEquals(child.pid(), session.pid())
+            session.dispose()
+            org.junit.jupiter.api.assertThrows<java.io.IOException> { adopted.pty.outputStream.write(1) }
+            assertTrue(child.waitFor(10, TimeUnit.SECONDS), "closing a tab before attachment must still stop its child")
+        } finally {
+            session.dispose()
+            child.destroyForcibly()
+            child.inputStream.close()
+        }
+    }
+
+    @Test
     fun `handover preserves scrollback after more than a megabyte of cursor redraws`() {
         assumeFalse(GraphicsEnvironment.isHeadless(), "needs a display to build the widget")
         val script = "i=1; while [ \$i -le 180 ]; do printf 'result-%s\\n' \"\$i\"; i=\$((i+1)); done; " +

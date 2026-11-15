@@ -197,11 +197,17 @@ internal object ProjectWorker {
     }
 
     /** Ends the worker, if one is running: for nop's shutdown, and for tests. */
-    fun stop() {
-        synchronized(this) {
+    fun stop(waitForExit: Boolean = true) {
+        val worker = synchronized(this) {
             val worker = running ?: return
             worker.closing = true
             running = null
+            worker
+        }
+        // A restart has nothing to save in this disposable worker. Do not wait behind an index
+        // build, or for a reply reader that needs our lock to report the worker's exit.
+        if (!waitForExit) worker.process.destroyForcibly()
+        else {
             runCatching { worker.input.close() }
             if (!worker.process.waitFor(5, TimeUnit.SECONDS)) worker.process.destroyForcibly()
         }

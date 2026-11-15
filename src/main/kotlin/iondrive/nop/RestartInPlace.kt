@@ -1,7 +1,6 @@
 package iondrive.nop
 
 import iondrive.nop.agent.Account
-import iondrive.nop.agent.AgentMessages
 import iondrive.nop.agent.AgentSessionStore
 import iondrive.nop.agent.handoverTarget
 import iondrive.nop.agent.resumesAfterReset
@@ -9,6 +8,7 @@ import iondrive.nop.browser.SlackBrowsers
 import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.terminal.Posix
+import iondrive.nop.terminal.TerminalSession
 import iondrive.nop.ui.TerminalStore
 import iondrive.nop.ui.ToolTab
 import iondrive.nop.update.SelfUpdate
@@ -100,7 +100,7 @@ object RestartInPlace {
             while (true) Thread.sleep(1_000)
         }
         // The project worker is this process's own, and the next one starts its own.
-        iondrive.nop.worker.ProjectWorker.stop()
+        iondrive.nop.worker.ProjectWorker.stop(waitForExit = false)
         val handed = p.out.pids
         val strays = ProcessHandle.current().children().map { it.pid() }.filter { it !in handed }.toList()
         val manifest = runCatching { Handover.write(p.out, strays) }
@@ -117,11 +117,13 @@ object RestartInPlace {
     }
 
     /**
-     * Puts the tabs the last nop handed over back where they were, before any window opens, and
-     * starts reading their terminals. On the UI thread, since that is where a terminal's widget is
-     * made. A tab whose account has since gone, or whose terminal no tab claims, is hung up.
+     * Puts the tabs the last nop handed over back where they were, before any window opens.
+     * Returns the terminals to attach after the windows' first frame, one at a time. Building all
+     * the hidden widgets here used to keep every window down until the last one was ready.
+     * A tab whose account has since gone, or whose terminal no tab claims, is hung up.
      */
-    fun place(incoming: Handover.Incoming, accounts: List<Account>) {
+    fun place(incoming: Handover.Incoming, accounts: List<Account>): List<TerminalSession> {
+        val terminalsToAttach = mutableListOf<TerminalSession>()
         for ((record, _) in incoming.agents.toList()) {
             val account = accounts.firstOrNull { it.name == record.account && it.provider.id == record.provider }
             if (account == null) {
@@ -137,8 +139,7 @@ object RestartInPlace {
             sessions.resumesAfterReset = { from -> accounts.resumesAfterReset(from) }
             val session = sessions.adopt(record, adopted, root.toFile(), account)
             if (session.inbox.isNotEmpty()) Log.info("restart: carried ${session.inbox.size} waiting message(s) into agent tab ${record.title}")
-            runCatching { session.session.getOrCreateWidget() }
-                .onFailure { Log.error("restart: could not attach agent tab ${record.title}", it) }
+            terminalsToAttach += session.session
         }
         val roots = (incoming.shells.map { it.first.root to it.first.projects } +
             incoming.views.keys.map { it to emptyList() }).groupBy({ it.first }, { it.second })
@@ -149,13 +150,11 @@ object RestartInPlace {
             incoming.views[root]?.let { name -> terminals.sessionTab = ToolTab.entries.firstOrNull { it.name == name } }
             for (run in terminals.shells.sessions) {
                 if (run.session.isStarted) continue
-                if (run.session.isAdopted) runCatching { run.session.getOrCreateWidget() }
-                    .onFailure { Log.error("restart: could not attach a terminal in $root", it) }
+                if (run.session.isAdopted) terminalsToAttach += run.session
             }
         }
         Handover.hangUpUnclaimed()
-        // Messages that were on their way in when the last nop went carry on going in.
-        AgentMessages.startPump()
+        return terminalsToAttach
     }
 
     /** The launcher runs a restart would stop, by tab name: they are put back waiting to be run again. */

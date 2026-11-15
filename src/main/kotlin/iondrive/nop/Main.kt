@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
@@ -217,14 +218,15 @@ fun main(args: Array<String>) {
     // Set when a window's recovery restarts nop: that restart is not an ordinary end. See [WindowRecovery].
     var restartingToRecover = false
 
-    // The tabs the last nop handed over go back into their projects before any window opens, and
-    // their terminals are read from now on: a program writing to a PTY nobody reads stops when it
-    // fills, and the project it is in may not be on screen for hours.
-    Handover.incoming?.let { incoming ->
+    // Register all carried tabs before composition can restore a second copy. Their visible
+    // widgets are made by the windows; the hidden ones attach between frames below.
+    val terminalsToAttach = Handover.incoming?.let { incoming ->
         RestartInPlace.reapStrays(incoming.strays)
         val accounts = Accounts.load().accounts
-        SwingUtilities.invokeAndWait { RestartInPlace.place(incoming, accounts) }
-    }
+        val place = FutureTask { RestartInPlace.place(incoming, accounts) }
+        SwingUtilities.invokeAndWait(place)
+        place.get()
+    }.orEmpty().toMutableList()
 
     // Read the spellchecker's word lists while the window is still being built. They're wanted the
     // moment a file or diff is on screen, and a diff checks its lines during composition — so
@@ -536,6 +538,17 @@ fun main(args: Array<String>) {
         // Up, with every window composed and the terminals handed over taken up: what tells an update
         // that it works, so the install's launchers move to it. See [SelfUpdate.markHealthy].
         LaunchedEffect(Unit) {
+            for (terminal in terminalsToAttach) {
+                withFrameNanos { }
+                if (terminal.isStarted || terminal.isDisposed || terminal.handedOver) continue
+                runCatching { terminal.getOrCreateWidget() }
+                    .onFailure { Log.error("restart: could not attach terminal ${terminal.title}", it) }
+            }
+            if (terminalsToAttach.isNotEmpty()) Log.info("restart: attached ${terminalsToAttach.size} terminal reader(s)")
+            // Do not keep closed terminals and their saved replay alive for this application's lifetime.
+            terminalsToAttach.clear()
+            // Messages in flight at restart can carry on once all terminal readers are attached.
+            iondrive.nop.agent.AgentMessages.startPump()
             delay(HEALTHY_AFTER_MS)
             withContext(Dispatchers.IO) {
                 LaunchJournal.up()
@@ -580,8 +593,12 @@ fun main(args: Array<String>) {
         // second, after the poller has let go of its repositories.
         DisposableEffect(Unit) {
             onDispose {
-                projectPoller.close()
-                repoWatcher.close()
+                // Watch-service cleanup can wait for filesystem work too. The windows can close
+                // while it finishes; the restart stops the worker independently.
+                kotlin.concurrent.thread(isDaemon = true, name = "project-poller-close") {
+                    projectPoller.close()
+                    repoWatcher.close()
+                }
             }
         }
         // The agent sessions are the one thing that outlives the window showing it (see

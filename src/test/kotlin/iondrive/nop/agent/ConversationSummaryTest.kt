@@ -14,6 +14,25 @@ class ConversationSummaryTest {
     @TempDir lateinit var dir: Path
 
     @Test
+    fun `command history streams only assistant text and excludes later appends`() {
+        val file = dir.resolve("history.jsonl")
+        val original = listOf(
+            AgentEvent.UserMessage("Try `sample --user`", 1),
+            AgentEvent.AssistantMessage(listOf(Block.Thinking("private"), Block.Text("Use `sample --first`")), at = 2),
+            AgentEvent.ToolFinished("tool", "sample --tool", false, at = 3),
+            AgentEvent.AssistantMessage(listOf(Block.Text("Then `sample --second`")), at = 4),
+        )
+        Files.writeString(file, original.joinToString("\n", postfix = "\n") { Json.encodeToString(AgentEvent.serializer(), it) })
+        val texts = mutableListOf<String>()
+        ConversationSummary.forEachAssistantText(file) { text ->
+            texts += text
+            Files.writeString(file, Json.encodeToString(AgentEvent.serializer(),
+                AgentEvent.AssistantMessage(listOf(Block.Text("later")), at = 5)) + "\n", StandardOpenOption.APPEND)
+        }
+        assertEquals(listOf("Use `sample --first`", "Then `sample --second`"), texts)
+    }
+
+    @Test
     fun `only participant prose survives in its original order across handovers`() {
         val events = sequenceOf(
             AgentEvent.RunStarted(provider = "anthropic", account = "claude-alpha", at = 1),

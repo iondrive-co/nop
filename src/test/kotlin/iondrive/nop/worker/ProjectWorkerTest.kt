@@ -15,6 +15,9 @@ import java.io.PipedOutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import java.time.Duration
+import org.junit.jupiter.api.assertTimeoutPreemptively
 import kotlin.concurrent.thread
 
 /**
@@ -155,5 +158,32 @@ class ProjectWorkerTest {
         assertThrows<ProjectWorker.Unavailable> { ProjectWorker.status(root) }
         assertThrows<ProjectWorker.Unavailable> { ProjectWorker.dirty(root) }
         assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(20), "a dead worker kept its caller waiting")
+    }
+
+    @Test
+    fun `restart stops a busy worker without its graceful exit delay`() {
+        val ready = tmp.resolve("worker-ready")
+        ProjectWorker.command = {
+            listOf("sh", "-c", "read request; printf ready > \"\$1\"; exec sleep 40", "worker", ready.toString())
+        }
+        ProjectWorker.workerEnvironment = { System.getenv() }
+        val background = Executors.newSingleThreadExecutor()
+        try {
+            val root = repo()
+            val answer = background.submit<Boolean> {
+                assertThrows<ProjectWorker.Unavailable> { ProjectWorker.dirty(root) }
+                true
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            while (!Files.exists(ready) && System.nanoTime() < deadline) Thread.sleep(10)
+            assertTrue(Files.exists(ready), "the worker must have started before signalling it")
+            val process = ProcessHandle.of(checkNotNull(ProjectWorker.workerPid())).orElseThrow()
+            assertTimeoutPreemptively(Duration.ofSeconds(1)) { ProjectWorker.stop(waitForExit = false) }
+            assertTrue(answer.get(10, TimeUnit.SECONDS))
+            process.onExit().get(10, TimeUnit.SECONDS)
+            assertFalse(process.isAlive)
+        } finally {
+            background.shutdownNow()
+        }
     }
 }

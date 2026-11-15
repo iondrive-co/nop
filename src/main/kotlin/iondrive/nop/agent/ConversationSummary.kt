@@ -21,7 +21,23 @@ data class ConversationSummary(val messages: List<Message>, val capturedAt: Long
         )
 
         /** Reads only the bytes present on opening, so an active writer cannot extend the snapshot. */
-        fun read(file: Path): ConversationSummary {
+        fun read(file: Path): ConversationSummary = readEvents(file) { fromEvents(it) }
+
+        /** Command copying needs assistant text, without retaining the rest of a long conversation. */
+        internal fun forEachAssistantText(file: Path, consume: (String) -> Unit) {
+            readEvents(file) { events ->
+                for (event in events) {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    if (event is AgentEvent.AssistantMessage) {
+                        val text = event.blocks.filterIsInstance<Block.Text>()
+                            .map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n")
+                        if (text.isNotBlank()) consume(text)
+                    }
+                }
+            }
+        }
+
+        private fun <T> readEvents(file: Path, consume: (Sequence<AgentEvent>) -> T): T {
             Files.newInputStream(file).use { input ->
                 val length = Files.size(file)
                 val bounded = object : FilterInputStream(input) {
@@ -37,7 +53,7 @@ data class ConversationSummary(val messages: List<Message>, val capturedAt: Long
                     }
                 }
                 return bounded.bufferedReader().useLines { lines ->
-                    fromEvents(lines.mapNotNull { line ->
+                    consume(lines.mapNotNull { line ->
                         runCatching { json.decodeFromString(AgentEvent.serializer(), line) }.getOrNull()
                     })
                 }
