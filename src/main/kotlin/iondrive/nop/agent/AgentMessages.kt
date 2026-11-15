@@ -168,6 +168,7 @@ object AgentMessages {
         if (!on) return
         sessions().filter { key(it.projectDir) == dir && !it.ended }.forEach { s ->
             s.inbox.filter { key(it.fromProject) == dir }.forEach { it.approved = true }
+            s.persistInbox()
         }
         startPump()
     }
@@ -286,6 +287,14 @@ object AgentMessages {
      */
     private fun enqueue(target: AgentSession, held: Held, unasked: Boolean, shownAs: String, freely: String): Outcome {
         target.inbox.add(held)
+        held.approved = unasked
+        try {
+            target.persistInbox()
+        } catch (e: Exception) {
+            target.inbox.remove(held)
+            Log.warn("could not save agent message ${held.id}: $e")
+            return Outcome("The message could not be saved; please retry: ${e.message}", isError = true)
+        }
         val to = "\"${clean(target.title)}\" (${target.shortId})"
         if (unasked) {
             held.approved = true
@@ -311,6 +320,7 @@ object AgentMessages {
     fun deliver(session: AgentSession, held: Held) {
         if (held !in session.inbox) return
         held.approved = true
+        session.persistInbox()
         Log.info("agent message ${held.id} from ${held.fromId} to ${session.shortId}: delivered by the user")
         startPump()
     }
@@ -324,6 +334,7 @@ object AgentMessages {
     /** The user taking back a Deliver that has not gone in yet. */
     fun hold(held: Held) {
         held.approved = false
+        sessions().firstOrNull { held in it.inbox }?.persistInbox()
         held.loggedBlocker = null
         Log.info("agent message ${held.id} from ${held.fromId}: held back by the user")
     }
@@ -331,6 +342,7 @@ object AgentMessages {
     /** The user's Discard. */
     fun discard(session: AgentSession, held: Held) {
         if (!session.inbox.remove(held)) return
+        session.persistInbox()
         gone[held.id] = held.sender to Status(held.id, Status.State.Discarded, "discarded by the user at ${clock(System.currentTimeMillis())}")
         Log.info("agent message ${held.id} from ${held.fromId} to ${session.shortId}: discarded by the user")
     }
@@ -359,6 +371,15 @@ object AgentMessages {
         val receivingRun = s.run
         if (held.attempts++ == 0) held.attemptedAt = now
         s.inFlightMessage = held
+        try {
+            s.persistInbox()
+        } catch (e: Exception) {
+            s.inFlightMessage = null
+            s.inbox.add(0, held)
+            held.retryAt = now + 3_000
+            Log.warn("agent message ${held.id} was not sent because its pending receipt could not be saved: $e")
+            return
+        }
         val to = "\"${clean(s.title)}\" (${s.shortId})"
         gone[held.id] = held.sender to Status(held.id, Status.State.Submitting,
             if (s.usesControlDelivery) "sending to $to at ${clock(now)}"
@@ -385,6 +406,9 @@ object AgentMessages {
                     Status(held.id, Status.State.Undeliverable, "typed into $to's prompt, but its CLI stopped before the Enter that sends it")
                 }
             }
+            runCatching { s.persistInbox() }.onFailure {
+                Log.warn("could not save agent message ${held.id}'s delivery result; its saved receipt remains available: $it")
+            }
         }
     }
 
@@ -406,6 +430,7 @@ object AgentMessages {
             now - s.run.startedAt.toEpochMilli() < BOOT_MS -> "its CLI has finished starting"
             s.account.provider == Provider.OpenAI -> when {
                 terminal.submitting -> "nop has finished delivering another message"
+                s.usesControlDelivery && !s.run.controlReady -> s.run.startupQuestion ?: "Codex has opened its conversation"
                 !s.usesControlDelivery && terminal.mayHoldDraft(now) -> "the draft in its prompt is sent or cleared"
                 !s.usesControlDelivery && terminal.lastSubmitAt > 0L && now - terminal.lastSubmitAt < BETWEEN_SUBMITS_MS -> "the prompt has finished sending"
                 else -> null
@@ -428,6 +453,8 @@ object AgentMessages {
         waitReason(s, now)?.let { return it }
         val first = s.inbox.firstOrNull { it.approved }
         if (first != null && first !== held) return "the message ahead of it has gone in"
+        if (held.retryAt > now) return "Codex accepts the message on its local connection" +
+            (s.run.controlDeliveryError?.let { " ($it)" } ?: "")
         if (now - lastSubmitAt < BETWEEN_SUBMITS_MS) return "nop has paused after typing in another message"
         return null
     }

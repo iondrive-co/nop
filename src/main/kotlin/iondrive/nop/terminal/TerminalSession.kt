@@ -162,6 +162,8 @@ class TerminalSession private constructor(
 
     internal fun modelPickerOpen(): Boolean = modelPickerVisible(screenLines().map { it.text })
 
+    internal fun codexStartupQuestion(): String? = codexStartupQuestion(screenLines().map { it.text })
+
     /** When a prompt was last submitted (by the user or via [submit]) in this terminal. */
     var lastSubmitAt: Long = 0L
         internal set
@@ -746,6 +748,12 @@ class TerminalSession private constructor(
     }
 
     companion object {
+        internal fun codexStartupQuestion(lines: List<String>): String? {
+            val text = lines.joinToString("\n") { it.replace("\u0000", "").trim() }
+            return if ("Hooks need review" in text && "Trust all and continue" in text &&
+                "Continue without trusting" in text && "enter confirm" in text) "the hooks review in its terminal has been answered" else null
+        }
+
         private const val INITIAL_COLUMNS = 80
         private const val INITIAL_ROWS = 24
 

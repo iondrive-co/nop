@@ -61,10 +61,14 @@ class AgentMessagesTest {
 
     /** [tab] as a CLI that is up and has finished starting, with nothing in its prompt. */
     private fun running(tab: AgentSession) {
+        tab.run.follower?.stop()
+        tab.run.follower = null
         val term = tab.run.session
         term.testStarted = true
         term.running = true
         term.deferred = false
+        // Drain notifications from the real follower before installing the simulated backend state.
+        onEdt { tab.run.controlReady = true }
         tab.run.startedAt = java.time.Instant.now().minusSeconds(10)
     }
 
@@ -108,6 +112,8 @@ class AgentMessagesTest {
         val now = System.currentTimeMillis() + 10_000
         onEdt { AgentMessages.deliver(to, held); AgentMessages.pump(now) }
         assertTrue(to.inbox.isEmpty())
+        assertEquals(held.id, AgentInboxStore.load(to.sessionId)!!.single().id,
+            "a message remains durable while the backend's acknowledgement is pending")
         onEdt { typed.single().second(false) }
         assertEquals(listOf(held), to.inbox.toList())
         onEdt { AgentMessages.pump(now + 10_000) }
@@ -115,6 +121,29 @@ class AgentMessagesTest {
         assertEquals(typed[0].first, typed[1].first)
         onEdt { typed.last().second(true) }
         assertTrue(to.inbox.isEmpty())
+        assertTrue(AgentInboxStore.load(to.sessionId)!!.isEmpty(), "only an acknowledgement removes the durable copy")
+    }
+
+    @Test
+    fun `a startup question blocks delivery and names what needs answering`(@TempDir dir: Path) {
+        val (_, to) = tabs(dir, "sender" to Provider.Anthropic, "recipient" to Provider.OpenAI)
+        running(to)
+        to.run.controlReady = false
+        to.run.startupQuestion = "the startup review has been answered"
+        to.refreshActivity(to.run.tracker)
+        assertEquals(Activity.Asking, to.activity)
+        assertEquals("the startup review has been answered", AgentMessages.waitReason(to))
+        val typed = typedHere()
+        val held = AgentMessages.Held("sender", "sender-id", dir.toFile(), "Read the task", "Read the task", 5)
+        to.inbox.add(held)
+        onEdt { AgentMessages.deliver(to, held); AgentMessages.pump(System.currentTimeMillis() + 10_000) }
+        assertTrue(typed.isEmpty())
+        assertEquals(held.id, AgentInboxStore.load(to.sessionId)!!.single().id)
+        to.run.controlReady = true
+        onEdt { AgentMessages.pump(System.currentTimeMillis() + 20_000) }
+        assertEquals(1, typed.size)
+        onEdt { typed.single().second(true) }
+        assertTrue(AgentInboxStore.load(to.sessionId)!!.isEmpty())
     }
 
     /** The id on the status line a send's answer ends with. */

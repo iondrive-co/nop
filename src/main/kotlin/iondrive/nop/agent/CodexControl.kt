@@ -39,7 +39,8 @@ internal object CodexControl {
     internal fun send(rpc: Rpc, conversationId: String?, text: String, messageId: String, authorized: ConversationModel?, retrySince: Long? = null,
                       stillCurrent: () -> Boolean = { true }): Observation {
         check(stillCurrent()) { "The receiving agent run has ended" }
-        val conversation = conversationId ?: loadedThread(rpc)
+        // The private backend owns the terminal's identity. A saved transcript id is only a hint.
+        val conversation = loadedThread(rpc, conversationId)
         var observed = observe(rpc, conversation)
         if (authorized != null && (observed.model != authorized.model ||
                 (authorized.reasoning != null && observed.reasoning != null && authorized.reasoning != observed.reasoning))) {
@@ -116,11 +117,39 @@ internal object CodexControl {
         return Observation(state["model"].str(), state["reasoningEffort"].str(), conversation)
     }
 
-    private fun loadedThread(rpc: Rpc): String {
-        val page = rpc.request("thread/loaded/list", buildJsonObject {})
-        val threads = (page["data"] as? JsonArray)?.mapNotNull { it.str() }.orEmpty()
-        check(threads.size == 1) { "Codex has not attached its terminal to one thread yet" }
-        return threads.single()
+    fun conversation(account: Account, socket: String, hint: String? = null): String? = connect(account, socket = socket) { rpc ->
+        loadedConversations(rpc, hint).singleOrNull()
+    }
+
+    private fun loadedThread(rpc: Rpc, hint: String?): String {
+        val threads = loadedConversations(rpc, hint)
+        return hint?.takeIf { it in threads } ?: threads.singleOrNull()
+            ?: error("Codex has not attached its terminal to one conversation yet")
+    }
+
+    private fun loadedConversations(rpc: Rpc, hint: String?): List<String> {
+        val threads = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        var cursor: String? = null
+        do {
+            val page = rpc.request("thread/loaded/list", buildJsonObject {
+                cursor?.let { put("cursor", it) }
+            })
+            val ids = (page["data"] as? JsonArray)?.mapNotNull { it.str() }.orEmpty()
+            for (id in ids.sortedBy { if (it == hint) 0 else 1 }) {
+                val state = rpc.request("thread/read", buildJsonObject {
+                    put("threadId", id); put("includeTurns", false)
+                })["thread"].obj() ?: continue
+                if (state["id"].str() == id && state["canAcceptDirectInput"].bool() &&
+                    state["source"].obj()?.containsKey("subAgent") != true) {
+                    if (id == hint) return listOf(id)
+                    threads += id
+                }
+            }
+            cursor = page["nextCursor"].str()
+            check(cursor == null || seen.add(cursor)) { "Codex repeated a loaded-thread cursor" }
+        } while (cursor != null)
+        return threads.distinct()
     }
 
     private fun setModel(rpc: Rpc, conversation: String, authorized: ConversationModel) =

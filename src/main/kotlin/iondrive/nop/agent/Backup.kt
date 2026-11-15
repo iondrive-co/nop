@@ -250,7 +250,7 @@ object Backup {
      * account list as `agent.json`, and each account's share of its home under `homes/<name>/`.
      */
     internal fun sources(config: AgentConfig, dataRoot: Path, configFile: Path): List<Pair<Path, String>> = buildList {
-        for (dir in listOf("sessions", "handoffs", "memory")) add(dataRoot.resolve(dir) to "nop/$dir")
+        for (dir in listOf("sessions", "handoffs", "memory", "inboxes")) add(dataRoot.resolve(dir) to "nop/$dir")
         add(configFile to "agent.json")
         for (account in config.accounts) {
             for (part in keptIn(account.provider)) {

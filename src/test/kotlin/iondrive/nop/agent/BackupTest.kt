@@ -58,6 +58,7 @@ class BackupTest {
         write(w.data.resolve("sessions/tab-1.jsonl"), "{\"type\":\"session_started\"}\n")
         write(w.data.resolve("handoffs/tab-1/handoff-1.md"), "# handoff\n")
         write(w.data.resolve("memory/memory.md"), "# memory\n")
+        write(w.data.resolve("inboxes/tab-1.json"), "[]\n")
         write(w.configFile, "{\"accounts\":[]}")
         write(w.claudeTranscript("conv-1"), "{\"type\":\"user\"}\n")
         write(w.claude.homePath.resolve("settings.json"), "{}")
@@ -81,6 +82,7 @@ class BackupTest {
             "nop/sessions/tab-1.jsonl",
             "nop/handoffs/tab-1/handoff-1.md",
             "nop/memory/memory.md",
+            "nop/inboxes/tab-1.json",
             "agent.json",
             "homes/claude-alpha/projects/${ClaudeTailer.slug(w.project)}/conv-1.jsonl",
             "homes/claude-alpha/settings.json",

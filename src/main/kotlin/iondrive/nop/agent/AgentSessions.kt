@@ -179,8 +179,9 @@ class AgentSessions {
                     resumeId = if (row.provider == Provider.Anthropic.id) {
                         EventLog.ownConversation(row.sessionId, row.nativeSessionId)
                     } else {
-                        row.nativeSessionId
+                        row.nativeSessionId.takeIf { it.isNotBlank() }
                     },
+                    seed = row.pendingStart?.takeIf { row.nativeSessionId.isBlank() && it.isNotEmpty() },
                     sessionId = row.sessionId,
                     restoredTitle = row.title,
                     titleByUser = row.titleIsUsers,
@@ -207,6 +208,7 @@ class AgentSessions {
         if (_sessions.isNotEmpty()) {
             pickerTabVisible = false
         }
+        if (_sessions.any { it.inbox.any { held -> held.approved } }) AgentMessages.startPump()
     }
 
     /**
@@ -237,6 +239,7 @@ class AgentSessions {
         session.refreshActivity(session.run.tracker)
         _sessions.add(session)
         if (record.selected) selectedId = session.sessionId
+        if (session.inbox.isNotEmpty()) session.persistInbox()
         pickerTabVisible = false
         return session
     }

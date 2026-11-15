@@ -66,6 +66,8 @@ data class RunContext(
     val pid: (() -> Long?)? = null,
     /** The thread a private control connection has identified before the first rollout appears. */
     val knownNativeSessionId: (() -> String?)? = null,
+    /** When present, only this run's private backend may identify its conversation. Null means wait. */
+    val resolveNativeSessionId: (() -> String?)? = null,
 )
 
 /**

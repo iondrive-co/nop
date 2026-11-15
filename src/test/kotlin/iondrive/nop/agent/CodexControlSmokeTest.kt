@@ -13,6 +13,72 @@ import java.util.concurrent.TimeUnit
 @EnabledIfEnvironmentVariable(named = "NOP_CODEX_SMOKE_BINARY", matches = ".+")
 class CodexControlSmokeTest {
     @Test
+    fun `a real startup hook review has no conversation until answered and then accepts queued work`() {
+        val root = Files.createTempDirectory("nch-")
+        val script = root.resolve("fixture.py")
+        javaClass.getResourceAsStream("/agent/codex-control-fixture.py")!!.use { Files.copy(it, script) }
+        val binary = Path.of(System.getenv("NOP_CODEX_SMOKE_BINARY"))
+        val command = CodexLaunch.wrap(AgentCommand(listOf(binary.toString(), "--no-alt-screen", "-C", root.resolve("work").toString()),
+            mapOf("HOME" to root.resolve("home").toString()), null))
+        val launch = root.resolve("launch.json")
+        Files.writeString(launch, buildJsonObject {
+            put("argv", JsonArray(command.argv.map(::JsonPrimitive)))
+            put("env", buildJsonObject { command.env.forEach { (key, value) -> put(key, value) } })
+            put("startup_hook", true)
+        }.toString())
+        val fixture = ProcessBuilder("python3", script.toString(), binary.toString(), root.toString(), launch.toString())
+            .redirectError(root.resolve("fixture.err").toFile()).start()
+        val input = fixture.inputStream.bufferedReader()
+        val output = fixture.outputStream.bufferedWriter()
+        fun operation(op: String): JsonObject {
+            output.write("""{"op":"$op"}"""); output.newLine(); output.flush()
+            return Json.parseToJsonElement(input.readLine() ?: error(Files.readString(root.resolve("fixture.err")))).jsonObject
+        }
+        try {
+            val ready = Json.parseToJsonElement(input.readLine() ?: error(Files.readString(root.resolve("fixture.err")))).jsonObject
+            val account = Account("fixture", Provider.OpenAI, ready["home"].str()!!)
+            val socket = ready["socket"].str()!!
+            val screen = operation("capture")["screen"].str()!!
+            assertNotNull(iondrive.nop.terminal.TerminalSession.codexStartupQuestion(screen.lines()), screen)
+            val waiting = assertThrows(java.util.concurrent.ExecutionException::class.java) {
+                CodexControl.connect(account, binary, socket = socket) {
+                    CodexControl.send(it, "unrelated-saved-thread", "Read the queued work.", "notice-orchid", null)
+                }
+            }
+            assertTrue(waiting.cause is IllegalStateException)
+            operation("review_hooks")
+            var delivered: CodexControl.Observation? = null
+            val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+            do {
+                delivered = runCatching {
+                    CodexControl.connect(account, binary, socket = socket) {
+                        CodexControl.send(it, "unrelated-saved-thread", "Read the queued work.", "notice-orchid", null)
+                    }
+                }.getOrNull()
+                if (delivered == null) Thread.sleep(100)
+            } while (delivered == null && System.nanoTime() < until)
+            assertNotNull(delivered, operation("capture").toString())
+            val conversation = delivered!!.conversation
+            assertNotEquals("unrelated-saved-thread", conversation)
+            val receiptDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8)
+            var received = false
+            do {
+                val receipts = CodexControl.connect(account, binary, socket = socket) {
+                    it.request("thread/items/list", buildJsonObject {
+                        put("threadId", conversation); put("limit", 100); put("sortDirection", "desc")
+                    })
+                }
+                received = receipts["data"]!!.jsonArray.any { it.jsonObject["item"].obj()?.get("clientId").str() == "notice-orchid" }
+                if (!received) Thread.sleep(100)
+            } while (!received && System.nanoTime() < receiptDeadline)
+            assertTrue(received, operation("capture").toString())
+        } finally {
+            runCatching { output.write("""{"op":"quit"}"""); output.newLine(); output.flush() }
+            if (!fixture.waitFor(30, TimeUnit.SECONDS)) fixture.destroyForcibly()
+        }
+    }
+
+    @Test
     fun `socket messages leave a draft and a model picker untouched and correct unexpected models`() {
         val root = Files.createTempDirectory("ncs-")
         val script = root.resolve("fixture.py")

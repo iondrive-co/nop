@@ -92,6 +92,10 @@ def send(text):
 
 try:
     launch = json.loads(Path(launch_file).read_text())
+    if launch.get("startup_hook"):
+        (home / ".codex/hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [{
+            "matcher": "Bash", "hooks": [{"type": "command", "command": "cat >/dev/null"}]
+        }]}}))
     env.update(launch["env"])
     socket = env["NOP_CODEX_CONTROL_SOCKET"]
     command = launch["argv"]
@@ -100,7 +104,7 @@ try:
         tmux + ["new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "140", "-y", "45", shlex.join(command)],
         env=env).decode().strip()
     subprocess.run(tmux + ["set-option", "-g", "remain-on-exit", "on"], env=env, check=True)
-    wait_for(lambda: "test-orchid" in capture())
+    wait_for(lambda: ("Hooks need review" if launch.get("startup_hook") else "test-orchid") in capture())
     if not Path(socket).exists():
         keys("F2")
         time.sleep(0.2)
@@ -118,6 +122,10 @@ try:
             send("/model")
             wait_for(lambda: "Select Model" in capture())
         elif operation == "close_picker":
+            keys("Escape")
+        elif operation == "review_hooks":
+            keys("Enter")
+            wait_for(lambda: "Lifecycle hooks from config" in capture())
             keys("Escape")
         elif operation == "resume":
             keys("C-d")

@@ -86,6 +86,7 @@ object Handover {
         val authorizedModel: String? = null,
         val authorizedReasoning: String? = null,
         val codexControlSocket: String? = null,
+        val startupPrompt: String? = null,
         val pty: PtyRecord? = null,
     )
 

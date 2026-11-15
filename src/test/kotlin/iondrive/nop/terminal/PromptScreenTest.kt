@@ -23,6 +23,14 @@ import org.junit.jupiter.api.Test
  */
 class PromptScreenTest {
 
+    @Test
+    fun `hooks startup review requires the complete active question`() {
+        val question = listOf("Hooks need review", "2. Trust all and continue", "3. Continue without trusting", "enter confirm · esc skip")
+        assertTrue(TerminalSession.codexStartupQuestion(question) != null)
+        assertTrue(TerminalSession.codexStartupQuestion(listOf("The log mentioned Hooks need review")) == null)
+        assertTrue(TerminalSession.codexStartupQuestion(listOf("Hooks", "t trust all · enter review · esc close")) == null)
+    }
+
     private val rule = "─".repeat(40)
 
     /** [output] as JediTerm would draw it on a 60×12 screen. */

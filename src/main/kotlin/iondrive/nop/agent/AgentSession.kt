@@ -110,6 +110,11 @@ class AgentRun(
      */
     var nativeSessionId: String? by mutableStateOf(command.nativeSessionId)
 
+    internal var controlReady: Boolean by mutableStateOf(command.env[CodexLaunch.SOCKET_ENV] == null)
+    internal var startupQuestion: String? by mutableStateOf(null)
+    internal var controlDeliveryError: String? by mutableStateOf(null)
+    internal var startupPrompt: String? = null
+
     /**
      * The handover prompt the user has open and not yet sent or cancelled: [barDraft] from the
      * session bar, [exitDraft] from the post-exit panel. Held here rather than in those panels,
@@ -256,13 +261,15 @@ class AgentSession(
     /**
      * Messages other agents have sent this tab, waiting for the user to deliver or discard them —
      * see [AgentMessages]. Compose state: the tab's inbox and its mark in the strip are drawn from it.
-     * Kept for the life of the tab, across a restart in place too ([handOff]), but never written to
-     * disk; a message is not worth more than the tab it was sent to.
+     * Persisted before delivery, including a message in flight until its receipt is confirmed.
      */
     val inbox = androidx.compose.runtime.mutableStateListOf<AgentMessages.Held>().apply {
-        adoption?.first?.inbox?.forEach { add(AgentMessages.Held.of(it)) }
+        (AgentInboxStore.load(sessionId) ?: adoption?.first?.inbox).orEmpty().forEach { add(AgentMessages.Held.of(it)) }
     }
     internal var inFlightMessage: AgentMessages.Held? = null
+
+    internal fun persistInbox() = AgentInboxStore.save(sessionId,
+        (listOfNotNull(inFlightMessage) + inbox).distinctBy { it.id }.map { it.record() })
 
     /**
      * What happened in this session, in a vocabulary neither vendor uses — which is what makes a
@@ -504,7 +511,10 @@ class AgentSession(
      */
     internal fun refreshActivity(tracker: ActivityTracker, now: Long = System.currentTimeMillis()) {
         if (tracker !== run.tracker || ended) return
-        val (next, settles) = synchronized(tracker) { tracker.activity(now) to tracker.settlesAt() }
+        val (tracked, settles) = synchronized(tracker) { tracker.activity(now) to tracker.settlesAt() }
+        val next = if (!run.controlReady) {
+            if (run.startupQuestion != null) Activity.Asking else Activity.Running
+        } else tracked
         val was = live
         if (next != was) {
             live = next
@@ -1048,12 +1058,11 @@ class AgentSession(
     /**
      * This session as a row for the state file, or null for one that should not come back.
      *
-     * Two kinds decline. A session whose run the *user* ended is one they are finished with: the
+     * A session whose run the user ended is one they are finished with: the
      * tab is still in the strip so its last frame can be read, but starting nop again is not a
      * reason to start that CLI again — the picker lists it among the past sessions, which is where
-     * a deliberate return to it belongs. And a session with no [AgentRun.nativeSessionId] is one
-     * nop has no way back into; restoring it would be a tab in the right place with the wrong
-     * conversation behind it.
+     * a deliberate return to it belongs. A CLI still starting has no native conversation id;
+     * its saved launch prompt lets it finish starting without borrowing another tab's history.
      *
      * [EndReason.Killed] is explicitly not the first of those. It is nop's own doing — [dispose],
      * which is what quitting nop calls on every session it has — so reading it as "the user quit
@@ -1064,7 +1073,7 @@ class AgentSession(
      */
     fun asOpenAgent(): Settings.OpenAgent? {
         if (ended && run.endReason != EndReason.Killed) return null
-        val native = run.nativeSessionId ?: return null
+        val native = run.nativeSessionId.orEmpty()
         return Settings.OpenAgent(
             sessionId = sessionId,
             provider = account.provider.id,
@@ -1075,6 +1084,7 @@ class AgentSession(
             baselineSha = baselineSha.orEmpty(),
             authorizedModel = run.modelAuthorization.choice?.model.orEmpty(),
             authorizedReasoning = run.modelAuthorization.choice?.reasoning.orEmpty(),
+            pendingStart = if (native.isEmpty()) run.startupPrompt.orEmpty() else null,
         )
     }
 
@@ -1153,6 +1163,7 @@ class AgentSession(
             codexControlSocket = current.command.env[CodexLaunch.SOCKET_ENV],
             authorizedModel = current.modelAuthorization.choice?.model,
             authorizedReasoning = current.modelAuthorization.choice?.reasoning,
+            startupPrompt = current.startupPrompt,
         )
         return record to pty
     }
@@ -1230,6 +1241,7 @@ class AgentSession(
                     return@invokeLater
                 }
                 if (sent.isSuccess) {
+                    current.controlDeliveryError = null
                     current.userPromptSubmitted = true
                     sent.getOrNull()?.conversation?.let {
                         current.nativeSessionId = it
@@ -1244,6 +1256,7 @@ class AgentSession(
                         }
                     }
                 } else {
+                    current.controlDeliveryError = generateSequence(sent.exceptionOrNull()) { it.cause }.lastOrNull()?.message
                     Log.warn("agent message to $shortId failed on Codex's control socket: ${sent.exceptionOrNull()}")
                 }
                 entered(sent.isSuccess)
@@ -1364,6 +1377,7 @@ class AgentSession(
             account, command, terminal, seededFromHandoff, tracker, conversationMissing,
             startedAt = carried?.let { Instant.ofEpochMilli(it.startedAt) } ?: Instant.now(),
         )
+        newRun.startupPrompt = seed ?: carried?.startupPrompt
         if (log.hadHistory && (resumeId != null || carried != null)) {
             kotlin.concurrent.thread(isDaemon = true, name = "agent-command-history") {
                 runCatching { ConversationSummary.read(log.file) }.onSuccess { history ->
@@ -1425,6 +1439,19 @@ class AgentSession(
             joinAt = carried?.transcriptPath?.let { Path.of(it) to (carried.transcriptOffset ?: 0L) },
             pid = { terminal.pid() },
             knownNativeSessionId = { newRun.nativeSessionId },
+            resolveNativeSessionId = command.env[CodexLaunch.SOCKET_ENV]?.let { socket ->
+                {
+                    val id = if (terminal.running) runCatching { CodexControl.conversation(account, socket, newRun.nativeSessionId) }.getOrNull() else null
+                    SwingUtilities.invokeLater {
+                        if (run === newRun && !ended) {
+                            newRun.controlReady = id != null
+                            newRun.startupQuestion = if (id == null) terminal.codexStartupQuestion() else null
+                            refreshActivity(tracker)
+                        }
+                    }
+                    id
+                }
+            },
         )
         val tailer = tailerFor(account)
         newRun.follower = TranscriptFollower(

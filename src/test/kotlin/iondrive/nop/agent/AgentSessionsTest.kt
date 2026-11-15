@@ -1730,13 +1730,20 @@ class AgentSessionsTest {
         assertNull(session.asOpenAgent())
     }
 
-    /** Nothing to resume means nothing to restore: the tab would come back with a blank CLI in it. */
     @Test
-    fun `a session with no conversation behind it is not written down`(@TempDir tmp: Path) {
-        val session = sessions().open(tmp.toFile(), account("codex", Provider.OpenAI))
+    fun `a starting session preserves its pending launch instead of borrowing a conversation`(@TempDir tmp: Path) {
+        val owner = account("codex", Provider.OpenAI)
+        val session = sessions().open(tmp.toFile(), owner, seed = "Read the queued work and continue.")
 
         assertNull(session.run.nativeSessionId, "codex names its own session, a moment after it starts")
-        assertNull(session.asOpenAgent())
+        val row = session.asOpenAgent()!!
+        assertEquals("", row.nativeSessionId)
+        assertEquals("Read the queued work and continue.", row.pendingStart)
+        val restored = sessions()
+        restored.restore(listOf(row), tmp.toFile(), listOf(owner))
+        assertEquals(session.sessionId, restored.sessions.single().sessionId)
+        assertEquals("Read the queued work and continue.", restored.sessions.single().run.startupPrompt)
+        assertFalse(restored.sessions.single().run.isResume)
     }
 
     private fun row(

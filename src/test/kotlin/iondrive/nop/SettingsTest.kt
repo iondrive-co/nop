@@ -12,6 +12,15 @@ import java.nio.file.Path
 import java.nio.file.Paths
 
 class SettingsTest {
+    @Test
+    fun `a starting agent preserves its launch prompt without a vendor conversation id`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val project = tmp.resolve("project")
+        val row = Settings.OpenAgent("tab-orchid", "openai", "account-fern", "", "Worker", true,
+            pendingStart = "Read the handoff\nthen continue\t雨")
+        Settings.saveOpenAgents(project, listOf(row))
+        assertEquals(listOf(row), Settings.loadOpenAgents(project))
+    }
     private val originalRoot: Path = Settings.configRoot
 
     @Test

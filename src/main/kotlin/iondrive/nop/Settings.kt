@@ -703,6 +703,8 @@ object Settings {
         val baselineSha: String = "",
         val authorizedModel: String = "",
         val authorizedReasoning: String = "",
+        /** A CLI still starting has no native id yet; preserve the prompt it was launched with. */
+        val pendingStart: String? = null,
     )
 
     /**
@@ -724,7 +726,10 @@ object Settings {
                 val provider = parts[1].trim()
                 val account = parts[2].trim()
                 val nativeSessionId = parts[3].trim()
-                if (sessionId.isEmpty() || account.isEmpty() || nativeSessionId.isEmpty()) {
+                val pendingStart = parts.getOrNull(9)?.takeIf { it.startsWith("start:") }?.let {
+                    runCatching { String(java.util.Base64.getDecoder().decode(it.removePrefix("start:")), Charsets.UTF_8) }.getOrNull()
+                }
+                if (sessionId.isEmpty() || account.isEmpty() || (nativeSessionId.isEmpty() && pendingStart == null)) {
                     return@mapNotNull null
                 }
                 OpenAgent(
@@ -742,6 +747,7 @@ object Settings {
                     baselineSha = parts.getOrNull(6)?.trim().orEmpty(),
                     authorizedModel = parts.getOrNull(7)?.trim().orEmpty(),
                     authorizedReasoning = parts.getOrNull(8)?.trim().orEmpty(),
+                    pendingStart = pendingStart,
                 )
             }
             .toList()
@@ -766,6 +772,7 @@ object Settings {
                     flatten(agent.baselineSha),
                     flatten(agent.authorizedModel),
                     flatten(agent.authorizedReasoning),
+                    agent.pendingStart?.let { "start:" + java.util.Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)) }.orEmpty(),
                 ).joinToString("\t")
             }
             Files.writeString(f, if (body.isEmpty()) body else body + "\n")

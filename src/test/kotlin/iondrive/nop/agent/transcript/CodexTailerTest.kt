@@ -402,6 +402,50 @@ class CodexTailerTest {
 
     // ── Locating ──
 
+    @Test
+    fun `startup readiness is checked before any rollout directory exists`(@TempDir tmp: Path) {
+        var checked = false
+        val context = RunContext(tmp.resolve("work"), tmp, null, 71, resolveNativeSessionId = { checked = true; null })
+        assertNull(CodexTailer(tmp).locate(context))
+        assertTrue(checked)
+    }
+
+    @Test
+    fun `a private backend waiting at startup cannot adopt a sibling rollout`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val now = System.currentTimeMillis()
+        rollout(tmp, "rollout-sibling.jsonl", project.toString(), now)
+        val tailer = CodexTailer(tmp)
+        val context = RunContext(project, tmp, "stale-id", now, resolveNativeSessionId = { null })
+        assertNull(tailer.locate(context))
+        assertNull(tailer.nativeSessionId())
+    }
+
+    @Test
+    fun `private backends identify simultaneous tabs regardless of file order or stale hints`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val now = System.currentTimeMillis()
+        val orchid = rollout(tmp, "rollout-orchid.jsonl", project.toString(), now)
+        val fern = rollout(tmp, "rollout-fern.jsonl", project.toString(), now + 500)
+        val first = CodexTailer(tmp)
+        val second = CodexTailer(tmp)
+        assertEquals(orchid, first.locate(RunContext(project, tmp, "rollout-fern", now,
+            resolveNativeSessionId = { "rollout-orchid" })))
+        assertEquals(fern, second.locate(RunContext(project, tmp, null, now,
+            resolveNativeSessionId = { "rollout-fern" })))
+        assertEquals("rollout-orchid", first.nativeSessionId())
+        assertEquals("rollout-fern", second.nativeSessionId())
+    }
+
+    @Test
+    fun `a private backend whose transcript has not appeared never falls back to a sibling`(@TempDir tmp: Path) {
+        val project = tmp.resolve("project").also { Files.createDirectories(it) }
+        val now = System.currentTimeMillis()
+        rollout(tmp, "rollout-sibling.jsonl", project.toString(), now)
+        assertNull(CodexTailer(tmp).locate(RunContext(project, tmp, null, now,
+            resolveNativeSessionId = { "thread-unwritten" })))
+    }
+
     private fun rollout(
         home: Path,
         name: String,

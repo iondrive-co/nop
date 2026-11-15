@@ -49,14 +49,28 @@ class CodexTailer(private val home: Path) : Tailer {
     @Volatile
     private var sessionId: String? = null
 
+    private var checkedIdentityAt = 0L
+    private var backendIdentity: String? = null
+
+    private fun identity(run: RunContext): String? {
+        val resolve = run.resolveNativeSessionId ?: return run.knownNativeSessionId?.invoke() ?: run.nativeSessionId
+        val now = System.nanoTime()
+        if (checkedIdentityAt == 0L || now - checkedIdentityAt >= 1_000_000_000L) {
+            checkedIdentityAt = now
+            backendIdentity = runCatching { resolve() }.getOrNull()
+        }
+        return backendIdentity
+    }
+
     override fun nativeSessionId(): String? = sessionId
 
     override fun locate(run: RunContext): Path? {
+        val knownId = identity(run)
+        if (run.resolveNativeSessionId != null && knownId == null) return null
         val root = home.resolve(".codex").resolve("sessions")
         if (!Files.isDirectory(root)) return null
         val wanted = run.projectDir.toAbsolutePath().normalize().toString()
 
-        val knownId = run.knownNativeSessionId?.invoke() ?: run.nativeSessionId
         if (knownId != null) {
             val targetId = knownId
             val candidates = runCatching {
@@ -114,6 +128,13 @@ class CodexTailer(private val home: Path) : Tailer {
             return file
         }
         return null
+    }
+
+    override fun switched(run: RunContext, current: Path): Path? {
+        if (run.resolveNativeSessionId == null) return null
+        val id = identity(run) ?: return null
+        if (id == sessionId) return null
+        return locate(run)?.takeIf { it != current }
     }
 
     override fun parse(line: String): List<AgentEvent> {

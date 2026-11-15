@@ -36,11 +36,12 @@ class CodexControlTest {
             assertEquals("The receiving agent run has ended", failure.message)
         }
         assertEquals(2, checks, "cancellation must be checked again after inspecting the backend")
-        assertEquals(listOf("initialize", "initialized", "thread/read"), calls.map { it["method"].str() })
+        assertEquals(listOf("initialize", "initialized", "thread/loaded/list", "thread/read", "thread/read"), calls.map { it["method"].str() })
         assertFalse(calls.any { it["method"].str() == "turn/start" || it["method"].str() == "thread/inject_items" })
     }
 
-    private fun withServer(model: String, action: (CodexControl.Rpc) -> Unit): List<JsonObject> {
+    private fun withServer(model: String, loaded: List<String> = listOf("thread-orchid"),
+                           action: (CodexControl.Rpc) -> Unit): List<JsonObject> {
         val input = PipedInputStream(1_048_576)
         val reply = DataOutputStream(PipedOutputStream(input))
         val requests = PipedInputStream(1_048_576)
@@ -82,7 +83,14 @@ class CodexControlTest {
                 val id = request["id"] ?: continue
                 val result = when (request["method"].str()) {
                     "initialize" -> "{}"
-                    "thread/read" -> """{"thread":{"id":"thread-orchid","canAcceptDirectInput":true,"model":"$model","reasoningEffort":"high"}}"""
+                    "thread/loaded/list" -> buildJsonObject { put("data", JsonArray(loaded.map(::JsonPrimitive))) }.toString()
+                    "thread/read" -> buildJsonObject {
+                        val threadId = request["params"].obj()!!["threadId"].str()!!
+                        put("thread", buildJsonObject {
+                            put("id", threadId); put("canAcceptDirectInput", true); put("model", model); put("reasoningEffort", "high")
+                            if (threadId.startsWith("worker-")) put("source", buildJsonObject { put("subAgent", "review") })
+                        })
+                    }.toString()
                     else -> "{}"
                 }
                 if (request["method"].str() != "turn/start") send("ping", 9)
@@ -115,7 +123,7 @@ class CodexControlTest {
         val calls = withServer("model-orchid") { rpc ->
             CodexControl.send(rpc, "thread-orchid", text, "message-one", ConversationModel("model-orchid", "high"))
         }
-        assertEquals(listOf("initialize", "initialized", "thread/read", "turn/start"), calls.map { it["method"].str() })
+        assertEquals(listOf("initialize", "initialized", "thread/loaded/list", "thread/read", "thread/read", "turn/start"), calls.map { it["method"].str() })
         val params = calls.last()["params"].obj()!!
         assertEquals("thread-orchid", params["threadId"].str())
         assertEquals("message-one", params["clientUserMessageId"].str())
@@ -127,8 +135,47 @@ class CodexControlTest {
         val calls = withServer("model-fern") { rpc ->
             CodexControl.send(rpc, "thread-orchid", "hello", "message-one", ConversationModel("model-orchid", "high"))
         }
-        assertEquals(listOf("initialize", "initialized", "thread/read", "thread/settings/update", "turn/start"),
+        assertEquals(listOf("initialize", "initialized", "thread/loaded/list", "thread/read", "thread/read", "thread/settings/update", "turn/start"),
             calls.map { it["method"].str() })
-        assertEquals("model-orchid", calls[3]["params"].obj()!!["model"].str())
+        assertEquals("model-orchid", calls[5]["params"].obj()!!["model"].str())
+    }
+
+    @Test
+    fun `a stale saved id delivers only to the private backend's loaded conversation`() {
+        val calls = withServer("model-orchid") { rpc ->
+            val observed = CodexControl.send(rpc, "thread-larch", "A queued notification", "notice-fern", null)
+            assertEquals("thread-orchid", observed.conversation)
+        }
+        assertEquals("thread-orchid", calls.last()["params"].obj()!!["threadId"].str())
+        assertFalse(calls.any { it["method"].str() == "thread/resume" })
+    }
+
+    @Test
+    fun `a backend without a loaded conversation never receives a turn or an injection`() {
+        val calls = withServer("model-orchid", emptyList()) { rpc ->
+            assertThrows(IllegalStateException::class.java) {
+                CodexControl.send(rpc, "thread-larch", "A queued notification", "notice-fern", null)
+            }
+        }
+        assertEquals(listOf("initialize", "initialized", "thread/loaded/list"), calls.map { it["method"].str() })
+    }
+
+    @Test
+    fun `a worker cannot become the recipient even when it is the saved hint`() {
+        val calls = withServer("model-orchid", listOf("worker-kestrel", "thread-orchid")) { rpc ->
+            val observed = CodexControl.send(rpc, "worker-kestrel", "Check the result", "notice-maple", null)
+            assertEquals("thread-orchid", observed.conversation)
+        }
+        assertEquals("thread-orchid", calls.last()["params"].obj()!!["threadId"].str())
+    }
+
+    @Test
+    fun `ambiguous root conversations cannot receive a message without a matching hint`() {
+        val calls = withServer("model-orchid", listOf("thread-orchid", "thread-larch")) { rpc ->
+            assertThrows(IllegalStateException::class.java) {
+                CodexControl.send(rpc, null, "Check the result", "notice-maple", null)
+            }
+        }
+        assertFalse(calls.any { it["method"].str() == "turn/start" || it["method"].str() == "thread/inject_items" })
     }
 }
