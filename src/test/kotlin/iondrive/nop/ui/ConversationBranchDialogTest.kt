@@ -31,7 +31,7 @@ class ConversationBranchDialogTest {
         Files.createDirectories(file.parent)
         var parent: String? = null
         val records = listOf("user" to "Describe the orchard layout.", "assistant" to "The orchard has an eastern path.",
-            "user" to "Describe the greenhouse layout.", "assistant" to "The greenhouse has a western path.").map { (role, body) ->
+            "user" to "Describe the greenhouse layout.", "assistant" to "The orchard has an eastern path.").map { (role, body) ->
             val uuid = UUID.randomUUID().toString()
             buildJsonObject {
                 put("uuid", uuid); put("parentUuid", parent); put("sessionId", id); put("type", role)
@@ -48,7 +48,7 @@ class ConversationBranchDialogTest {
         source.log.append(AgentEvent.RunStarted("anthropic", account.name, home = account.home,
             nativeSessionId = id, transcriptPath = file.toString(), at = System.currentTimeMillis()))
         val click = ConversationClick(listOf("Describe the orchard layout.", "The orchard has an eastern path.",
-            "Describe the greenhouse layout.", "The greenhouse has a western path."), 1)
+            "Describe the greenhouse layout.", "The orchard has an eastern path."), 1)
         var shown by mutableStateOf(true)
         val owner = onEdt {
             ComposeWindow().apply {

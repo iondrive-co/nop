@@ -140,11 +140,41 @@ class ConversationBranchTest {
         }
     }
 
-    @Test fun `repeated text at competing boundaries never guesses a different history`() {
+    @Test fun `repeated replies map to their native turn in conversation order`() {
         val one = point("one", "The same completed answer.")
         val two = point("two", "The same completed answer.")
-        assertThrows(IllegalStateException::class.java) {
-            ConversationBranch.nearest(listOf(one, two), ConversationClick(listOf(one.preceding), 0))
+        val lines = listOf(one.preceding, "A different question.", two.preceding)
+        assertEquals(one, ConversationBranch.nearest(listOf(one, two), ConversationClick(lines, 0)))
+        assertEquals(two, ConversationBranch.nearest(listOf(one, two), ConversationClick(lines, 2)))
+        assertEquals(two, ConversationBranch.nearest(listOf(one, two), ConversationClick(listOf(one.preceding), 0)))
+    }
+
+    @Test fun `thinking blocks in one completed reply expose only its last native entry`() {
+        val (account, _) = claude(user("prompt-a", null, "Consider the orchard layout."),
+            reply("answer-a", "prompt-a", "Retain the eastern orchard."),
+            """{"type":"assistant","uuid":"thinking-a","parentUuid":"answer-a","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"A private calculation"}]}}""")
+        assertEquals(listOf(null, "thinking-a"), ConversationBranch.points(account, root, conversation).map { it.boundary })
+    }
+
+    @Test fun `a reply completed after the menu opened cannot steal a repeated passage`() {
+        val one = point("one", "The same completed answer.").copy(at = 10)
+        val future = point("future", one.preceding).copy(at = 30)
+        assertEquals(one, ConversationBranch.nearest(listOf(one, future), ConversationClick(listOf(one.preceding), 0, capturedAt = 20)))
+    }
+
+    @Test fun `the summary message timestamp identifies an earlier repeated answer`() {
+        val first = point("first", "The same completed answer.").copy(at = 10)
+        val second = point("second", first.preceding).copy(at = 30)
+        assertEquals(first, ConversationBranch.nearest(listOf(first, second),
+            ConversationClick(listOf(first.preceding), 0, capturedAt = 40, messageAt = 10)))
+    }
+
+    @Test fun `a long history of identical replies aligns the visible suffix without a match cross product`() {
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(5)) {
+            val points = (0 until 5000).map { point("reply-$it", "The same completed answer.") }
+            val lines = List(500) { "The same completed answer." }
+            assertEquals(points[4500], ConversationBranch.nearest(points, ConversationClick(lines, 0)))
+            assertEquals(points.last(), ConversationBranch.nearest(points, ConversationClick(lines, lines.lastIndex)))
         }
     }
 

@@ -82,6 +82,7 @@ dependencies {
     implementation("io.github.java-diff-utils:java-diff-utils:4.16")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.xerial:sqlite-jdbc:3.50.3.0")
     implementation("org.commonmark:commonmark:0.24.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.24.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.24.0")

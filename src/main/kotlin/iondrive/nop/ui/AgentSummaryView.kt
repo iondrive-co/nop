@@ -176,7 +176,7 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
                             val lines = rows.flatten()
                             val before = rows.take(index).sumOf { it.size }
                             val row = before + (clickFraction * rows[index].lastIndex).toInt()
-                            onBranchHere(iondrive.nop.agent.ConversationClick(lines, row))
+                            onBranchHere(iondrive.nop.agent.ConversationClick(lines, row, snapshot.capturedAt, message.at))
                         })
                     }) {
                         Column(
