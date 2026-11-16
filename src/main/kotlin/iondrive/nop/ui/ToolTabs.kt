@@ -229,7 +229,7 @@ fun ToolTabs(
     sessionTab: ToolTab?,
     /** Whether the tool half is folded away, leaving the whole region to the session. */
     collapsed: Boolean,
-    onToggleCollapsed: () -> Unit,
+    onHideSidePanel: () -> Unit,
     paneRatio: Float,
     onPaneRatioChange: (Float) -> Unit,
     terminals: RunSessions,
@@ -315,7 +315,7 @@ fun ToolTabs(
             selected = selected,
             onSelect = onSelect,
             collapsed = collapsed,
-            onToggleCollapsed = onToggleCollapsed,
+            onHideSidePanel = onHideSidePanel,
             histories = histories,
             onSelectHistory = onSelectHistory,
             onCloseHistory = onCloseHistory,
@@ -380,17 +380,17 @@ fun ToolTabs(
 }
 
 /**
- * The upper strip: the git logs, then the fixed tool tabs, then the collapse control.
+ * The upper strip: the git logs, then the fixed tool tabs, then the side-panel hide control.
  *
  * The chevron sits outside the scrolling half so it is reachable whatever the strip is scrolled to
- * — it is the one control in the strip that is about the *region* rather than about a tab, and one
- * that scrolls off the end is one the user cannot use to get the tools back. It is no longer the
- * only way back, though: clicking the tab that is already showing folds the panel away too, which
- * is the gesture that is already under the pointer when the user decides they want the columns.
+ * — it is the control in the strip that hides the whole right-hand side panel (including the
+ * session strip and agent tab), while clicking the tool tab that is already showing folds the
+ * tool half away beside the session pane.
  *
- * Folded away, no tab draws as the current one — there is no panel for it to be current in, and a
- * highlighted tab over an empty half of the region reads as a panel that has failed to draw.
- * [selected] is still the tab that comes back, so the strip forgets nothing by showing nothing.
+ * With the tool half folded away, no tab draws as the current one — there is no panel for it to be
+ * current in, and a highlighted tab over an empty half of the region reads as a panel that has
+ * failed to draw. [selected] is still the tab that comes back, so the strip forgets nothing by
+ * showing nothing.
  */
 @Composable
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -398,7 +398,7 @@ private fun ToolStrip(
     selected: ToolTab,
     onSelect: (ToolTab) -> Unit,
     collapsed: Boolean,
-    onToggleCollapsed: () -> Unit,
+    onHideSidePanel: () -> Unit,
     histories: HistorySessions,
     onSelectHistory: (String) -> Unit,
     onCloseHistory: (String) -> Unit,
@@ -418,7 +418,7 @@ private fun ToolStrip(
         style = style,
         isDark = isDark,
         trailing = {
-            CollapseToolsButton(collapsed = collapsed, isDark = isDark, onClick = onToggleCollapsed)
+            SidePanelToggleButton(collapsed = false, isDark = isDark, onClick = onHideSidePanel)
         },
     ) {
         // The git logs lead, for the same reason the sessions lead their own strip: they are the
@@ -920,17 +920,40 @@ private fun StripRow(
     }
 }
 
-/** Folds the tool half away, and brings it back. */
+/** Folds the entire right-hand side panel (sessions and tools) away, and brings it back. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun CollapseToolsButton(collapsed: Boolean, isDark: Boolean, onClick: () -> Unit) {
+private fun SidePanelToggleButton(collapsed: Boolean, isDark: Boolean, onClick: () -> Unit) {
     val tint = if (isDark) ProjectIconTintDark else ProjectIconTintLight
-    Tooltip(tooltip = { Text(if (collapsed) "Show the tool panel" else "Hide the tool panel") }) {
+    Tooltip(tooltip = { Text(if (collapsed) "Show the side panel" else "Hide the side panel") }) {
         Box(
             modifier = Modifier.size(22.dp).clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Text(if (collapsed) "◀" else "▶", color = tint)
+        }
+    }
+}
+
+/**
+ * The narrow right-edge rail shown while the side panel is hidden, keeping the restore button at
+ * the top-right corner where the hide button sat.
+ */
+@Composable
+internal fun CollapsedSidePanelStrip(onExpand: () -> Unit) {
+    val isDark = JewelTheme.isDark
+    val style = JewelTheme.defaultTabStyle
+    val palette = remember(isDark) { StripPalette(isDark) }
+    val divider = if (isDark) Color(0xFF323438) else Color(0xFFD0D2D5)
+    Row(modifier = Modifier.fillMaxHeight().background(palette.strip)) {
+        Box(modifier = Modifier.width(1.dp).fillMaxHeight().background(divider))
+        Column(modifier = Modifier.width(22.dp).fillMaxHeight()) {
+            Box(
+                modifier = Modifier.fillMaxWidth().height(style.metrics.tabHeight),
+                contentAlignment = Alignment.Center,
+            ) {
+                SidePanelToggleButton(collapsed = true, isDark = isDark, onClick = onExpand)
+            }
         }
     }
 }

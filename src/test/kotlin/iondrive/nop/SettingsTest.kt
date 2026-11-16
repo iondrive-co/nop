@@ -859,6 +859,25 @@ class SettingsTest {
         assertEquals(true, Settings.loadToolsCollapsed())
     }
 
+    @Test
+    fun `side panel collapse defaults to visible and persists globally and per project`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        assertEquals(false, Settings.loadSidePanelCollapsed(), "side panel with the agent tab must open visible")
+        Settings.saveSidePanelCollapsed(true)
+        assertEquals(true, Settings.loadSidePanelCollapsed())
+
+        val a = tmp.resolve("a").also { Files.createDirectories(it) }
+        val b = tmp.resolve("b").also { Files.createDirectories(it) }
+        val fresh = tmp.resolve("fresh").also { Files.createDirectories(it) }
+        // A project with nothing saved inherits the last saved global state.
+        assertEquals(true, Settings.loadSidePanelCollapsed(fresh))
+
+        Settings.saveSidePanelCollapsed(a, false)
+        Settings.saveSidePanelCollapsed(b, true)
+        assertEquals(false, Settings.loadSidePanelCollapsed(a))
+        assertEquals(true, Settings.loadSidePanelCollapsed(b))
+    }
+
     /** A tab or a newline in a name would split the row it is written on. */
     @Test
     fun `an agent title carrying a separator survives as one row`(@TempDir tmp: Path) {

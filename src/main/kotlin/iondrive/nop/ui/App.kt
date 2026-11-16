@@ -365,6 +365,13 @@ fun App(
             .drop(1)
             .collectLatest { Settings.saveToolsCollapsed(projectPath, it) }
     }
+    // Whether the entire right-hand side panel (sessions, tools, docked Slack) is hidden.
+    var sidePanelCollapsed by remember(projectPath) { mutableStateOf(Settings.loadSidePanelCollapsed(projectPath)) }
+    LaunchedEffect(projectPath) {
+        snapshotFlow { sidePanelCollapsed }
+            .drop(1)
+            .collectLatest { Settings.saveSidePanelCollapsed(projectPath, it) }
+    }
 
     // Pull external edits into cached editor buffers. The buffer behind a file/diff tab is read from
     // disk once and then cached for the whole session, so a file changed outside nop (another editor,
@@ -796,6 +803,13 @@ fun App(
     var slackVisible by slackView.visible
     var slackConnectionVersion by slackView.connectionVersion
     SideEffect { if (!slackView.floating) slackView.dockedViewReady() }
+    var wasSlackFloating by remember(projectPath) { mutableStateOf(slackView.floating) }
+    LaunchedEffect(slackView.floating) {
+        if (wasSlackFloating && !slackView.floating && slackView.visible.value) {
+            sidePanelCollapsed = false
+        }
+        wasSlackFloating = slackView.floating
+    }
     LaunchedEffect(slackWorkspaces, selectedSlackId) {
         if (selectedSlackId != null && slackWorkspaces.none { it.id == selectedSlackId }) {
             selectedSlackId = slackWorkspaces.firstOrNull()?.id
@@ -813,7 +827,7 @@ fun App(
     var sessionTab by remember(projectPath) { mutableStateOf(projectTerminals.sessionTab) }
 
     /**
-     * Shows [tab] on the right, unfolding the tool panel if it was collapsed.
+     * Shows [tab] on the right, unfolding the side panel and tool panel if either was collapsed.
      *
      * Every external trigger goes through here rather than assigning the selection directly. A
      * Ctrl+Shift+F that flipped the hidden panel to Search would look, from the user's side, like
@@ -822,6 +836,7 @@ fun App(
     fun showTool(tab: ToolTab) {
         toolTab = tab
         toolsCollapsed = false
+        sidePanelCollapsed = false
     }
 
     /**
@@ -839,12 +854,14 @@ fun App(
     }
 
     /**
-     * Shows [tab]'s collection in the session pane on the left. Written into the store as well, so
-     * that coming back to this project shows the same collection. Its terminals are still running.
+     * Shows [tab]'s collection in the session pane on the left, unfolding the side panel if it was
+     * hidden. Written into the store as well, so that coming back to this project shows the same
+     * collection. Its terminals are still running.
      */
     fun showSession(tab: ToolTab) {
         sessionTab = tab
         projectTerminals.sessionTab = tab
+        sidePanelCollapsed = false
     }
 
     /** What the Diff tab dates its "session" base from — see [DiffPanel]. */
@@ -1876,6 +1893,8 @@ fun App(
                         onRatioChange = { toolsRatio = it },
                         minFirstDp = 240.dp,
                         minSecondDp = if (slackVisible && !slackView.floating) (if (toolsCollapsed) 524.dp else 728.dp) else 240.dp,
+                        secondCollapsed = sidePanelCollapsed,
+                        collapsedSecond = { CollapsedSidePanelStrip(onExpand = { sidePanelCollapsed = false }) },
                         first = {
                             TabbedViewerPanel(
                                 tabsState = tabsState,
@@ -1984,7 +2003,7 @@ fun App(
                                 onSelect = { toggleTool(it) },
                                 sessionTab = sessionTab,
                                 collapsed = toolsCollapsed,
-                                onToggleCollapsed = { toolsCollapsed = !toolsCollapsed },
+                                onHideSidePanel = { sidePanelCollapsed = true },
                                 paneRatio = sessionRatio,
                                 onPaneRatioChange = { sessionRatio = it },
                                 terminals = terminals,
@@ -2377,15 +2396,18 @@ fun App(
         // left is the thing you look at to decide what to do next, and it is global state, so
         // burying it behind a tab would cost a click you only make once you already suspect the
         // answer. The theme toggle is in the project bar, which is drawn once per window.
-        UsageIndicator(
-            accounts = agentAccounts,
-            readings = agentUsage,
-            onClick = { showAccounts = true },
-            onHeight = { usageStripHeight = it },
-            backupDir = agentConfig?.backupDir,
-            spanWidth = toolRegionWidth,
-            modifier = Modifier.align(androidx.compose.ui.Alignment.BottomEnd),
-        )
+        // Hidden while the side panel is collapsed so it doesn't float over the editor.
+        if (!sidePanelCollapsed) {
+            UsageIndicator(
+                accounts = agentAccounts,
+                readings = agentUsage,
+                onClick = { showAccounts = true },
+                onHeight = { usageStripHeight = it },
+                backupDir = agentConfig?.backupDir,
+                spanWidth = toolRegionWidth,
+                modifier = Modifier.align(androidx.compose.ui.Alignment.BottomEnd),
+            )
+        }
 
         if (showAccounts) {
             val config = agentConfig ?: AgentConfig()

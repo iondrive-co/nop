@@ -38,6 +38,8 @@ fun HorizontalSplit(
     minFirstDp: Dp = 120.dp,
     minSecondDp: Dp = 120.dp,
     dividerThickness: Dp = 4.dp,
+    secondCollapsed: Boolean = false,
+    collapsedSecond: (@Composable () -> Unit)? = null,
     first: @Composable () -> Unit,
     second: @Composable () -> Unit,
 ) {
@@ -54,14 +56,22 @@ fun HorizontalSplit(
         val firstWidthDp = with(density) { (available * clampedRatio).toDp() }
 
         Row(modifier = Modifier.fillMaxSize()) {
-            Box(Modifier.width(firstWidthDp).fillMaxHeight()) { first() }
-            DividerBar(
-                thickness = dividerThickness,
-                onDrag = { delta ->
-                    onRatioChange(((clampedRatio * available + delta) / available).coerceIn(minRatio, maxRatio))
-                },
-            )
-            Box(Modifier.weight(1f).fillMaxHeight()) { second() }
+            // Keep first in a fixed slot so hiding/showing second preserves its composition state.
+            Box(
+                if (secondCollapsed) Modifier.weight(1f).fillMaxHeight()
+                else Modifier.width(firstWidthDp).fillMaxHeight()
+            ) { first() }
+            if (secondCollapsed) {
+                collapsedSecond?.invoke()
+            } else {
+                DividerBar(
+                    thickness = dividerThickness,
+                    onDrag = { delta ->
+                        onRatioChange(((clampedRatio * available + delta) / available).coerceIn(minRatio, maxRatio))
+                    },
+                )
+                Box(Modifier.weight(1f).fillMaxHeight()) { second() }
+            }
         }
     }
 }

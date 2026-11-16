@@ -405,18 +405,10 @@ object Settings {
 
     /** Whether [projectPath]'s tool panel is folded away; a project with nothing saved follows [loadToolsCollapsed]. */
     fun loadToolsCollapsed(projectPath: Path): Boolean =
-        when (runCatching { Files.readString(projectDataDir(projectPath).resolve("tools-collapsed")).trim() }.getOrNull()) {
-            "1" -> true
-            "0" -> false
-            else -> loadToolsCollapsed()
-        }
+        loadProjectFlag(projectPath, "tools-collapsed", ::loadToolsCollapsed)
 
     fun saveToolsCollapsed(projectPath: Path, collapsed: Boolean) {
-        val f = projectDataDir(projectPath).resolve("tools-collapsed")
-        runCatching {
-            Files.createDirectories(f.parent)
-            Files.writeString(f, if (collapsed) "1" else "0")
-        }
+        saveProjectFlag(projectPath, "tools-collapsed", collapsed)
         saveToolsCollapsed(collapsed)
     }
 
@@ -435,6 +427,42 @@ object Settings {
         val map = load()
         map["tools.collapsed"] = if (collapsed) "1" else "0"
         save(map)
+    }
+
+    /** Whether [projectPath]'s right-hand side panel (sessions and tools) is hidden; defaults to [loadSidePanelCollapsed]. */
+    fun loadSidePanelCollapsed(projectPath: Path): Boolean =
+        loadProjectFlag(projectPath, "side-panel-collapsed", ::loadSidePanelCollapsed)
+
+    fun saveSidePanelCollapsed(projectPath: Path, collapsed: Boolean) {
+        saveProjectFlag(projectPath, "side-panel-collapsed", collapsed)
+        saveSidePanelCollapsed(collapsed)
+    }
+
+    /**
+     * Whether the right-hand side panel was last hidden in any project. Visible when nothing is
+     * saved, because the side panel holds the agent tab and terminals.
+     */
+    fun loadSidePanelCollapsed(): Boolean = load()["sidePanel.collapsed"] == "1"
+
+    fun saveSidePanelCollapsed(collapsed: Boolean) {
+        val map = load()
+        map["sidePanel.collapsed"] = if (collapsed) "1" else "0"
+        save(map)
+    }
+
+    private fun loadProjectFlag(projectPath: Path, fileName: String, fallback: () -> Boolean): Boolean =
+        when (runCatching { Files.readString(projectDataDir(projectPath).resolve(fileName)).trim() }.getOrNull()) {
+            "1" -> true
+            "0" -> false
+            else -> fallback()
+        }
+
+    private fun saveProjectFlag(projectPath: Path, fileName: String, value: Boolean) {
+        val f = projectDataDir(projectPath).resolve(fileName)
+        runCatching {
+            Files.createDirectories(f.parent)
+            Files.writeString(f, if (value) "1" else "0")
+        }
     }
 
     /** Returns the persisted theme, defaulting to dark when nothing is saved or the value is unknown. */
