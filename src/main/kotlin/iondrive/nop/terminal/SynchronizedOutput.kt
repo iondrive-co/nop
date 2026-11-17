@@ -24,10 +24,12 @@ internal class SynchronizedOutput(
 
     /** Antigravity emits its erase commands before the synchronized frame that repaints them. */
     var clearsStartUpdates: Boolean = false
+    /** Full-screen and scrollback erases (`2J`/`3J`) precede Codex's synchronized redraw frame. */
+    var screenClearsStartUpdates: Boolean = false
     var beforeScreenClear: (() -> Unit)? = null
 
     fun eraseInDisplay(mode: Int) {
-        if (clearsStartUpdates) begin()
+        if (clearsStartUpdates || (screenClearsStartUpdates && (mode == 2 || mode == 3))) begin()
         if (active && (mode == 2 || mode == 3)) beforeScreenClear?.invoke()
     }
 

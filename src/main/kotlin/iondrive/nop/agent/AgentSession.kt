@@ -1361,6 +1361,7 @@ class AgentSession(
             title = account.name,
             adopted = adoption?.second,
             nopPrompts = NOP_PROMPTS,
+            screenClearsStartUpdates = account.provider == Provider.OpenAI,
             // Three jobs, one copy of the output, and none of them touches what is drawn. The
             // quota watcher is how nop learns the CLI has hit a wall — it announces that in its own
             // UI and nowhere else — and the screen tail is the fallback a handoff is built from

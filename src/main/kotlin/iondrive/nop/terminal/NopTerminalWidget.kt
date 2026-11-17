@@ -399,9 +399,6 @@ internal class NopTerminalPanel(
     init {
         synchronizedOutput.beforeScreenClear = ::captureHistoryAnchor
         verticalScrollModel.addChangeListener { viewingHistory = verticalScrollModel.value < 0 }
-        addHierarchyListener { event ->
-            if (event.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong() != 0L && !isShowing) discardCompletedFrame()
-        }
         terminalTextBuffer.addChangesListener(object : TextBufferChangesListener {
             override fun historyCleared() {
                 if (!synchronizedOutput.active || rebuiltFrom != null) return
@@ -668,9 +665,8 @@ internal class NopTerminalPanel(
     private fun paintHeldFrame(g: Graphics): Boolean {
         if (!synchronizedOutput.active && !finishingUpdate.get()) return false
         val frame = completedFrame
-        // A newly shown or oversized terminal can still paint immutable history without a cache.
-        if (frame == null && rebuiltFrom == null && !terminalTextBuffer.isUsingAlternateBuffer &&
-            verticalScrollModel.value + terminalTextBuffer.height <= 0) return false
+        // While nothing has cleared the buffer yet, paint it directly instead of blanking to the background.
+        if (frame == null && rebuiltFrom == null) return false
         val graphics = g.create()
         try {
             graphics.color = settings.bg
@@ -689,9 +685,11 @@ internal class NopTerminalPanel(
         val pixelWidth = ceil(width * scaleX).toInt()
         val pixelHeight = ceil(height * scaleY).toInt()
         if (pixelWidth <= 0 || pixelHeight <= 0 || pixelWidth.toLong() * pixelHeight > MAX_FRAME_PIXELS) return null
-        return completedFrame?.takeIf {
-            it.width == width && it.height == height && it.scaleX == scaleX && it.scaleY == scaleY
-        } ?: CompletedFrame(BufferedImage(pixelWidth, pixelHeight, BufferedImage.TYPE_INT_RGB), scaleX, scaleY, width, height)
+        val existing = completedFrame
+        if (existing != null && existing.width == width && existing.height == height &&
+            existing.scaleX == scaleX && existing.scaleY == scaleY) return existing
+        existing?.image?.flush()
+        return CompletedFrame(BufferedImage(pixelWidth, pixelHeight, BufferedImage.TYPE_INT_RGB), scaleX, scaleY, width, height)
     }
 
     private fun drawCompletedFrame(g: Graphics, frame: CompletedFrame) {
@@ -704,7 +702,7 @@ internal class NopTerminalPanel(
         } finally { graphics.dispose() }
     }
 
-    private fun discardCompletedFrame() {
+    internal fun discardCompletedFrame() {
         completedFrame?.image?.flush()
         completedFrame = null
     }
@@ -769,7 +767,7 @@ internal class NopTerminalPanel(
     }
 
     private companion object {
-        /** Bound the optional completed-frame image to a 4K display; hidden terminals release it. */
+        /** Bound the optional completed-frame image to a 4K display. */
         const val MAX_FRAME_PIXELS = 8L * 1024 * 1024
 
         /** How often a held update checks whether its program has stopped writing. */

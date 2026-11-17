@@ -71,6 +71,7 @@ class TerminalSession private constructor(
      * the user's own prompts apart from those ([UserMessages]). Null for any other terminal.
      */
     private val nopPrompts: List<String>? = null,
+    private val screenClearsStartUpdates: Boolean = false,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(adopted?.pty?.isAlive == true)
@@ -292,8 +293,10 @@ class TerminalSession private constructor(
         // has even been laid out.
         val w = NopTerminalWidget(adopted?.columns ?: INITIAL_COLUMNS, adopted?.rows ?: INITIAL_ROWS, s)
         w.onBranchHere = onBranchHere
-        (w.terminalPanel as NopTerminalPanel).synchronizedOutput.clearsStartUpdates =
-            env["AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS"] == "1"
+        (w.terminalPanel as NopTerminalPanel).synchronizedOutput.apply {
+            clearsStartUpdates = env["AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS"] == "1"
+            this.screenClearsStartUpdates = this@TerminalSession.screenClearsStartUpdates
+        }
         commandCopies?.let(w::showCommandCopies)
         // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
         // Must be installed before the process starts writing, or early output misses out: JediTerm
@@ -368,6 +371,7 @@ class TerminalSession private constructor(
         s.link = link
         widget?.let { w ->
             w.background = bg
+            (w.terminalPanel as? NopTerminalPanel)?.discardCompletedFrame()
             w.terminalPanel.background = bg
             w.terminalPanel.repaint()
         }
@@ -993,6 +997,7 @@ class TerminalSession private constructor(
             adopted: Adopted? = null,
             /** How the prompts nop types in begin — see [TerminalSession.nopPrompts]. */
             nopPrompts: List<String>? = null,
+            screenClearsStartUpdates: Boolean = false,
         ): TerminalSession =
             TerminalSession(
                 title = title,
@@ -1003,6 +1008,7 @@ class TerminalSession private constructor(
                 outputTap = outputTap,
                 adopted = adopted,
                 nopPrompts = nopPrompts,
+                screenClearsStartUpdates = screenClearsStartUpdates,
             )
 
         /** The PTY master behind [proc], for a process whose master this nop can name. */

@@ -1041,6 +1041,8 @@ private fun ApplicationScope.WorkspaceWindow(
                     onRestart = onRestartRequested,
                     isDark = darkMode,
                 )
+                val usageStripHeight = remember { mutableStateOf(0.dp) }
+                val toolRegionWidth = remember { mutableStateOf(0.dp) }
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     if (activeTab != null && activeProject != null) {
                         // Recreate each tab's workers and project resources when it becomes active.
@@ -1058,6 +1060,8 @@ private fun ApplicationScope.WorkspaceWindow(
                             App(
                                 projectPath = activeProject,
                                 projectTreeState = treeState,
+                                usageStripHeightState = usageStripHeight,
+                                toolRegionWidthState = toolRegionWidth,
                                 repoWatcher = repoWatcher,
                                 onDirtyChange = { dirty -> onProjectDirty(activeProject, dirty) },
                                 recentProjects = recentProjects,

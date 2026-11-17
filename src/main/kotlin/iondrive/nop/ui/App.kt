@@ -14,6 +14,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -181,6 +182,8 @@ fun App(
     navigateBackTrigger: Int = 0,
     navigateForwardTrigger: Int = 0,
     projectTreeState: ProjectTreeState = remember(projectPath) { ProjectTreeState() },
+    usageStripHeightState: MutableState<Dp> = remember { mutableStateOf(0.dp) },
+    toolRegionWidthState: MutableState<Dp> = remember { mutableStateOf(0.dp) },
 ) {
     val repo: GitRepo? = remember(projectPath) { GitRepo.discover(projectPath) }
     DisposableEffect(repo) { onDispose { repo?.close() } }
@@ -1082,12 +1085,12 @@ fun App(
     // How much room the usage strip at the bottom of the window is taking. Terminals are
     // heavyweight AWT components drawn over everything Compose paints, so each one has to stop
     // short of the strip by exactly this much or the strip is simply not on screen.
-    var usageStripHeight by remember { mutableStateOf(0.dp) }
+    var usageStripHeight by usageStripHeightState
     // And how wide the tool region is, which is how wide the strip draws itself: the accounts want
     // one line, and one line's worth of room is the agent pane plus the panel beside it. Measured
     // rather than derived from the two split ratios, which would have to be re-derived here every
     // time either of them moved.
-    var toolRegionWidth by remember { mutableStateOf(0.dp) }
+    var toolRegionWidth by toolRegionWidthState
     // Whether the accounts dialog is up.
     // Once per nop run, not once per opening: re-asking every time turns a lock into a nuisance and
     // trains the user to keep the dialog open, which is the opposite of what it is for.

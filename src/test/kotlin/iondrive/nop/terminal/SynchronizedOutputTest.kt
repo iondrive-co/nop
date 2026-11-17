@@ -9,6 +9,7 @@ import com.jediterm.terminal.util.CharUtils
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.Color
+import java.awt.event.HierarchyEvent
 import java.awt.event.MouseWheelEvent
 import java.awt.image.BufferedImage
 import java.util.concurrent.atomic.AtomicBoolean
@@ -91,6 +92,65 @@ class SynchronizedOutputTest {
         now += 2_001
         output.expire()
         assertFalse(output.active, "a missing native frame must not hold the terminal forever")
+    }
+
+    @Test
+    fun `screenClearsStartUpdates holds full erases while leaving partial erases immediate`() {
+        var now = 0L
+        val output = SynchronizedOutput(clock = { now })
+        var captures = 0
+        output.beforeScreenClear = { captures++ }
+        output.screenClearsStartUpdates = true
+        fun erase(control: String) {
+            val stream = SynchronizedOutputStream(ArrayTerminalDataStream(control.toCharArray()), output)
+            assertEquals(control, buildString { while (!stream.isEmpty) append(stream.char) })
+        }
+        erase("\u001b[J")
+        assertFalse(output.active, "composer tail erases must not hold ordinary typing")
+        assertEquals(0, captures)
+        erase("\u001b[2J\u001b[3J")
+        assertTrue(output.active, "full screen and scrollback clear must hold before the synchronized frame begins")
+        assertEquals(2, captures)
+        output.begin()
+        output.end()
+        assertFalse(output.active)
+    }
+
+    @Test
+    fun `a clear before a synchronized reprint preserves the completed frame and a fresh panel paints existing text`() {
+        lateinit var widget: NopTerminalWidget
+        lateinit var panel: NopTerminalPanel
+        lateinit var before: IntArray
+        onEdt {
+            widget = widget()
+            panel = widget.terminalPanel as NopTerminalPanel
+            panel.synchronizedOutput.screenClearsStartUpdates = true
+            feed(panel, "Visible conversation row\r\nCurrent prompt\u001b[?25l")
+            before = pixels(paint(panel))
+            val hidden = HierarchyEvent(panel, HierarchyEvent.HIERARCHY_CHANGED, panel, panel, HierarchyEvent.SHOWING_CHANGED.toLong())
+            panel.hierarchyListeners.forEach { it.hierarchyChanged(hidden) }
+            feed(panel, "\u001b[H\u001b[2J\u001b[3J\u001b[H")
+            assertArrayEquals(before, pixels(paint(panel)), "erasing before 2026h must keep the completed frame even after hiding")
+            feed(panel, "\u001b[?2026hRebuilt row\r\nUpdated prompt")
+            assertArrayEquals(before, pixels(paint(panel)), "the reprint must keep the completed frame until finished")
+            feed(panel, "\u001b[?2026l")
+        }
+        try {
+            onEdt {
+                assertFalse(before.contentEquals(pixels(paint(panel))), "the finished reprint paints the updated screen")
+            }
+            lateinit var fresh: NopTerminalWidget
+            onEdt {
+                fresh = widget()
+                val freshPanel = fresh.terminalPanel as NopTerminalPanel
+                feed(freshPanel, "Initial screen\u001b[?25l\u001b[?2026h")
+                val painted = pixels(paint(freshPanel))
+                assertTrue(painted.any { it != Color.WHITE.rgb },
+                    "an uncached non-clearing synchronized update must draw existing text rather than blank white")
+                feed(freshPanel, "\u001b[?2026l")
+            }
+            onEdt { fresh.close() }
+        } finally { onEdt { widget.close() } }
     }
 
     @Test
