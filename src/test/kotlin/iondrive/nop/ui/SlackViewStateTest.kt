@@ -120,5 +120,39 @@ class SlackViewStateTest {
         // Stacked monitor above allows dragging into negative y coordinates on the upper screen.
         val upper = Rectangle(0, -1080, 1920, 1080)
         assertEquals(-400, clampDragTopY(-400, Point(500, -200), listOf(left, upper)))
+
+        // With a client-drawn titlebar margin, dragging stays below screen.y + margin and detects y = 0.
+        assertEquals(76, clampDragTopY(10, Point(500, 400), listOf(left), topMargin = 48))
+        assertTrue(isWindowOffscreen(Rectangle(100, 28, 900, 700), listOf(left), topMargin = 48))
+    }
+
+    @Test
+    fun `bringWindowOnScreenBounds centers over the main window inside multi-monitor virtual screens`() {
+        // One virtual desktop spanning asymmetric monitors: a lower monitor extends below y = 3563,
+        // and another monitor starts at y = 1440 inside the virtual rectangle.
+        val virtual = listOf(Rectangle(0, 0, 9881, 4320))
+        val mainWindow = Rectangle(2000, 3100, 1600, 1000)
+
+        // Window stranded with its top offscreen above the y = 1440 monitor still sits inside the
+        // virtual bounding box, so Bring on screen must move it over the active main window.
+        val stranded = Rectangle(2200, 1380, 900, 700)
+        val brought = bringWindowOnScreenBounds(stranded, mainWindow, virtual, topMargin = XPRA_TITLEBAR_MARGIN)
+        assertEquals(Rectangle(2350, 3250, 900, 700), brought)
+
+        // When the main window sits near the top of a monitor, keep room for a client-drawn titlebar.
+        val topMain = Rectangle(100, 0, 1600, 1000)
+        val atTop = bringWindowOnScreenBounds(Rectangle(100, 0, 900, 980), topMain, virtual, topMargin = XPRA_TITLEBAR_MARGIN)
+        assertTrue(atTop.y >= XPRA_TITLEBAR_MARGIN)
+        assertTrue(atTop.y + atTop.height <= topMain.height)
+
+        // A window legitimately placed on the lower monitor stays untouched by clampPlacement on reopen.
+        val lowerSaved = SlackPlacement(floating = true, visible = true, width = 900, height = 700, x = 2350, y = 3250)
+        assertEquals(lowerSaved, clampPlacement(lowerSaved, virtual, topMargin = XPRA_TITLEBAR_MARGIN))
+
+        // Without an anchor window, clamping falls back to usable screen bounds with the titlebar margin.
+        assertEquals(
+            Rectangle(100, XPRA_TITLEBAR_MARGIN, 900, 700),
+            bringWindowOnScreenBounds(Rectangle(100, -40, 900, 700), null, virtual, topMargin = XPRA_TITLEBAR_MARGIN),
+        )
     }
 }

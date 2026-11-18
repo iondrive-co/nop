@@ -40,7 +40,6 @@ class SlackFloatingContentTest {
         var workspaces by mutableStateOf(listOf(workspace))
         var selected by mutableStateOf(workspace.id)
         var attention by mutableStateOf<Map<String, SlackAttention>>(emptyMap())
-        var offscreen by mutableStateOf(false)
         var additions = 0
         var docks = 0
         var bringsOnScreen = 0
@@ -56,7 +55,6 @@ class SlackFloatingContentTest {
                         onDock = { docks++ }, onSelect = { selected = it },
                         onClose = { id -> workspaces = workspaces.filterNot { it.id == id } },
                         onAdd = { additions++ },
-                        offscreen = offscreen,
                         onBringOnScreen = { bringsOnScreen++ },
                         onDragBy = { dx, dy -> draggedX += dx; draggedY += dy },
                     ) {
@@ -202,22 +200,18 @@ class SlackFloatingContentTest {
     }
 
     @Test
-    fun `bottom move bar drags the window and exposes dock and bring on screen when offscreen`() {
+    fun `bottom move bar drags the window and keeps dock and bring on screen visible`() {
         Preview(900, 700, first, false).use { preview ->
             preview.settle()
             val moveBounds = preview.bounds("Move")
             assertTrue(moveBounds.top >= preview.body.bottom, "move bar sits below the browser")
-            assertTrue(preview.allBounds("Bring on screen").isEmpty())
+            val bring = preview.bounds("Bring on screen")
+            assertTrue(bring.top >= preview.body.bottom)
+            val bottomDock = preview.allBounds("Dock").single { it.top >= preview.body.bottom }
 
             preview.drag("Move", 35f, 48f)
             assertEquals(35, preview.draggedX)
             assertEquals(48, preview.draggedY)
-
-            preview.offscreen = true
-            preview.settle()
-            val bring = preview.bounds("Bring on screen")
-            assertTrue(bring.top >= preview.body.bottom)
-            val bottomDock = preview.allBounds("Dock").single { it.top >= preview.body.bottom }
 
             preview.clickAt(bring.center)
             assertEquals(1, preview.bringsOnScreen)

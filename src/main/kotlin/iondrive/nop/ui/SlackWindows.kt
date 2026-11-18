@@ -42,6 +42,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
@@ -55,6 +56,7 @@ import iondrive.nop.browser.SlackAttention
 import iondrive.nop.browser.SlackBrowsers
 import iondrive.nop.browser.SlackWorkspace
 import iondrive.nop.browser.SlackWorkspaceNames
+import iondrive.nop.terminal.X11ScreenCapture
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -90,6 +92,9 @@ import kotlin.math.roundToInt
 internal const val MIN_SLACK_WIDTH = 400
 internal const val MIN_SLACK_HEIGHT = 300
 internal const val MAX_SLACK_SIZE = 10000
+internal const val XPRA_TITLEBAR_MARGIN = 48
+
+private val xpraSession by lazy { !GraphicsEnvironment.isHeadless() && X11ScreenCapture.isXpra() }
 
 @Serializable
 internal data class SlackPlacement(
@@ -196,26 +201,41 @@ internal object SlackWindows {
 
 @OptIn(FlowPreview::class)
 @Composable
-internal fun SlackFloatingWindows(dark: Boolean, onDock: (Path) -> Unit) {
+internal fun SlackFloatingWindows(
+    dark: Boolean,
+    anchorBounds: (Path) -> Rectangle? = { null },
+    onDock: (Path) -> Unit,
+) {
     SlackWindows.views.values.toList().forEach { view ->
         key(view.project) {
             LaunchedEffect(view) {
                 snapshotFlow { view.placement() }.debounce(300).distinctUntilChanged().collect { SlackWindows.save(view, it) }
             }
-            if (view.floating && view.visible.value) SlackFloatingWindow(view, dark) { onDock(view.project); view.dock() }
+            if (view.floating && view.visible.value) {
+                SlackFloatingWindow(view, dark, anchorBounds = { anchorBounds(view.project) }) {
+                    onDock(view.project)
+                    view.dock()
+                }
+            }
         }
     }
 }
 
-/** Usable desktop rectangles across connected screens (monitor bounds minus taskbar/panel insets). */
-internal fun usableScreenBounds(): List<Rectangle> {
+/**
+ * Usable desktop rectangles across connected screens.
+ *
+ * Under Xpra seamless mode, X11 exposes one virtual bounding rectangle across all monitors and
+ * `_NET_WORKAREA` reports a single shared bottom inset that slices across lower monitors; skip
+ * toolkit insets there so windows on lower monitors are not treated as offscreen.
+ */
+internal fun usableScreenBounds(includeInsets: Boolean = !xpraSession): List<Rectangle> {
     if (GraphicsEnvironment.isHeadless()) return emptyList()
     return runCatching {
-        val toolkit = Toolkit.getDefaultToolkit()
+        val toolkit = if (includeInsets) Toolkit.getDefaultToolkit() else null
         GraphicsEnvironment.getLocalGraphicsEnvironment().screenDevices.mapNotNull { device ->
             val config = device.defaultConfiguration ?: return@mapNotNull null
             val bounds = Rectangle(config.bounds)
-            val insets = runCatching { toolkit.getScreenInsets(config) }.getOrNull()
+            val insets = toolkit?.let { runCatching { it.getScreenInsets(config) }.getOrNull() }
             if (insets != null) {
                 bounds.x += insets.left
                 bounds.y += insets.top
@@ -252,7 +272,11 @@ internal fun pickTargetScreen(x: Int?, y: Int?, width: Int, height: Int, screens
 }
 
 /** Clamps a floating window's size and position inside its target usable screen so it never opens offscreen. */
-internal fun clampPlacement(placement: SlackPlacement, screens: List<Rectangle>): SlackPlacement {
+internal fun clampPlacement(
+    placement: SlackPlacement,
+    screens: List<Rectangle>,
+    topMargin: Int = 0,
+): SlackPlacement {
     val screen = pickTargetScreen(placement.x, placement.y, placement.width, placement.height, screens) ?: return placement
     val minW = MIN_SLACK_WIDTH.coerceAtMost(screen.width)
     val minH = MIN_SLACK_HEIGHT.coerceAtMost(screen.height)
@@ -260,51 +284,92 @@ internal fun clampPlacement(placement: SlackPlacement, screens: List<Rectangle>)
     val height = placement.height.coerceIn(minH, screen.height)
     if (placement.x == null || placement.y == null) return placement.copy(width = width, height = height)
     val x = placement.x.coerceIn(screen.x, screen.x + screen.width - width)
-    val y = placement.y.coerceIn(screen.y, screen.y + screen.height - height)
+    val minY = (screen.y + topMargin).coerceAtMost(screen.y + screen.height - height)
+    val y = placement.y.coerceIn(minY, (screen.y + screen.height - height).coerceAtLeast(minY))
     return placement.copy(width = width, height = height, x = x, y = y)
 }
 
 /** Whether any corner of [bounds] falls outside all usable [screens] or exceeds its target screen. */
-internal fun isWindowOffscreen(bounds: Rectangle, screens: List<Rectangle>): Boolean {
+internal fun isWindowOffscreen(bounds: Rectangle, screens: List<Rectangle>, topMargin: Int = 0): Boolean {
     if (screens.isEmpty() || bounds.width <= 0 || bounds.height <= 0) return false
     val right = bounds.x + bounds.width - 1
     val bottom = bounds.y + bounds.height - 1
-    val cornersOnScreen = listOf(
-        bounds.x to bounds.y,
-        right to bounds.y,
-        bounds.x to bottom,
-        right to bottom,
-    ).all { (cx, cy) -> screens.any { it.contains(cx, cy) } }
+    fun containsTop(cx: Int, cy: Int): Boolean = screens.any { screen ->
+        val minY = (screen.y + topMargin).coerceAtMost(screen.y + screen.height - 1)
+        cx in screen.x until (screen.x + screen.width) && cy in minY until (screen.y + screen.height)
+    }
+    val cornersOnScreen = containsTop(bounds.x, bounds.y) &&
+        containsTop(right, bounds.y) &&
+        screens.any { it.contains(bounds.x, bottom) } &&
+        screens.any { it.contains(right, bottom) }
     if (!cornersOnScreen) return true
     val target = pickTargetScreen(bounds.x, bounds.y, bounds.width, bounds.height, screens) ?: return false
     return bounds.width > target.width || bounds.height > target.height
 }
 
 /** Computes [bounds] clamped onto its target usable screen. */
-internal fun clampedWindowBounds(bounds: Rectangle, screens: List<Rectangle>): Rectangle {
+internal fun clampedWindowBounds(bounds: Rectangle, screens: List<Rectangle>, topMargin: Int = 0): Rectangle {
     val placement = SlackPlacement(
         width = bounds.width.coerceAtLeast(1),
         height = bounds.height.coerceAtLeast(1),
         x = bounds.x,
         y = bounds.y,
     )
-    val clamped = clampPlacement(placement, screens)
+    val clamped = clampPlacement(placement, screens, topMargin)
     return Rectangle(clamped.x ?: bounds.x, clamped.y ?: bounds.y, clamped.width, clamped.height)
 }
 
+/**
+ * Target bounds for "Bring on screen": centers over [anchor] (a live main window guaranteed to be
+ * on a visible monitor) with [topMargin] for client-drawn titlebars, falling back to [screens].
+ */
+internal fun bringWindowOnScreenBounds(
+    current: Rectangle,
+    anchor: Rectangle?,
+    screens: List<Rectangle>,
+    topMargin: Int = 0,
+): Rectangle {
+    if (anchor != null && anchor.width > 0 && anchor.height > 0) {
+        val maxW = anchor.width.coerceAtLeast(MIN_SLACK_WIDTH)
+        val maxH = (anchor.height - topMargin).coerceAtLeast(MIN_SLACK_HEIGHT)
+        val w = current.width.coerceIn(MIN_SLACK_WIDTH.coerceAtMost(maxW), maxW)
+        val h = current.height.coerceIn(MIN_SLACK_HEIGHT.coerceAtMost(maxH), maxH)
+        val x = (anchor.x + (anchor.width - w) / 2)
+            .coerceIn(anchor.x, (anchor.x + anchor.width - w).coerceAtLeast(anchor.x))
+        val minY = anchor.y + topMargin
+        val maxY = (anchor.y + anchor.height - h).coerceAtLeast(minY)
+        val y = (anchor.y + (anchor.height - h) / 2).coerceIn(minY, maxY)
+        val overAnchor = Rectangle(x, y, w, h)
+        return if (screens.isEmpty()) overAnchor else clampedWindowBounds(overAnchor, screens, topMargin)
+    }
+    return clampedWindowBounds(current, screens, topMargin)
+}
+
 /** Keeps the top edge of a dragged window below the top of the screen under [pointer]. */
-internal fun clampDragTopY(desiredY: Int, pointer: Point, screens: List<Rectangle>): Int {
+internal fun clampDragTopY(
+    desiredY: Int,
+    pointer: Point,
+    screens: List<Rectangle>,
+    topMargin: Int = 0,
+): Int {
     val screen = screens.firstOrNull { it.contains(pointer) }
         ?: pickTargetScreen(pointer.x, pointer.y, 1, 1, screens)
         ?: return desiredY
-    return desiredY.coerceAtLeast(screen.y)
+    val minY = (screen.y + topMargin).coerceAtMost(screen.y + screen.height - 1)
+    return desiredY.coerceAtLeast(minY)
 }
 
 @OptIn(FlowPreview::class)
 @Composable
-private fun SlackFloatingWindow(view: SlackViewState, dark: Boolean, onDock: () -> Unit) {
+private fun SlackFloatingWindow(
+    view: SlackViewState,
+    dark: Boolean,
+    anchorBounds: () -> Rectangle? = { null },
+    onDock: () -> Unit,
+) {
     val saved = remember {
-        clampPlacement(view.geometry, usableScreenBounds()).also { clamped ->
+        val topMargin = if (xpraSession) XPRA_TITLEBAR_MARGIN else 0
+        clampPlacement(view.geometry, usableScreenBounds(), topMargin).also { clamped ->
             if (clamped != view.geometry) view.geometry = clamped
         }
     }
@@ -348,40 +413,36 @@ private fun SlackFloatingWindow(view: SlackViewState, dark: Boolean, onDock: () 
         state = state,
         title = "Slack — ${view.project.fileName} — nop",
     ) {
-        var offscreen by remember { mutableStateOf(false) }
-        fun updateOffscreen() {
-            if (window.isShowing) {
-                offscreen = isWindowOffscreen(window.bounds, usableScreenBounds())
+        fun applyTargetBounds(target: Rectangle) {
+            val current = window.bounds
+            if (target.size != current.size) {
+                state.size = DpSize(target.width.dp, target.height.dp)
+                window.setBounds(target)
+            } else if (target.location != current.location) {
+                window.setLocation(target.x, target.y)
             }
+            state.position = WindowPosition(target.x.dp, target.y.dp)
+            applyReported(WindowGeometry(target.width, target.height, target.x, target.y))
         }
         fun bringOnScreen() {
             val screens = usableScreenBounds()
-            if (screens.isEmpty()) return
-            val current = window.bounds
-            val target = clampedWindowBounds(current, screens)
-            if (target != current) {
-                if (target.size != current.size) window.setBounds(target) else window.setLocation(target.x, target.y)
-            }
-            updateOffscreen()
+            val anchor = anchorBounds()
+            if (anchor == null && screens.isEmpty()) return
+            val topMargin = if (xpraSession || window.insets.top == 0) XPRA_TITLEBAR_MARGIN else 0
+            applyTargetBounds(bringWindowOnScreenBounds(window.bounds, anchor, screens, topMargin))
         }
         DisposableEffect(window) {
-            val componentListener = object : ComponentAdapter() {
-                override fun componentMoved(e: ComponentEvent?) = updateOffscreen()
-                override fun componentResized(e: ComponentEvent?) = updateOffscreen()
-                override fun componentShown(e: ComponentEvent?) = updateOffscreen()
-            }
             val windowListener = object : WindowAdapter() {
                 override fun windowOpened(e: WindowEvent?) {
                     val screens = usableScreenBounds()
-                    if (isWindowOffscreen(window.bounds, screens)) bringOnScreen() else updateOffscreen()
+                    val topMargin = if (xpraSession || window.insets.top == 0) XPRA_TITLEBAR_MARGIN else 0
+                    if (isWindowOffscreen(window.bounds, screens, topMargin)) {
+                        applyTargetBounds(clampedWindowBounds(window.bounds, screens, topMargin))
+                    }
                 }
             }
-            window.addComponentListener(componentListener)
             window.addWindowListener(windowListener)
-            onDispose {
-                window.removeComponentListener(componentListener)
-                window.removeWindowListener(windowListener)
-            }
+            onDispose { window.removeWindowListener(windowListener) }
         }
         var raisedOnce by remember { mutableStateOf(false) }
         LaunchedEffect(view.raise) {
@@ -389,8 +450,9 @@ private fun SlackFloatingWindow(view: SlackViewState, dark: Boolean, onDock: () 
             window.toFront()
             window.requestFocus()
             // Skip initial composition before the WM maps the window; windowOpened handles that once mapped.
-            if (raisedOnce && isWindowOffscreen(window.bounds, usableScreenBounds())) {
-                bringOnScreen()
+            if (raisedOnce) {
+                val topMargin = if (xpraSession || window.insets.top == 0) XPRA_TITLEBAR_MARGIN else 0
+                if (isWindowOffscreen(window.bounds, usableScreenBounds(), topMargin)) bringOnScreen()
             }
             raisedOnce = true
         }
@@ -417,7 +479,7 @@ private fun SlackFloatingWindow(view: SlackViewState, dark: Boolean, onDock: () 
                         syncGeometry()
                         onDock()
                     },
-                    onSelect = { view.show(it) },
+                    onSelect = { view.selectedId.value = it },
                     onClose = { id ->
                         SlackBrowsers.close(view.project, id)
                         if (view.selectedId.value == id) {
@@ -430,15 +492,14 @@ private fun SlackFloatingWindow(view: SlackViewState, dark: Boolean, onDock: () 
                             knownWorkspaces.map { workspace ->
                                 TabMenuItem.Item(workspace.name) {
                                     SlackBrowsers.reopen(view.project, workspace.id)
-                                    view.show(workspace.id)
+                                    view.selectedId.value = workspace.id
                                 }
                             } + TabMenuItem.Item("Sign in to another workspace…") {
                                 SlackBrowsers.connect(view.project)
                                 view.connectionVersion.value++
-                                view.show(null)
+                                view.selectedId.value = null
                             })
                     },
-                    offscreen = offscreen,
                     onBringOnScreen = ::bringOnScreen,
                     window = window,
                 ) {
@@ -459,7 +520,6 @@ internal fun SlackFloatingContent(
     onSelect: (String) -> Unit,
     onClose: (String) -> Unit,
     onAdd: () -> Unit,
-    offscreen: Boolean = false,
     onBringOnScreen: () -> Unit = {},
     window: java.awt.Window? = null,
     onDragBy: ((Int, Int) -> Unit)? = null,
@@ -491,7 +551,6 @@ internal fun SlackFloatingContent(
         Box(Modifier.weight(1f).fillMaxWidth()) { content() }
         FloatingMoveBar(
             dark = dark,
-            offscreen = offscreen,
             onDock = onDock,
             onBringOnScreen = onBringOnScreen,
             window = window,
@@ -501,14 +560,13 @@ internal fun SlackFloatingContent(
 }
 
 /**
- * Bottom move handle so the floating window can still be dragged, brought back on screen, or
- * docked even when its OS title bar and top toolbar are pushed above the top of the screen.
+ * Persistent bottom move handle so the floating window can always be dragged, brought back over
+ * the main window, or docked even when its OS title bar and top toolbar are offscreen.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FloatingMoveBar(
     dark: Boolean,
-    offscreen: Boolean,
     onDock: () -> Unit,
     onBringOnScreen: () -> Unit,
     window: java.awt.Window?,
@@ -525,7 +583,6 @@ private fun FloatingMoveBar(
                 drawContent()
                 drawLine(palette.divider, Offset(0f, 0.5f), Offset(size.width, 0.5f), strokeWidth = 1f)
             }
-            .windowDragMove(window, onDragBy)
             .let { m ->
                 if (window != null) {
                     m.pointerInput(window, dark, onDock, onBringOnScreen) {
@@ -547,17 +604,18 @@ private fun FloatingMoveBar(
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (offscreen) {
-            Text(
-                "Dock",
-                color = palette.accent,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.clickable(onClick = onDock).padding(horizontal = 4.dp, vertical = 2.dp),
-            )
-        }
+        Text(
+            "Dock",
+            color = palette.accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.clickable(onClick = onDock).padding(horizontal = 4.dp, vertical = 2.dp),
+        )
         Box(
-            modifier = Modifier.weight(1f).fillMaxHeight(),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .windowDragMove(window, onDragBy),
             contentAlignment = Alignment.Center,
         ) {
             Tooltip(tooltip = { Text("Drag to move window") }) {
@@ -576,15 +634,13 @@ private fun FloatingMoveBar(
                 }
             }
         }
-        if (offscreen) {
-            Text(
-                "Bring on screen",
-                color = palette.accent,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.clickable(onClick = onBringOnScreen).padding(horizontal = 4.dp, vertical = 2.dp),
-            )
-        }
+        Text(
+            "Bring on screen",
+            color = palette.accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.clickable(onClick = onBringOnScreen).padding(horizontal = 4.dp, vertical = 2.dp),
+        )
     }
 }
 
@@ -604,6 +660,8 @@ private fun Modifier.windowDragMove(
                 val down = awaitFirstDown(requireUnconsumed = true)
                 val startPointer = if (window != null) MouseInfo.getPointerInfo()?.location else null
                 val startWindow = window?.location
+                val dragScreens = if (window != null) usableScreenBounds() else emptyList()
+                val topMargin = if (window != null && (xpraSession || window.insets.top == 0)) XPRA_TITLEBAR_MARGIN else 0
                 var lastLocal = down.position
                 down.consume()
                 while (true) {
@@ -615,7 +673,7 @@ private fun Modifier.windowDragMove(
                         val current = MouseInfo.getPointerInfo()?.location ?: continue
                         val targetX = startWindow.x + (current.x - startPointer.x)
                         val rawY = startWindow.y + (current.y - startPointer.y)
-                        val targetY = clampDragTopY(rawY, current, usableScreenBounds())
+                        val targetY = clampDragTopY(rawY, current, dragScreens, topMargin)
                         if (window.x != targetX || window.y != targetY) {
                             window.setLocation(targetX, targetY)
                         }

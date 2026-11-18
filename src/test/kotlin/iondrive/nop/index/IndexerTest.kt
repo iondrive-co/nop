@@ -217,16 +217,25 @@ class IndexerTest {
     private val cacheStamp = 2_000_000_000L
     private val future = 3_000_000_000L
 
+    private fun ageTree(root: Path) {
+        // Files.walk skips symlinks by default so link-loop tests do not recurse to ELOOP.
+        Files.walk(root).use { stream ->
+            stream.forEach { path ->
+                if (!Files.isSymbolicLink(path)) path.toFile().setLastModified(past)
+            }
+        }
+    }
+
     @Test fun `isStale is false when nothing changed since the cache`(@TempDir tmp: Path) {
         tmp.resolve("a.kt").writeText("val a = 1\n")
         val b = tmp.resolve("sub/b.kt"); b.parent.createDirectories(); b.writeText("val b = 2\n")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 2))
     }
 
     @Test fun `isStale is true after a file is edited`(@TempDir tmp: Path) {
         val a = tmp.resolve("a.kt"); a.writeText("x\n")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         a.toFile().setLastModified(future) // edited after the cache was written
         assertTrue(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
     }
@@ -234,7 +243,7 @@ class IndexerTest {
     @Test fun `isStale is true when the file count grew`(@TempDir tmp: Path) {
         tmp.resolve("a.kt").writeText("x\n")
         tmp.resolve("b.kt").writeText("y\n")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         // The cache only knew about one file; a second appeared without bumping mtimes.
         assertTrue(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
     }
@@ -243,7 +252,7 @@ class IndexerTest {
         // The double-shift bug: a file added while nop stays open (fresh mtime, grown count) must
         // read as stale so the next refresh rebuilds the file index and the file becomes findable.
         val existing = tmp.resolve("src/a.ts"); existing.parent.createDirectories(); existing.writeText("export const a = 1\n")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         val added = tmp.resolve("src/text.ts"); added.writeText("export const t = 2\n")
         added.toFile().setLastModified(future)
         assertTrue(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 1))
@@ -253,7 +262,7 @@ class IndexerTest {
         tmp.resolve("a.kt").writeText("x\n")
         val junk = tmp.resolve("node_modules/pkg/index.js")
         junk.parent.createDirectories(); junk.writeText("garbage\n")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         // A freshly-touched file under node_modules must not count as a project change.
         junk.toFile().setLastModified(future)
         junk.parent.toFile().setLastModified(future)
@@ -265,7 +274,7 @@ class IndexerTest {
         val live = share.resolve("bulk/rows.json")
         live.parent.createDirectories(); live.writeText("{}\n")
         java.nio.file.Files.createSymbolicLink(tmp.resolve("data"), share.resolve("bulk"))
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         // A recorder writing to the share must not make the project look changed.
         live.toFile().setLastModified(future)
         live.parent.toFile().setLastModified(future)
@@ -283,7 +292,7 @@ class IndexerTest {
         java.nio.file.Files.createSymbolicLink(tmp.resolve("var/stage/var"), tmp.resolve("var"))
         val walked = mutableListOf<String>()
         Indexer.build(tmp, files = walked)
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = walked.size))
     }
 
@@ -303,7 +312,7 @@ class IndexerTest {
     @Test fun `an incremental build reparses a java file edited since the cache`(@TempDir tmp: Path) {
         val a = tmp.resolve("A.java"); a.writeText("class A { void before() {} }")
         val b = tmp.resolve("B.java"); b.writeText("class B { void kept() {} }")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         val previous = Indexer.build(tmp)
         a.writeText("class A { void after() {} }")
         a.toFile().setLastModified(future)
@@ -328,7 +337,7 @@ class IndexerTest {
     @Test fun `an incremental build drops a deleted java file`(@TempDir tmp: Path) {
         val a = tmp.resolve("A.java"); a.writeText("class A { void gone() {} }")
         val b = tmp.resolve("B.java"); b.writeText("class B { void stays() {} }")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         val previous = Indexer.build(tmp)
         a.toFile().delete()
         val index = Indexer.build(tmp, previous, since = cacheStamp)
@@ -341,7 +350,7 @@ class IndexerTest {
         val c = tmp.resolve("src/C.java"); c.parent.createDirectories()
         c.writeText("package q; class C extends p.A { void n() {} }")
         tmp.resolve("x.kt").writeText("fun x() = 1\n")
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         val previous = Indexer.build(tmp)
         c.writeText("package q; class C extends p.A { void n2() {} }")
         c.toFile().setLastModified(future)
@@ -416,7 +425,7 @@ class IndexerTest {
         assertTrue(index.lookup("b").isEmpty())
         assertEquals(1, index.lookup("a").size)
 
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         // Output written into an ignored directory must not make the project look changed.
         churn.toFile().setLastModified(future)
         churn.parent.toFile().setLastModified(future)
@@ -428,13 +437,13 @@ class IndexerTest {
         val walked = mutableListOf<String>()
         Indexer.build(tmp, files = walked, maxFiles = 4)
         assertEquals(4, walked.size)
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         assertFalse(Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 4, maxFiles = 4))
     }
 
     @Test fun `the staleness probe stops once asked`(@TempDir tmp: Path) {
         tenDirectories(tmp)
-        tmp.toFile().walkTopDown().forEach { it.setLastModified(past) }
+        ageTree(tmp)
         assertFailsWith<CancellationException> {
             Indexer.isStale(tmp, since = cacheStamp, cachedFileCount = 10, stop = { true })
         }

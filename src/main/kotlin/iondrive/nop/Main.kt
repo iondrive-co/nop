@@ -651,7 +651,20 @@ fun main(args: Array<String>) {
                 }
         }
 
-        SlackFloatingWindows(darkMode) { project -> revealProject(focusedId, project) }
+        fun anchorBounds(project: Path): java.awt.Rectangle? {
+            val norm = project.toAbsolutePath().normalize()
+            val preferred = Workspaces.containing(workspaces, norm)?.takeIf { it.open }
+                ?: workspaces.firstOrNull { it.open && it.id == focusedId }
+                ?: workspaces.firstOrNull { it.open }
+            val window = preferred?.let { windowRefs[it.id] } ?: return null
+            return window.takeIf { it.isShowing && it.width > 0 && it.height > 0 }?.bounds
+        }
+
+        SlackFloatingWindows(
+            dark = darkMode,
+            anchorBounds = ::anchorBounds,
+            onDock = { project -> revealProject(focusedId, project) },
+        )
         val allWindows = workspaces.toList()
         val projectTreeStates = remember { mutableMapOf<Long, ProjectTreeState>() }
         SideEffect {
