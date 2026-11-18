@@ -1099,6 +1099,18 @@ fun App(
     // Anthropic Models API with the account's own token, so it reflects what that account may
     // actually use rather than a list baked in here to go stale.
     val agentModels = remember { mutableStateMapOf<String, List<String>>() }
+    val modelCatalogGeneration = Usage.modelCatalogGeneration
+    LaunchedEffect(agentAccounts, modelCatalogGeneration) {
+        for (account in agentAccounts) {
+            runCatching {
+                val models = withContext(Dispatchers.IO) { Usage.discoverModels(account) }
+                if (models.isNotEmpty()) agentModels[account.name] = models
+            }.onFailure { failure ->
+                if (failure is CancellationException) throw failure
+                Log.warn("could not discover models for ${account.name}: $failure")
+            }
+        }
+    }
     // Each account's quota, refreshed on a background coroutine. Deliberately only a number to look
     // at: nothing here interrupts a running TUI. Being told at 80% that the session is over is
     // worse than seeing the number and deciding at the next natural stopping point — a quota wall
@@ -1980,6 +1992,8 @@ fun App(
                                 slackVisible = slackVisible,
                                 slackFloating = slackView.floating,
                                 onToggleSlack = { if (slackView.floating) slackView.show() else slackVisible = !slackVisible },
+                                onDockSlack = slackView::dock,
+                                onFloatSlack = slackView::float,
                                 slackPaneRatio = slackRatio,
                                 onSlackPaneRatioChange = { slackRatio = it },
                                 selectedSlackId = selectedSlackId,

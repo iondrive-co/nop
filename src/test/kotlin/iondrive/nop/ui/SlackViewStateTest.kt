@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.awt.Point
+import java.awt.Rectangle
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -73,5 +75,50 @@ class SlackViewStateTest {
         assertEquals(0, leases)
         assertTrue(restored.floating)
         assertFalse(restored.visible.value)
+    }
+
+    @Test
+    fun `clampPlacement brings top-offscreen and disconnected-monitor windows back onscreen`() {
+        val primary = listOf(Rectangle(0, 28, 1920, 1052))
+
+        // Top bit pushed above top panel: reopening brings y down to screen.y while keeping x and size.
+        val topOff = SlackPlacement(floating = true, visible = true, width = 900, height = 700, x = 240, y = -90)
+        assertEquals(topOff.copy(y = 28), clampPlacement(topOff, primary))
+
+        // Bottom-right corner pushed past screen edge: shifts left and up just enough to fit.
+        val bottomRightOff = SlackPlacement(floating = true, visible = true, width = 900, height = 700, x = 1500, y = 700)
+        assertEquals(bottomRightOff.copy(x = 1020, y = 380), clampPlacement(bottomRightOff, primary))
+
+        // Window saved on an unplugged second monitor returns onto the remaining primary screen.
+        val absentMonitor = SlackPlacement(floating = true, visible = true, width = 900, height = 700, x = 2200, y = 120)
+        assertEquals(absentMonitor.copy(x = 1020, y = 120), clampPlacement(absentMonitor, primary))
+
+        // Oversized window shrinks to fit smaller screen and keeps PlatformDefault null coordinates intact.
+        val smallScreen = listOf(Rectangle(0, 0, 800, 600))
+        val unpositionedOversized = SlackPlacement(floating = true, visible = true, width = 1200, height = 900, x = null, y = null)
+        assertEquals(unpositionedOversized.copy(width = 800, height = 600), clampPlacement(unpositionedOversized, smallScreen))
+        assertEquals(unpositionedOversized, clampPlacement(unpositionedOversized, emptyList()))
+    }
+
+    @Test
+    fun `isWindowOffscreen and clampDragTopY handle single and multi-monitor layouts`() {
+        val left = Rectangle(0, 28, 1920, 1052)
+        val right = Rectangle(1920, 28, 1920, 1052)
+        val dual = listOf(left, right)
+
+        assertFalse(isWindowOffscreen(Rectangle(100, 40, 900, 700), dual))
+        // Straddling the seam between two side-by-side monitors is completely onscreen.
+        assertFalse(isWindowOffscreen(Rectangle(1500, 40, 900, 700), dual))
+        // Top edge above the usable area makes the titlebar unreachable.
+        assertTrue(isWindowOffscreen(Rectangle(100, 0, 900, 700), dual))
+        assertTrue(isWindowOffscreen(Rectangle(3500, 40, 900, 700), dual))
+
+        // Dragging on a single screen cannot push the top edge above screen.y.
+        assertEquals(28, clampDragTopY(-15, Point(500, 400), listOf(left)))
+        assertEquals(120, clampDragTopY(120, Point(500, 400), listOf(left)))
+
+        // Stacked monitor above allows dragging into negative y coordinates on the upper screen.
+        val upper = Rectangle(0, -1080, 1920, 1080)
+        assertEquals(-400, clampDragTopY(-400, Point(500, -200), listOf(left, upper)))
     }
 }

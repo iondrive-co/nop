@@ -1,5 +1,6 @@
 package iondrive.nop.agent
 
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -13,6 +14,10 @@ import java.time.Duration
 
 @EnabledOnOs(OS.LINUX, OS.MAC)
 class CliUpdatesTest {
+    @AfterEach
+    fun resetStatus() {
+        CliUpdates.status = CliUpdates.Status.Idle
+    }
     private fun installer(dir: Path, body: String): Path = dir.resolve("vendor-cli").also {
         Files.writeString(it, "#!/bin/sh\n$body\n")
         check(it.toFile().setExecutable(true))
@@ -65,5 +70,73 @@ class CliUpdatesTest {
         assertFalse(result.success)
         assertTrue(result.detail.startsWith("timed out"))
         assertTrue(Duration.ofNanos(System.nanoTime() - start) < Duration.ofSeconds(5))
+    }
+
+    @Test
+    fun `manual update checks all installed updatable providers, refreshes models, and publishes results`() {
+        val checked = mutableListOf<Path>()
+        var refreshedAccounts: List<Account>? = null
+        val configuredAccounts = listOf(Account("codex-alpha", Provider.OpenAI, "/home/dev/.accounts/codex-alpha"))
+
+        CliUpdates.runUpdates(
+            configuredOnly = false,
+            accountsProvider = { configuredAccounts },
+            locateBinary = { provider ->
+                when (provider) {
+                    Provider.OpenAI -> Path.of("/bin/codex")
+                    Provider.Anthropic -> Path.of("/bin/claude")
+                    Provider.Antigravity -> Path.of("/bin/agy")
+                }
+            },
+            runUpdate = { binary ->
+                checked.add(binary)
+                if (binary.fileName.toString() == "codex") {
+                    CliUpdates.Outcome(true, "exit 0: Codex CLI 0.169.1 installed successfully.")
+                } else {
+                    CliUpdates.Outcome(false, "exit 1: network error")
+                }
+            },
+            refreshModels = { refreshedAccounts = it },
+        )
+
+        assertEquals(listOf(Path.of("/bin/codex"), Path.of("/bin/claude")), checked)
+        assertEquals(configuredAccounts, refreshedAccounts)
+        val done = CliUpdates.status as CliUpdates.Status.Done
+        assertEquals(2, done.results.size)
+        assertEquals(Provider.OpenAI, done.results[0].provider)
+        assertTrue(done.results[0].outcome.success)
+        assertEquals(Provider.Anthropic, done.results[1].provider)
+        assertFalse(done.results[1].outcome.success)
+    }
+
+    @Test
+    fun `scheduled update skips providers without configured accounts`() {
+        val checked = mutableListOf<Path>()
+        var refreshed = false
+
+        CliUpdates.runUpdates(
+            configuredOnly = true,
+            accountsProvider = {
+                listOf(Account("claude-alpha", Provider.Anthropic, "/home/dev/.accounts/claude-alpha"))
+            },
+            locateBinary = { provider -> Path.of("/bin/${provider.binary}") },
+            runUpdate = { binary ->
+                checked.add(binary)
+                CliUpdates.Outcome(true, "exit 0: up to date")
+            },
+            refreshModels = { refreshed = true },
+        )
+
+        assertEquals(listOf(Path.of("/bin/claude")), checked)
+        assertTrue(refreshed)
+        val done = CliUpdates.status as CliUpdates.Status.Done
+        assertEquals(listOf(Provider.Anthropic), done.results.map { it.provider })
+    }
+
+    @Test
+    fun `refreshModels bumps modelCatalogGeneration`() {
+        val before = Usage.modelCatalogGeneration
+        Usage.refreshModels(emptyList())
+        assertEquals(before + 1, Usage.modelCatalogGeneration)
     }
 }

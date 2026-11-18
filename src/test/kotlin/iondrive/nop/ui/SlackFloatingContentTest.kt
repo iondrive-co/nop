@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.PointerButton
 import androidx.compose.ui.input.pointer.PointerButtons
@@ -17,11 +18,13 @@ import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.unit.Density
-import iondrive.nop.browser.SlackWorkspace
+import iondrive.nop.agent.AgentSessions
 import iondrive.nop.browser.SlackAttention
+import iondrive.nop.browser.SlackWorkspace
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
 import org.jetbrains.jewel.ui.component.Text
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.awt.EventQueue
@@ -37,8 +40,12 @@ class SlackFloatingContentTest {
         var workspaces by mutableStateOf(listOf(workspace))
         var selected by mutableStateOf(workspace.id)
         var attention by mutableStateOf<Map<String, SlackAttention>>(emptyMap())
+        var offscreen by mutableStateOf(false)
         var additions = 0
         var docks = 0
+        var bringsOnScreen = 0
+        var draggedX = 0
+        var draggedY = 0
         var body = Rect.Zero
         private var time = 0L
         private val scene = onEdt {
@@ -49,6 +56,9 @@ class SlackFloatingContentTest {
                         onDock = { docks++ }, onSelect = { selected = it },
                         onClose = { id -> workspaces = workspaces.filterNot { it.id == id } },
                         onAdd = { additions++ },
+                        offscreen = offscreen,
+                        onBringOnScreen = { bringsOnScreen++ },
+                        onDragBy = { dx, dy -> draggedX += dx; draggedY += dy },
                     ) {
                         Box(Modifier.fillMaxSize().onGloballyPositioned { body = it.boundsInRoot() }) {
                             Text("Conversation fixture")
@@ -64,11 +74,18 @@ class SlackFloatingContentTest {
             Thread.sleep(5)
         }
 
-        fun bounds(text: String): Rect = onEdt {
-            fun find(node: SemanticsNode): SemanticsNode? =
-                node.takeIf { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true }
-                    ?: node.children.firstNotNullOfOrNull(::find)
-            scene.semanticsOwners.firstNotNullOf { find(it.unmergedRootSemanticsNode) }.boundsInRoot
+        fun bounds(text: String): Rect = allBounds(text).first()
+
+        fun allBounds(text: String): List<Rect> = onEdt {
+            fun collect(node: SemanticsNode): List<Rect> {
+                val own = if (node.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true) {
+                    listOf(node.boundsInRoot)
+                } else {
+                    emptyList()
+                }
+                return own + node.children.flatMap(::collect)
+            }
+            scene.semanticsOwners.flatMap { collect(it.unmergedRootSemanticsNode) }
         }
 
         fun statusDescriptions(): List<String> = onEdt {
@@ -78,13 +95,26 @@ class SlackFloatingContentTest {
                 .filter { it.startsWith("Unread") || it.contains("unread mention") }
         }
 
-        fun click(text: String) {
-            val at = bounds(text).center
+        fun click(text: String) = clickAt(bounds(text).center)
+
+        fun clickAt(at: Offset) {
             onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
             settle()
             onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary) }
             settle()
             onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
+            settle()
+        }
+
+        fun drag(text: String, dx: Float, dy: Float) {
+            val start = bounds(text).center
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, start) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, start, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, Offset(start.x + dx, start.y + dy), buttons = PointerButtons(isPrimaryPressed = true)) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, Offset(start.x + dx, start.y + dy), buttons = PointerButtons(), button = PointerButton.Primary) }
             settle()
         }
 
@@ -168,6 +198,129 @@ class SlackFloatingContentTest {
             assertTrue(preview.body.height > 260)
             preview.click("Add workspace…")
             assertEquals(1, preview.additions)
+        }
+    }
+
+    @Test
+    fun `bottom move bar drags the window and exposes dock and bring on screen when offscreen`() {
+        Preview(900, 700, first, false).use { preview ->
+            preview.settle()
+            val moveBounds = preview.bounds("Move")
+            assertTrue(moveBounds.top >= preview.body.bottom, "move bar sits below the browser")
+            assertTrue(preview.allBounds("Bring on screen").isEmpty())
+
+            preview.drag("Move", 35f, 48f)
+            assertEquals(35, preview.draggedX)
+            assertEquals(48, preview.draggedY)
+
+            preview.offscreen = true
+            preview.settle()
+            val bring = preview.bounds("Bring on screen")
+            assertTrue(bring.top >= preview.body.bottom)
+            val bottomDock = preview.allBounds("Dock").single { it.top >= preview.body.bottom }
+
+            preview.clickAt(bring.center)
+            assertEquals(1, preview.bringsOnScreen)
+            preview.clickAt(bottomDock.center)
+            assertEquals(1, preview.docks)
+            assertEquals(35, preview.draggedX)
+            assertEquals(48, preview.draggedY)
+        }
+    }
+
+    @Test
+    fun `tool strip offers dock action to reattach a detached slack window`() {
+        var floating by mutableStateOf(true)
+        var docks = 0
+        var time = 0L
+        fun <T> onEdt(block: () -> T): T {
+            var result: Result<T>? = null
+            EventQueue.invokeAndWait { result = runCatching(block) }
+            return result!!.getOrThrow()
+        }
+        val terminals = RunSessions()
+        val runs = RunSessions()
+        val histories = HistorySessions()
+        val agents = AgentSessions()
+        val scene = onEdt {
+            ImageComposeScene(900, 400, Density(1f)) {
+                IntUiTheme(isDark = false) {
+                    ToolTabs(
+                        selected = ToolTab.Commit,
+                        onSelect = {},
+                        sessionTab = ToolTab.Agent,
+                        collapsed = false,
+                        onHideSidePanel = {},
+                        paneRatio = 0.5f,
+                        onPaneRatioChange = {},
+                        terminals = terminals,
+                        onNewTerminal = {},
+                        onSelectTerminal = {},
+                        onCloseTerminal = {},
+                        agents = agents,
+                        onShowPicker = {},
+                        onSelectAgent = {},
+                        onCloseAgent = {},
+                        onRenameAgent = { _, _ -> },
+                        runs = runs,
+                        onSelectRun = {},
+                        onCloseRun = {},
+                        histories = histories,
+                        onSelectHistory = {},
+                        onCloseHistory = {},
+                        terminal = { Text("Terminal") },
+                        agent = { Text("Agent") },
+                        commit = { Text("Commit") },
+                        diff = {},
+                        search = {},
+                        usages = {},
+                        stash = {},
+                        preview = {},
+                        run = {},
+                        history = {},
+                        slack = {},
+                        slackVisible = false,
+                        slackFloating = floating,
+                        onToggleSlack = {},
+                        onDockSlack = { docks++; floating = false },
+                        slackPaneRatio = 0.6f,
+                        onSlackPaneRatioChange = {},
+                        slackWorkspaces = listOf(first),
+                        knownSlackWorkspaces = listOf(first),
+                        slackAttention = emptyMap(),
+                        onCloseSlack = {},
+                        selectedSlackId = first.id,
+                        onSelectSlack = {},
+                        onNewSlack = {},
+                    )
+                }
+            }
+        }
+        try {
+            fun settle() = repeat(8) {
+                time += 16_000_000
+                onEdt { scene.render(time) }
+                Thread.sleep(5)
+            }
+            fun findTextBounds(label: String): Rect? = onEdt {
+                fun find(node: SemanticsNode): SemanticsNode? =
+                    node.takeIf { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == label } == true }
+                        ?: node.children.firstNotNullOfOrNull(::find)
+                scene.semanticsOwners.firstNotNullOfOrNull { find(it.unmergedRootSemanticsNode) }?.boundsInRoot
+            }
+            settle()
+            val dockBounds = checkNotNull(findTextBounds("Dock"))
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, dockBounds.center) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, dockBounds.center, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, dockBounds.center, buttons = PointerButtons(), button = PointerButton.Primary) }
+            settle()
+            assertEquals(1, docks)
+            assertFalse(floating)
+            assertEquals(null, findTextBounds("Dock"))
+        } finally {
+            onEdt { scene.close() }
         }
     }
 }

@@ -1,5 +1,8 @@
 package iondrive.nop.agent
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import iondrive.nop.Log
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -361,6 +364,10 @@ object Usage {
         Provider.Antigravity -> Antigravity.signedIn(account)
     }
 
+    /** Increments whenever [refreshModels] completes so open windows reload their model dropdowns. */
+    var modelCatalogGeneration: Long by mutableStateOf(0L)
+        private set
+
     /**
      * The models the picker should offer for [account], asked of whoever can answer.
      *
@@ -368,15 +375,15 @@ object Usage {
      * models`; Codex's from its app-server `model/list`. Both CLI queries run under the account's
      * own home, so their catalogs follow the same configuration as an interactive session.
      */
-    fun discoverModels(account: Account): List<String> {
+    fun discoverModels(account: Account, force: Boolean = false): List<String> {
         UsageFixture.file?.let { return UsageFixture.models(it, account) }
         // Kept for the life of nop once found, so a project switch does not ask again: another HTTPS
         // GET for Claude, another CLI start for Codex or Antigravity.
         val key = gateKey(account)
-        discovered[key]?.let { return it }
+        if (!force) discovered[key]?.let { return it }
         val now = Instant.now()
         val lastTry = modelsTriedAt[key]
-        if (lastTry != null && Duration.between(lastTry, now) < UsageGate.HOLD) return emptyList()
+        if (!force && lastTry != null && Duration.between(lastTry, now) < UsageGate.HOLD) return emptyList()
         modelsTriedAt[key] = now
         val found = when (account.provider) {
             Provider.Anthropic -> discoverClaudeModels(account)
@@ -384,7 +391,21 @@ object Usage {
             Provider.OpenAI -> CodexModels.discover(account)
         }
         if (found.isNotEmpty()) discovered[key] = found
-        return found
+        return if (found.isNotEmpty()) found else discovered[key].orEmpty()
+    }
+
+    /**
+     * Re-queries the live model catalog for every account in [accounts], bypassing cached lists
+     * and retry holds, and bumps [modelCatalogGeneration] so open windows update their dropdowns.
+     */
+    fun refreshModels(accounts: List<Account>) {
+        val seen = HashSet<String>()
+        for (account in accounts) {
+            if (!seen.add(gateKey(account))) continue
+            runCatching { discoverModels(account, force = true) }
+                .onFailure { Log.warn("could not refresh models for ${account.name}: $it") }
+        }
+        modelCatalogGeneration++
     }
 
     private val discovered = ConcurrentHashMap<String, List<String>>()

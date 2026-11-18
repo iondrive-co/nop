@@ -265,6 +265,8 @@ fun ToolTabs(
     slackVisible: Boolean,
     slackFloating: Boolean,
     onToggleSlack: () -> Unit,
+    onDockSlack: () -> Unit = {},
+    onFloatSlack: () -> Unit = {},
     slackPaneRatio: Float,
     onSlackPaneRatioChange: (Float) -> Unit,
     slackWorkspaces: List<SlackWorkspace>,
@@ -320,7 +322,10 @@ fun ToolTabs(
             onSelectHistory = onSelectHistory,
             onCloseHistory = onCloseHistory,
             slackVisible = slackVisible,
+            slackFloating = slackFloating,
             onToggleSlack = onToggleSlack,
+            onDockSlack = onDockSlack,
+            onFloatSlack = onFloatSlack,
             slackWorkspaces = slackWorkspaces,
             knownSlackWorkspaces = knownSlackWorkspaces,
             slackAttention = slackAttention,
@@ -403,7 +408,10 @@ private fun ToolStrip(
     onSelectHistory: (String) -> Unit,
     onCloseHistory: (String) -> Unit,
     slackVisible: Boolean,
+    slackFloating: Boolean,
     onToggleSlack: () -> Unit,
+    onDockSlack: () -> Unit,
+    onFloatSlack: () -> Unit,
     slackWorkspaces: List<SlackWorkspace>,
     knownSlackWorkspaces: List<SlackWorkspace>,
     slackAttention: Map<String, SlackAttention>,
@@ -472,6 +480,26 @@ private fun ToolStrip(
                 ToolStripTab(
                     label = workspace.name, selected = isSelected, isDark = isDark, style = style,
                     onClick = { if (isSelected) onToggleSlack() else onSelectSlack(workspace.id) }, onClose = { onCloseSlack(workspace.id) },
+                    contextMenu = {
+                        if (slackFloating) {
+                            buildList {
+                                add(TabMenuItem.Item("Dock in window") {
+                                    onSelectSlack(workspace.id)
+                                    onDockSlack()
+                                })
+                                if (!isSelected) {
+                                    add(TabMenuItem.Item("Show floating window") { onSelectSlack(workspace.id) })
+                                }
+                            }
+                        } else {
+                            listOf(
+                                TabMenuItem.Item("Float in separate window") {
+                                    onSelectSlack(workspace.id)
+                                    onFloatSlack()
+                                },
+                            )
+                        }
+                    },
                     leading = { SlackTabIcon(attention) },
                     emphasis = if (attention.unread) JewelTheme.globalColors.text.normal else null,
                     modifier = Modifier.bringIntoViewRequester(requester),
@@ -481,7 +509,26 @@ private fun ToolStrip(
         if (slackVisible && selectedSlackId == null) {
             ToolStripTab(label = "Sign in…", selected = true, isDark = isDark, style = style,
                 leading = { SlackTabIcon() },
-                onClick = onToggleSlack, onClose = { onCloseSlack(null) })
+                onClick = onToggleSlack, onClose = { onCloseSlack(null) },
+                contextMenu = {
+                    if (slackFloating) {
+                        listOf(TabMenuItem.Item("Dock in window", onClick = onDockSlack))
+                    } else {
+                        listOf(TabMenuItem.Item("Float in separate window", onClick = onFloatSlack))
+                    }
+                })
+        }
+        if (slackFloating) {
+            Tooltip(tooltip = { Text("Reattach Slack to this window") }) {
+                ToolStripTab(
+                    label = "Dock",
+                    selected = false,
+                    isDark = isDark,
+                    style = style,
+                    onClick = onDockSlack,
+                    onClose = null,
+                )
+            }
         }
         val window = LocalWindow.current
         Tooltip(tooltip = { Text("Add or reopen Slack workspace") }) {
@@ -1223,7 +1270,7 @@ private fun Modifier.tabDivider(color: Color): Modifier = drawWithContent {
  * [Initial][PointerEventPass.Initial] pass and consuming it so nothing behind this node — the tab's
  * own `clickable` included — treats it as a click of its own.
  */
-private suspend fun PointerInputScope.secondaryClicks(onRightClick: () -> Unit) {
+internal suspend fun PointerInputScope.secondaryClicks(onRightClick: () -> Unit) {
     awaitPointerEventScope {
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Initial)

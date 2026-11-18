@@ -191,6 +191,12 @@ fun ProjectBar(
         ) {
             ThemeToggleButton(onToggle = onToggleTheme, modifier = Modifier)
         }
+        Box(
+            modifier = Modifier.height(BAR_HEIGHT),
+            contentAlignment = Alignment.Center,
+        ) {
+            AgentUpdateButton(modifier = Modifier)
+        }
         // Which nop this is, and the way to its updates.
         VersionLabel(onClick = { showingUpdates = true }, height = BAR_HEIGHT)
         // The way back to a window that was closed, and to this window's name. At the far right,
