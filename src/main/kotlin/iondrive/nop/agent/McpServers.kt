@@ -87,7 +87,7 @@ object McpServers {
             .onFailure { Log.warn("could not read the user's MCP servers: $it") }
             .getOrDefault(emptyMap())
         return when (account.provider) {
-            Provider.Anthropic -> Launch(servers, if (servers.isEmpty()) null else writeClaudeConfig(projectDir, servers))
+            Provider.Anthropic, Provider.Local -> Launch(servers, if (servers.isEmpty()) null else writeClaudeConfig(projectDir, servers))
             Provider.OpenAI -> Launch(servers, codexConfigured = codexConfigured(codexConfig(account.homePath)))
             Provider.Antigravity -> {
                 installForAntigravity(account.homePath, servers)

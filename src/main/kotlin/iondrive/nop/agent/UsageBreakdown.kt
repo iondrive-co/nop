@@ -185,6 +185,7 @@ object UsageBreakdown {
                     seenNativeIds = seenNativeSessionIds,
                 )
                 Provider.Antigravity -> Unit // Handled via conversation_summaries.db
+                Provider.Local -> Unit
             }
         }
 

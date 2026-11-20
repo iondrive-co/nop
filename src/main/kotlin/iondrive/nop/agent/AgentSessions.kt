@@ -190,7 +190,7 @@ class AgentSessions {
                         model = row.authorizedModel,
                         reasoning = row.authorizedReasoning.takeIf { it.isNotBlank() },
                     ) else account,
-                    resumeId = if (row.provider == Provider.Anthropic.id) {
+                    resumeId = if (account.provider.usesClaude) {
                         EventLog.ownConversation(row.sessionId, row.nativeSessionId)
                     } else {
                         row.nativeSessionId.takeIf { it.isNotBlank() }

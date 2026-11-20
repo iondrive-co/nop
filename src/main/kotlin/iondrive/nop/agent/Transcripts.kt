@@ -33,7 +33,7 @@ object Transcripts {
      * for Antigravity, whose conversations are databases nop does not read — see [canTell].
      */
     fun find(provider: Provider, home: Path, projectDir: File, id: String): Path? = when (provider) {
-        Provider.Anthropic -> claude(home, projectDir, id)
+        Provider.Anthropic, Provider.Local -> claude(home, projectDir, id)
         Provider.OpenAI -> codex(home, id)
         Provider.Antigravity -> null
     }
@@ -56,7 +56,7 @@ object Transcripts {
      */
     fun lastModel(account: Account, projectDir: File, id: String): ConversationModel? {
         val read: (String) -> ConversationModel? = when (account.provider) {
-            Provider.Anthropic -> ::claudeModel
+            Provider.Anthropic, Provider.Local -> ::claudeModel
             Provider.OpenAI -> ::codexModel
             Provider.Antigravity -> return null
         }

@@ -32,6 +32,7 @@ import iondrive.nop.Ago
 import iondrive.nop.agent.DEFAULT_CHOICE
 import iondrive.nop.agent.handoverTarget
 import iondrive.nop.agent.PastSession
+import iondrive.nop.agent.Provider
 import iondrive.nop.agent.UsageReading
 import java.nio.file.Path
 import org.jetbrains.jewel.ui.component.Link
@@ -87,10 +88,7 @@ fun AgentPicker(
         Spacer(Modifier.height(6.dp))
 
         if (accounts.isEmpty()) {
-            Text(
-                "No agent accounts yet. Settings adds one and signs it in through the vendor's own " +
-                    "login — nop never reads the credentials, it only points the CLI at them.",
-            )
+            Text("Add an account in Settings to start an agent session.")
         }
 
         // One choice list open at a time, as in the handover panel.
@@ -250,7 +248,7 @@ private fun AccountCard(
         details = {
             // The same numbers as the corner strip, spelled out: choosing which account to spend the
             // next hour on is exactly the decision this card is asking about.
-            Text(usageLine(reading), color = AgentMuted)
+            Text(if (account.provider == Provider.Local) localModelStatus(reading) else usageLine(reading), color = AgentMuted)
             // And where the hour after that comes from, when it has been decided in advance. Only
             // when it has: a line on every card saying nobody is nominated would be the settings
             // dialog's list printed into the picker, where the answer is almost always "nobody".

@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import iondrive.nop.Ago
 import iondrive.nop.agent.Account
+import iondrive.nop.agent.Provider
 import iondrive.nop.agent.Backup
 import iondrive.nop.agent.PaceSource
 import iondrive.nop.agent.UsageReading
@@ -133,7 +134,7 @@ fun UsageIndicator(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        accounts.forEach { account ->
+        accounts.filterNot { it.provider == Provider.Local }.forEach { account ->
             key(account.name) { UsageChip(account, readings[account.name]) }
         }
         // One item, so a wrap never puts the backup's mark on a different row from the gear.

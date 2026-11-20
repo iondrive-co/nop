@@ -338,14 +338,16 @@ object Usage {
     /** Blocking; call it off the UI thread. */
     fun read(account: Account): UsageReading {
         // The screenshot's canned numbers, when it has set some — see UsageFixture.
-        UsageFixture.file?.let { return UsageFixture.read(it, account) }
-        return pace.annotate(account.name, readProvider(account))
+        if (account.provider != Provider.Local) UsageFixture.file?.let { return UsageFixture.read(it, account) }
+        val reading = readProvider(account)
+        return if (account.provider == Provider.Local) reading else pace.annotate(account.name, reading)
     }
 
     private fun readProvider(account: Account): UsageReading {
         return when (account.provider) {
             Provider.Anthropic -> readClaude(account)
             Provider.OpenAI -> readCodex(account)
+            Provider.Local -> LocalModel.status(account)
             Provider.Antigravity -> gate.held(gateKey(account))
                 ?: gate.answered(gateKey(account), Antigravity.readUsage(account))
         }
@@ -360,6 +362,7 @@ object Usage {
         // part the user can do anything about.
         Provider.Anthropic -> claudeToken(account) != null
         Provider.OpenAI -> codexAuth(account) != null
+        Provider.Local -> false
         // The refresh token, for the same reason: the CLI spends it for a new access token on use.
         Provider.Antigravity -> Antigravity.signedIn(account)
     }
@@ -389,6 +392,7 @@ object Usage {
             Provider.Anthropic -> discoverClaudeModels(account)
             Provider.Antigravity -> Antigravity.models(account)
             Provider.OpenAI -> CodexModels.discover(account)
+            Provider.Local -> emptyList()
         }
         if (found.isNotEmpty()) discovered[key] = found
         return if (found.isNotEmpty()) found else discovered[key].orEmpty()

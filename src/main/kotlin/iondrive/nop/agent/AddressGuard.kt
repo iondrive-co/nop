@@ -123,7 +123,7 @@ internal object AddressGuard {
         val home = account.homePath
         if (!Files.isDirectory(home)) return
         when (account.provider) {
-            Provider.Anthropic -> editJson(home.resolve("settings.json")) {
+            Provider.Anthropic, Provider.Local -> editJson(home.resolve("settings.json")) {
                 QuestionGuard.withClaudeHook(withClaudeHook(it, command), question)
             }
             Provider.OpenAI -> hookCodex(home.resolve(".codex"), command)
@@ -399,6 +399,7 @@ internal object AddressGuard {
         val found = buildList {
             for (account in accounts) {
                 when (account.provider) {
+                    Provider.Local -> Unit
                     Provider.Anthropic -> add(claudeEmail(account.homePath.resolve(".claude.json")))
                     Provider.OpenAI -> add(codexEmail(account.homePath.resolve(".codex").resolve("auth.json")))
                     Provider.Antigravity -> add(runCatching { Antigravity.email(account) }.getOrNull())

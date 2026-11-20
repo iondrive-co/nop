@@ -44,7 +44,9 @@ object ConversationBranch {
             val provider = Provider.byId(run.provider)
             val configured = accounts.firstOrNull { it.name == run.account && it.provider == provider }
             val account = configured?.let { if (run.home != null) it.copy(home = run.home) else it }
-                ?: run.home?.let { home -> provider?.let { Account(run.account, it, home, run.model, run.reasoning) } }
+                ?: run.home?.let { home ->
+                    provider?.takeUnless { it == Provider.Local }?.let { Account(run.account, it, home, run.model, run.reasoning) }
+                }
             if (account == null) emptyList()
             else runCatching { points(account, source.projectDir.toPath(), run.nativeSessionId!!) }.getOrDefault(emptyList())
         }
@@ -57,7 +59,7 @@ object ConversationBranch {
         val file = Transcripts.find(account.provider, account.homePath, project.toFile(), conversation)
             ?: error("This agent's saved conversation is not available for branching.")
         return when (account.provider) {
-            Provider.Anthropic -> claudePoints(account, conversation, file)
+            Provider.Anthropic, Provider.Local -> claudePoints(account, conversation, file)
             Provider.OpenAI -> codexPoints(account, conversation, file)
             Provider.Antigravity -> error("No saved Antigravity conversation is available.")
         }
@@ -235,7 +237,7 @@ object ConversationBranch {
     fun create(point: ConversationBranchPoint, binary: Path? = null): String? {
         if (point.boundary == null) return null
         return when (point.account.provider) {
-            Provider.Anthropic -> copyClaude(point)
+            Provider.Anthropic, Provider.Local -> copyClaude(point)
             Provider.OpenAI -> CodexBranch.fork(point, binary ?: CliTools.locate(Provider.OpenAI)
                 ?: error("Codex is not installed."))
             Provider.Antigravity -> AntigravityBranch.create(point)

@@ -264,7 +264,7 @@ object Backup {
      * settings the CLI reads — which are otherwise lost with the home, hooks and all.
      */
     internal fun keptIn(provider: Provider): List<String> = when (provider) {
-        Provider.Anthropic -> listOf("projects", "settings.json")
+        Provider.Anthropic, Provider.Local -> listOf("projects", "settings.json")
         Provider.OpenAI -> listOf(
             ".codex/sessions",
             ".codex/session_index.jsonl",

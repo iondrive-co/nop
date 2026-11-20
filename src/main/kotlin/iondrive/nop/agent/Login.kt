@@ -60,6 +60,7 @@ object Login {
      * a signed-in account must not leave the old login in place if the new one is abandoned.
      */
     fun command(account: Account): List<String> = when (account.provider) {
+        Provider.Local -> error("Local model accounts use an endpoint.")
         Provider.Anthropic -> listOf(CliTools.resolve(Provider.Anthropic), "auth", "login")
         Provider.OpenAI -> listOf(
             "sh", "-c",
@@ -75,17 +76,19 @@ object Login {
 
     /** The same isolating environment a run gets — this is what files the login under the account. */
     fun env(account: Account): Map<String, String> = when (account.provider) {
-        Provider.Anthropic -> mapOf("CLAUDE_CONFIG_DIR" to account.home)
+        Provider.Anthropic, Provider.Local -> mapOf("CLAUDE_CONFIG_DIR" to account.home)
         Provider.OpenAI, Provider.Antigravity -> mapOf("HOME" to account.home)
     }
 
     /** Signs the account out by deleting its credential file — no CLI, so it works when one is missing. */
     fun logOut(account: Account) {
+        if (account.provider == Provider.Local) return
         runCatching { Files.deleteIfExists(account.credentialFile) }
     }
 
     /** Whether the account has a credential file at all. Not proof it still works — see [Usage]. */
-    fun hasCredentials(account: Account): Boolean = Files.isRegularFile(account.credentialFile)
+    fun hasCredentials(account: Account): Boolean =
+        account.provider != Provider.Local && Files.isRegularFile(account.credentialFile)
 
     private fun credentialParent(account: Account) = account.credentialFile.parent
 

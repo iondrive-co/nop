@@ -49,6 +49,7 @@ internal object VendorConfig {
     /** Does whatever [account]'s provider needs before an interactive run. Safe to call every time. */
     fun prepareForInteractive(account: Account) {
         when (account.provider) {
+            Provider.Local -> settle(account.homePath.resolve(".claude.json"))
             Provider.Anthropic -> {
                 if (!Files.isRegularFile(account.credentialFile)) return
                 settle(account.homePath.resolve(".claude.json"))

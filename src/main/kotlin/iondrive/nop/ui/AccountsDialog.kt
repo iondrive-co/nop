@@ -54,6 +54,7 @@ import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.Backup
 import iondrive.nop.agent.DEFAULT_CHOICE
 import iondrive.nop.agent.Login
+import iondrive.nop.agent.LocalModel
 import iondrive.nop.agent.NetworkShare
 import iondrive.nop.agent.Provider
 import iondrive.nop.agent.UsageReading
@@ -124,6 +125,9 @@ fun AccountsDialog(
                         others = draft.accounts.map { it.name }.filterNot { it == account.name },
                         handoverModels = draft.accounts.firstOrNull { it.name == account.handoverTo }
                             ?.let(modelsFor).orEmpty(),
+                        handoverIsLocal = draft.accounts.any {
+                            it.name == account.handoverTo && it.provider == Provider.Local
+                        },
                         onChange = { changed ->
                             update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) changed else it }))
                         },
@@ -199,7 +203,7 @@ fun AccountsDialog(
                 onAdd = { account ->
                     update(draft.copy(accounts = draft.accounts + account))
                     adding = false
-                    onLogIn(account)
+                    if (account.provider != Provider.Local) onLogIn(account)
                 },
                 onCancel = { adding = false },
             )
@@ -238,6 +242,7 @@ private fun AccountEditor(
     others: List<String>,
     /** The models the account this one hands its work to can run, offered for that handover. */
     handoverModels: List<String>,
+    handoverIsLocal: Boolean,
     onChange: (Account) -> Unit,
     onLogIn: () -> Unit,
     onLogOut: () -> Unit,
@@ -270,6 +275,10 @@ private fun AccountEditor(
                 modifier = Modifier.weight(1f),
             )
             Text(account.provider.label, color = AgentMuted)
+        }
+        if (account.provider == Provider.Local) {
+            LocalAccountEditor(account, reading, onChange, onRemove)
+            return@Column
         }
         Text(account.home, color = AgentMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         // A home outside nop's folder holds this account's logins and every conversation it has had,
@@ -326,7 +335,7 @@ private fun AccountEditor(
                     )
                 },
             )
-            if (!account.resumeAfterReset && account.handoverTo in others) {
+            if (!account.resumeAfterReset && account.handoverTo in others && !handoverIsLocal) {
                 ChoicePicker(
                     label = "on",
                     options = (listOf(HANDOVER_OWN_MODEL, DEFAULT_CHOICE) + handoverModels).distinct(),
@@ -354,6 +363,45 @@ private fun AccountEditor(
         }
     }
 }
+
+@Composable
+private fun LocalAccountEditor(
+    account: Account,
+    reading: UsageReading?,
+    onChange: (Account) -> Unit,
+    onRemove: () -> Unit,
+) {
+    val saved = account.endpoint ?: LocalModel.DEFAULT_ENDPOINT
+    key(saved) {
+        val endpoint = rememberTextFieldState(saved)
+        var error by remember { mutableStateOf<String?>(null) }
+        Text("Server URL", color = AgentMuted)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextField(state = endpoint, modifier = Modifier.weight(1f))
+            OutlinedButton(
+                onClick = {
+                    runCatching { LocalModel.endpoint(endpoint.text.toString()) }.fold(
+                        onSuccess = {
+                            error = null
+                            onChange(account.copy(endpoint = it))
+                        },
+                        onFailure = { error = it.message },
+                    )
+                },
+                enabled = endpoint.text.toString() != saved,
+            ) { Text("Save") }
+        }
+        error?.let { Text(it, color = ChangeColors.REMOVED) }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(localModelStatus(reading), color = if (reading?.unavailable == null) AgentMuted else ChangeColors.REMOVED,
+            modifier = Modifier.weight(1f))
+        Link("Remove", onClick = onRemove)
+    }
+}
+
+internal fun localModelStatus(reading: UsageReading?): String =
+    if (reading == null) "Checking server…" else reading.unavailable ?: "Connected"
 
 /**
  * Where the agent sessions are backed up to, and how the last backup went. See [Backup] for what is
@@ -599,6 +647,7 @@ private val BelowAnchorProvider: PopupPositionProvider = object : PopupPositionP
 @Composable
 private fun AddAccountDialog(existing: List<String>, onAdd: (Account) -> Unit, onCancel: () -> Unit) {
     val name = rememberTextFieldState("")
+    val endpoint = rememberTextFieldState(LocalModel.DEFAULT_ENDPOINT)
     var provider by remember { mutableStateOf(Provider.Anthropic) }
     var error by remember { mutableStateOf<String?>(null) }
     val focus = remember { FocusRequester() }
@@ -615,7 +664,15 @@ private fun AddAccountDialog(existing: List<String>, onAdd: (Account) -> Unit, o
             else -> null
         }
         if (error == null) {
-            onAdd(Account(trimmed, provider, Accounts.defaultHome(trimmed).toString()))
+            val home = Accounts.defaultHome(trimmed)
+            if (provider == Provider.Local) {
+                runCatching { LocalModel.endpoint(endpoint.text.toString()) }.fold(
+                    onSuccess = { onAdd(Account(trimmed, provider, home.resolve("local-model").toString(), endpoint = it)) },
+                    onFailure = { error = it.message },
+                )
+            } else {
+                onAdd(Account(trimmed, provider, home.toString()))
+            }
         }
     }
 
@@ -636,10 +693,14 @@ private fun AddAccountDialog(existing: List<String>, onAdd: (Account) -> Unit, o
                 onSelect = { chosen -> Provider.entries.firstOrNull { it.label == chosen }?.let { provider = it } },
             )
         }
+        if (provider == Provider.Local) {
+            Text("Server URL", color = AgentMuted)
+            TextField(state = endpoint, modifier = Modifier.fillMaxWidth())
+        }
         error?.let { Text(it, color = ChangeColors.REMOVED) }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
             OutlinedButton(onClick = onCancel) { Text("Cancel") }
-            DefaultButton(onClick = ::submit) { Text("Add and sign in") }
+            DefaultButton(onClick = ::submit) { Text(if (provider == Provider.Local) "Add" else "Add and sign in") }
         }
     }
 }

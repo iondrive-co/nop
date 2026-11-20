@@ -843,7 +843,7 @@ class AgentSession(
         // Anything may have happened between the watcher firing and this reaching the UI thread —
         // the user quitting the TUI, or handing the work on themselves. A run that is already over
         // is not one to end again.
-        if (current.endReason != null) return
+        if (current.endReason != null || current.quota != null || current.account.provider == Provider.Local) return
 
         // A session resumed simply to inspect or view must not trigger an auto-handover until
         // the user actually enters a question in this run. Otherwise, replaying the previous
@@ -998,22 +998,31 @@ class AgentSession(
 
         val nominated = handoverTarget(current.account)
         val target = nominated?.takeIf { canTakeOver(it, now) }
-        if (target == null) {
-            // Said out loud: otherwise, in the log, a handover that does not happen looks exactly
-            // like a wall that was never seen.
-            Log.info(
-                "${current.account.name} ran out and nothing took the work on: " +
-                    (nominated?.let { "${it.name} ran out in this session too" }
-                        ?: "it nominates nobody"),
-            )
-            endRun(EndReason.Quota)
-            // Killed rather than left sitting at its own error — the session is over either way.
-            // Killed and not disposed, so the dead TUI keeps its last frame under the panel, which
-            // is usually the thing that says whether switching is the right call.
-            current.session.kill()
-            return
+        when (target?.provider) {
+            Provider.Local -> kotlin.concurrent.thread(isDaemon = true, name = "local-handover-check") {
+                val unavailable = LocalModel.status(target).unavailable
+                SwingUtilities.invokeLater {
+                    if (run !== current || ended || switching) return@invokeLater
+                    if (unavailable == null && handoverTarget(current.account) == target) {
+                        autoHandOver(current, target, hit)
+                    } else {
+                        endAtQuota(current, unavailable ?: "the handover target changed")
+                    }
+                }
+            }
+            null -> endAtQuota(current, nominated?.let { "${it.name} ran out in this session too" } ?: "it nominates nobody")
+            else -> autoHandOver(current, target, hit)
         }
+    }
 
+    private fun endAtQuota(current: AgentRun, reason: String) {
+        Log.info("${current.account.name} ran out and nothing took the work on: $reason")
+        endRun(EndReason.Quota)
+        // Keep the final frame under the panel after stopping the process.
+        current.session.kill()
+    }
+
+    private fun autoHandOver(current: AgentRun, target: Account, hit: QuotaHit) {
         Log.info("${current.account.name} ran out; handing over to ${target.name} on ${target.model ?: DEFAULT_CHOICE}")
         handOver(target, EndReason.Quota)
         // After the switch, so the note describes a handover that has actually happened — and after
@@ -1120,6 +1129,7 @@ class AgentSession(
         return when (account.provider) {
             Provider.Anthropic -> "CLAUDE_CONFIG_DIR=$home claude --resume $native"
             Provider.OpenAI -> "CODEX_HOME=$home/.codex codex resume $native"
+            Provider.Local -> null
             Provider.Antigravity -> "HOME=$home agy --conversation $native"
         }
     }
@@ -1203,7 +1213,7 @@ class AgentSession(
      */
     private fun inLastModel(account: Account, resumeId: String): Account {
         // Vendor telemetry records what ran, not who authorized a model change.
-        if (account.provider == Provider.OpenAI) return account
+        if (account.provider == Provider.OpenAI || account.provider == Provider.Local) return account
         val last = Transcripts.lastModel(account, projectDir, resumeId) ?: return account
         val resumed = account.copy(
             model = last.model.takeIf { it != DEFAULT_CHOICE },
@@ -1362,6 +1372,9 @@ class AgentSession(
             adopted = adoption?.second,
             nopPrompts = NOP_PROMPTS,
             screenClearsStartUpdates = account.provider == Provider.OpenAI,
+            prepareCommand = if (account.provider == Provider.Local && carried == null) {
+                { LocalModel.prepare(account, command) }
+            } else null,
             // Three jobs, one copy of the output, and none of them touches what is drawn. The
             // quota watcher is how nop learns the CLI has hit a wall — it announces that in its own
             // UI and nowhere else — and the screen tail is the fallback a handoff is built from
@@ -1371,7 +1384,7 @@ class AgentSession(
                 if (switching || run.tracker !== tracker) return@output
                 // Stripped once here, for all three of its readers.
                 val clean = QuotaWatcher.stripAnsi(text)
-                quotaWatcher.feedPlain(clean)
+                if (account.provider != Provider.Local) quotaWatcher.feedPlain(clean)
                 log.appendScreenTail(clean)
                 var titleChanged = false
                 titles.feed(text)?.let { title ->
@@ -1545,7 +1558,7 @@ class AgentSession(
     }
 
     private fun tailerFor(account: Account): Tailer = when (account.provider) {
-        Provider.Anthropic -> ClaudeTailer(account.homePath)
+        Provider.Anthropic, Provider.Local -> ClaudeTailer(account.homePath)
         Provider.OpenAI -> CodexTailer(account.homePath)
         Provider.Antigravity -> AntigravityTailer(account.homePath)
     }

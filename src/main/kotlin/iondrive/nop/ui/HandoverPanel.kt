@@ -167,6 +167,7 @@ fun HandoverProviderList(
                     },
                     actionLabel = actionLabel,
                     onAction = { onHandOver(target) },
+                    canAct = account.provider != Provider.Local || readings[account.name]?.asOf != null,
                 )
             }
         }
@@ -196,17 +197,19 @@ fun HandoverProviderCard(
     onAction: () -> Unit,
     modifier: Modifier = Modifier,
     /** The usage beside the name, or empty for none. */
-    usage: String = usageDescription(reading),
+    usage: String = if (account.provider == Provider.Local) localModelStatus(reading) else usageDescription(reading),
     /** Lines about the account between its name and its choices. */
     details: @Composable () -> Unit = {},
     /** Drawn at the end of the name's row, after the usage. */
     headerAction: (@Composable () -> Unit)? = null,
+    canAct: Boolean = true,
 ) {
     val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
     val cardBackground = if (JewelTheme.isDark) Color(0xFF26282B) else Color(0xFFF7F8FA)
     val tint = if (JewelTheme.isDark) ProjectIconTintDark else ProjectIconTintLight
     val cli = CliTools.locate(account.provider)
     val isCliInstalled = cli != null
+    val local = account.provider == Provider.Local
     val reasoningInModel = account.provider == Provider.Antigravity && selectedModel != DEFAULT_CHOICE
 
     Column(
@@ -268,7 +271,7 @@ fun HandoverProviderCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            AgentChoice.entries.forEach { choice ->
+            if (!local) AgentChoice.entries.forEach { choice ->
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -297,7 +300,7 @@ fun HandoverProviderCard(
             }
             OutlinedButton(
                 onClick = onAction,
-                enabled = isCliInstalled,
+                enabled = isCliInstalled && canAct,
             ) {
                 Text(actionLabel)
             }
@@ -307,7 +310,7 @@ fun HandoverProviderCard(
             Text("This model includes its reasoning level.", color = AgentMuted)
         }
 
-        if (openDropdown != null && (openDropdown != AgentChoice.Reasoning || !reasoningInModel)) {
+        if (!local && openDropdown != null && (openDropdown != AgentChoice.Reasoning || !reasoningInModel)) {
             val options = if (openDropdown == AgentChoice.Model) {
                 models
             } else {

@@ -51,6 +51,7 @@ data class Account(
      * whole, at the cost of the wait. See [AgentSession.onQuotaWall].
      */
     val resumeAfterReset: Boolean = false,
+    val endpoint: String? = null,
 ) {
     val homePath: Path get() = Path.of(home)
 
@@ -64,7 +65,7 @@ data class Account(
      */
     val credentialFile: Path
         get() = when (provider) {
-            Provider.Anthropic -> homePath.resolve(".credentials.json")
+            Provider.Anthropic, Provider.Local -> homePath.resolve(".credentials.json")
             Provider.OpenAI -> homePath.resolve(".codex").resolve("auth.json")
             Provider.Antigravity -> Antigravity.tokenFile(homePath)
         }
@@ -92,6 +93,7 @@ fun List<Account>.handoverTarget(from: Account): Account? {
     if (currentFrom.resumeAfterReset) return null
     val nominated = currentFrom.handoverTo?.takeIf { it != currentFrom.name } ?: return null
     val target = firstOrNull { it.name == nominated } ?: return null
+    if (target.provider == Provider.Local) return target
     val model = currentFrom.handoverModel ?: return target
     return target.copy(model = model.takeIf { it != DEFAULT_CHOICE })
 }

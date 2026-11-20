@@ -84,7 +84,7 @@ class CliUpdatesTest {
             locateBinary = { provider ->
                 when (provider) {
                     Provider.OpenAI -> Path.of("/bin/codex")
-                    Provider.Anthropic -> Path.of("/bin/claude")
+                    Provider.Anthropic, Provider.Local -> Path.of("/bin/claude")
                     Provider.Antigravity -> Path.of("/bin/agy")
                 }
             },

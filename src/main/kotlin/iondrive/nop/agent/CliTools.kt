@@ -47,7 +47,7 @@ object CliTools {
 
     /** The shell command that installs [provider]'s CLI, or null when there is no one-line install. */
     fun installCommand(provider: Provider): String? = when (provider) {
-        Provider.Anthropic -> "npm install -g @anthropic-ai/claude-code"
+        Provider.Anthropic, Provider.Local -> "npm install -g @anthropic-ai/claude-code"
         Provider.OpenAI -> "npm install -g @openai/codex"
         Provider.Antigravity -> null
     }
@@ -55,7 +55,7 @@ object CliTools {
     /** Where to get [provider]'s CLI when [installCommand] has no command to offer. */
     fun installPage(provider: Provider): String = when (provider) {
         Provider.Antigravity -> "https://antigravity.google/docs/cli"
-        Provider.Anthropic, Provider.OpenAI -> "https://www.npmjs.com/"
+        Provider.Anthropic, Provider.OpenAI, Provider.Local -> "https://www.npmjs.com/"
     }
 
     /** Where these CLIs install outside PATH: npm's default global prefix and user-local prefixes. */

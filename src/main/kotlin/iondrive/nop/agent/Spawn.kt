@@ -44,14 +44,16 @@ object Spawn {
         resumeId: String? = null,
         mcp: McpServers.Launch = McpServers.Launch.NONE,
     ): AgentCommand = when (account.provider) {
-        Provider.Anthropic -> claude(account, projectDir, seed, resumeId, mcp)
+        Provider.Anthropic, Provider.Local -> claude(account, projectDir, seed, resumeId, mcp)
         Provider.OpenAI -> codex(account, projectDir, seed, resumeId, mcp)
         Provider.Antigravity -> antigravity(account, projectDir, seed, resumeId)
     }
 
     private fun claude(account: Account, projectDir: File, seed: String?, resumeId: String?, mcp: McpServers.Launch): AgentCommand {
         val argv = mutableListOf(CliTools.resolve(Provider.Anthropic), "--permission-mode", "bypassPermissions")
-        account.model?.takeIf { it != DEFAULT_CHOICE }?.let { argv += listOf("--model", it) }
+        if (account.provider != Provider.Local) {
+            account.model?.takeIf { it != DEFAULT_CHOICE }?.let { argv += listOf("--model", it) }
+        }
 
         // A fresh run gets an id nop chooses, because knowing it before the CLI starts is what lets
         // the tailer name the transcript file it is about to watch — the alternative is guessing
@@ -75,7 +77,9 @@ object Spawn {
         seed?.takeIf { it.isNotBlank() }?.let { argv += listOf("--", it) }
 
         val env = mutableMapOf("CLAUDE_CONFIG_DIR" to account.home)
-        CLAUDE_THINKING_BUDGETS[account.reasoning]?.let { env["MAX_THINKING_TOKENS"] = it.toString() }
+        if (account.provider != Provider.Local) {
+            CLAUDE_THINKING_BUDGETS[account.reasoning]?.let { env["MAX_THINKING_TOKENS"] = it.toString() }
+        }
         // The classic renderer, which prints the conversation into the terminal's scrollback, where nop
         // can mark the user's messages and scroll to them. The fullscreen one keeps the conversation
         // inside the CLI, on the alternate screen, scrolled by the CLI itself. This beats a fullscreen

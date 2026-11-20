@@ -4,9 +4,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
- * A vendor coding agent nop knows how to launch.
+ * An agent provider nop knows how to launch.
  *
- * All three keep their credentials in a *file* inside a directory nop points an environment
+ * Subscription providers keep their credentials in a *file* inside a directory nop points an environment
  * variable at, which is what makes running several accounts side by side possible at all.
  *
  * Antigravity keeps its token in that file only while the OS keyring is unusable — with a usable
@@ -33,7 +33,12 @@ enum class Provider(
 
     @SerialName("antigravity")
     Antigravity("antigravity", "Antigravity", "agy"),
+
+    @SerialName("local")
+    Local("local", "Local model", "claude"),
     ;
+
+    val usesClaude: Boolean get() = this == Anthropic || this == Local
 
     /**
      * Reasoning levels this provider's CLI accepts. Claude's map onto extended-thinking token
@@ -50,6 +55,7 @@ enum class Provider(
             Anthropic -> CLAUDE_THINKING_BUDGETS.keys.toList()
             OpenAI -> listOf("minimal", "low", "medium", "high")
             Antigravity -> listOf("low", "medium", "high")
+            Local -> emptyList()
         }
 
     /**
@@ -70,7 +76,7 @@ enum class Provider(
         get() = when (this) {
             Anthropic -> true
             OpenAI -> true
-            Antigravity -> false
+            Antigravity, Local -> false
         }
 
     /**

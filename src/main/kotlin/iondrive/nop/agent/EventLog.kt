@@ -208,7 +208,10 @@ data class PastSession(
     fun accountIn(configured: List<Account>): Account? {
         if (lastNativeSessionId == null) return null
         val name = lastAccount ?: return null
-        configured.firstOrNull { it.name == name }?.let { return it }
+        configured.firstOrNull {
+            it.name == name && (lastProvider != Provider.Local.id || it.provider == Provider.Local)
+        }?.let { return it }
+        if (lastProvider == Provider.Local.id) return null
         // No account by that name, so the row names a store. That is resumable only if nop wrote
         // down which directory it was — a row from a log older than that field cannot be placed,
         // and guessing at a credential directory is not something to do on the user's behalf.
@@ -510,7 +513,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
          * worse answer than a row that admits it does not know.
          */
         private fun storeOf(run: AgentEvent.RunStarted?): String? {
-            if (run?.provider != Provider.Anthropic.id) return null
+            if (run == null || Provider.byId(run.provider)?.usesClaude != true) return null
             val path = run.transcriptPath ?: return null
             return runCatching {
                 val projects = Path.of(path).parent?.parent ?: return null
@@ -606,7 +609,7 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
 
         /** Whether [run] was following a Claude transcript that something other than the TUI wrote. */
         private fun headless(run: AgentEvent.RunStarted, followed: Path): Boolean =
-            run.provider == Provider.Anthropic.id && ClaudeTailer.writtenOutsideTui(followed)
+            Provider.byId(run.provider)?.usesClaude == true && ClaudeTailer.writtenOutsideTui(followed)
 
         /**
          * The conversation nop spawned [run] on, for a run that ended up following a headless one:

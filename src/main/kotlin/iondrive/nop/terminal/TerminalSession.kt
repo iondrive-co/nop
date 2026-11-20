@@ -8,6 +8,7 @@ import com.jediterm.terminal.model.TerminalLine
 import com.jediterm.terminal.ui.JediTermWidget
 import com.pty4j.PtyProcess
 import com.pty4j.PtyProcessBuilder
+import iondrive.nop.agent.AgentCommand
 import com.pty4j.unix.Pty
 import com.pty4j.unix.UnixPtyProcess
 import iondrive.nop.Log
@@ -72,6 +73,7 @@ class TerminalSession private constructor(
      */
     private val nopPrompts: List<String>? = null,
     private val screenClearsStartUpdates: Boolean = false,
+    private val prepareCommand: (() -> AgentCommand)? = null,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
     var running: Boolean by mutableStateOf(adopted?.pty?.isAlive == true)
@@ -339,9 +341,30 @@ class TerminalSession private constructor(
         nopPrompts?.let { w.userMessages = UserMessages(it) }
         settings = s
         widget = w
-        runCatching { attach(w, startProcess()) }.onFailure {
-            Log.warn("failed to start terminal process: ${it.message}")
-            running = false
+        val prepare = prepareCommand
+        if (prepare == null) {
+            runCatching { attach(w, startProcess()) }.onFailure {
+                Log.warn("failed to start terminal process: ${it.message}")
+                running = false
+            }
+        } else {
+            thread(isDaemon = true, name = "terminal-prepare") {
+                val prepared = runCatching(prepare)
+                SwingUtilities.invokeLater {
+                    if (widget !== w || isDisposed) return@invokeLater
+                    runCatching {
+                        val launch = prepared.getOrThrow()
+                        attach(w, startProcess(launch.argv, launch.env))
+                    }.onFailure {
+                        val message = it.message ?: "Could not start the terminal process."
+                        Log.warn("failed to start terminal process: $message")
+                        w.terminal.writeCharacters(message.filterNot(Char::isISOControl))
+                        w.terminalPanel.repaint()
+                        exitCode = 1
+                        onExit?.invoke(1)
+                    }
+                }
+            }
         }
         commandHistory?.start()
         return w
@@ -595,7 +618,7 @@ class TerminalSession private constructor(
         return (0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue) < 128
     }
 
-    private fun startProcess(): PtyProcess {
+    private fun startProcess(argv: List<String> = command, extraEnv: Map<String, String> = emptyMap()): PtyProcess {
         if (adopted != null && !adoptionUsed) {
             adoptionUsed = true
             return watch(adopted.pty)
@@ -631,12 +654,13 @@ class TerminalSession private constructor(
         // HOME is the point rather than an accident: it is how the Codex CLI is made to read one
         // account's ~/.codex instead of the machine owner's.
         childEnv.putAll(env)
+        childEnv.putAll(extraEnv)
         val factory = processFactory
         val proc = if (factory != null) {
-            factory(command, childEnv, workingDir)
+            factory(argv, childEnv, workingDir)
         } else {
             PtyProcessBuilder()
-                .setCommand(command.toTypedArray())
+                .setCommand(argv.toTypedArray())
                 .setEnvironment(childEnv)
                 .setDirectory(workingDir.absolutePath)
                 .setInitialColumns(INITIAL_COLUMNS)
@@ -998,6 +1022,7 @@ class TerminalSession private constructor(
             /** How the prompts nop types in begin — see [TerminalSession.nopPrompts]. */
             nopPrompts: List<String>? = null,
             screenClearsStartUpdates: Boolean = false,
+            prepareCommand: (() -> AgentCommand)? = null,
         ): TerminalSession =
             TerminalSession(
                 title = title,
@@ -1009,6 +1034,7 @@ class TerminalSession private constructor(
                 adopted = adopted,
                 nopPrompts = nopPrompts,
                 screenClearsStartUpdates = screenClearsStartUpdates,
+                prepareCommand = prepareCommand,
             )
 
         /** The PTY master behind [proc], for a process whose master this nop can name. */

@@ -1155,8 +1155,10 @@ fun App(
             }
             // Sooner while a reading is stale or spent, so a rate-limited or reset account recovers
             // within a minute rather than five. Usage's own gate decides whether a poll actually asks.
-            val stale = agentAccounts.any {
-                agentUsage[it.name]?.note != null || agentUsage[it.name]?.looksSpent() == true
+            val stale = agentAccounts.any { account ->
+                val reading = agentUsage[account.name]
+                reading?.note != null || reading?.looksSpent() == true ||
+                    (account.provider == Provider.Local && reading?.unavailable != null)
             }
             delay(if (stale) USAGE_RETRY_INTERVAL_MS else USAGE_POLL_INTERVAL_MS)
         }
