@@ -179,7 +179,8 @@ class AntigravityTailer(
             pending.addLast(callId)
             startedAtOf[callId] = at
         }
-        if (blocks.isNotEmpty()) {
+        val stopReason = if (started.isEmpty()) "end_turn" else "tool_use"
+        if (blocks.isNotEmpty() || started.isEmpty()) {
             events += AgentEvent.AssistantMessage(
                 blocks = blocks,
                 usage = TokenUsage(
@@ -187,6 +188,7 @@ class AntigravityTailer(
                     outputTokens = record["output_tokens"].long(),
                     cacheReadTokens = record["cache_read_tokens"].long(),
                 ),
+                stopReason = stopReason,
                 at = at,
             )
         }

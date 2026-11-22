@@ -15,7 +15,7 @@ enum class Activity {
      */
     Asleep,
 
-    /** Running, and nothing it has said so far says doing what. Every Antigravity tab, for now. */
+    /** Running, and nothing it has said so far says doing what — a fresh tab before its first signal. */
     Running,
 
     /** In the middle of a turn: the CLI's own spinner is going. */
@@ -135,6 +135,7 @@ class TitleReader {
  * says nothing rather than claiming a working agent has stopped.
  */
 object TitleSignal {
+    @kotlinx.serialization.Serializable
     enum class Says { Working, Blocked, Stopped }
 
     /** Claude Code's and Codex's spinner frames. */
@@ -218,14 +219,60 @@ class ActivityTracker {
      */
     private var promptUnread = false
 
+    /**
+     * Whether work started since the last [consumeWorked] read. Ensures a fast turn that starts and
+     * ends between two UI refreshes is still noticed as completed work.
+     */
+    private var sawWork = false
+
+    /**
+     * Epoch millis when a lifecycle hook last reported the turn stopped, or 0 while a turn is active
+     * or no stop hook has fired. Trailing transcript events written before that stop (read by the
+     * polling tailer moments later) are ignored so they cannot flip the tab back to working or revive
+     * a canceled question.
+     */
+    private var hookStoppedAt = 0L
+
     fun onTitle(text: String, at: Long) {
-        // The same title again is not news, and must not restart the wait for stillness — Claude
-        // Code rewrites a stopped title now and then without anything having changed.
-        if (text == title) return
+        // An empty title carries no signal — a CLI clearing its window title must not erase activity
+        // already tracked from hooks or its transcript. The same title again is not news, and must
+        // not restart the wait for stillness.
+        if (text.isBlank() || text == title) return
         before = activity(at)
         title = text
         titleAt = at
         said = TitleSignal.read(text)
+        if (said == TitleSignal.Says.Working) sawWork = true
+    }
+
+    /** Reports a turn starting from a CLI lifecycle hook, for CLIs that write no terminal title. */
+    fun onTurnWorking() {
+        hookStoppedAt = 0L
+        if (title == null) markWorking()
+    }
+
+    /** Reports a turn stopping from a CLI lifecycle hook (completion, cancellation or error). */
+    fun onTurnStopped(at: Long = System.currentTimeMillis()) {
+        open.clear()
+        hasQueuedQuestion = false
+        asyncQuestion = false
+        recentOutput.setLength(0)
+        hookStoppedAt = at
+        said = TitleSignal.Says.Stopped
+        before = Activity.Idle
+    }
+
+    /** Returns whether work occurred since the previous read and clears the flag. */
+    fun consumeWorked(): Boolean {
+        val worked = sawWork
+        sawWork = false
+        return worked
+    }
+
+    private fun markWorking() {
+        said = TitleSignal.Says.Working
+        before = Activity.Working
+        sawWork = true
     }
 
     fun onOutput(text: String): Boolean = text.isNotEmpty() && onOutputPlain(QuotaWatcher.stripAnsi(text))
@@ -247,7 +294,13 @@ class ActivityTracker {
             recentOutput.containsIgnoringCase("input", endingFrom)
         // A permission prompt only ever holds a tool call, so outside one the same words are the
         // agent talking about a prompt, not showing one.
-        val prompt = open.isNotEmpty() && (promptUnread || recentOutput.containsIgnoringCase("yes", endingFrom))
+        val prompt = open.isNotEmpty() && (
+            promptUnread ||
+                recentOutput.containsIgnoringCase("yes", endingFrom) ||
+                recentOutput.containsIgnoringCase("deny", endingFrom) ||
+                recentOutput.containsIgnoringCase("allow", endingFrom) ||
+                recentOutput.containsIgnoringCase("once", endingFrom)
+            )
         if (queued && QUEUED_QUESTION.find(recentOutput, from) != null ||
             prompt && PERMISSION_PROMPT.find(recentOutput, if (promptUnread) 0 else from) != null
         ) {
@@ -281,6 +334,10 @@ class ActivityTracker {
     }
 
     fun onEvent(event: AgentEvent) {
+        if (hookStoppedAt > 0L) {
+            if (event.at <= hookStoppedAt + STALE_EVENT_SLACK_MS) return
+            hookStoppedAt = 0L
+        }
         when (event) {
             // A new prompt starts a new turn. Anything still open from the last one was interrupted
             // or lost to the tailer, and is not a question anybody is being asked now.
@@ -289,11 +346,13 @@ class ActivityTracker {
                 hasQueuedQuestion = false
                 asyncQuestion = false
                 recentOutput.setLength(0)
+                if (title == null) markWorking()
             }
             is AgentEvent.ToolStarted -> {
                 open[event.callId] = event.tool
                 promptUnread = true
                 if (event.tool == ASYNC_QUESTION_TOOL) asyncQuestion = true
+                if (title == null) markWorking()
             }
             is AgentEvent.ToolFinished -> {
                 open.remove(event.callId)
@@ -301,6 +360,7 @@ class ActivityTracker {
                     hasQueuedQuestion = false
                     recentOutput.setLength(0)
                 }
+                if (title == null) markWorking()
             }
             is AgentEvent.AssistantMessage -> if (event.stopReason == "end_turn" || event.stopReason?.startsWith("aborted:") == true) {
                 // A completed or interrupted turn no longer holds questions or permission dialogs.
@@ -310,6 +370,8 @@ class ActivityTracker {
                 recentOutput.setLength(0)
                 said = TitleSignal.Says.Stopped
                 before = Activity.Idle
+            } else if (title == null) {
+                markWorking()
             }
             else -> Unit
         }
@@ -317,10 +379,11 @@ class ActivityTracker {
 
     /**
      * What a nop taking this run over needs to read it the same way: the tool calls still open in the
-     * turn and the title last shown. The transcript before the handover is not read again, so a
-     * question asked before it would otherwise never be seen as one.
+     * turn, the title last shown, and the last known state for CLIs without terminal titles. The
+     * transcript before the handover is not read again, so a question asked before it would otherwise
+     * never be seen as one.
      */
-    fun snapshot(): Snapshot = Snapshot(LinkedHashMap(open), title, asyncQuestion)
+    fun snapshot(): Snapshot = Snapshot(LinkedHashMap(open), title, asyncQuestion, said)
 
     /** Takes up where [snapshot] left off, in another nop. */
     fun restore(from: Snapshot, now: Long) {
@@ -328,7 +391,21 @@ class ActivityTracker {
         open.putAll(from.openCalls)
         promptUnread = true
         asyncQuestion = from.asyncQuestion
-        from.title?.let { onTitle(it, now) }
+        if (from.title != null) {
+            onTitle(from.title, now)
+            if (from.said == TitleSignal.Says.Stopped) {
+                said = TitleSignal.Says.Stopped
+                before = Activity.Idle
+            }
+        } else if (from.said != null) {
+            said = from.said
+            before = when (from.said) {
+                TitleSignal.Says.Working -> Activity.Working
+                TitleSignal.Says.Blocked -> Activity.Asking
+                TitleSignal.Says.Stopped -> Activity.Idle
+            }
+        }
+        sawWork = false
     }
 
     @kotlinx.serialization.Serializable
@@ -337,6 +414,8 @@ class ActivityTracker {
         val title: String? = null,
         /** A Codex question still queued for the user, which a restart must not forget. */
         val asyncQuestion: Boolean = false,
+        /** Last known CLI state, needed across restarts for CLIs without terminal titles. */
+        val said: TitleSignal.Says? = null,
     )
 
     /** What the tab is doing at [now], for a run that is alive. */
@@ -379,12 +458,15 @@ class ActivityTracker {
         )
 
         /**
-         * A confirmation dialog holding a tool call — a PreToolUse hook asking, in Claude Code:
-         * "Do you want to proceed?" with the numbered "1. Yes" under it. The question and the
-         * answers together, because either alone turns up in ordinary prose and tool output.
+         * A confirmation dialog holding a tool call — Claude Code's "Do you want to proceed?" with
+         * the numbered "1. Yes" under it, or Antigravity's tool confirmation ("Yes, allow ..." with
+         * "No, deny" or "Run this command?"). Both the prompt and its confirmation choice appear
+         * together, because either alone turns up in ordinary prose and tool output.
          */
         val PERMISSION_PROMPT: Regex = Regex(
-            """do\s*you\s*want\s*to\s*\w+[^?\n]{0,120}\?\s*(?:❯\s*)?1\.\s*yes""",
+            """do\s*you\s*want\s*to\s*\w+[^?\n]{0,120}\?\s*(?:❯\s*)?1\.\s*yes""" +
+                """|yes,\s*allow\s*(?:tool\s*call|access|creation|command|once)[\s\S]{0,160}no,\s*deny""" +
+                """|run\s*this\s*command\?[\s\S]{0,160}(?:yes,\s*allow|no,\s*deny|allow\s*once|1\.\s*yes)""",
             RegexOption.IGNORE_CASE,
         )
 
@@ -395,5 +477,8 @@ class ActivityTracker {
 
         /** The longest word [QUEUED_QUESTION] or [PERMISSION_PROMPT] ends in, less one. */
         private const val LONGEST_ENDING = 5
+
+        /** Covers 1-second timestamp truncation on transcript lines written right before a Stop hook. */
+        private const val STALE_EVENT_SLACK_MS = 2_000L
     }
 }

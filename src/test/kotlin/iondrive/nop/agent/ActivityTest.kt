@@ -464,6 +464,95 @@ class ActivityTest {
         tracker.onTitle("✳ x", at = 0)
         assertNull(tracker.settlesAt())
     }
+
+    @Test
+    fun `a blank title does not overwrite transcript or hook activity`() {
+        val tracker = ActivityTracker()
+        tracker.onEvent(AgentEvent.UserMessage("check the build", at = 100))
+        assertEquals(Activity.Working, tracker.activity(now = 100))
+
+        tracker.onTitle("", at = 200)
+        assertEquals(Activity.Working, tracker.activity(now = 10_000))
+        assertNull(tracker.settlesAt())
+    }
+
+    @Test
+    fun `a title-less CLI tracks working, asking and idle from its transcript events`() {
+        val tracker = ActivityTracker()
+        assertEquals(Activity.Running, tracker.activity(now = 0))
+
+        tracker.onEvent(AgentEvent.UserMessage("inspect the config", at = 1_000))
+        assertEquals(Activity.Working, tracker.activity(now = 1_000))
+
+        tracker.onEvent(AgentEvent.ToolStarted("c1", "Bash", emptyMap(), at = 2_000))
+        assertEquals(Activity.Working, tracker.activity(now = 2_000))
+        tracker.onEvent(AgentEvent.ToolFinished("c1", at = 3_000))
+        assertEquals(Activity.Working, tracker.activity(now = 3_000))
+
+        tracker.onEvent(AgentEvent.ToolStarted("q1", "ask_question", emptyMap(), at = 4_000))
+        assertEquals(Activity.Asking, tracker.activity(now = 4_000))
+        tracker.onEvent(AgentEvent.ToolFinished("q1", at = 5_000))
+        assertEquals(Activity.Working, tracker.activity(now = 5_000))
+
+        tracker.onEvent(AgentEvent.AssistantMessage(listOf(Block.Text("All set.")), stopReason = "end_turn", at = 6_000))
+        assertEquals(Activity.Idle, tracker.activity(now = 6_000))
+    }
+
+    @Test
+    fun `a stop hook clears an open question and ignores trailing transcript lines written before it`() {
+        val tracker = ActivityTracker()
+        tracker.onTurnWorking()
+        tracker.onEvent(AgentEvent.ToolStarted("q1", "ask_question", emptyMap(), at = 10_000))
+        assertEquals(Activity.Asking, tracker.activity(now = 10_000))
+
+        tracker.onTurnStopped(at = 10_500)
+        assertEquals(Activity.Idle, tracker.activity(now = 10_500))
+
+        // Trailing lines read by the polling tailer moments after Stop must not flip the tab back.
+        tracker.onEvent(AgentEvent.UserMessage("canceled prompt", at = 10_000))
+        tracker.onEvent(AgentEvent.ToolStarted("q2", "ask_question", emptyMap(), at = 10_000))
+        assertEquals(Activity.Idle, tracker.activity(now = 11_000))
+
+        // A fresh PreInvocation immediately resumes working, and a much later transcript turn also recovers.
+        tracker.onTurnWorking()
+        assertEquals(Activity.Working, tracker.activity(now = 11_100))
+        tracker.onTurnStopped(at = 12_000)
+        tracker.onEvent(AgentEvent.UserMessage("later turn without hook", at = 20_000))
+        assertEquals(Activity.Working, tracker.activity(now = 20_000))
+    }
+
+    @Test
+    fun `Antigravity tool confirmation prompts mark an open call as asking, even split across reads`() {
+        for (prompt in listOf(
+            "Yes, allow tool call\nNo, deny permission",
+            "Yes,allowaccess  No,denypermission",
+            "Run this command?\n  Yes, allow once\n  No, deny",
+        )) {
+            for (cut in 1 until prompt.length) {
+                val tracker = ActivityTracker()
+                tracker.onEvent(AgentEvent.ToolStarted("c1", "Bash", emptyMap(), at = 1_000))
+                val first = tracker.onOutput(prompt.substring(0, cut))
+                assertTrue(first || tracker.onOutput(prompt.substring(cut)), "missed at $cut for $prompt")
+                assertEquals(Activity.Asking, tracker.activity(now = 1_000))
+            }
+            // Outside an open tool call, prose quoting the same options is not a confirmation dialog.
+            assertFalse(ActivityTracker().onOutput(prompt))
+        }
+    }
+
+    @Test
+    fun `a title-less CLI's working and idle states survive snapshot and restore`() {
+        val working = ActivityTracker().apply { onTurnWorking() }
+        val restoredWorking = ActivityTracker().apply { restore(working.snapshot(), now = 1_000) }
+        assertEquals(Activity.Working, restoredWorking.activity(now = 1_000))
+
+        val idle = ActivityTracker().apply {
+            onTurnWorking()
+            onTurnStopped(at = 2_000)
+        }
+        val restoredIdle = ActivityTracker().apply { restore(idle.snapshot(), now = 3_000) }
+        assertEquals(Activity.Idle, restoredIdle.activity(now = 3_000))
+    }
 }
 
 /**
@@ -574,5 +663,126 @@ class AgentActivityTest {
         old.onTitle("✳ x", 2000)
         session.refreshActivity(old, now = 2000)
         assertFalse(session.unseen)
+    }
+
+    @Test
+    fun `an Antigravity turn that finishes behind another tab marks unseen, even within one refresh`(@TempDir tmp: Path) {
+        val session = AgentSessions().also { opened += it }
+            .open(tmp.toFile(), Account("agy-alpha", Provider.Antigravity, "/homes/agy-alpha"))
+        session.run.session.running = true
+
+        // Both UserMessage and end_turn arrive before the UI thread refreshes.
+        session.run.tracker.onEvent(AgentEvent.UserMessage("summarise the diff", at = 1_000))
+        session.run.tracker.onEvent(AgentEvent.AssistantMessage(listOf(Block.Text("Two files changed.")), stopReason = "end_turn", at = 1_500))
+        session.refreshActivity(session.run.tracker, now = 1_500)
+
+        assertEquals(Activity.Idle, session.activity)
+        assertTrue(session.hasWorked)
+        assertTrue(session.unseen)
+        assertEquals(1_500L, session.activitySince)
+
+        // Reading the tab clears unseen; a second fast turn behind another tab marks it again.
+        session.watch()
+        assertFalse(session.unseen)
+        session.unwatch()
+
+        session.run.tracker.onEvent(AgentEvent.UserMessage("check tests too", at = 3_000))
+        session.run.tracker.onEvent(AgentEvent.AssistantMessage(listOf(Block.Text("All green.")), stopReason = "end_turn", at = 3_500))
+        session.refreshActivity(session.run.tracker, now = 3_500)
+
+        assertEquals(Activity.Idle, session.activity)
+        assertTrue(session.unseen)
+        assertEquals(3_500L, session.activitySince)
+    }
+
+    @Test
+    fun `an Antigravity question marks unseen and clearing it returns to working before idle`(@TempDir tmp: Path) {
+        val session = AgentSessions().also { opened += it }
+            .open(tmp.toFile(), Account("agy-alpha", Provider.Antigravity, "/homes/agy-alpha"))
+        session.run.session.running = true
+
+        session.event(AgentEvent.UserMessage("update the schema", at = 1_000), at = 1_000)
+        assertEquals(Activity.Working, session.activity)
+        assertFalse(session.unseen)
+
+        session.event(AgentEvent.ToolStarted("q1", "ask_question", emptyMap(), at = 2_000), at = 2_000)
+        assertEquals(Activity.Asking, session.activity)
+        assertTrue(session.unseen)
+
+        session.watch()
+        assertFalse(session.unseen)
+        session.event(AgentEvent.ToolFinished("q1", at = 3_000), at = 3_000)
+        assertEquals(Activity.Working, session.activity)
+        session.unwatch()
+
+        session.event(AgentEvent.AssistantMessage(listOf(Block.Text("Updated.")), stopReason = "end_turn", at = 4_000), at = 4_000)
+        assertEquals(Activity.Idle, session.activity)
+        assertTrue(session.unseen)
+    }
+
+    @Test
+    fun `reopening a past Antigravity session ignores replayed history and tracks subsequent live turns`(@TempDir tmp: Path) {
+        org.junit.jupiter.api.Assumptions.assumeTrue(Files.isDirectory(Path.of("/proc/self/fd")))
+        val home = tmp.resolve("home")
+        val lock = Antigravity.presenceDir(home).resolve("conv-old.lock")
+        Files.createDirectories(lock.parent)
+        Files.createFile(lock)
+        val transcript = Antigravity.conversationTranscript(home, "conv-old")
+        Files.createDirectories(transcript.parent)
+        Files.writeString(
+            transcript,
+            """{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2020-01-01T00:00:00Z","content":"<USER_REQUEST>\nold task\n</USER_REQUEST>"}""" + "\n" +
+                """{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2020-01-01T00:00:05Z","content":"Old reply."}""" + "\n",
+        )
+        val process = com.pty4j.PtyProcessBuilder(arrayOf("sh", "-c", "exec 9<'$lock'; echo ready; exec sleep 30"))
+            .setEnvironment(System.getenv()).start()
+        try {
+            process.inputStream.bufferedReader().readLine()
+            val session = AgentSessions().also { opened += it }
+                .open(tmp.toFile(), Account("agy-alpha", Provider.Antigravity, home.toString()), resumeId = "conv-old")
+            session.run.session.javaClass.getDeclaredField("process").apply { isAccessible = true }.set(session.run.session, process)
+            session.run.session.running = true
+
+            fun waitUntil(message: String, predicate: () -> Boolean) {
+                val deadline = System.currentTimeMillis() + 5_000L
+                while (System.currentTimeMillis() < deadline && !predicate()) Thread.sleep(50)
+                javax.swing.SwingUtilities.invokeAndWait { }
+                assertTrue(predicate(), message)
+            }
+
+            waitUntil("history should still be logged") {
+                session.log.events().any { it is AgentEvent.AssistantMessage }
+            }
+            assertEquals(Activity.Running, session.activity)
+            assertFalse(session.hasWorked)
+            assertFalse(session.unseen)
+
+            // Live turn: prompt -> question -> answer -> final reply, all behind another tab.
+            fun append(line: String) = Files.writeString(transcript, line + "\n", java.nio.file.StandardOpenOption.APPEND)
+            val now = java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            append("""{"step_index":2,"type":"USER_INPUT","status":"DONE","created_at":"$now","content":"<USER_REQUEST>\ncheck status\n</USER_REQUEST>"}""")
+            waitUntil("live prompt starts working") { session.activity == Activity.Working }
+            assertTrue(session.hasWorked)
+            assertFalse(session.unseen)
+
+            append("""{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"${now.plusSeconds(1)}","tool_calls":[{"name":"ask_question","args":{"questions":"[]"}}]}""")
+            waitUntil("ask_question marks tab asking") { session.activity == Activity.Asking }
+            assertTrue(session.unseen)
+
+            append("""{"step_index":4,"type":"GENERIC","status":"DONE","created_at":"${now.plusSeconds(2)}","content":"A1: yes"}""")
+            waitUntil("answering returns to working") { session.activity == Activity.Working }
+            assertFalse(session.unseen)
+
+            append("""{"step_index":5,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"${now.plusSeconds(3)}","content":"Finished."}""")
+            waitUntil("final reply marks tab idle with unread response") { session.activity == Activity.Idle }
+            assertTrue(session.unseen)
+
+            session.watch()
+            assertFalse(session.unseen)
+            session.unwatch()
+        } finally {
+            process.destroyForcibly()
+            process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
     }
 }

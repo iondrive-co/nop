@@ -179,6 +179,8 @@ object AgentSocket {
         fun listService(caller: AgentServices.Registration): AgentMessages.Outcome
         fun sendService(caller: AgentServices.Registration, to: String, message: String): AgentMessages.Outcome
         fun statusService(caller: AgentServices.Registration, id: String): AgentMessages.Outcome
+        fun activity(caller: AgentSession, state: String, conversationId: String): AgentMessages.Outcome =
+            AgentMessages.Outcome("ok")
     }
 
     /** One request answered: whether it worked, and what to say. */
@@ -200,6 +202,7 @@ object AgentSocket {
                 tools.send(caller, to, lines.getOrNull(3).orEmpty())
             }
             "status" -> tools.status(caller, lines.getOrNull(2)?.trim().orEmpty())
+            "activity" -> tools.activity(caller, lines.getOrNull(2)?.trim().orEmpty(), lines.getOrNull(3)?.trim().orEmpty())
             "service-register" -> tools.registerService(caller, lines.getOrNull(2)?.trim().orEmpty())
             "remember", "forget" -> {
                 val scope = SharedMemory.parseScope(lines.getOrNull(2)?.trim().orEmpty().split(' ').filter { it.isNotEmpty() })?.first
@@ -238,6 +241,9 @@ object AgentSocket {
 
         override fun status(caller: AgentSession, id: String) =
             onEdt { AgentMessages.status(caller, id) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
+
+        override fun activity(caller: AgentSession, state: String, conversationId: String) =
+            onEdt { caller.reportActivity(state, conversationId) } ?: AgentMessages.Outcome("nop did not answer in time", isError = true)
 
         // As memory: the project is read on the EDT, the registration written here.
         override fun registerService(caller: AgentSession, name: String): AgentMessages.Outcome {

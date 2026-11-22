@@ -69,6 +69,11 @@ class AgentSocketTest {
             memory += Triple(forget, scope, text)
             return AgentMessages.Outcome("remembered")
         }
+        val activities = mutableListOf<Pair<String, String>>()
+        override fun activity(caller: AgentSession, state: String, conversationId: String): AgentMessages.Outcome {
+            activities += state to conversationId
+            return AgentMessages.Outcome("ok")
+        }
     }
 
     @Test
@@ -79,7 +84,7 @@ class AgentSocketTest {
         assertEquals(true to "service list", AgentSocket.handle("${service.ticket}\nlist\n", { null }, tools, identify))
         assertTrue(AgentSocket.handle("${service.ticket}\nsend\nrecipient\nfirst\nsecond", { null }, tools, identify).first)
         assertEquals(listOf("recipient" to "first\nsecond"), tools.sent)
-        for (verb in listOf("remember", "forget", "service-register")) {
+        for (verb in listOf("remember", "forget", "service-register", "activity")) {
             assertFalse(AgentSocket.handle("${service.ticket}\n$verb\nproject\ntext", { null }, tools, identify).first)
         }
         assertFalse(AgentSocket.handle("guess\nsend\nrecipient\nact", { null }, tools, identify).first)
@@ -95,6 +100,8 @@ class AgentSocketTest {
         assertEquals(listOf("Task scheduler"), tools.services)
         assertEquals(true to "message m87654321 waiting: behind a draft", AgentSocket.handle("${tab.agentTicket}\nstatus\nm87654321", { tab }, tools, identify))
         assertEquals(listOf("service m12345678", "tab m87654321"), tools.asked)
+        assertEquals(true to "ok", AgentSocket.handle("${tab.agentTicket}\nactivity\nworking\nconv-alpha\n", { tab }, tools, identify))
+        assertEquals(listOf("working" to "conv-alpha"), tools.activities)
     }
 
     @Test

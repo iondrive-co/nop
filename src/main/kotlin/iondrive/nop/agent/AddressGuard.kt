@@ -108,18 +108,23 @@ internal object AddressGuard {
             QuestionGuard.writeScript(root, it)
             command(it, QuestionGuard.scriptPath(root))
         }
+        val activity = python?.let {
+            AntigravityActivityHook.writeScript(root, it)
+            command(it, AntigravityActivityHook.scriptPath(root))
+        }
         if (command == null) Log.warn("address guard: no python3, so no account gets the hook")
         for (account in accounts) {
-            runCatching { hook(account, command, question) }
+            runCatching { hook(account, command, question, activity) }
                 .onFailure { Log.warn("address guard: could not hook ${account.name}: $it") }
         }
     }
 
     /**
-     * Puts [command] in front of [account]'s tool calls, or takes nop's hook out when it is null; and
-     * for Claude, [question] (the [QuestionGuard]) in front of its questions in the same way.
+     * Puts [command] in front of [account]'s tool calls, or takes nop's hook out when it is null;
+     * for Claude, [question] ([QuestionGuard]) in front of its questions; and for Antigravity,
+     * [activity] ([AntigravityActivityHook]) on its turn lifecycle.
      */
-    internal fun hook(account: Account, command: String?, question: String? = null) {
+    internal fun hook(account: Account, command: String?, question: String? = null, activity: String? = null) {
         val home = account.homePath
         if (!Files.isDirectory(home)) return
         when (account.provider) {
@@ -128,7 +133,7 @@ internal object AddressGuard {
             }
             Provider.OpenAI -> hookCodex(home.resolve(".codex"), command)
             Provider.Antigravity -> editJson(home.resolve(".gemini").resolve("config").resolve("hooks.json")) {
-                withAgyHook(it, command)
+                AntigravityActivityHook.withAgyHook(withAgyHook(it, command), activity)
             }
         }
     }

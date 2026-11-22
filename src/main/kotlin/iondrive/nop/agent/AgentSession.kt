@@ -503,6 +503,41 @@ class AgentSession(
     }
 
     /**
+     * Records a turn-lifecycle signal from a CLI hook (see [AntigravityActivityHook]).
+     *
+     * Hooks inherit this tab's ticket into child subagents and nested CLI calls, so a signal carrying
+     * another conversation's id is ignored once this run's own conversation is known (or when that
+     * conversation already belongs to another tab).
+     */
+    internal fun reportActivity(
+        state: String,
+        conversationId: String = "",
+        now: Long = System.currentTimeMillis(),
+    ): AgentMessages.Outcome {
+        val current = run
+        if (ended || current.endReason != null) return AgentMessages.Outcome("ok")
+        val conv = conversationId.trim()
+        if (conv.isNotEmpty()) {
+            val known = current.nativeSessionId
+            if (known != null && conv != known) return AgentMessages.Outcome("ignored")
+            if (known == null && LiveTranscripts.isForeign(conv, sessionId)) return AgentMessages.Outcome("ignored")
+        }
+        when (state) {
+            "working" -> {
+                current.userPromptSubmitted = true
+                synchronized(current.tracker) { current.tracker.onTurnWorking() }
+                refreshActivity(current.tracker, now)
+            }
+            "idle" -> {
+                synchronized(current.tracker) { current.tracker.onTurnStopped(now) }
+                refreshActivity(current.tracker, now)
+            }
+            else -> return AgentMessages.Outcome("unknown activity state: $state", isError = true)
+        }
+        return AgentMessages.Outcome("ok")
+    }
+
+    /**
      * Reads what [tracker] says now into [activity], and arms a re-read for when a title that has not
      * said anything yet will have stood still long enough to. On the UI thread.
      *
@@ -511,27 +546,33 @@ class AgentSession(
      */
     internal fun refreshActivity(tracker: ActivityTracker, now: Long = System.currentTimeMillis()) {
         if (tracker !== run.tracker || ended) return
-        val (tracked, settles) = synchronized(tracker) { tracker.activity(now) to tracker.settlesAt() }
+        val (tracked, settles, worked) = synchronized(tracker) {
+            Triple(tracker.activity(now), tracker.settlesAt(), tracker.consumeWorked())
+        }
         val next = if (!run.controlReady) {
             if (run.startupQuestion != null) Activity.Asking else Activity.Running
         } else tracked
         val was = live
+        val didWork = run.controlReady && (worked || next == Activity.Working)
+        if (didWork) {
+            hasWorked = true
+            // The CLI went back to work by itself — Claude Code does once its window resets,
+            // or when a prompt is submitted — so clear any pending wait and let it work.
+            if (resumeWait != null) {
+                carriedOnDuringWait = true
+                Log.info("${run.account.name} carried on by itself; clearing waited-out wall")
+                stopResumeWait()
+                run.waitedOutWallAt = Instant.ofEpochMilli(now)
+                quotaWatcher.reset()
+            }
+        }
         if (next != was) {
             live = next
             activitySince = now
-            if (next == Activity.Working) {
-                hasWorked = true
-                // The CLI went back to work by itself — Claude Code does once its window resets,
-                // or when a prompt is submitted — so clear any pending wait and let it work.
-                if (resumeWait != null) {
-                    carriedOnDuringWait = true
-                    Log.info("${run.account.name} carried on by itself; clearing waited-out wall")
-                    stopResumeWait()
-                    run.waitedOutWallAt = Instant.ofEpochMilli(now)
-                    quotaWatcher.reset()
-                }
-            }
-            noteChange(was, next)
+            noteChange(if (didWork && next == Activity.Idle) Activity.Working else was, next)
+        } else if (didWork && next == Activity.Idle) {
+            activitySince = now
+            noteChange(Activity.Working, Activity.Idle)
         }
         if (next == Activity.Idle && !legacyCodexUpgradePending && account.provider == Provider.OpenAI &&
             CodexLaunch.needsTerminalUpgrade(run.command) && run.session.pid() != null && !System.getProperty("os.name").startsWith("Windows", true)
@@ -1500,8 +1541,10 @@ class AgentSession(
                     newRun.userPromptSubmitted = true
                 }
                 // A question lasts until answered or its turn ends — see [ActivityTracker].
-                if (event is AgentEvent.ToolStarted || event is AgentEvent.ToolFinished ||
-                    event is AgentEvent.UserMessage || event is AgentEvent.AssistantMessage
+                // Historical transcript lines replayed on reopening a past session do not describe
+                // live work in this run.
+                if (event.at >= startedAt - 5000 && (event is AgentEvent.ToolStarted || event is AgentEvent.ToolFinished ||
+                    event is AgentEvent.UserMessage || event is AgentEvent.AssistantMessage)
                 ) {
                     synchronized(tracker) { tracker.onEvent(event) }
                     SwingUtilities.invokeLater { refreshActivity(tracker) }

@@ -350,6 +350,33 @@ class AntigravityTailerTest {
     }
 
     @Test
+    fun `planner responses mark end_turn only when no tool calls follow`(@TempDir tmp: Path) {
+        val tailer = located(tmp)
+        val tracker = iondrive.nop.agent.ActivityTracker()
+
+        tailer.parse(userInput("check the build")).forEach(tracker::onEvent)
+        assertEquals(iondrive.nop.agent.Activity.Working, tracker.activity(now = 0))
+
+        val withTool = tailer.parse(
+            """{"step_index":1,"type":"PLANNER_RESPONSE","content":"Running tests.","tool_calls":[{"name":"run_command","args":{"CommandLine":"\"make\""}}]}""",
+        )
+        assertEquals("tool_use", withTool.filterIsInstance<AgentEvent.AssistantMessage>().single().stopReason)
+        withTool.forEach(tracker::onEvent)
+        assertEquals(iondrive.nop.agent.Activity.Working, tracker.activity(now = 0))
+
+        tailer.parse("""{"step_index":2,"type":"GENERIC","status":"DONE","content":"ok"}""").forEach(tracker::onEvent)
+        assertEquals(iondrive.nop.agent.Activity.Working, tracker.activity(now = 0))
+
+        val finalTurn = tailer.parse("""{"step_index":3,"type":"PLANNER_RESPONSE","content":"Tests pass."}""")
+        assertEquals("end_turn", finalTurn.filterIsInstance<AgentEvent.AssistantMessage>().single().stopReason)
+        finalTurn.forEach(tracker::onEvent)
+        assertEquals(iondrive.nop.agent.Activity.Idle, tracker.activity(now = 0))
+
+        val emptyFinal = tailer.parse("""{"step_index":4,"type":"PLANNER_RESPONSE"}""")
+        assertEquals("end_turn", emptyFinal.filterIsInstance<AgentEvent.AssistantMessage>().single().stopReason)
+    }
+
+    @Test
     fun `the CLI's own notices and lines that are not JSON produce nothing`(@TempDir tmp: Path) {
         val tailer = located(tmp)
 
