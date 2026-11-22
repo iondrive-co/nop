@@ -131,21 +131,20 @@ class SpawnTest {
     }
 
     /**
-     * The bypass flag answered every MCP server's own form itself, declining it unseen, so a server
-     * that asks before it opens access could never be told yes. What replaces it has to keep shell
-     * commands running without a question while letting exactly that one kind through.
+     * Codex must never stop an unattended tab on an interactive shell approval prompt. Under
+     * Codex's exec policy, any `granular` approval policy still prompts on commands flagged as
+     * dangerous (such as `rm -rf`), so nop must pass `approval_policy="never"` rather than a
+     * granular table.
      */
     @Test
-    fun `a codex run asks nothing about commands but lets an MCP server's form through to the user`() {
+    fun `a codex run sets approval_policy to never so dangerous commands cannot block unattended tabs`() {
         val command = Spawn.command(codex(), projectDir)
 
         assertFalse("--dangerously-bypass-approvals-and-sandbox" in command.argv)
         assertTrue("sandbox_mode=\"danger-full-access\"" in command.argv.configs())
         val policy = command.argv.configs().single { it.startsWith("approval_policy=") }
-        for (rejected in listOf("sandbox_approval", "rules", "request_permissions", "skill_approval")) {
-            assertTrue("$rejected=false" in policy, "$rejected must be rejected, not asked: $policy")
-        }
-        assertTrue("mcp_elicitations=true" in policy, policy)
+        assertEquals("approval_policy=\"never\"", policy)
+        assertFalse("granular" in policy, "granular policies still prompt on dangerous commands: $policy")
         assertTrue("approvals_reviewer=\"user\"" in command.argv.configs())
         assertTrue("notice.hide_rate_limit_model_nudge=true" in command.argv.configs())
     }

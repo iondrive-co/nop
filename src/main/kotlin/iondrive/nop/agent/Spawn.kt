@@ -32,8 +32,7 @@ data class AgentCommand(
  *
  * No CLI asks before it acts. This is a launcher for agents that are trusted to edit the project
  * they were opened on; a permission prompt the user cannot see the reason for, inside a TUI nop
- * does not parse, is worse than no prompt at all. The one question let through is an MCP server's
- * own, in Codex — see [CODEX_APPROVAL_POLICY].
+ * does not parse, is worse than no prompt at all. See [CODEX_APPROVAL_POLICY] for Codex.
  */
 object Spawn {
 
@@ -163,8 +162,8 @@ object Spawn {
             "sandbox_mode=\"danger-full-access\"",
             "-c",
             CODEX_APPROVAL_POLICY,
-            // The questions that policy lets through go to the person at the keyboard, not to
-            // Codex's automatic reviewer, whatever the account's config.toml says.
+            // Keep the reviewer pinned to the user rather than Codex's automatic reviewer,
+            // whatever the account's config.toml says.
             "-c",
             "approvals_reviewer=\"user\"",
             // Automated messages must never accept a suggestion to change the selected model.
@@ -198,20 +197,17 @@ object Spawn {
     }
 
     /**
-     * Codex's approval policy for the runs nop starts. With no sandbox, every category that could
-     * stop a shell command is rejected rather than asked about, so commands run without a word, as
-     * they did under `--dangerously-bypass-approvals-and-sandbox`. Only `mcp_elicitations` reaches
-     * the user: an MCP server's own form, drawn inline. Accepting it resumes the tool call that
-     * asked; declining or Esc leaves whatever it guards closed.
+     * Codex's approval policy for the runs nop starts.
      *
-     * The bypass flag answered those forms itself, `decline` without showing them, so a server that
-     * asks before it opens access could never be told yes. The same category also carries Codex's
-     * own "Allow the … MCP server to run tool …?" before every call to a tool not marked read-only,
-     * which nop turns off per server — see [McpServers.codexOverrides].
+     * `approval_policy="never"` is the only Codex policy that guarantees shell commands never stop
+     * on an interactive approval prompt. Under Codex's `exec_policy.rs`, any `granular` approval
+     * policy still routes commands flagged by `is_dangerous_command` (for example `rm -rf` or
+     * `rm -f` under `danger-full-access`) to `Decision::Prompt`, which hangs unattended tabs until
+     * a human answers. Passing `sandbox_mode` and `approval_policy` as explicit `-c` overrides
+     * rather than `--dangerously-bypass-approvals-and-sandbox` keeps [CodexLaunch] able to pass
+     * backend and client overrides separately.
      */
-    internal const val CODEX_APPROVAL_POLICY =
-        "approval_policy={granular={sandbox_approval=false,rules=false,mcp_elicitations=true," +
-            "request_permissions=false,skill_approval=false}}"
+    internal const val CODEX_APPROVAL_POLICY = "approval_policy=\"never\""
 
     /**
      * [text] as a TOML basic string, which is how `-c` reads a value: anything that doesn't parse as

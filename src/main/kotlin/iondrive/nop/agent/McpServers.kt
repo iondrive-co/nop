@@ -113,10 +113,8 @@ object McpServers {
      * CLI does not speak, or a name that isn't a bare TOML key — is left out rather than guessed at.
      *
      * Every server, these and the [configured] ones the account's config.toml already has, runs its
-     * tools without Codex asking first. [Spawn.CODEX_APPROVAL_POLICY] lets MCP questions through to
-     * the user so that a server's own form can reach them; the same category would otherwise put
-     * Codex's "Allow the … MCP server to run tool …?" in front of every call to a tool not marked
-     * read-only, and a tab would stop at each one.
+     * tools without Codex asking first, matching [Spawn.CODEX_APPROVAL_POLICY] so an MCP tool call
+     * never stops an unattended tab even if approval settings change.
      */
     internal fun codexOverrides(servers: Map<String, JsonObject>, configured: Set<String> = emptySet()): List<String> = buildList {
         val given = mutableSetOf<String>()

@@ -143,7 +143,7 @@ class CodexControlSmokeTest {
             assertTrue("Automated message ahead of the draft." in screen, screen)
             assertTrue("Preserve fixture launch instructions." in operation("capture")["requests"].toString())
             val context = operation("capture")["contexts"]!!.jsonArray.last().jsonObject
-            assertTrue(context["approval_policy"].obj()!!["granular"].obj()!!["mcp_elicitations"].bool())
+            assertEquals("never", context["approval_policy"].str())
             assertEquals("danger-full-access", context["sandbox_policy"].obj()!!["type"].str())
             operation("picker")
             deliver("Automated message while picking a model.")
@@ -186,7 +186,7 @@ class CodexControlSmokeTest {
             awaitScreen("Continue after reopening.")
             val resumedContext = operation("capture")["contexts"]!!.jsonArray.last().jsonObject
             assertEquals("danger-full-access", resumedContext["sandbox_policy"].obj()!!["type"].str())
-            assertTrue(resumedContext["approval_policy"].obj()!!["granular"].obj()!!["mcp_elicitations"].bool())
+            assertEquals("never", resumedContext["approval_policy"].str())
         } finally {
             runCatching { output.write("""{"op":"quit"}"""); output.newLine(); output.flush() }
             if (!fixture.waitFor(30, TimeUnit.SECONDS)) fixture.destroyForcibly()
