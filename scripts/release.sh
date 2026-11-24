@@ -71,9 +71,8 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     exit 1
 fi
 
-# GitHub runs its checks only once the tag is pushed, and a release whose Linux job fails still
-# publishes, just without the .deb or the Linux self-update. So run the same Linux checks here
-# first, on the commit being released, and stop if any fails.
+# The release workflow runs once the tag is pushed and blocks publishing if any check or
+# platform build fails. Run its Linux checks here first so a failing commit never gets tagged.
 if [[ "${NOP_RELEASE_SKIP_LOCAL_CI:-}" == 1 ]]; then
     echo "Skipping the local Linux checks (NOP_RELEASE_SKIP_LOCAL_CI=1)."
 else
@@ -111,7 +110,8 @@ git push origin "$BRANCH"
 git push origin "$TAG"
 
 echo
-echo "Released $TAG. Watch the build: https://github.com/iondrive-co/nop/actions"
+echo "Pushed $TAG. GitHub publishes it after the release workflow passes."
+echo "Watch the build: https://github.com/iondrive-co/nop/actions"
 }
 
 main "$@"

@@ -26,12 +26,26 @@ internal class SynchronizedOutput(
     var clearsStartUpdates: Boolean = false
     /** Full-screen and scrollback erases (`2J`/`3J`) precede Codex's synchronized redraw frame. */
     var screenClearsStartUpdates: Boolean = false
+    /** Scrollback erases (`3J`) start a held update so destructive clears can preserve history. */
+    var historyClearsStartUpdates: Boolean = false
     var beforeScreenClear: (() -> Unit)? = null
+    var beforeHistoryClear: (() -> Unit)? = null
+    var beforeViewportWipe: (() -> Unit)? = null
+    var onViewportWipeRow: ((Int) -> Unit)? = null
 
     fun eraseInDisplay(mode: Int) {
-        if (clearsStartUpdates || (screenClearsStartUpdates && (mode == 2 || mode == 3))) begin()
+        if (clearsStartUpdates || (screenClearsStartUpdates && (mode == 2 || mode == 3)) ||
+            (historyClearsStartUpdates && mode == 3)
+        ) {
+            begin()
+        }
         if (active && (mode == 2 || mode == 3)) beforeScreenClear?.invoke()
+        if (mode == 3) beforeHistoryClear?.invoke()
     }
+
+    fun viewportWipeStart() { beforeViewportWipe?.invoke() }
+
+    fun viewportWipeRow(erasedRows: Int) { onViewportWipeRow?.invoke(erasedRows) }
 
     /** Milliseconds since the update now in progress began. */
     val age: Long get() = clock() - startedAt
@@ -93,6 +107,8 @@ internal class SynchronizedOutputStream(
     private val pending = ArrayDeque<Char>()
     private var state = 0
     private var endPending = false
+    private var wipeState = 0
+    private var wipeRows = 0
 
     override fun getChar(): Char {
         finishPending()
@@ -105,9 +121,13 @@ internal class SynchronizedOutputStream(
                     2 -> when (ch) { '\u009c' -> 0; '\u001b' -> 4; else -> 2 }
                     else -> when (ch) { '\\', '\u009c' -> 0; '\u001b' -> state; else -> state - 2 }
                 }
+                resetWipe()
                 return ch
             }
-            if (ch != '\u001b' && ch != '\u009b') return ch
+            if (ch != '\u001b' && ch != '\u009b') {
+                resetWipe()
+                return ch
+            }
             val next = if (ch == '\u001b') read() else '['
             if (next == '[') {
                 val control = StringBuilder()
@@ -118,6 +138,7 @@ internal class SynchronizedOutputStream(
                 }
                 val last = control.last()
                 val parameters = control.dropLast(1).toString()
+                trackViewportWipe(last, parameters)
                 if (last == 'J') {
                     val mode = if (parameters.isEmpty()) 0 else parameters.toIntOrNull()
                     if (mode != null && mode in 0..3) output.eraseInDisplay(mode)
@@ -142,6 +163,7 @@ internal class SynchronizedOutputStream(
                 if (ch == '\u001b') pending.addLast('[')
                 control.forEach(pending::addLast)
             } else {
+                resetWipe()
                 pending.addLast(next)
                 state = when (next) { ']' -> 1; 'P', 'X', '^', '_' -> 2; else -> 0 }
             }
@@ -152,10 +174,54 @@ internal class SynchronizedOutputStream(
     override fun readNonControlCharacters(maxChars: Int): String {
         finishPending()
         output.touch()
-        if (pending.isEmpty()) return source.readNonControlCharacters(maxChars)
+        if (pending.isEmpty()) {
+            val text = source.readNonControlCharacters(maxChars)
+            if (text.isNotEmpty()) resetWipe()
+            return text
+        }
         val text = ArrayTerminalDataStream(pending.toList().toCharArray()).readNonControlCharacters(maxChars)
         repeat(text.length) { pending.removeFirst() }
         return text
+    }
+
+    /**
+     * Recognises in-place full-viewport wipes (`ESC[H` followed by repeated `ESC[2K ESC[1B]`, or
+     * `ESC[H ESC[2K` + repeated `ESC[K ESC[1B]`) before the first `ESC[2K` erases row 0.
+     */
+    private fun trackViewportWipe(finalByte: Char, parameters: String) {
+        val isHome = (finalByte == 'H' || finalByte == 'f') &&
+            (parameters.isEmpty() || parameters == ";" || parameters == "1" || parameters == "1;1" || parameters == "1;" || parameters == ";1")
+        val isLineErase = finalByte == 'K' && (parameters.isEmpty() || parameters == "0" || parameters == "2")
+        val isDownOne = finalByte == 'B' && (parameters.isEmpty() || parameters == "1")
+        when {
+            isHome -> {
+                wipeState = 1
+                wipeRows = 0
+            }
+            wipeState == 1 && finalByte == 'K' && parameters == "2" -> {
+                output.viewportWipeStart()
+                wipeRows = 1
+                wipeState = 2
+                output.viewportWipeRow(wipeRows)
+            }
+            wipeState == 2 && finalByte == 'K' && (parameters.isEmpty() || parameters == "0") -> {
+                // `j4r` emits `ESC[2K` then `ESC[K ESC[1B]` on row 0 before advancing down the viewport.
+            }
+            wipeState == 2 && isDownOne -> {
+                wipeState = 3
+            }
+            wipeState == 3 && isLineErase -> {
+                wipeRows++
+                wipeState = 2
+                output.viewportWipeRow(wipeRows)
+            }
+            else -> resetWipe()
+        }
+    }
+
+    private fun resetWipe() {
+        wipeState = 0
+        wipeRows = 0
     }
 
     override fun pushChar(ch: Char) { pending.addFirst(ch) }

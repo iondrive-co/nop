@@ -224,14 +224,18 @@ compose.desktop {
         // a large checkout (220k files) allocates ~470 MB of short-lived garbage. Squeezed into
         // what was left, that garbage outlived the young generation and was promoted, and nop spent
         // its days in back-to-back full collections (2,300 of them, 207 s, in one session). 2 GB
-        // gives it room to die young; G1 commits only what it uses, so a quiet nop stays small.
+        // gives it room to die young. A concurrent periodic collection lets G1 shrink the committed
+        // heap when the editor is quiet, even if it isn't allocating enough to trigger a collection.
         // String dedup reclaims the many identical strings the index produces (repeated file
         // paths, symbol names); it requires G1, which is already the default GC.
         // The native heap needs trimming as well. glibc keeps what a thread frees inside that
         // thread's malloc arena rather than giving it back, and Skia frees a paragraph's native
         // memory only when the GC reaches its Java wrapper, so a burst of text layout leaves
         // gigabytes resident long after it was freed. Trimming once a minute returns it.
-        jvmArgs += listOf("-Xmx2g", "-XX:+UseStringDeduplication", "-XX:TrimNativeHeapInterval=60000")
+        jvmArgs += listOf(
+            "-Xmx2g", "-XX:G1PeriodicGCInterval=60000",
+            "-XX:+UseStringDeduplication", "-XX:TrimNativeHeapInterval=60000",
+        )
 
         nativeDistributions {
             targetFormats(TargetFormat.AppImage, TargetFormat.Deb, TargetFormat.Dmg, TargetFormat.Msi)

@@ -21,8 +21,10 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import me.friwi.jcefmaven.CefAppBuilder
 import me.friwi.jcefmaven.MavenCefAppHandlerAdapter
+import me.friwi.jcefmaven.impl.step.init.CefInitializer
 import org.cef.CefApp
 import org.cef.CefClient
+import org.cef.OS
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.browser.CefRequestContext
@@ -114,9 +116,9 @@ object SlackBrowsers {
     @Volatile private var stopping = false
     @Volatile private var runtimeStarted = false
 
-    /** This process is about to be replaced, so Chromium is left running for the exec to end. */
+    /** Chromium is left running until process exit or replacement, after flushing cookies. */
     @Volatile
-    internal var replacing = false
+    internal var leavingRuntime = false
         private set
 
     @Synchronized
@@ -219,8 +221,9 @@ object SlackBrowsers {
         val profilePath = profile.toRealPath()
         runCatching { SlackSpelling.prepare(profilePath) }
             .onFailure { Log.warn("Could not prepare Slack spelling dictionaries: ${it.message}") }
+        val installDir = root.resolve(CefRuntime.directoryName).toFile()
         val builder = CefAppBuilder().apply {
-            setInstallDir(root.resolve(CefRuntime.directoryName).toFile())
+            setInstallDir(installDir)
             setProgressHandler { state, percent ->
                 progress("Preparing browser: ${state.name.lowercase().replace('_', ' ')}" +
                     if (percent >= 0) " (${percent.toInt()}%)" else "")
@@ -246,12 +249,21 @@ object SlackBrowsers {
             })
         }
         builder.install()
-        CefRuntime.verify(root.resolve(CefRuntime.directoryName))
-        builder.setSkipInstallation(true)
-        builder.build().also {
+        CefRuntime.verify(installDir.toPath())
+        val runtime = if (OS.isLinux()) {
+            // build() registers a JVM shutdown hook that disposes CEF. On Linux a windowed
+            // browser's Swing timer can still call into Chromium while that teardown runs.
+            // Initialise the verified runtime without the hook and let nop own the quit.
+            progress("Preparing browser: initializing")
+            CefInitializer.initialize(installDir, builder.jcefArgs, builder.cefSettings)
+        } else {
+            builder.setSkipInstallation(true)
+            builder.build()
+        }
+        runtime.also {
             runtimeStarted = true
             if (stopping) {
-                if (!replacing) it.dispose()
+                if (!leavingRuntime) it.dispose()
                 error("Browser is shutting down")
             }
             app = it
@@ -272,19 +284,25 @@ object SlackBrowsers {
      */
     @Synchronized
     fun leaveForExec() {
-        replacing = true
+        leaveRuntime()
+    }
+
+    private fun leaveRuntime() {
+        if (leavingRuntime) return
+        leavingRuntime = true
         stopping = true
         runCatching {
             check(app != null && CefApp.getState() == CefApp.CefAppState.INITIALIZED) { "not running" }
             check(CefCookieManager.getGlobalManager().flushStore { cookiesWritten.countDown() }) { "flush refused" }
         }.onFailure {
-            if (runtimeStarted) Log.info("Chromium's cookies were not written before the restart: ${it.message}")
+            if (runtimeStarted) Log.info("Chromium's cookies were not written before exit: ${it.message}")
             cookiesWritten.countDown()
         }
     }
 
     @Synchronized
     fun disposeAll() {
+        if (OS.isLinux()) leaveRuntime()
         stopping = true
         sessions.values.forEach { it.close() }
         sessions.clear()
@@ -292,7 +310,7 @@ object SlackBrowsers {
         projects.clear()
         val running = app ?: return
         app = null
-        if (replacing) return
+        if (leavingRuntime) return
         // Behind every close() above, each of which disposes its own client. A client disposed again
         // once its browser has closed reports itself gone again, which shuts the native runtime down a
         // second time, and that dereferences the context the first shutdown destroyed.
@@ -306,9 +324,9 @@ object SlackBrowsers {
     fun awaitShutdown(): Boolean {
         if (!runtimeStarted) return true
         try {
-            if (replacing) {
+            if (leavingRuntime) {
                 return cookiesWritten.await(2, TimeUnit.SECONDS).also {
-                    if (!it) Log.warn("Chromium did not finish writing its cookies before the restart")
+                    if (!it) Log.warn("Chromium did not finish writing its cookies before exit")
                 }
             }
             return terminated.await(10, TimeUnit.SECONDS).also {
@@ -539,8 +557,9 @@ class SlackBrowser internal constructor(private val project: Path, private val i
     fun close() {
         closed = true
         scope.cancel()
-        if (SlackBrowsers.replacing) return
+        if (SlackBrowsers.leavingRuntime) return
         SwingUtilities.invokeLater {
+            if (SlackBrowsers.leavingRuntime) return@invokeLater
             mutableState.value.browser?.uiComponent?.let { component ->
                 component.parent?.let { parent -> parent.remove(component); parent.revalidate(); parent.repaint() }
             }

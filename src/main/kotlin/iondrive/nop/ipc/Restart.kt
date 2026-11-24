@@ -63,12 +63,13 @@ object Restart {
 
     /**
      * Replaces this process with [launcher], given [args], before it has done anything that matters:
-     * how a nop starting up hands over to a newer version of itself (see
-     * [iondrive.nop.update.SelfUpdate.redirectAtStart]). Returns the errno only if the exec failed,
+     * how a nop starting up hands over to a newer version of itself or starts its JVM in a new
+     * cgroup. Keep [fds] open across the exec when continuing an in-place restart.
+     * Returns the errno only if the exec failed,
      * and this is then still the nop it was, which carries on starting.
      */
-    fun execNow(launcher: Path, args: List<String>): Int {
-        iondrive.nop.terminal.Posix.keepOnlyAcrossExec(emptyList())
+    fun execNow(launcher: Path, args: List<String>, fds: Collection<Int> = emptyList()): Int {
+        iondrive.nop.terminal.Posix.keepOnlyAcrossExec(fds)
         return iondrive.nop.terminal.Posix.exec(launcher.toString(), listOf(launcher.toString()) + args, successorEnvironment(System.getenv()))
     }
 

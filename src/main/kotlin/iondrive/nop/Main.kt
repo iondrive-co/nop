@@ -188,9 +188,12 @@ fun main(args: Array<String>) {
     // Otherwise, if another nop is already running, hand the requested paths off to it (or just ask
     // it to come to the foreground when no paths were supplied) and exit. The primary owns every
     // window, so it can raise the one that already holds the project rather than opening a second.
-    val restartedInPlace = adoptFrom != null && Handover.adopt(adoptFrom)
-    if (!restartedInPlace && SingleInstance.tryForward(argPaths, Settings.configRoot)) {
-        exitProcess(0)
+    if (adoptFrom == null) {
+        if (SingleInstance.tryForward(argPaths, Settings.configRoot)) exitProcess(0)
+        LinuxMemoryScope.start(args, adopting = false)
+    } else {
+        LinuxMemoryScope.start(args, adopting = true)
+        if (!Handover.adopt(adoptFrom) && SingleInstance.tryForward(argPaths, Settings.configRoot)) exitProcess(0)
     }
 
     // Only the nop that owns the windows backs the sessions up — see [Backup].

@@ -4,6 +4,7 @@ import iondrive.nop.RestartInPlace
 import iondrive.nop.ipc.Restart
 import iondrive.nop.terminal.Posix
 import org.cef.CefApp
+import org.cef.OS
 import org.cef.callback.CefCookieVisitor
 import org.cef.network.CefCookie
 import org.cef.network.CefCookieManager
@@ -32,7 +33,7 @@ object CefShutdownSmoke {
 
     private val cases = listOf(
         "quit-page-never-shown", "quit-page-shown", "quit-after-its-window-closed", "quit-one-page-shown-one-not",
-        "quit-after-reopening", "quit-while-opening", "restart", "restart-after-its-window-closed",
+        "quit-after-reopening", "quit-while-opening", "check-quit-cookie", "restart", "restart-after-its-window-closed",
     )
 
     @JvmStatic
@@ -59,8 +60,8 @@ object CefShutdownSmoke {
     private fun runAll(scratch: Path) {
         val data = scratch.resolve("data")
         val failed = cases.filterNot { name ->
-            // The runtime stays between cases, to be unpacked once; the profile does not.
-            data.resolve("nop/browser/slack").toFile().deleteRecursively()
+            // Reopen the preceding quit's profile in a fresh JVM to verify the cookie reached disk.
+            if (name != "check-quit-cookie") data.resolve("nop/browser/slack").toFile().deleteRecursively()
             val project = scratch.resolve("project").also(Files::createDirectories)
             val output = scratch.resolve("$name.log")
             val process = ProcessBuilder(
@@ -119,9 +120,20 @@ object CefShutdownSmoke {
                 awaitLoaded(project)
             }
             "quit-while-opening" -> {
-                SlackBrowsers.connect(project, "about:blank")
-                val browser = browserOf(project)
-                SwingUtilities.invokeAndWait { frameHolding(browser.uiComponent) }
+                showPage(project)
+                setCookie()
+                val other = project.resolveSibling("opening-project").also(Files::createDirectories)
+                SlackBrowsers.connect(other, "about:blank")
+                val browser = browserOf(other)
+                // Keep the creation queued on the Swing thread when the windows close.
+                return quit {
+                    frameHolding(browser.uiComponent)
+                    browser.createImmediately()
+                }
+            }
+            "check-quit-cookie" -> {
+                showPage(project)
+                check(cookieIsSet()) { "the cookie did not survive quit while opening another page" }
             }
             "restart" -> return restartFirstHalf(project, windowsGoFirst = false)
             "restart-after-its-window-closed" -> return restartFirstHalf(project, windowsGoFirst = true)
@@ -136,26 +148,32 @@ object CefShutdownSmoke {
     }
 
     /** What nop's windows closing does at a quit: they go first, and Chromium after them. */
-    private fun quit() {
+    private fun quit(beforeClosing: () -> Unit = {}) {
         SwingUtilities.invokeAndWait {
+            beforeClosing()
             java.awt.Window.getWindows().forEach { it.dispose() }
             SlackBrowsers.disposeAll()
         }
-        check(SlackBrowsers.awaitShutdown()) { "Chromium did not terminate" }
-        check(CefApp.getState() == CefApp.CefAppState.TERMINATED) { "Chromium is ${CefApp.getState()}" }
-        // Whatever was queued behind the native shutdown has had its turn when the process is still here.
+        check(SlackBrowsers.awaitShutdown()) { "Chromium did not finish preparing for quit" }
+        val expected = if (OS.isLinux()) CefApp.CefAppState.INITIALIZED else CefApp.CefAppState.TERMINATED
+        check(CefApp.getState() == expected) { "Chromium is ${CefApp.getState()}, expected $expected" }
+        // Give queued Swing work time to run before ending the JVM.
         Thread.sleep(2_000)
+        check(CefApp.getState() == expected) { "Chromium changed to ${CefApp.getState()} late in quit" }
     }
 
-    private fun restartFirstHalf(project: Path, windowsGoFirst: Boolean) {
-        showPage(project)
+    private fun setCookie() {
         check(CefCookieManager.getGlobalManager().setCookie(COOKIE_URL, CefCookie(
             COOKIE_NAME, "1", "cookie.test", "/", true, false,
             Date(), Date(), true, Date(System.currentTimeMillis() + TimeUnit.DAYS.toMillis(1)),
         ))) { "the cookie was refused" }
-        // setCookie only queues the cookie. A page's cookies are in the store long before a restart, so
-        // the restart starts once this one is.
+        // setCookie only queues the cookie. Wait for it to reach the in-memory store.
         check(cookieIsSet()) { "the cookie was never set" }
+    }
+
+    private fun restartFirstHalf(project: Path, windowsGoFirst: Boolean) {
+        showPage(project)
+        setCookie()
         // RestartInPlace.prepare, then the windows closing as they do on the way to the exec.
         SwingUtilities.invokeAndWait { SlackBrowsers.leaveForExec() }
         if (windowsGoFirst) closeWindowsAWhileBeforeTheBrowsers()

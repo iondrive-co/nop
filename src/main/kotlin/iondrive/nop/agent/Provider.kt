@@ -53,7 +53,7 @@ enum class Provider(
     val reasoningLevels: List<String>
         get() = when (this) {
             Anthropic -> CLAUDE_THINKING_BUDGETS.keys.toList()
-            OpenAI -> listOf("minimal", "low", "medium", "high")
+            OpenAI -> listOf("minimal", "low", "medium", "high", "xhigh")
             Antigravity -> listOf("low", "medium", "high")
             Local -> emptyList()
         }

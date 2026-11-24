@@ -1,5 +1,6 @@
 package iondrive.nop.lang
 
+import iondrive.nop.LinuxMemoryScope
 import iondrive.nop.terminal.InheritedEnvironment
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -162,7 +163,8 @@ class GradleClasspath(
                 "--console=plain", "--no-configuration-cache", "--no-configure-on-demand", "--init-script", script.toString(),
                 "-Dnop.gradle.root=${root.canonicalPath}", "-Dnop.gradle.output=$output", ":nopExportJavaModel",
             )
-            val builder = ProcessBuilder(command).directory(root).redirectErrorStream(true).redirectOutput(log)
+            val builder = ProcessBuilder(LinuxMemoryScope.workload(command))
+                .directory(root).redirectErrorStream(true).redirectOutput(log)
             val environment = InheritedEnvironment.of(builder.environment()).apply {
                 remove("_JPACKAGE_LAUNCHER")
                 remove("LD_LIBRARY_PATH")

@@ -11,6 +11,7 @@ import com.pty4j.PtyProcessBuilder
 import iondrive.nop.agent.AgentCommand
 import com.pty4j.unix.Pty
 import com.pty4j.unix.UnixPtyProcess
+import iondrive.nop.LinuxMemoryScope
 import iondrive.nop.Log
 import iondrive.nop.launchers.Launcher
 import java.awt.Color
@@ -73,6 +74,7 @@ class TerminalSession private constructor(
      */
     private val nopPrompts: List<String>? = null,
     private val screenClearsStartUpdates: Boolean = false,
+    private val preserveScrollback: Boolean = false,
     private val prepareCommand: (() -> AgentCommand)? = null,
 ) {
     /** Whether the child process is currently alive. Compose-observable so the header updates. */
@@ -295,9 +297,12 @@ class TerminalSession private constructor(
         // has even been laid out.
         val w = NopTerminalWidget(adopted?.columns ?: INITIAL_COLUMNS, adopted?.rows ?: INITIAL_ROWS, s)
         w.onBranchHere = onBranchHere
-        (w.terminalPanel as NopTerminalPanel).synchronizedOutput.apply {
-            clearsStartUpdates = env["AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS"] == "1"
-            this.screenClearsStartUpdates = this@TerminalSession.screenClearsStartUpdates
+        (w.terminalPanel as NopTerminalPanel).apply {
+            preserveScrollback = this@TerminalSession.preserveScrollback
+            synchronizedOutput.apply {
+                clearsStartUpdates = env["AGY_CLI_DISABLE_ESCAPE_SEQUENCE_OPTIMIZATIONS"] == "1"
+                this.screenClearsStartUpdates = this@TerminalSession.screenClearsStartUpdates
+            }
         }
         commandCopies?.let(w::showCommandCopies)
         // Underlines the http(s) URLs the run prints and makes them open in the browser on click.
@@ -660,7 +665,7 @@ class TerminalSession private constructor(
             factory(argv, childEnv, workingDir)
         } else {
             PtyProcessBuilder()
-                .setCommand(argv.toTypedArray())
+                .setCommand(LinuxMemoryScope.workload(argv).toTypedArray())
                 .setEnvironment(childEnv)
                 .setDirectory(workingDir.absolutePath)
                 .setInitialColumns(INITIAL_COLUMNS)
@@ -1034,6 +1039,7 @@ class TerminalSession private constructor(
                 adopted = adopted,
                 nopPrompts = nopPrompts,
                 screenClearsStartUpdates = screenClearsStartUpdates,
+                preserveScrollback = true,
                 prepareCommand = prepareCommand,
             )
 

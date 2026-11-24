@@ -11,9 +11,30 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag || github.ref }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run tests
+        run: xvfb-run --auto-servernum ./gradlew test --no-daemon
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -38,7 +59,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag || github.ref }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -81,8 +102,8 @@ jobs:
       # tarball; update-linux-x64.json listing every file in it by sha256; a delta tarball of only the
       # files that differ from the previous release's, which a nop on that release downloads instead;
       # and update-linux-x64.json.sig, an Ed25519 signature over the manifest made with
-      # NOP_UPDATE_SIGNING_KEY (scripts/update-signing-key.sh). A release without the signature is
-      # still published, but no nop will update itself to it.
+      # NOP_UPDATE_SIGNING_KEY (scripts/update-signing-key.sh). Tagged builds require the signature
+      # so existing installations can upgrade to the release.
       - name: Self-update bundle (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -94,6 +115,10 @@ jobs:
           version="$(grep -E '^[[:space:]]*packageVersion[[:space:]]*=' build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
           if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
             echo "Tag $GITHUB_REF_NAME does not match packageVersion $version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* && -z "$SIGNING_KEY" ]]; then
+            echo "::error::NOP_UPDATE_SIGNING_KEY is required to publish a Linux update."
             exit 1
           fi
           platform=linux-x64
@@ -132,13 +157,54 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: release/*
+          if-no-files-found: error
           retention-days: 14
 
+  publish:
+    name: Publish GitHub release
+    needs: [test, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Verify release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for pattern in \
+            'release/*.deb' \
+            'release/*.msi' \
+            'release/*.dmg' \
+            'release/nop-*-linux-x64.tar.gz' \
+            'release/update-linux-x64.json' \
+            'release/update-linux-x64.json.sig'; do
+            matches=( $pattern )
+            if [[ ${#matches[@]} -eq 0 || ! -e "${matches[0]}" ]]; then
+              echo "Missing required release artifact: $pattern" >&2
+              exit 1
+            fi
+            for artifact in "${matches[@]}"; do
+              if [[ ! -f "$artifact" || ! -s "$artifact" ]]; then
+                echo "Invalid release artifact: $artifact" >&2
+                exit 1
+              fi
+            done
+          done
+          ls -la release/
+
       - name: Attach to GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
+          fail_on_unmatched_files: true
           draft: false
           generate_release_notes: true
         env:

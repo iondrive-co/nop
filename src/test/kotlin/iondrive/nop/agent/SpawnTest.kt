@@ -174,11 +174,12 @@ class SpawnTest {
     }
 
     @Test
-    fun `codex reasoning goes through the config override, quoted as the CLI expects`() {
-        val command = Spawn.command(codex(model = "gpt-5.5-codex", reasoning = "high"), projectDir)
+    fun `codex offers extra high reasoning and passes it as a quoted config override`() {
+        assertTrue("xhigh" in Provider.OpenAI.reasoningLevels)
+        val command = Spawn.command(codex(model = "gpt-5.5-codex", reasoning = "xhigh"), projectDir)
 
         assertEquals("gpt-5.5-codex", command.argv.after("-m"))
-        assertTrue("model_reasoning_effort=\"high\"" in command.argv.configs(), "${command.argv}")
+        assertTrue("model_reasoning_effort=\"xhigh\"" in command.argv.configs(), "${command.argv}")
     }
 
     @Test

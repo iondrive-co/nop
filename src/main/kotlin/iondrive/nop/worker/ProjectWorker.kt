@@ -1,5 +1,6 @@
 package iondrive.nop.worker
 
+import iondrive.nop.LinuxMemoryScope
 import iondrive.nop.Log
 import iondrive.nop.ipc.Restart
 import java.io.BufferedWriter
@@ -145,7 +146,7 @@ internal object ProjectWorker {
         val command = command() ?: throw Unavailable("no launcher to start a project worker with")
         val env = workerEnvironment()
         val process = try {
-            ProcessBuilder(command)
+            ProcessBuilder(LinuxMemoryScope.workload(command))
                 .apply {
                     environment().clear()
                     environment().putAll(env)

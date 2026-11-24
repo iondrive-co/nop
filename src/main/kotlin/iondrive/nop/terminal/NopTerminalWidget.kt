@@ -126,9 +126,13 @@ internal class NopTerminalWidget(
                     panel.showRowsAboveBottom(rowsAboveBottom)
                     userScrolledUp = panel.verticalScrollModel.value < 0
                 }
-                rowsAboveBottom != null || !userScrolledUp -> scrollToBottom()
+                rowsAboveBottom != null || !userScrolledUp -> {
+                    panel.flushPendingScroll()
+                    scrollToBottom()
+                }
             }
         }
+        panel.onScrollbackRestored = { markMessagesSoon() }
         panel.onScrollInput = {
             settings.nudgeActive()
             userScrolledUp = panel.verticalScrollModel.value < 0
@@ -304,6 +308,13 @@ internal class NopTerminalPanel(
      * reader was, 0 at the bottom; otherwise null.
      */
     var onSynchronizedOutputFinished: ((rowsAboveBottom: Int?) -> Unit)? = null
+    var onScrollbackRestored: (() -> Unit)? = null
+    var preserveScrollback: Boolean = false
+        set(value) {
+            field = value
+            synchronizedOutput.historyClearsStartUpdates = value
+        }
+    internal val scrollbackPreserver = ScrollbackPreserver()
     private var disposed = false
     private data class CompletedFrame(
         val image: BufferedImage,
@@ -328,6 +339,9 @@ internal class NopTerminalPanel(
 
     /** Ends an update whose program stopped writing before it finished it. */
     private val expiryTimer = Timer(EXPIRY_CHECK_MS) { synchronizedOutput.expire() }
+
+    /** Reconciles an unbracketed full-viewport wipe once its replacement screen settles. */
+    private val wipeSettleTimer = Timer(WIPE_SETTLE_MS) { reconcileUnbracketedWipe() }.apply { isRepeats = false }
 
     /**
      * How many rows above the bottom the reader was when the update in progress cleared the
@@ -364,10 +378,15 @@ internal class NopTerminalPanel(
             finishingUpdate.set(true)
             // A repaint the timer has not got to yet would otherwise draw the update's first rows.
             if (repaintDue?.getAndSet(false) == true) repaintHeld.set(true)
-            SwingUtilities.invokeLater { if (!disposed && synchronizedOutput.active) expiryTimer.start() }
+            SwingUtilities.invokeLater {
+                wipeSettleTimer.stop()
+                if (!disposed && synchronizedOutput.active) expiryTimer.start()
+            }
         } else {
             val generation = updateGeneration.get()
-            val rowsAboveBottom = rebuildAnchor?.let(::findHistoryAnchor) ?: rebuiltFrom
+            val addedToBottom = if (preserveScrollback) scrollbackPreserver.reconcile(terminalTextBuffer) else 0
+            val rowsAboveBottom = rebuildAnchor?.let(::findHistoryAnchor)
+                ?: rebuiltFrom?.let { if (it > 0) it + addedToBottom else it }
             rebuiltFrom = null
             rebuildAnchor = null
             SwingUtilities.invokeLater {
@@ -382,10 +401,27 @@ internal class NopTerminalPanel(
         }
     }
 
+    private fun reconcileUnbracketedWipe() {
+        if (disposed || synchronizedOutput.active || !preserveScrollback) return
+        val addedToBottom = scrollbackPreserver.reconcile(terminalTextBuffer)
+        val rowsAboveBottom = rebuildAnchor?.let(::findHistoryAnchor)
+            ?: rebuiltFrom?.let { if (it > 0) it + addedToBottom else it }
+        rebuiltFrom = null
+        rebuildAnchor = null
+        if (addedToBottom > 0) {
+            if (rowsAboveBottom != null && rowsAboveBottom > 0) showRowsAboveBottom(rowsAboveBottom)
+            else flushPendingScroll()
+            onScrollbackRestored?.invoke()
+            super.repaint()
+        }
+    }
+
     override fun dispose() {
         disposed = true
         discardCompletedFrame()
         expiryTimer.stop()
+        wipeSettleTimer.stop()
+        scrollbackPreserver.clear()
         synchronizedOutput.reset()
         super.dispose()
     }
@@ -398,7 +434,28 @@ internal class NopTerminalPanel(
 
     init {
         synchronizedOutput.beforeScreenClear = ::captureHistoryAnchor
+        synchronizedOutput.beforeHistoryClear = {
+            if (preserveScrollback) scrollbackPreserver.beforeHistoryClear(terminalTextBuffer)
+        }
+        synchronizedOutput.beforeViewportWipe = {
+            if (preserveScrollback) {
+                scrollbackPreserver.beforeViewportWipe(terminalTextBuffer)
+            }
+        }
+        synchronizedOutput.onViewportWipeRow = { rows ->
+            if (preserveScrollback && scrollbackPreserver.noteViewportWipeRow(terminalTextBuffer, rows)) {
+                captureHistoryAnchor()
+                if (!synchronizedOutput.active) {
+                    SwingUtilities.invokeLater { if (!disposed && !synchronizedOutput.active) wipeSettleTimer.restart() }
+                }
+            }
+        }
         verticalScrollModel.addChangeListener { viewingHistory = verticalScrollModel.value < 0 }
+        terminalTextBuffer.addModelListener {
+            if (preserveScrollback && !synchronizedOutput.active && scrollbackPreserver.hasConfirmedViewportWipe) {
+                SwingUtilities.invokeLater { if (!disposed && !synchronizedOutput.active) wipeSettleTimer.restart() }
+            }
+        }
         terminalTextBuffer.addChangesListener(object : TextBufferChangesListener {
             override fun historyCleared() {
                 if (!synchronizedOutput.active || rebuiltFrom != null) return
@@ -772,6 +829,9 @@ internal class NopTerminalPanel(
 
         /** How often a held update checks whether its program has stopped writing. */
         const val EXPIRY_CHECK_MS = 250
+
+        /** Quiet interval before an unbracketed full-viewport wipe reconciles its saved rows. */
+        const val WIPE_SETTLE_MS = 250
     }
 }
 
