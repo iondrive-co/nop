@@ -26,6 +26,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFileRefusal
+import iondrive.nop.TextFiles
 import iondrive.nop.diff.DiffComputer
 import iondrive.nop.diff.DiffResult
 import iondrive.nop.diff.DiffRow
@@ -53,6 +56,7 @@ fun CommitDiffView(
     findTrigger: Int = 0,
 ) {
     var loading by remember(tab.id) { mutableStateOf(true) }
+    var refusal by remember(tab.id) { mutableStateOf<TextFileRefusal?>(null) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
     var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
@@ -64,23 +68,43 @@ fun CommitDiffView(
     // again / F5" mean the same thing on every diff surface.
     LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
         try {
-            val (oldText, newText, created) = withContext(Dispatchers.IO) {
+            val (oldRead, newRead) = withContext(Dispatchers.IO) {
                 val parentRev = "${tab.sha}^"
                 val old = when (tab.file.changeType) {
-                    CommitFileChange.ADDED -> null
-                    else -> repo.readContentAt(parentRev, tab.file.path)
+                    CommitFileChange.ADDED -> TextFileRead.Missing
+                    else -> repo.readTextAt(parentRev, tab.file.path)
                 }
-                val new = when (tab.file.changeType) {
-                    CommitFileChange.DELETED -> ""
-                    else -> repo.readContentAt(tab.sha, tab.file.path) ?: ""
+                val new = when {
+                    old is TextFileRead.Refused -> TextFileRead.Missing
+                    tab.file.changeType == CommitFileChange.DELETED -> TextFileRead.Missing
+                    else -> repo.readTextAt(tab.sha, tab.file.path)
                 }
-                Triple(old ?: "", new, old == null && tab.file.changeType != CommitFileChange.DELETED)
+                old to new
             }
-            absentBefore = created
+            val refused = (oldRead as? TextFileRead.Refused)?.reason ?: (newRead as? TextFileRead.Refused)?.reason
+            if (refused != null) {
+                refusal = refused
+                result = null
+                error = null
+                loading = false
+                return@LaunchedEffect
+            }
+            val unreadable = (oldRead as? TextFileRead.Unreadable)?.message ?: (newRead as? TextFileRead.Unreadable)?.message
+            if (unreadable != null) {
+                refusal = null
+                error = unreadable
+                loading = false
+                return@LaunchedEffect
+            }
+            absentBefore = oldRead is TextFileRead.Missing && tab.file.changeType != CommitFileChange.DELETED
+            val oldText = (oldRead as? TextFileRead.Content)?.text ?: ""
+            val newText = (newRead as? TextFileRead.Content)?.text ?: ""
             result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText, ignoreWhitespace) }
+            refusal = null
             error = null
             loading = false
         } catch (t: Throwable) {
+            refusal = null
             error = t.message ?: t::class.simpleName
             loading = false
         }
@@ -93,6 +117,11 @@ fun CommitDiffView(
     CompositionLocalProvider(LocalDiffTokenizer provides tokenize, LocalFileNameBadge provides fileName) {
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
+            refusal != null -> DiffRefusalView(
+                refusal!!,
+                file = File(tab.repoRoot, tab.file.path),
+                showFileNameBadge = true,
+            )
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Could not load diff: $error") }
             result != null -> ReadOnlyDiffList(
                 result = result!!,
@@ -129,6 +158,7 @@ fun RevisionDiffView(
     findTrigger: Int = 0,
 ) {
     var loading by remember(tab.id) { mutableStateOf(true) }
+    var refusal by remember(tab.id) { mutableStateOf<TextFileRefusal?>(null) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
     var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
@@ -139,20 +169,41 @@ fun RevisionDiffView(
         try {
             val rel = repoRelativePath(repo, tab.file)
             if (rel == null) {
+                refusal = null
                 error = "That file is outside this repository."
                 loading = false
                 return@LaunchedEffect
             }
-            val (oldText, newText) = withContext(Dispatchers.IO) {
+            val (oldRead, newRead) = withContext(Dispatchers.IO) {
+                val working = TextFiles.read(tab.file)
                 // Absent from that commit's tree means the file didn't exist yet (or the commit is
                 // the one that deleted it), so the whole of it reads as added — which is the truth.
-                val old = repo.readContentAt(tab.sha, rel) ?: ""
-                old to runCatching { tab.file.readText() }.getOrDefault("")
+                val old = if (working is TextFileRead.Refused) TextFileRead.Missing else repo.readTextAt(tab.sha, rel)
+                old to working
             }
+            val refused = (newRead as? TextFileRead.Refused)?.reason ?: (oldRead as? TextFileRead.Refused)?.reason
+            if (refused != null) {
+                refusal = refused
+                result = null
+                error = null
+                loading = false
+                return@LaunchedEffect
+            }
+            val unreadable = (oldRead as? TextFileRead.Unreadable)?.message ?: (newRead as? TextFileRead.Unreadable)?.message
+            if (unreadable != null) {
+                refusal = null
+                error = unreadable
+                loading = false
+                return@LaunchedEffect
+            }
+            val oldText = (oldRead as? TextFileRead.Content)?.text ?: ""
+            val newText = (newRead as? TextFileRead.Content)?.text ?: ""
             result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText, ignoreWhitespace) }
+            refusal = null
             error = null
             loading = false
         } catch (t: Throwable) {
+            refusal = null
             error = t.message ?: t::class.simpleName
             loading = false
         }
@@ -162,6 +213,7 @@ fun RevisionDiffView(
     CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
+            refusal != null -> DiffRefusalView(refusal!!, file = tab.file, showFileNameBadge = true)
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
                 Text("Could not load diff: $error")
             }

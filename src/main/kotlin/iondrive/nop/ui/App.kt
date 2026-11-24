@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.text.input.TextFieldState
 import iondrive.nop.Log
 import iondrive.nop.Settings
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFiles
 import iondrive.nop.browser.SlackBrowsers
 import iondrive.nop.SplitRatios
 import iondrive.nop.agent.Account
@@ -1390,6 +1392,25 @@ fun App(
         BackgroundCommits.finish(run)
     }
 
+    // Push the reverted on-disk content into any editor tab open on [file], so it stops showing
+    // now-discarded edits. Consult [editStore.editorsFor] first so a file with no open buffer is
+    // never read back, and go through [TextFiles.read] so reverting back to a binary or oversized
+    // file evicts the stale buffer instead of loading it into heap.
+    suspend fun syncEditorsAfterRevert(file: File) {
+        val editors = editStore.editorsFor(file)
+        if (editors.isEmpty()) return
+        when (val read = withContext(Dispatchers.IO) { TextFiles.read(file) }) {
+            is TextFileRead.Content -> editors.forEach { it.adoptDiskText(read.text) }
+            is TextFileRead.Refused -> {
+                editStore.closeFor(file)
+                tabsState.tabs
+                    .filter { it.sourceFile.absolutePath == file.absolutePath }
+                    .forEach { tabsState.requestReload(it.id) }
+            }
+            TextFileRead.Missing, is TextFileRead.Unreadable -> Unit
+        }
+    }
+
     // Discard a single file's local changes, restoring it to its last committed state (or deleting
     // it when it's a brand-new file). The on-disk content just changed, so any open editor buffer
     // for it must drop its in-app edits — otherwise a later save would re-introduce the very changes
@@ -1402,15 +1423,7 @@ fun App(
                 withContext(Dispatchers.IO) { runCatching { repo.revertFile(change) } }
                 val reverted = File(repo.rootDir.toFile(), change.path)
                 if (reverted.isFile) {
-                    // Push the reverted on-disk content into any editor tab open on this file, so it
-                    // stops showing the now-discarded edits. Find those buffers first and read the file
-                    // only when one exists: reverting a large binary (never open in the text editor)
-                    // must not pull its whole content into heap — an unconditional read would OOM-crash the app.
-                    val editors = editStore.editorsFor(reverted)
-                    if (editors.isNotEmpty()) {
-                        val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
-                        if (disk != null) editors.forEach { it.adoptDiskText(disk) }
-                    }
+                    syncEditorsAfterRevert(reverted)
                 } else {
                     closeTabsUnder(reverted)
                 }
@@ -1434,13 +1447,7 @@ fun App(
                     for (change in changes) {
                         val reverted = File(repo.rootDir.toFile(), change.path)
                         if (reverted.isFile) {
-                            // Read the file only when a buffer is actually open on it — see
-                            // performRevert: an unconditional read of a large binary would OOM-crash the app.
-                            val editors = editStore.editorsFor(reverted)
-                            if (editors.isNotEmpty()) {
-                                val disk = withContext(Dispatchers.IO) { runCatching { reverted.readText() }.getOrNull() }
-                                if (disk != null) editors.forEach { it.adoptDiskText(disk) }
-                            }
+                            syncEditorsAfterRevert(reverted)
                         } else {
                             closeTabsUnder(reverted)
                         }
@@ -1489,14 +1496,7 @@ fun App(
                     val outcome = withContext(Dispatchers.IO) { repo.revertCommit(request.sha) }
                     revertedNothing = outcome.isEmpty
                     for (path in outcome.updated) {
-                        val file = File(repo.rootDir.toFile(), path)
-                        // Read the file only when a buffer is actually open on it — see
-                        // performRevert: an unconditional read of a large binary would OOM-crash the app.
-                        val editors = editStore.editorsFor(file)
-                        if (editors.isNotEmpty()) {
-                            val disk = withContext(Dispatchers.IO) { runCatching { file.readText() }.getOrNull() }
-                            if (disk != null) editors.forEach { it.adoptDiskText(disk) }
-                        }
+                        syncEditorsAfterRevert(File(repo.rootDir.toFile(), path))
                     }
                     for (path in outcome.removed) {
                         closeTabsUnder(File(repo.rootDir.toFile(), path), includeHistoryTabs = false)
@@ -1674,7 +1674,7 @@ fun App(
             val done = mutableListOf<Pair<File, String>>()
             for ((rel, ranges) in plan.edits) {
                 val file = File(root, rel)
-                val before = runCatching { file.readText() }.getOrNull()
+                val before = (TextFiles.read(file) as? TextFileRead.Content)?.text
                     ?: return@withContext Result.failure(IOException("Could not read $rel"))
                 val after = JavaRename.applyEdits(before, ranges, plan.newName)
                 if (after == before) continue
@@ -2340,20 +2340,29 @@ fun App(
                                             Text("Open a markdown file to see it rendered here")
                                         }
                                     } else {
-                                        // Reads the live buffer, not the file: the preview has always
-                                        // tracked what the user is typing rather than what was last
-                                        // saved, and the editor beside it is writing into this very
-                                        // TextFieldState.
-                                        val edit = editStore.edit(previewTab)
-                                        // Clipped: squeezed past the width its longest word needs,
-                                        // the rendered text lays out wider than the panel it was
-                                        // given and would otherwise spill over the viewer beside it.
-                                        Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
-                                            MarkdownPreview(
-                                                text = edit.state.text.toString(),
-                                                modifier = Modifier.fillMaxSize(),
-                                                scroll = edit.previewScroll,
-                                            )
+                                        // Reads the live buffer, not the file: the preview tracks
+                                        // what the user is typing rather than what was last saved,
+                                        // and the editor beside it writes into this TextFieldState.
+                                        when (val opened = editStore.open(previewTab)) {
+                                            is OpenEditResult.Refused -> Box(
+                                                modifier = Modifier.fillMaxSize().padding(16.dp),
+                                                contentAlignment = androidx.compose.ui.Alignment.Center,
+                                            ) {
+                                                Text(previewRefusalMessage(opened.reason))
+                                            }
+                                            is OpenEditResult.Ready -> {
+                                                val edit = opened.edit
+                                                // Clipped: squeezed past the width its longest word needs,
+                                                // the rendered text lays out wider than the panel it was
+                                                // given and would otherwise spill over the viewer beside it.
+                                                Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
+                                                    MarkdownPreview(
+                                                        text = edit.state.text.toString(),
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        scroll = edit.previewScroll,
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 },

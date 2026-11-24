@@ -71,10 +71,19 @@
         ${scope} :is(a, .c-link) { color: var(--nop-accent) !important; }
         ${scope} .p-channel_sidebar :is(.p-channel_sidebar__channel, .p-channel_sidebar__link,
             .p-channel_sidebar__name, .p-channel_sidebar__section_heading,
-            .p-channel_sidebar__section_heading_label, .p-channel_sidebar__channel_icon),
-        ${scope} .p-channel_sidebar :is(.p-channel_sidebar__name, .p-channel_sidebar__section_heading_label) * {
+            .p-channel_sidebar__section_heading_label,
+            .p-channel_sidebar__channel_icon:not(.c-presence--active)),
+        ${scope} .p-channel_sidebar :is(.p-channel_sidebar__name, .p-channel_sidebar__section_heading_label) *:not(.c-presence--active) {
             color: var(--nop-foreground) !important;
             opacity: 1 !important;
+        }
+        ${scope} .p-channel_sidebar__channel--selected .c-presence--active {
+            color: var(--dt_color-theme-base-inv-hgl-2, #2bac76) !important;
+        }
+        /* Keep text selection clearly visible in both themes regardless of embedded window focus. */
+        :where(${scope}) ::selection {
+            background: var(--nop-text-selection);
+            color: var(--nop-foreground);
         }
         ${scope} :is(.c-timestamp, .c-timestamp__label, .c-message_kit__timestamp, [data-qa="message_timestamp"]),
         ${scope} :is(.c-timestamp, .c-timestamp__label, .c-message_kit__timestamp, [data-qa="message_timestamp"]) * {
@@ -141,6 +150,9 @@
         root.style.setProperty("--nop-raised-hover", "color-mix(in srgb, var(--nop-foreground) 14%, var(--nop-raised))");
         root.style.setProperty("--nop-outline", "color-mix(in srgb, var(--nop-foreground) 40%, var(--nop-background))");
         root.style.setProperty("--nop-shadow", appearance.dark ? "rgba(0, 0, 0, .55)" : "rgba(0, 0, 0, .16)");
+        root.style.setProperty("--nop-text-selection", appearance.dark
+            ? "color-mix(in srgb, var(--nop-accent) 45%, var(--nop-background))"
+            : "color-mix(in srgb, var(--nop-accent) 32%, var(--nop-background))");
     }
 
     function themeTokens(sidebar) {
@@ -151,6 +163,9 @@
         }
         const rules = [];
         for (const name of variables) {
+            // Preserve semantic status, highlight, danger, and education tokens (such as active
+            // green presence --dt_color-theme-base-inv-hgl-2) instead of flattening them to greys.
+            if (/^--dt_color-/.test(name) && /-(hgl|imp|education)(?:-|$)/.test(name)) continue;
             let value = null;
             if (/^--dt_color-(theme-)?(content|text)-/.test(name)) {
                 value = /-(sec|ter)$/.test(name) ? "var(--nop-muted)" : "var(--nop-foreground)";
@@ -305,9 +320,24 @@
     // the composer, and turning spellcheck on there whenever it was focused (1.7.2) came with Slack
     // saving drafts nobody had typed. Spelling follows Slack's own "Enable spellcheck" preference.
 
-    // Use Slack's own menu so permissions, edit history and the editor stay native.
+    function hasSelectionAt(event) {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || !selection.toString()) return false;
+        if (event.target instanceof Node && selection.containsNode(event.target, true)) return true;
+        for (let i = 0; i < selection.rangeCount; i++) {
+            for (const rect of selection.getRangeAt(i).getClientRects()) {
+                if (event.clientX >= rect.left - 4 && event.clientX <= rect.right + 4 &&
+                    event.clientY >= rect.top - 4 && event.clientY <= rect.bottom + 4) return true;
+            }
+        }
+        return false;
+    }
+
+    // Use Slack's own menu so permissions, edit history and the editor stay native, while keeping
+    // Chromium's context menu when the user right-clicks selected text to copy it.
     function messageMenu(event) {
-        if (!panel || event.shiftKey || event.target.closest?.('a, img, input, textarea, [contenteditable="true"]')) return;
+        if (!panel || event.shiftKey || hasSelectionAt(event) ||
+            event.target.closest?.('a, img, input, textarea, [contenteditable="true"]')) return;
         const rows = '[data-qa="message_container"], .c-message_kit__message, .c-message_kit__background, .c-message_kit__hover';
         let message = event.target.closest?.(rows);
         let menu = null;

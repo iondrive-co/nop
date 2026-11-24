@@ -54,6 +54,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import iondrive.nop.TextFileRead
 import iondrive.nop.git.CommitFile
 import iondrive.nop.git.CommitFileChange
 import iondrive.nop.git.GitRepo
@@ -192,6 +193,7 @@ fun TabbedViewerPanel(
                     FileEditView(
                         tab = current,
                         store = editStore,
+                        reloadKey = tabsState.reloadKey(current.id),
                         onSaved = onFileSaved,
                         onResolveAt = { text, offset -> onResolveAt(current.file, text, offset) },
                         onJump = onJump,
@@ -331,6 +333,7 @@ private fun saveMarker(edit: FileEdit?): String = when {
 private fun FileEditView(
     tab: Tab.FileView,
     store: FileEditStore,
+    reloadKey: Int = 0,
     onSaved: () -> Unit,
     onResolveAt: (text: String, offset: Int) -> JumpTarget? = { _, _ -> null },
     onJump: (File, Int) -> Unit = { _, _ -> },
@@ -354,11 +357,20 @@ private fun FileEditView(
     javaProject: JavaAnalysisProject? = null,
     modifier: Modifier = Modifier,
 ) {
-    val edit = remember(tab.id) {
-        store.edit(tab) {
-            repo?.let { r -> repoRelativePath(r, tab.file)?.let { r.readHeadContent(it) } } ?: ""
+    val opened = remember(tab.id, reloadKey) {
+        store.open(tab) {
+            repo?.let { r -> repoRelativePath(r, tab.file)?.let { r.readHeadText(it) } } ?: TextFileRead.Missing
         }
     }
+    if (opened is OpenEditResult.Refused) {
+        UneditableFileView(
+            file = tab.file,
+            refusal = opened.reason,
+            modifier = modifier,
+        )
+        return
+    }
+    val edit = (opened as OpenEditResult.Ready).edit
     val focusRequester = remember(tab.id) { FocusRequester() }
     // Viewport and find/replace text come from the per-file FileEdit rather than a remember here, so
     // each tab keeps its own across switches instead of inheriting the last file's — see FileEdit.

@@ -27,6 +27,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFileRefusal
+import iondrive.nop.TextFiles
 import iondrive.nop.diff.DiffComputer
 import iondrive.nop.diff.DiffResult
 import iondrive.nop.history.LocalHistory
@@ -130,6 +133,7 @@ fun LocalDiffView(
     findTrigger: Int = 0,
 ) {
     var loading by remember(tab.id) { mutableStateOf(true) }
+    var refusal by remember(tab.id) { mutableStateOf<TextFileRefusal?>(null) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var result by remember(tab.id) { mutableStateOf<DiffResult?>(null) }
     var ignoreWhitespace by remember(tab.id) { mutableStateOf(false) }
@@ -137,19 +141,41 @@ fun LocalDiffView(
     // reloadKey re-reads both sides: the right-hand one is the live file, so re-opening this tab (or
     // F5) is how the user re-diffs the revision against work done since.
     LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
-        val (old, new) = withContext(Dispatchers.IO) {
-            val revision = history.revisionAt(tab.file, tab.timestampMillis)
-            val snapshot = revision?.let { history.read(it) }
-            snapshot to runCatching { tab.file.readText() }.getOrDefault("")
+        val (old, newRead) = withContext(Dispatchers.IO) {
+            val working = TextFiles.read(tab.file)
+            if (working is TextFileRead.Refused) {
+                null to working
+            } else {
+                val revision = history.revisionAt(tab.file, tab.timestampMillis)
+                val snapshot = revision?.let { history.read(it) }
+                snapshot to working
+            }
+        }
+        if (newRead is TextFileRead.Refused) {
+            refusal = newRead.reason
+            result = null
+            error = null
+            loading = false
+            return@LaunchedEffect
         }
         if (old == null) {
             // Pruned away, or a tab restored against a history that has since been cleared. Saying so
             // beats an empty diff that reads as "this revision was identical to the file".
+            refusal = null
             error = "That revision is no longer in local history."
             loading = false
             return@LaunchedEffect
         }
-        result = withContext(Dispatchers.Default) { DiffComputer.compute(old, new, ignoreWhitespace) }
+        if (TextFiles.looksBinaryText(old)) {
+            refusal = TextFileRefusal.Binary(old.length.toLong())
+            result = null
+            error = null
+            loading = false
+            return@LaunchedEffect
+        }
+        val newText = (newRead as? TextFileRead.Content)?.text ?: ""
+        result = withContext(Dispatchers.Default) { DiffComputer.compute(old, newText, ignoreWhitespace) }
+        refusal = null
         error = null
         loading = false
     }
@@ -158,6 +184,7 @@ fun LocalDiffView(
     CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
         when {
             loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text("Loading diff…") }
+            refusal != null -> DiffRefusalView(refusal!!, file = tab.file, showFileNameBadge = true)
             error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) { Text(error!!) }
             result != null -> ReadOnlyDiffList(
                 result = result!!,

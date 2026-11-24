@@ -35,6 +35,8 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFileRefusal
 import iondrive.nop.diff.DiffComputer
 import iondrive.nop.diff.DiffResult
 import iondrive.nop.git.ChangeKind
@@ -294,18 +296,45 @@ private fun FileDiff(
     onSplitRatioChange: (Float) -> Unit,
 ) {
     var result by remember(change.path, baseRev) { mutableStateOf<DiffResult?>(null) }
+    var refusal by remember(change.path, baseRev) { mutableStateOf<TextFileRefusal?>(null) }
     var error by remember(change.path, baseRev) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(change.path, change.kind, baseRev, refreshKey) {
         try {
-            val (oldText, newText) = withContext(Dispatchers.IO) {
-                val old = if (change.kind == ChangeKind.UNTRACKED) "" else repo.readContentAt(baseRev, change.path) ?: ""
-                val new = repo.readWorkingTreeContent(change.path) ?: ""
-                old to new
+            val loaded = withContext(Dispatchers.IO) {
+                val oldRead = if (change.kind == ChangeKind.UNTRACKED) {
+                    TextFileRead.Missing
+                } else {
+                    repo.readTextAt(baseRev, change.path)
+                }
+                val newRead = if (oldRead is TextFileRead.Refused) {
+                    TextFileRead.Missing
+                } else {
+                    repo.readWorkingTreeText(change.path)
+                }
+                oldRead to newRead
             }
+            val (oldRead, newRead) = loaded
+            val refused = (oldRead as? TextFileRead.Refused)?.reason ?: (newRead as? TextFileRead.Refused)?.reason
+            if (refused != null) {
+                refusal = refused
+                result = null
+                error = null
+                return@LaunchedEffect
+            }
+            val unreadable = (oldRead as? TextFileRead.Unreadable)?.message ?: (newRead as? TextFileRead.Unreadable)?.message
+            if (unreadable != null) {
+                refusal = null
+                error = unreadable
+                return@LaunchedEffect
+            }
+            val oldText = (oldRead as? TextFileRead.Content)?.text ?: ""
+            val newText = (newRead as? TextFileRead.Content)?.text ?: ""
             result = withContext(Dispatchers.Default) { DiffComputer.compute(oldText, newText) }
+            refusal = null
             error = null
         } catch (t: Throwable) {
+            refusal = null
             error = t.message ?: t::class.simpleName
         }
     }
@@ -315,6 +344,7 @@ private fun FileDiff(
     }
     CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
         when {
+            refusal != null -> EmptyDiffPanel(diffRefusalMessage(refusal!!))
             error != null -> EmptyDiffPanel("Could not load diff: $error")
             result == null -> EmptyDiffPanel("Loading diff…")
             else -> ReadOnlyDiffList(

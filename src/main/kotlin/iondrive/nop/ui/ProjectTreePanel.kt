@@ -565,6 +565,7 @@ fun ProjectTreePanel(
     val dirRowRanges = remember(projectPath) { mutableStateMapOf<String, ClosedFloatingPointRange<Float>>() }
 
     var pressCarriedSelectModifier by remember(projectPath) { mutableStateOf(false) }
+    var pressWasSecondary by remember(projectPath) { mutableStateOf(false) }
     var selectionBeforeSecondaryPress by remember(projectPath) { mutableStateOf<List<File>>(emptyList()) }
 
     val effectiveOpenFiles = remember(openFiles, revealFile) {
@@ -792,7 +793,8 @@ fun ProjectTreePanel(
                                 val mods = event.keyboardModifiers
                                 pressCarriedSelectModifier =
                                     mods.isCtrlPressed || mods.isMetaPressed || mods.isShiftPressed
-                                if (event.buttons.isSecondaryPressed) {
+                                pressWasSecondary = event.buttons.isSecondaryPressed
+                                if (pressWasSecondary) {
                                     selectionBeforeSecondaryPress = selectedFilesOf(treeState.selectedKeys, rootId)
                                 }
                             }
@@ -800,6 +802,8 @@ fun ProjectTreePanel(
                     }
                     .onPreviewKeyEvent { event ->
                         if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        pressCarriedSelectModifier = false
+                        pressWasSecondary = false
                         val copyModifier = event.isCtrlPressed || event.isMetaPressed
                         when (event.key) {
                             Key.Delete -> selectedFiles().takeIf { it.isNotEmpty() }
@@ -818,7 +822,7 @@ fun ProjectTreePanel(
                 onElementClick = { element ->
                     when (val entry = element.data) {
                         is TreeEntry.Node -> {
-                            if (entry.canOpen && !pressCarriedSelectModifier) onFileClick(entry.file)
+                            if (entry.canOpen && !pressCarriedSelectModifier && !pressWasSecondary) onFileClick(entry.file)
                         }
                         is TreeEntry.Ellipsis -> {
                             expandedEllipsisKeys = expandedEllipsisKeys + entry.rangeId

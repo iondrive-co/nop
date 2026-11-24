@@ -72,6 +72,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFileRefusal
 import iondrive.nop.diff.ConflictParser
 import iondrive.nop.diff.DiffComputer
 import iondrive.nop.diff.DiffResult
@@ -148,15 +150,22 @@ fun DiffView(
     // For untracked/added files this is still fine; for removed/missing files the working file
     // doesn't exist and the buffer starts empty. Re-keyed on reloadKey so a file that has since
     // appeared on disk (created by a checkout, a pull, an agent) gets picked up on a reload.
-    val edit = remember(tab.id, reloadKey) {
-        if (workingFile.isFile) editStore.edit(Tab.FileView(workingFile)) else null
+    val workingOpen = remember(tab.id, reloadKey) {
+        when {
+            tab.change.kind == ChangeKind.REMOVED || tab.change.kind == ChangeKind.MISSING -> null
+            workingFile.isFile -> editStore.open(Tab.FileView(workingFile))
+            else -> null
+        }
     }
+    val edit = (workingOpen as? OpenEditResult.Ready)?.edit
+    val workingRefusal = (workingOpen as? OpenEditResult.Refused)?.reason
     val javaDiagnostics = rememberJavaDiagnostics(
         workingFile, edit, editStore,
         javaProject ?: JavaAnalysisProject(repo.rootDir.toFile(), revision = reloadKey),
     )
 
-    var loading by remember(tab.id) { mutableStateOf(true) }
+    var loading by remember(tab.id) { mutableStateOf(workingRefusal == null) }
+    var refusal by remember(tab.id, reloadKey) { mutableStateOf(workingRefusal) }
     var error by remember(tab.id) { mutableStateOf<String?>(null) }
     var content by remember(tab.id) { mutableStateOf<DiffContent?>(null) }
     var headText by remember(tab.id) { mutableStateOf("") }
@@ -176,12 +185,36 @@ fun DiffView(
     // `loading` is deliberately keyed on tab.id alone: a reload updates in place rather than
     // flashing the placeholder and dropping the user's scroll position.
     LaunchedEffect(tab.id, reloadKey, ignoreWhitespace) {
+        if (workingRefusal != null) {
+            refusal = workingRefusal
+            content = null
+            error = null
+            loading = false
+            return@LaunchedEffect
+        }
         try {
-            val head = withContext(Dispatchers.IO) {
+            val headRead = withContext(Dispatchers.IO) {
                 when (tab.change.kind) {
-                    ChangeKind.UNTRACKED, ChangeKind.ADDED -> ""
-                    else -> repo.readHeadContent(tab.change.path) ?: ""
+                    ChangeKind.UNTRACKED, ChangeKind.ADDED -> TextFileRead.Missing
+                    else -> repo.readHeadText(tab.change.path)
                 }
+            }
+            val head = when (headRead) {
+                is TextFileRead.Refused -> {
+                    refusal = headRead.reason
+                    content = null
+                    error = null
+                    loading = false
+                    return@LaunchedEffect
+                }
+                is TextFileRead.Unreadable -> {
+                    refusal = null
+                    error = headRead.message
+                    loading = false
+                    return@LaunchedEffect
+                }
+                is TextFileRead.Content -> headRead.text
+                TextFileRead.Missing -> ""
             }
             headText = head
             // The working side renders the shared edit buffer, which is cached for the whole session
@@ -198,9 +231,11 @@ fun DiffView(
             }
             content = withContext(Dispatchers.Default) { computeContent(head, workingNow, ignoreWhitespace) }
             bufferReset++
+            refusal = null
             error = null
             loading = false
         } catch (t: Throwable) {
+            refusal = null
             error = t.message ?: t::class.simpleName
             loading = false
         }
@@ -277,25 +312,28 @@ fun DiffView(
     CompositionLocalProvider(LocalDiffTokenizer provides tokenize) {
     Column(modifier = Modifier.fillMaxSize()) {
     // The working side of a diff is an editor like any other, and stops reaching disk the same way.
-    if (edit != null) SaveStatusStrip(edit, onSaved = savedCallback)
-    javaDiagnostics.status?.let {
-        DependencyStatusBar(it)
-    }
-    javaDiagnostics.result?.let { analysis ->
-        analysis.failure?.let {
-            Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+    if (edit != null && refusal == null) SaveStatusStrip(edit, onSaved = savedCallback)
+    if (refusal == null) {
+        javaDiagnostics.status?.let {
+            DependencyStatusBar(it)
         }
-        JavaProblemBar(
-            problems = analysis.problems,
-            onGoTo = { offset -> onJump(workingFile, lineNumberAt(edit?.state?.text?.toString() ?: "", offset)) },
-            lineOf = { offset -> lineNumberAt(edit?.state?.text?.toString() ?: "", offset) },
-        )
+        javaDiagnostics.result?.let { analysis ->
+            analysis.failure?.let {
+                Text(it, color = ChangeColors.REMOVED, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
+            }
+            JavaProblemBar(
+                problems = analysis.problems,
+                onGoTo = { offset -> onJump(workingFile, lineNumberAt(edit?.state?.text?.toString() ?: "", offset)) },
+                lineOf = { offset -> lineNumberAt(edit?.state?.text?.toString() ?: "", offset) },
+            )
+        }
     }
     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
     when {
         loading -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
             Text("Loading diff…")
         }
+        refusal != null -> DiffRefusalView(refusal!!, file = workingFile, showFileNameBadge = true)
         error != null -> Box(Modifier.fillMaxSize().padding(16.dp), Alignment.Center) {
             Text("Could not load diff: $error")
         }

@@ -1,6 +1,8 @@
 package iondrive.nop.git
 
 import iondrive.nop.PathOrder
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFiles
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand
 import org.eclipse.jgit.api.errors.CheckoutConflictException
@@ -1262,6 +1264,30 @@ class GitRepo private constructor(
         return null
     }
 
+    /** Bounded, binary-checked text at HEAD for [relPath]. */
+    fun readHeadText(relPath: String, maxBytes: Long = TextFiles.MAX_TEXT_BYTES): TextFileRead =
+        readTextAt("HEAD", relPath, maxBytes)
+
+    /**
+     * Bounded, binary-checked text at [rev] for [relPath]. Checks known binary extensions and
+     * streams only the leading bytes when sniffing, so binary or oversized blobs are never pulled
+     * into heap.
+     */
+    fun readTextAt(rev: String, relPath: String, maxBytes: Long = TextFiles.MAX_TEXT_BYTES): TextFileRead {
+        val objectId = repository.resolve(rev) ?: return TextFileRead.Missing
+        RevWalk(repository).use { walk ->
+            val commit = walk.parseCommit(objectId)
+            TreeWalk.forPath(repository, relPath, commit.tree)?.use { tw ->
+                val blobId = tw.getObjectId(0)
+                val loader = repository.open(blobId)
+                return TextFiles.readStream(relPath, knownSize = loader.size, maxBytes = maxBytes) {
+                    loader.openStream()
+                }
+            }
+        }
+        return TextFileRead.Missing
+    }
+
     /**
      * Commits touching [relPath], newest first. Pass null/empty to log the whole repo.
      * Capped at [limit] entries to keep the UI snappy on long-lived files.
@@ -1321,6 +1347,7 @@ class GitRepo private constructor(
      * Returns null when the path can't be blamed — absent from history, binary, or an unborn branch.
      */
     fun blame(relPath: String): List<BlameLine>? = runCatching {
+        if (TextFiles.hasBinaryExtension(relPath)) return null
         val result = git.blame()
             .setFilePath(relPath)
             // Ignore whitespace-only churn so reflows/reindents don't reassign a line to the commit
@@ -1347,6 +1374,10 @@ class GitRepo private constructor(
         if (!file.isFile) return null
         return runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
     }
+
+    /** Bounded, binary-checked text from the working tree for [relPath]. */
+    fun readWorkingTreeText(relPath: String, maxBytes: Long = TextFiles.MAX_TEXT_BYTES): TextFileRead =
+        TextFiles.read(File(rootDir.toFile(), relPath), maxBytes = maxBytes)
 
     /** The repository's git directory — `.git` in an ordinary clone. */
     val gitDir: Path get() = repository.directory.toPath()

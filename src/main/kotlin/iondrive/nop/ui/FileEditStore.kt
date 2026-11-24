@@ -7,6 +7,9 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFileRefusal
+import iondrive.nop.TextFiles
 import iondrive.nop.diff.ThreeWayMerge
 import iondrive.nop.history.LocalHistory
 import java.io.File
@@ -151,7 +154,20 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
     fun save(): SaveResult {
         if (readOnly) return SaveResult.Failed("Library files are read-only")
         val text = state.text.toString()
-        val disk = runCatching { file.readText() }.getOrNull()
+        val disk = when (val read = TextFiles.read(file)) {
+            is TextFileRead.Content -> read.text
+            is TextFileRead.Refused -> {
+                val message = when (val reason = read.reason) {
+                    is TextFileRefusal.Binary ->
+                        "File on disk now holds binary content — not overwriting"
+                    is TextFileRefusal.TooLarge ->
+                        "File on disk grew to ${TextFiles.formatSize(reason.sizeBytes)} (limit ${TextFiles.formatSize(reason.limitBytes)}) — not overwriting"
+                }
+                saveBlock = SaveBlock.Failed(message)
+                return SaveResult.Failed(message)
+            }
+            TextFileRead.Missing, is TextFileRead.Unreadable -> null
+        }
         if (text == disk) {
             markSaved(text)
             saveBlock = null
@@ -268,7 +284,18 @@ class FileEdit(initialText: String, val file: File, private val history: LocalHi
         // unchanged was most of what nop allocated. While neither the file's stamp nor the buffer has
         // moved since the last comparison, it would come out the same.
         lastCompared?.let { (seen, text) -> if (seen == stamp && text === shown) return null }
-        val disk = runCatching { file.readText() }.getOrNull() ?: return null
+        if (stamp.size > TextFiles.MAX_TEXT_BYTES) {
+            if (!stamp.isRacy()) lastCompared = stamp to shown
+            return null
+        }
+        val disk = when (val read = TextFiles.read(file)) {
+            is TextFileRead.Content -> read.text
+            is TextFileRead.Refused -> {
+                if (!stamp.isRacy()) lastCompared = stamp to shown
+                return null
+            }
+            TextFileRead.Missing, is TextFileRead.Unreadable -> return null
+        }
         if (!stamp.isRacy()) lastCompared = stamp to shown
         return if (disk == shown.toString()) null else disk
     }
@@ -329,11 +356,43 @@ private data class DiskStamp(val modified: FileTime, val size: Long, val key: An
     }
 }
 
+/** Result of opening a file tab into [FileEditStore]. */
+sealed interface OpenEditResult {
+    data class Ready(val edit: FileEdit) : OpenEditResult
+
+    data class Refused(val reason: TextFileRefusal) : OpenEditResult
+}
+
 class FileEditStore(private val history: LocalHistory? = null) {
     private val edits = mutableStateMapOf<String, FileEdit>()
 
+    /**
+     * Returns the cached [FileEdit] for [tab], or inspects and reads [tab.file] under [TextFiles]'s
+     * binary and size guards before creating one. Refused files are never cached in the store so
+     * they stay out of autosave, disk reconciliation, and editor text layout.
+     */
+    fun open(tab: Tab.FileView, fallback: (() -> TextFileRead)? = null): OpenEditResult {
+        edits[tab.id]?.let { return OpenEditResult.Ready(it) }
+        val text = when (val read = TextFiles.read(tab.file)) {
+            is TextFileRead.Content -> read.text
+            is TextFileRead.Refused -> return OpenEditResult.Refused(read.reason)
+            TextFileRead.Missing, is TextFileRead.Unreadable -> when (val fb = fallback?.invoke()) {
+                is TextFileRead.Content -> fb.text
+                is TextFileRead.Refused -> return OpenEditResult.Refused(fb.reason)
+                TextFileRead.Missing, is TextFileRead.Unreadable, null -> ""
+            }
+        }
+        val edit = FileEdit(text, tab.file, history, readOnly = tab.readOnly)
+        edits[tab.id] = edit
+        return OpenEditResult.Ready(edit)
+    }
+
     fun edit(tab: Tab.FileView, fallbackText: (() -> String)? = null): FileEdit = edits.getOrPut(tab.id) {
-        val text = runCatching { tab.file.readText() }.getOrNull() ?: fallbackText?.invoke() ?: ""
+        val text = when (val read = TextFiles.read(tab.file)) {
+            is TextFileRead.Content -> read.text
+            is TextFileRead.Refused -> ""
+            TextFileRead.Missing, is TextFileRead.Unreadable -> fallbackText?.invoke() ?: ""
+        }
         FileEdit(text, tab.file, history, readOnly = tab.readOnly)
     }
 
@@ -352,6 +411,12 @@ class FileEditStore(private val history: LocalHistory? = null) {
 
     fun close(id: String) {
         edits.remove(id)
+    }
+
+    /** Evicts every cached editor buffer backing [file]. */
+    fun closeFor(file: File) {
+        val path = file.absolutePath
+        edits.entries.filter { it.value.file.absolutePath == path }.map { it.key }.forEach { edits.remove(it) }
     }
 
     /** A stable copy of the live buffers, for reconciling them against disk. Call on the UI thread. */

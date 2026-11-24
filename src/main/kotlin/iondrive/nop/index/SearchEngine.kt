@@ -4,6 +4,8 @@ import java.io.File
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFiles
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -55,41 +57,15 @@ class SearchProgress {
  * [kotlinx.coroutines.flow.collectLatest] and trust that the prior coroutine drops out promptly.
  */
 object SearchEngine {
-    /** Same cutoff [iondrive.nop.index.Indexer] uses for source readability. */
-    private const val MAX_FILE_BYTES = 2L * 1024 * 1024
+    /** Same cutoff [TextFiles] and [iondrive.nop.index.Indexer] use for source readability. */
+    private const val MAX_FILE_BYTES = TextFiles.MAX_TEXT_BYTES
     /** Cap per-file matches so a query that hits "the" in a giant log doesn't OOM the panel. */
     private const val MAX_HITS_PER_FILE = 200
     /** Cap total matches so the result list stays scrollable and the UI stays responsive. */
     const val MAX_TOTAL_HITS = 2000
-    /** Probe this many leading bytes for a NUL — the cheap "is this binary?" heuristic git uses. */
-    private const val BINARY_SNIFF_BYTES = 8192
-
-    /**
-     * Extensions never worth scanning for text — images, media, archives, compiled artefacts, fonts,
-     * office documents, and data blobs. These are skipped without being read at all, so a project
-     * full of assets doesn't drag the search down. Text-ish formats (svg, json, csv, …) are absent
-     * on purpose so they stay searchable; anything not listed still gets the NUL-byte content check.
-     */
-    private val BINARY_EXTENSIONS = setOf(
-        // images
-        "png", "jpg", "jpeg", "gif", "bmp", "ico", "icns", "webp", "tiff", "tif", "heic", "avif", "psd",
-        // video / audio
-        "mp4", "mov", "avi", "mkv", "webm", "flv", "wmv", "mp3", "wav", "flac", "ogg", "m4a", "aac",
-        // archives
-        "zip", "gz", "tgz", "bz2", "xz", "zst", "tar", "rar", "7z", "jar", "war", "ear",
-        // compiled / executables
-        "class", "o", "obj", "a", "lib", "so", "dll", "dylib", "exe", "bin", "wasm", "node",
-        "pyc", "pyo", "pdb",
-        // documents
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods",
-        // fonts
-        "woff", "woff2", "ttf", "otf", "eot",
-        // databases / opaque data
-        "db", "sqlite", "sqlite3", "dat",
-        // columnar and array data, pickles — what a data-heavy repository holds most of
-        "parquet", "arrow", "feather", "orc", "avro", "npy", "npz", "pkl", "pickle", "h5", "hdf5",
-        "lz4", "whl",
-    )
+    /** Extensions never worth scanning for text — delegates to [TextFiles] plus opaque `.dat` blobs. */
+    private fun hasBinaryExtension(rel: String): Boolean =
+        TextFiles.hasBinaryExtension(rel) || rel.endsWith(".dat", ignoreCase = true)
 
     suspend fun search(
         projectRoot: Path,
@@ -148,31 +124,9 @@ object SearchEngine {
         if (hasBinaryExtension(rel)) return 0
         val file = File(root, rel)
         if (!file.isFile || file.length() > MAX_FILE_BYTES) return 0
-        // The sniff comes before the rest of the file is read, not after. Most of what a large tree
-        // holds is data, and a NUL in the first 8 KB settles a 2 MB file without reading the rest.
-        val bytes = runCatching {
-            file.inputStream().use { input ->
-                val head = input.readNBytes(BINARY_SNIFF_BYTES)
-                if (looksBinary(head)) null else head + input.readAllBytes()
-            }
-        }.getOrNull() ?: return 0
-        val text = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull() ?: return 0
-        return scanText(rel, text, needle, out)
-    }
-
-    /** True when [rel]'s extension is in the never-scan [BINARY_EXTENSIONS] denylist. */
-    private fun hasBinaryExtension(rel: String): Boolean {
-        val name = rel.substringAfterLast('/')
-        val dot = name.lastIndexOf('.')
-        if (dot <= 0) return false
-        return name.substring(dot + 1).lowercase() in BINARY_EXTENSIONS
-    }
-
-    /** Treats a file as binary if a NUL byte appears in its first [BINARY_SNIFF_BYTES] bytes. */
-    private fun looksBinary(bytes: ByteArray): Boolean {
-        val n = minOf(bytes.size, BINARY_SNIFF_BYTES)
-        for (i in 0 until n) if (bytes[i].toInt() == 0) return true
-        return false
+        val read = TextFiles.read(file, maxBytes = MAX_FILE_BYTES)
+        if (read !is TextFileRead.Content) return 0
+        return scanText(rel, read.text, needle, out)
     }
 
     /**

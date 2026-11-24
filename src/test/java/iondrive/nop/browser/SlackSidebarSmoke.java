@@ -16,8 +16,13 @@ import javax.swing.SwingUtilities;
 import javax.imageio.ImageIO;
 import java.net.InetSocketAddress;
 import java.awt.Robot;
+import java.awt.Toolkit;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
+import java.util.ArrayList;
+import java.util.List;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -111,6 +116,16 @@ public class SlackSidebarSmoke {
             builder.setSkipInstallation(true);
             app = builder.build();
             client = app.createClient();
+            client.addFocusHandler(new org.cef.handler.CefFocusHandlerAdapter() {
+                @Override public void onGotFocus(CefBrowser focused) {
+                    SwingUtilities.invokeLater(() -> {
+                        var component = focused.getUIComponent();
+                        if (component.isDisplayable() && !component.isFocusOwner()) {
+                            component.requestFocusInWindow();
+                        }
+                    });
+                }
+            });
             client.addDisplayHandler(new org.cef.handler.CefDisplayHandlerAdapter() {
                 @Override public boolean onConsoleMessage(CefBrowser browser, CefSettings.LogSeverity level,
                                                            String message, String source, int line) {
@@ -220,6 +235,7 @@ public class SlackSidebarSmoke {
                     "Native keyboard input lost after browser transfer " + cycle);
                 System.out.println("SLACK_TRANSFER " + cycle + " draft and native focus preserved");
             }
+            verifyMessageSelectionAndCopy(browser, devtools, client, frame, robot);
             SlackSpellingSmoke.verify(browser, devtools, client);
             SlackDownloadSmoke.verify(browser, devtools, client, scratch, "http://127.0.0.1:" + server.getAddress().getPort());
             SlackDraftTidySmoke.verify(browser, devtools, client, scratch);
@@ -233,6 +249,108 @@ public class SlackSidebarSmoke {
                 app.dispose();
                 ended.await(5, TimeUnit.SECONDS);
             }
+        }
+    }
+
+    private static void verifyMessageSelectionAndCopy(CefBrowser browser, DevToolsCalls devtools,
+                                                      org.cef.CefClient client, JFrame host, Robot robot) throws Exception {
+        // Put AWT focus on an external Swing control beside Chromium so drag-select + Ctrl+C
+        // exercises real focus handoff into the embedded browser.
+        var externalField = new javax.swing.JTextField("unrelated");
+        SwingUtilities.invokeAndWait(() -> {
+            host.getContentPane().add(externalField, java.awt.BorderLayout.NORTH);
+            host.validate();
+            externalField.requestFocusInWindow();
+        });
+        robot.delay(150);
+        try {
+            evaluate(devtools, "window.copyMenuClicks = 0; " +
+                "document.querySelector('.p-view_contents--primary').innerHTML = " +
+                "'<div data-qa=\"message_container\"><div class=\"c-message_kit__message\"><div class=\"p-rich_text_block\">" +
+                "<span id=\"copy-sample\" style=\"display:inline-block;margin:40px;font-size:20px;line-height:1.5\">Copyable slack message text</span>" +
+                "</div></div><div class=\"c-message_kit__actions\">" +
+                "<button data-qa=\"message-actions-menu\" aria-label=\"More actions\" onclick=\"window.copyMenuClicks++\">More</button>" +
+                "</div></div>'; true");
+            robot.delay(150);
+            var rect = JsonParser.parseString(evaluate(devtools,
+                "JSON.stringify((() => {const r = document.querySelector('#copy-sample').getBoundingClientRect(); " +
+                "return {left:r.left,right:r.right,y:r.top+r.height/2};})())")).getAsJsonObject();
+            final java.awt.Point origin = new java.awt.Point();
+            SwingUtilities.invokeAndWait(() -> origin.setLocation(browser.getUIComponent().getLocationOnScreen()));
+            double zoom = Math.pow(1.2, browser.getZoomLevel());
+            int startX = origin.x + (int) Math.round((rect.get("left").getAsDouble() + 4) * zoom);
+            int endX = origin.x + (int) Math.round((rect.get("right").getAsDouble() - 4) * zoom);
+            int y = origin.y + (int) Math.round(rect.get("y").getAsDouble() * zoom);
+            robot.mouseMove(startX, y);
+            robot.delay(50);
+            robot.mousePress(InputEvent.BUTTON1_DOWN_MASK);
+            for (int step = 1; step <= 8; step++) {
+                robot.mouseMove(startX + (endX - startX) * step / 8, y);
+                robot.delay(15);
+            }
+            robot.mouseRelease(InputEvent.BUTTON1_DOWN_MASK);
+            robot.delay(150);
+            String selected = evaluate(devtools, "window.getSelection().toString()");
+            if (selected.trim().isEmpty()) {
+                throw new AssertionError("Dragging across Slack message did not select text");
+            }
+            var clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
+            clipboard.setContents(new StringSelection(""), null);
+            robot.keyPress(KeyEvent.VK_CONTROL);
+            robot.keyPress(KeyEvent.VK_C);
+            robot.keyRelease(KeyEvent.VK_C);
+            robot.keyRelease(KeyEvent.VK_CONTROL);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            String copied = "";
+            while (System.nanoTime() < deadline) {
+                try {
+                    var data = clipboard.getData(DataFlavor.stringFlavor);
+                    if (data instanceof String s && !s.isEmpty()) {
+                        copied = s;
+                        break;
+                    }
+                } catch (Exception ignored) {
+                }
+                Thread.sleep(25);
+            }
+            if (!copied.equals(selected)) {
+                throw new AssertionError("Ctrl+C did not copy selected Slack text; selected=" + selected + "; copied=" + copied);
+            }
+            var menus = new LinkedBlockingQueue<List<String>>();
+            client.addContextMenuHandler(new org.cef.handler.CefContextMenuHandlerAdapter() {
+                @Override public void onBeforeContextMenu(CefBrowser from, CefFrame frame,
+                                                           org.cef.callback.CefContextMenuParams params,
+                                                           org.cef.callback.CefMenuModel model) {
+                    var labels = new ArrayList<String>();
+                    for (int i = 0; i < model.getCount(); i++) labels.add(model.getLabelAt(i).replace("&", ""));
+                    menus.add(List.copyOf(labels));
+                    model.clear();
+                }
+            });
+            try {
+                double midX = (rect.get("left").getAsDouble() + rect.get("right").getAsDouble()) / 2.0;
+                double midY = rect.get("y").getAsDouble();
+                String pos = "\"x\":" + midX + ",\"y\":" + midY + ",\"button\":\"right\",\"clickCount\":1";
+                devtools.call("Input.dispatchMouseEvent", "{\"type\":\"mousePressed\"," + pos + "}", 5, TimeUnit.SECONDS);
+                devtools.call("Input.dispatchMouseEvent", "{\"type\":\"mouseReleased\"," + pos + "}", 5, TimeUnit.SECONDS);
+                var labels = menus.poll(5, TimeUnit.SECONDS);
+                if (labels == null || !labels.contains("Copy")) {
+                    throw new AssertionError("Right-click on selected message text did not offer Copy menu: " + labels);
+                }
+                if (!evaluate(devtools, "String(window.copyMenuClicks)").equals("0")) {
+                    throw new AssertionError("Right-click on selected text opened Slack's message menu instead of Copy");
+                }
+            } finally {
+                client.removeContextMenuHandler();
+            }
+            System.out.println("SLACK_SELECTION drag-select, Ctrl+C, and right-click Copy passed: " + selected);
+        } finally {
+            SwingUtilities.invokeAndWait(() -> {
+                host.getContentPane().remove(externalField);
+                host.validate();
+                browser.setFocus(true);
+            });
+            robot.delay(100);
         }
     }
 

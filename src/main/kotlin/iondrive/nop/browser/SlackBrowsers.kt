@@ -28,6 +28,7 @@ import org.cef.browser.CefFrame
 import org.cef.browser.CefRequestContext
 import org.cef.callback.CefSchemeRegistrar
 import org.cef.handler.CefDisplayHandlerAdapter
+import org.cef.handler.CefFocusHandlerAdapter
 import org.cef.handler.CefLifeSpanHandlerAdapter
 import org.cef.handler.CefLoadHandler.ErrorCode
 import org.cef.handler.CefLoadHandlerAdapter
@@ -504,6 +505,18 @@ class SlackBrowser internal constructor(private val project: Path, private val i
             }
         })
         client.addDownloadHandler(downloads)
+        // Clicking or dragging inside the embedded Chromium window delivers native X11 input
+        // directly to CEF; sync Swing focus so keyboard shortcuts like Ctrl+C target Chromium.
+        client.addFocusHandler(object : CefFocusHandlerAdapter() {
+            override fun onGotFocus(browser: CefBrowser) {
+                SwingUtilities.invokeLater {
+                    val component = browser.uiComponent
+                    if (component.isDisplayable && !component.isFocusOwner) {
+                        component.requestFocusInWindow()
+                    }
+                }
+            }
+        })
     }
 
     /**

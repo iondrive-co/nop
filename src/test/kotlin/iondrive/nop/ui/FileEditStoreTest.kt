@@ -1,6 +1,9 @@
 package iondrive.nop.ui
 
 import androidx.compose.ui.text.TextRange
+import iondrive.nop.TextFileRead
+import iondrive.nop.TextFileRefusal
+import iondrive.nop.TextFiles
 import iondrive.nop.diff.ConflictParser
 import iondrive.nop.history.LocalHistory
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -761,5 +764,87 @@ class FileEditStoreTest {
         val store = FileEditStore()
         val edit = store.edit(Tab.FileView(f)) { "content from HEAD\n" }
         assertEquals("content from HEAD\n", edit.state.text.toString())
+    }
+
+    @Test
+    fun `open refuses binary and oversized files without caching them in the store`(@TempDir tmp: Path) {
+        val archive = tmp.resolve("archive.tar.gz").toFile().apply {
+            writeBytes(byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00, 0x01, 0x02))
+        }
+        val bin = tmp.resolve("raw-blob").toFile().apply {
+            writeBytes(byteArrayOf(0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01))
+        }
+        val huge = tmp.resolve("huge.log").toFile().apply {
+            writeBytes(ByteArray((TextFiles.MAX_TEXT_BYTES + 1024).toInt()) { 'a'.code.toByte() })
+        }
+        val store = FileEditStore()
+
+        val archiveRes = store.open(Tab.FileView(archive))
+        assertTrue(archiveRes is OpenEditResult.Refused && archiveRes.reason is TextFileRefusal.Binary)
+
+        val binRes = store.open(Tab.FileView(bin))
+        assertTrue(binRes is OpenEditResult.Refused && binRes.reason is TextFileRefusal.Binary)
+
+        val hugeRes = store.open(Tab.FileView(huge))
+        assertTrue(hugeRes is OpenEditResult.Refused && hugeRes.reason is TextFileRefusal.TooLarge)
+
+        assertTrue(store.snapshot().isEmpty(), "refused files must never enter FileEditStore")
+        assertNull(store.peek(Tab.FileView(archive).id))
+        assertTrue(store.editorsFor(huge).isEmpty())
+    }
+
+    @Test
+    fun `open refuses a missing file when its fallback is binary or too large`(@TempDir tmp: Path) {
+        val missing = tmp.resolve("removed.tar.gz").toFile()
+        val store = FileEditStore()
+        val res = store.open(Tab.FileView(missing)) {
+            TextFileRead.Refused(TextFileRefusal.Binary(1024L))
+        }
+        assertTrue(res is OpenEditResult.Refused && res.reason is TextFileRefusal.Binary)
+        assertTrue(store.snapshot().isEmpty())
+    }
+
+    @Test
+    fun `reconcile ignores and save refuses to clobber a file externally replaced with binary or huge content`(
+        @TempDir tmp: Path,
+    ) {
+        val f = tmp.resolve("output.log").toFile().apply { writeText("initial\n") }
+        val store = FileEditStore()
+        val edit = (store.open(Tab.FileView(f)) as OpenEditResult.Ready).edit
+
+        // Externally replaced with binary bytes.
+        val binaryBytes = byteArrayOf(0x00, 0x01, 0x02, 0x03, 0x04)
+        f.writeBytes(binaryBytes)
+
+        assertNull(edit.diskTextIfDivergedAndClean(), "reconcile must not pull binary bytes into the editor")
+        assertEquals("initial\n", edit.state.text.toString())
+
+        // User edits the buffer; saving must refuse instead of overwriting the binary file on disk.
+        edit.state.edit { replace(0, length, "user edit\n") }
+        edit.markUserEdit()
+        val saveRes = edit.save()
+        assertTrue(saveRes is SaveResult.Failed, "save must refuse when disk became binary")
+        assertTrue(edit.saveBlock is SaveBlock.Failed)
+        assertTrue(f.readBytes().contentEquals(binaryBytes), "binary file on disk must not be overwritten")
+
+        // Same for a file that grew past the editor limit.
+        val oversized = ByteArray((TextFiles.MAX_TEXT_BYTES + 4096).toInt()) { 'x'.code.toByte() }
+        f.writeBytes(oversized)
+        val saveHugeRes = edit.save()
+        assertTrue(saveHugeRes is SaveResult.Failed, "save must refuse when disk grew past limit")
+        assertEquals(oversized.size.toLong(), f.length(), "oversized file on disk must not be overwritten")
+    }
+
+    @Test
+    fun `closeFor evicts all cached buffers backing a file`(@TempDir tmp: Path) {
+        val f = tmp.resolve("a.txt").toFile().apply { writeText("one\n") }
+        val other = tmp.resolve("b.txt").toFile().apply { writeText("two\n") }
+        val store = FileEditStore()
+        store.open(Tab.FileView(f))
+        store.open(Tab.FileView(other))
+
+        store.closeFor(f)
+        assertTrue(store.editorsFor(f).isEmpty())
+        assertEquals(1, store.editorsFor(other).size)
     }
 }
