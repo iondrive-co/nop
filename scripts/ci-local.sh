@@ -11,6 +11,8 @@
 #   - every JVM's user.home is an empty home, as is $HOME;
 #   - PATH holds only the system directories and JDK 21 (Temurin, as setup-java installs);
 #   - TZ=UTC, C.UTF-8 and CI=true are set;
+#   - temporary files (TMPDIR, java.io.tmpdir, so every JUnit @TempDir) go in the scratch directory
+#     on disk, as a runner's /tmp is, not in a /tmp that may be tmpfs here;
 #   - the build has 4 CPUs (taskset), as many as a hosted runner;
 #   - the display is Xvfb.
 # Gradle gets its own home under ~/.cache/nop-ci, which reads your dependency cache but never
@@ -53,18 +55,6 @@ for tool in git python3 xvfb-run xauth taskset tar openssl; do
     command -v "$tool" >/dev/null || fail "$tool is not installed"
 done
 
-# The commands the workflows run. If a workflow changes them, this must change too, so check that
-# each one is still there, word for word.
-ci_test='xvfb-run --auto-servernum ./gradlew test --no-daemon'
-release_cef='xvfb-run -a ./gradlew testCefPackaging testCefMemory testCefShutdown testSlackSidebar --no-daemon'
-release_package='./gradlew ${{ matrix.task }} --no-daemon'
-grep -qF "$ci_test" "$repo/.github/workflows/ci.yml" \
-    || fail ".github/workflows/ci.yml no longer runs '$ci_test': update scripts/ci-local.sh to match it"
-for command in "$release_cef" "$release_package" 'Self-update bundle (Linux)' 'task: packageDeb'; do
-    grep -qF "$command" "$repo/.github/workflows/release.yml" \
-        || fail ".github/workflows/release.yml no longer has '$command': update scripts/ci-local.sh to match it"
-done
-
 # Gradle's default home follows Java's user.home, which may differ from a CLI's isolated HOME.
 gradle_source_home="${GRADLE_USER_HOME:-$(python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')/.gradle}"
 java_home="${NOP_CI_JAVA_HOME:-}"
@@ -87,7 +77,7 @@ run="$cache/run-$(date +%Y%m%d-%H%M%S)"
 src="$run/nop"
 home="$run/home"
 logs="$run/logs"
-mkdir -p "$home" "$logs" "$run/runtime" "$run/runner-temp"
+mkdir -p "$home" "$logs" "$run/runtime" "$run/runner-temp" "$run/tmp"
 chmod 700 "$run/runtime"
 
 if [[ -n "$commit" ]]; then
@@ -105,6 +95,20 @@ else
     (cd "$repo" && git ls-files -z --deleted) | (cd "$src" && xargs -0 -r rm -f --)
     what="the working tree of $repo ($(git -C "$repo" status --porcelain | wc -l | tr -d ' ') changed paths)"
 fi
+
+# Match the workflows in the source being tested, which can be a different revision from this script.
+ci_workflow="$src/.github/workflows/ci.yml"
+release_workflow="$src/.github/workflows/release.yml"
+ci_test='xvfb-run --auto-servernum ./gradlew test --no-daemon'
+release_cef='xvfb-run -a ./gradlew testCefPackaging testCefMemory testCefShutdown testSlackSidebar --no-daemon'
+release_package='./gradlew ${{ matrix.task }} --no-daemon'
+grep -qxF "        run: $ci_test" "$ci_workflow" \
+    || fail "$ci_workflow does not run '$ci_test': update scripts/ci-local.sh to match it"
+for command in "        run: $release_cef" "        run: $release_package" '      - name: Self-update bundle (Linux)' '            task: packageDeb'; do
+    grep -qxF "$command" "$release_workflow" \
+        || fail "$release_workflow does not have '$command': update scripts/ci-local.sh to match it"
+done
+
 if [[ -n "$version" ]]; then
     sed -i -E "0,/^([[:space:]]*packageVersion[[:space:]]*=[[:space:]]*\")[^\"]+(\")/s//\1$version\2/" \
         "$src/build.gradle.kts"
@@ -134,7 +138,9 @@ runner_env=(
     PATH="$java_home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     JAVA_HOME="$java_home"
     # Java reads user.home from the password file, so $HOME alone would leave it at your real home.
-    JAVA_TOOL_OPTIONS="-Duser.home=$home"
+    # It takes java.io.tmpdir as /tmp whatever TMPDIR says.
+    JAVA_TOOL_OPTIONS="-Duser.home=$home -Djava.io.tmpdir=$run/tmp"
+    TMPDIR="$run/tmp"
     GRADLE_USER_HOME="$gradle_home"
     XDG_RUNTIME_DIR="$run/runtime"
     LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC
@@ -194,17 +200,21 @@ if has deb; then
 fi
 if has bundle; then
     # The workflow's own script, read out of release.yml, signed with a key made for this run only.
-    python3 -I - "$repo/.github/workflows/release.yml" >"$run/bundle.sh" <<'PY'
+    python3 -I - "$release_workflow" >"$run/bundle.sh" <<'PY' || fail "could not read the Linux update step from $release_workflow"
 import sys, textwrap
 lines = open(sys.argv[1]).read().splitlines()
-start = next(i for i, line in enumerate(lines) if "name: Self-update bundle (Linux)" in line)
-run = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+start = lines.index("      - name: Self-update bundle (Linux)")
+end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("      - name: ")), len(lines))
+run = lines.index("        run: |", start + 1, end)
 body = []
-for line in lines[run + 1:]:
+for line in lines[run + 1:end]:
     if line.strip() and len(line) - len(line.lstrip()) <= len(lines[run]) - len(lines[run].lstrip()):
         break
     body.append(line)
-print(textwrap.dedent("\n".join(body)))
+script = textwrap.dedent("\n".join(body))
+if not script.strip():
+    sys.exit("Linux update step has no script")
+print(script)
 PY
     key="$run/signing.key"
     (umask 077; openssl genpkey -algorithm ed25519 -out "$key" 2>/dev/null) || fail "could not make a signing key"

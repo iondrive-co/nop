@@ -15,6 +15,7 @@ import java.security.MessageDigest
 import java.security.Signature
 import java.util.HexFormat
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -98,14 +99,24 @@ class UpdaterTest {
         dir.resolve("bin/nop").writeText(launcherScript(version, adopts, launcher))
         Files.setPosixFilePermissions(dir.resolve("bin/nop"), PosixFilePermissions.fromString("rwxr-xr-x"))
         dir.resolve("lib/app").createDirectories()
-        ZipOutputStream(Files.newOutputStream(dir.resolve("lib/app/nop-$version.jar"))).use { zip ->
-            zip.putNextEntry(ZipEntry(BuildInfo.RESOURCE_PATH))
-            zip.write("version=$version\nhandover=${adopts.max()}\n".toByteArray())
-            zip.closeEntry()
-        }
-        dir.resolve("lib/app/library.jar").writeText(library)
+        writeJar(dir.resolve("lib/app/library.jar"), "library.txt", library)
+        writeJar(dir.resolve("lib/app/nop-$version.jar"), BuildInfo.RESOURCE_PATH, "version=$version\nhandover=${adopts.max()}\n")
         return dir
     }
+
+    private fun writeJar(path: Path, entry: String, text: String) {
+        ZipOutputStream(Files.newOutputStream(path)).use { zip ->
+            // The delta reuses this dependency by hash, even when the images are created at different times.
+            zip.putNextEntry(ZipEntry(entry).apply { time = 0L })
+            zip.write(text.toByteArray())
+            zip.closeEntry()
+        }
+    }
+
+    private fun libraryContents(image: Path): String =
+        ZipFile(image.resolve("lib/app/library.jar").toFile()).use { jar ->
+            jar.getInputStream(jar.getEntry("library.txt")).bufferedReader().use { it.readText() }
+        }
 
     /** The install a release nop runs from: home `opt/nop`, as a directory of its own. */
     private fun install(version: String = "1.0.0"): Path = image(tmp.resolve("opt/nop"), version)
@@ -309,7 +320,7 @@ class UpdaterTest {
 
         assertTrue(requested.any { it.endsWith("-delta.tar.gz") })
         assertTrue(requested.none { it.endsWith("/nop-9.9.9.tar.gz") }, "the whole tarball is not downloaded")
-        assertEquals("a dependency", staged.dir.resolve("lib/app/library.jar").readText())
+        assertEquals("a dependency", libraryContents(staged.dir))
         assertTrue("launcher 9.9.9" in staged.dir.resolve("bin/nop").readText())
     }
 
@@ -322,7 +333,7 @@ class UpdaterTest {
         val staged = updater.stage(home, updater.latest(), reuse = listOf(home))
 
         assertTrue(requested.any { it.endsWith("/nop-9.9.9.tar.gz") })
-        assertEquals("a dependency", staged.dir.resolve("lib/app/library.jar").readText())
+        assertEquals("a dependency", libraryContents(staged.dir))
     }
 
     @Test

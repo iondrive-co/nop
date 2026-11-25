@@ -422,7 +422,8 @@ class Updater(
 
     /** The handover in the stamp of the one `lib/app` jar that has one, whose version must be [version]. */
     private fun jarHandover(image: Path, version: Version): Int {
-        val jars = Files.list(image.resolve("lib/app")).use { s -> s.filter { it.fileName.toString().endsWith(".jar") }.toList() }
+        // By name, so which jars are opened does not depend on the filesystem's listing order.
+        val jars = Files.list(image.resolve("lib/app")).use { s -> s.filter { it.fileName.toString().endsWith(".jar") }.sorted().toList() }
         for (jar in jars) {
             val stamp = ZipFile(jar.toFile()).use { zip ->
                 zip.getEntry(BuildInfo.RESOURCE_PATH)?.let { e -> zip.getInputStream(e).use { s -> Properties().apply { load(s) } } }

@@ -16,24 +16,9 @@ permissions:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag || github.ref }}
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Run tests
-        run: xvfb-run --auto-servernum ./gradlew test --no-daemon
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.ref_type != 'tag' && inputs.tag || '' }}
 
   build:
     name: Build (${{ matrix.os }})
@@ -59,7 +44,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag || github.ref }}
+          ref: ${{ github.ref_type != 'tag' && inputs.tag || '' }}
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4

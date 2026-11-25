@@ -6,7 +6,7 @@
 # GitHub release.
 #
 # First it runs the Linux checks of ci.yml and release.yml here, with scripts/ci-local.sh, and
-# releases nothing if any of them fails. NOP_RELEASE_SKIP_LOCAL_CI=1 skips them.
+# releases nothing if any of them fails.
 #
 # Pass an explicit version to override the auto-bump:
 #     scripts/release.sh           # auto-bump (e.g. 1.1.9 -> 1.2.0)
@@ -73,19 +73,15 @@ fi
 
 # The release workflow runs once the tag is pushed and blocks publishing if any check or
 # platform build fails. Run its Linux checks here first so a failing commit never gets tagged.
-if [[ "${NOP_RELEASE_SKIP_LOCAL_CI:-}" == 1 ]]; then
-    echo "Skipping the local Linux checks (NOP_RELEASE_SKIP_LOCAL_CI=1)."
-else
-    HEAD_BEFORE="$(git rev-parse HEAD)"
-    echo "Running GitHub's Linux checks here first (scripts/ci-local.sh, around 20 minutes)."
-    if ! "$REPO_ROOT/scripts/ci-local.sh" --commit "$HEAD_BEFORE" --version "$VERSION"; then
-        echo "Not releasing $TAG: the Linux checks failed here, so they would fail on GitHub too." >&2
-        exit 1
-    fi
-    if [[ "$(git rev-parse HEAD)" != "$HEAD_BEFORE" || -n "$(git status --porcelain)" ]]; then
-        echo "Not releasing $TAG: the checkout changed while the checks ran. Run scripts/release.sh again." >&2
-        exit 1
-    fi
+HEAD_BEFORE="$(git rev-parse HEAD)"
+echo "Running GitHub's Linux checks here first (scripts/ci-local.sh, around 20 minutes)."
+if ! "$REPO_ROOT/scripts/ci-local.sh" --commit "$HEAD_BEFORE" --version "$VERSION"; then
+    echo "Not releasing $TAG: the local Linux checks failed." >&2
+    exit 1
+fi
+if [[ "$(git rev-parse HEAD)" != "$HEAD_BEFORE" || -n "$(git status --porcelain)" ]]; then
+    echo "Not releasing $TAG: the checkout changed while the checks ran. Run scripts/release.sh again." >&2
+    exit 1
 fi
 
 echo "Bumping packageVersion: $CURRENT -> $VERSION"
