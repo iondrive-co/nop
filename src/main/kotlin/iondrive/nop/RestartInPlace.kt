@@ -57,7 +57,9 @@ object RestartInPlace {
         for ((root, _, sessions) in AgentSessionStore.byRoot()) {
             // The rows are what puts back the tabs that are not running, and the order of all of them.
             // Normally saved as they change, on a coroutine; written here as well so a change from the
-            // last moment cannot still be in flight when the process is replaced.
+            // last moment cannot still be in flight when the process is replaced. Not for a project
+            // another machine holds: its rows there are that machine's, fetched, not this one's.
+            if (!iondrive.nop.agent.ProjectSyncStore.owning(root)) continue
             Settings.saveOpenAgents(root, sessions.sessions.mapNotNull { it.asOpenAgent() })
         }
         val out = Handover.Outgoing()

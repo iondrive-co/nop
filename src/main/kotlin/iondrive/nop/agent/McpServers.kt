@@ -137,6 +137,33 @@ object McpServers {
 
     private const val CODEX_RUN_WITHOUT_ASKING = "default_tools_approval_mode=\"approve\""
 
+    /**
+     * [argv] with each server [codexOverrides] wrote replaced by its name, for the session log: a
+     * server's `env` and `http_headers` hold tokens, and the log is kept, read back and synced. The
+     * other arguments are untouched, since resuming reads its flags from the logged command.
+     */
+    internal fun redactArgv(argv: List<String>): List<String> = argv.map { arg ->
+        val override = CODEX_OVERRIDE.matchEntire(arg) ?: return@map arg
+        if (arg.endsWith(".$CODEX_RUN_WITHOUT_ASKING")) arg else "${override.groupValues[1].trim()}=\"<redacted>\""
+    }
+
+    /**
+     * A session log's [line] as it may leave this machine: a `run_started` record written before
+     * [redactArgv] was applied to it has it applied now. The same string when there is nothing to
+     * take out, and null for a line that looks like such a record and cannot be read as one.
+     */
+    internal fun redactLogLine(line: String): String? {
+        if ("mcp_servers." !in line || "\"run_started\"" !in line) return line
+        val record = runCatching { Json.parseToJsonElement(line) as? JsonObject }.getOrNull() ?: return null
+        val argv = record["argv"] as? JsonArray ?: return line
+        val words = argv.map { (it as? JsonPrimitive)?.takeIf { word -> word.isString }?.content ?: return null }
+        val redacted = redactArgv(words)
+        if (redacted == words) return line
+        return JsonObject(record + ("argv" to JsonArray(redacted.map(::JsonPrimitive)))).toString()
+    }
+
+    private val CODEX_OVERRIDE = Regex("""(mcp_servers\.[^=]+?)\s*=(.*)""", RegexOption.DOT_MATCHES_ALL)
+
     private fun codexConfig(home: Path): Path = home.resolve(".codex").resolve("config.toml")
 
     /** [codexConfigured] of the file at [config], or none when it cannot be read. */

@@ -27,12 +27,17 @@ import java.time.Instant
  *     "session": { "percent": 72, "resetsInMinutes": 108, "windowMinutes": 300 },
  *     "weekly": { "percent": 41, "resetsInMinutes": 4380, "windowMinutes": 10080 },
  *     "weeklyPerSession": 0.12,
- *     "models": ["claude-opus-5", "claude-sonnet-5"]
+ *     "models": ["claude-opus-5", "claude-sonnet-5"],
+ *     "resets": {
+ *       "offers": [{ "kind": "5-hour reset", "left": 2, "expiresInMinutes": 20160,
+ *                    "effect": "Refills your 5-hour limit now", "done": "5-hour limit reset" }],
+ *       "blocked": ["Weekly reset · usable once you reach your weekly limit"]
+ *     }
  *   },
  *   "codex-lab": { "unavailable": "not signed in" }
  * }
  * ```
- * Resets are relative, counted from the moment the reading is taken, so a fixture written once never
+ * Times are relative, counted from the moment the reading is taken, so a fixture written once never
  * drifts into a week-old snapshot with every window already rolled over.
  */
 internal object UsageFixture {
@@ -53,7 +58,27 @@ internal object UsageFixture {
             asOf = now,
             weeklyPerSession = entry["weeklyPerSession"].double(),
             paceSource = entry["weeklyPerSession"].double()?.let { PaceSource.Observed },
+            resets = resets(entry["resets"].obj(), now),
         )
+    }
+
+    private fun resets(obj: JsonObject?, now: Instant): LimitResets? {
+        obj ?: return null
+        fun later(minutes: Long?) = minutes?.let { now.plus(Duration.ofMinutes(it)) }
+        val offers = obj["offers"].arr()?.mapNotNull { it.obj() }?.mapIndexedNotNull { i, offer ->
+            val kind = offer["kind"].str() ?: return@mapIndexedNotNull null
+            ResetOffer(
+                id = "sample-$i",
+                kind = kind,
+                left = offer["left"].int() ?: 1,
+                until = later(offer["expiresInMinutes"].long()),
+                effect = offer["effect"].str() ?: "Resets your usage limits",
+                weekResets = later(offer["weekResetsInMinutes"].long()),
+                early = offer["early"].str(),
+                done = offer["done"].str() ?: "Limits reset",
+            )
+        }.orEmpty()
+        return LimitResets(offers, obj["blocked"].arr()?.mapNotNull { it.str() }.orEmpty(), obj["none"].str())
     }
 
     /** [account]'s canned model list, empty when the file gives none. */

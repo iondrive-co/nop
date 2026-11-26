@@ -742,8 +742,10 @@ object Settings {
      * fields; a row short of them, or missing one of the three that cannot be guessed at, is from a
      * half-written file and is skipped rather than restored as a tab pointing at nothing.
      */
-    fun loadOpenAgents(projectPath: Path): List<OpenAgent> {
-        val f = projectDataDir(projectPath).resolve("agents")
+    fun loadOpenAgents(projectPath: Path): List<OpenAgent> = readOpenAgents(projectDataDir(projectPath).resolve("agents"))
+
+    /** The rows of an `agents` file written by [saveOpenAgents], wherever it is kept. */
+    fun readOpenAgents(f: Path): List<OpenAgent> {
         if (!Files.isRegularFile(f)) return emptyList()
         val text = runCatching { Files.readString(f) }.getOrNull() ?: return emptyList()
         return text.lineSequence()

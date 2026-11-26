@@ -117,6 +117,8 @@ data class UsageReading(
     val pool: String? = null,
     /** Every other limit the provider reported for the account; see [OtherLimit]. */
     val others: List<OtherLimit> = emptyList(),
+    /** The usage-limit resets the account holds; null when the provider did not say. */
+    val resets: LimitResets? = null,
 ) {
     /**
      * The session percent to aim for by the end of this window, in session percent, for the weekly
@@ -268,6 +270,7 @@ object Usage {
     fun clearAuthCache() {
         refusedAt.clear()
         liveCodex.clear()
+        codexResets.clear()
         gate.clear()
         codexUsageUrl = CODEX_USAGE_URL
     }
@@ -346,7 +349,10 @@ object Usage {
     private fun readProvider(account: Account): UsageReading {
         return when (account.provider) {
             Provider.Anthropic -> readClaude(account)
-            Provider.OpenAI -> readCodex(account)
+            Provider.OpenAI -> readCodex(account).let { reading ->
+                val resets = codexResets[account.homePath.toAbsolutePath().normalize()]
+                if (resets == null || reading.unavailable == "not signed in") reading else reading.copy(resets = resets)
+            }
             Provider.Local -> LocalModel.status(account)
             Provider.Antigravity -> gate.held(gateKey(account))
                 ?: gate.answered(gateKey(account), Antigravity.readUsage(account))
@@ -427,7 +433,8 @@ object Usage {
             Log.info("usage for ${account.name}: $why" + (retryAfter?.let { " (Retry-After ${it.seconds}s)" } ?: ""))
             return gate.unanswered(key, why, retryAfter)
         }
-        val answer = get(USAGE_URL, token, mapOf("anthropic-beta" to OAUTH_BETA))
+        // Only a client that says it is the CLI is told which resets the account holds.
+        val answer = get("$USAGE_URL?${ClaudeResets.PROGRAM}=1", token, ClaudeResets.headers())
             ?: return unanswered("no answer from the usage API")
         when (answer.status) {
             200 -> {}
@@ -448,6 +455,7 @@ object Usage {
                 weekly = claudeWindow(data["seven_day"], Duration.ofDays(7)),
                 asOf = Instant.now(),
                 others = claudeOtherLimits(data["limits"]),
+                resets = ClaudeResets.resets(data[ClaudeResets.PROGRAM]),
             ),
         )
     }
@@ -628,6 +636,22 @@ object Usage {
     // ── Codex ──
 
     private val liveCodex = ConcurrentHashMap<Path, Pair<JsonObject, Instant>>()
+
+    /** Each Codex account's reset credits, as its CLI last told [refreshCodexResets]. */
+    private val codexResets = ConcurrentHashMap<Path, LimitResets>()
+
+    /**
+     * Asks [account]'s Codex CLI which reset credits it holds, and keeps the answer for its readings
+     * to carry: the usage endpoint the polls read knows nothing of them. Blocking, and a CLI start,
+     * so it is for when the accounts are being looked at and after a reset, not for every poll.
+     */
+    fun refreshCodexResets(account: Account): LimitResets? {
+        if (account.provider != Provider.OpenAI || UsageFixture.file != null) return null
+        val home = account.homePath.toAbsolutePath().normalize()
+        val resets = if (Login.hasCredentials(account)) CodexResets.read(account) else null
+        if (resets == null) codexResets.remove(home) else codexResets[home] = resets
+        return resets
+    }
 
     /**
      * Records a live `rate_limits` snapshot arrived during a running session tail.

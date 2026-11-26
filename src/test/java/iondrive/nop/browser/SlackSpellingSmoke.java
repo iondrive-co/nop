@@ -127,14 +127,40 @@ final class SlackSpellingSmoke {
 
     private static SpellingMenu waitForTypo(DevToolsCalls calls, LinkedBlockingQueue<SpellingMenu> menus,
                                             String id, String word) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        SpellingMenu menu;
-        do {
-            Thread.sleep(100);
-            menu = contextMenu(calls, menus, id, word);
-            if (menu.word.equals(word)) return menu;
-        } while (System.nanoTime() < deadline);
-        throw new AssertionError("Offline spellchecker did not report " + word + ": " + menu);
+        // Chromium checks a word just typed once the renderer is idle, and drops that check if the
+        // selection moves first. The right-click that reads the menu moves it, so a read that comes
+        // too soon leaves the word unchecked for good. A miss types the word again for a fresh
+        // check and waits longer before the next read: a loaded machine keeps the renderer busy.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+        long quiet = 200;
+        for (int reads = 1; ; reads++) {
+            Thread.sleep(quiet);
+            var menu = contextMenu(calls, menus, id, word);
+            if (menu.word.equals(word)) {
+                if (reads > 1) System.out.println("SLACK_SPELLING " + word + " marked on read " + reads);
+                return menu;
+            }
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("Offline spellchecker did not report " + word + " in " + reads + " reads: " + menu +
+                    " " + evaluate(calls, "JSON.stringify({focused: document.hasFocus() && document.activeElement.id, " +
+                    "caret: String(getSelection().anchorNode && getSelection().anchorNode.textContent) + '@' + getSelection().anchorOffset, " +
+                    "html: document.querySelector('#" + id + "').innerHTML})"));
+            }
+            retype(calls, id, word);
+            quiet = Math.min(quiet * 2, 8000);
+        }
+    }
+
+    /** Types the first {@code word} in the element, and the space after it, over again. */
+    private static void retype(DevToolsCalls calls, String id, String word) throws Exception {
+        evaluate(calls, "(() => {const root = document.querySelector('#" + id + "'); root.focus(); " +
+            "const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); const word = " + new Gson().toJson(word) + "; " +
+            "while (walker.nextNode()) {const node = walker.currentNode; const offset = node.textContent.indexOf(word); " +
+            "if (offset < 0) continue; let end = offset + word.length; if (/\\s/.test(node.textContent.charAt(end))) end++; " +
+            "const range = document.createRange(); range.setStart(node, offset); range.setEnd(node, end); " +
+            "const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); return;} " +
+            "throw Error(root.innerHTML);})(), true");
+        calls.call("Input.insertText", "{\"text\":" + new Gson().toJson(word + " ") + "}", 5, TimeUnit.SECONDS);
     }
 
     private static SpellingMenu contextMenu(DevToolsCalls calls, LinkedBlockingQueue<SpellingMenu> menus,
@@ -157,7 +183,7 @@ final class SlackSpellingSmoke {
     }
 
     private static void awaitText(DevToolsCalls calls, String expected) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         do {
             if (evaluate(calls, "document.querySelector('#spelling-editor').textContent.replaceAll('\u00a0', ' ').startsWith(" +
                 new Gson().toJson("Keep formatting " + expected + " ") + ")").equals("true")) return;

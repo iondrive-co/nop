@@ -99,7 +99,7 @@ object Backup {
     private const val TAIL_CHECK_BYTES = 4096
 
     /** Never copied, wherever they turn up. */
-    private val CREDENTIALS = setOf(".credentials.json", "auth.json", "antigravity-oauth-token", "credential.json")
+    internal val CREDENTIALS = setOf(".credentials.json", "auth.json", "antigravity-oauth-token", "credential.json")
 
     private const val TEMP_PREFIX = ".nop-backup-"
 
@@ -347,7 +347,14 @@ object Backup {
      * only its new bytes — after checking that its tail still matches, which is what tells growth
      * from a rewrite that happens to be longer.
      */
-    private fun mirror(from: Path, into: Path, now: Instant, stamp: BackupRecord.Stamp, recorded: Boolean): Long {
+    private fun mirror(
+        from: Path,
+        into: Path,
+        now: Instant,
+        stamp: BackupRecord.Stamp,
+        recorded: Boolean,
+        aside: Path? = null,
+    ): Long {
         val size = stamp.size
         val modified = FileTime.fromMillis(stamp.modified)
         val isLog = from.fileName.toString().endsWith(".jsonl")
@@ -366,14 +373,44 @@ object Backup {
             }
             // Past this point the copy is replaced. That loses what was backed up when the file has
             // shrunk, and when a log — which only ever grows — has been rewritten, so either way the
-            // old copy is kept aside first.
-            if (size < had || isLog) keepAside(into, now)
+            // old copy is kept aside first. A copy placed from elsewhere, given a folder to keep what it
+            // replaces in, keeps everything it replaces there.
+            if (aside != null || size < had || isLog) keepAside(into, now, aside)
         } else {
             OwnerOnly.directory(into.parent)
         }
         copyWhole(from, into)
         runCatching { Files.setLastModifiedTime(into, modified) }
         return size
+    }
+
+    /**
+     * Brings [into] up to date with [from] the way a backup run does, for a copy coming back the other
+     * way: a log that has grown elsewhere takes only its new bytes, and anything it replaces is kept
+     * in [aside] under its own name and the time. A log that already holds all of [from] and more is
+     * left alone, since it is the same conversation further on. Returns the bytes copied.
+     */
+    internal fun mirrorFile(from: Path, into: Path, aside: Path, now: Instant = Instant.now()): Long {
+        val attrs = attributes(from) ?: return 0
+        if (!attrs.isRegularFile) return 0
+        val there = attributes(into)
+        if (there != null && from.fileName.toString().endsWith(".jsonl") &&
+            there.size() > attrs.size() && tailMatches(from, into, attrs.size())
+        ) return 0
+        val stamp = BackupRecord.Stamp(attrs.size(), attrs.lastModifiedTime().toMillis())
+        return mirror(from, into, now, stamp, recorded = false, aside = aside)
+    }
+
+    /**
+     * Whether [from] is the file at [into] or the same log at another length: a log that has grown
+     * here or there, by the same tail check a copy makes, and for anything else the same bytes.
+     */
+    internal fun continues(from: Path, into: Path): Boolean {
+        val a = attributes(from) ?: return false
+        val b = attributes(into) ?: return false
+        if (!a.isRegularFile || !b.isRegularFile) return false
+        if (from.fileName.toString().endsWith(".jsonl")) return tailMatches(from, into, minOf(a.size(), b.size()))
+        return a.size() == b.size() && Files.mismatch(from, into) == -1L
     }
 
     /** [file]'s size and times, in one look, or null when there is no such file. */
@@ -419,11 +456,15 @@ object Backup {
         }
     }
 
-    /** Moves the backed-up [file] aside, to `name.before-<time>.ext`, before a smaller version replaces it. */
-    private fun keepAside(file: Path, now: Instant) {
+    /**
+     * Moves the backed-up [file] aside, to `name.before-<time>.ext`, before a smaller version replaces
+     * it: beside it, or into [into] when that is given.
+     */
+    private fun keepAside(file: Path, now: Instant, into: Path? = null) {
         val name = file.fileName.toString()
         val dot = name.lastIndexOf('.').takeIf { it > 0 } ?: name.length
-        val aside = file.resolveSibling("${name.substring(0, dot)}.before-${STAMP.format(now)}${name.substring(dot)}")
+        val kept = "${name.substring(0, dot)}.before-${STAMP.format(now)}${name.substring(dot)}"
+        val aside = if (into == null) file.resolveSibling(kept) else into.resolve(kept).also { OwnerOnly.directory(into) }
         Files.move(file, aside)
     }
 
@@ -443,7 +484,10 @@ object Backup {
      * Files that only make sense beside a live process — SQLite's journals, lock files — and this
      * backup's own temporaries. A copy of a journal taken mid-write would be worse than none.
      */
-    private fun transient(name: String): Boolean =
+    internal fun transient(name: String): Boolean =
         name.startsWith(TEMP_PREFIX) || name.endsWith("-wal") || name.endsWith("-shm") ||
             name.endsWith("-journal") || name.endsWith(".lock")
+
+    /** [transient] as file-name patterns, for a copy made by a tool that takes patterns rather than a test. */
+    internal val TRANSIENT_PATTERNS = listOf("$TEMP_PREFIX*", "*-wal", "*-shm", "*-journal", "*.lock")
 }

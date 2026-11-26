@@ -94,15 +94,37 @@ class AgentSummaryViewTest {
             click(action.boundsInRoot.center)
         }
 
-        /** Presses the scrollbar track and holds it for [millis], the pointer still, before letting go. */
-        fun holdScrollbar(millis: Long) {
+        /**
+         * Presses the scrollbar track and lets go at once. The press queues its first page of scrolling
+         * before the release, and the release stops it before any repeat, however slow the machine.
+         */
+        fun tapScrollbar() {
+            val at = Offset(896f, 500f)
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
+            settle()
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = PointerButtons(isPrimaryPressed = true), button = PointerButton.Primary) }
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, at, buttons = PointerButtons(), button = PointerButton.Primary) }
+            settle()
+        }
+
+        /** How far the conversation list is scrolled, as it reports it to accessibility. */
+        fun listPosition(): Float {
+            val range = nodes().mapNotNull { it.config.getOrNull(SemanticsProperties.VerticalScrollAxisRange) }.single()
+            return onEdt { range.value() }
+        }
+
+        /**
+         * Presses the scrollbar track and holds it, the pointer still, until [done] or a minute has
+         * passed. The track repeats on wall time, so a fixed hold proves nothing on a loaded machine.
+         */
+        fun holdScrollbar(done: () -> Boolean) {
             val at = Offset(896f, 500f)
             val pressed = PointerButtons(isPrimaryPressed = true)
             onEdt { scene.sendPointerEvent(PointerEventType.Move, at) }
             settle()
             onEdt { scene.sendPointerEvent(PointerEventType.Press, at, buttons = pressed, button = PointerButton.Primary) }
-            val until = System.nanoTime() + millis * 1_000_000
-            while (System.nanoTime() < until) {
+            val deadline = System.nanoTime() + 60_000_000_000
+            while (!done() && System.nanoTime() < deadline) {
                 time += 16_000_000
                 onEdt { scene.render(time).close() }
                 // A held mouse still reports where it is, and each report measures the scene first.
@@ -193,23 +215,25 @@ class AgentSummaryViewTest {
                     "Message $index.\n" + "The checks are progressing.\n".repeat(index % 4), index % 5 != 1, index.toLong())
             }, 1)
         }
-        val clicked = conversation()
-        Reader(dir.resolve("unused.jsonl"), clicked).use { reader ->
+        val tapped = conversation()
+        var tappedAt = 0f
+        Reader(dir.resolve("unused.jsonl"), tapped).use { reader ->
             reader.settle()
-            reader.clickScrollbar()
+            reader.tapScrollbar()
+            tappedAt = reader.listPosition()
             reader.visible = false
             reader.settle()
         }
-        // Held past the 300 ms after which the track repeats its scroll, so the repeats run.
+        // Held past the 300 ms after which the track repeats its scroll, until a repeat has moved it on.
         val held = conversation()
         Reader(dir.resolve("unused.jsonl"), held).use { reader ->
             reader.settle()
-            reader.holdScrollbar(1_500)
+            reader.holdScrollbar { reader.listPosition() > tappedAt }
             reader.visible = false
             reader.settle()
         }
-        assertTrue(clicked.scrollIndex > 0, "a click on the track scrolls")
-        assertTrue(held.scrollIndex > clicked.scrollIndex, "holding scrolls on: ${held.scrollIndex} after holding, ${clicked.scrollIndex} after a click")
+        assertTrue(tapped.scrollIndex > 0, "a tap on the track scrolls")
+        assertTrue(held.scrollIndex > tapped.scrollIndex, "holding scrolls on: ${held.scrollIndex} after holding, ${tapped.scrollIndex} after a tap")
     }
 
     @Test

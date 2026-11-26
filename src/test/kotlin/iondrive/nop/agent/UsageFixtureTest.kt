@@ -64,4 +64,22 @@ class UsageFixtureTest {
         assertEquals(UsageWindow(100.0, null, null), reading.session)
         assertNull(reading.weekly)
     }
+
+    @Test
+    fun `sample reset offers include their expiry and confirmation details`(@TempDir tmp: Path) {
+        val file = fixture(tmp, """{"studio":{"resets":{
+            "offers":[{"kind":"weekly reset","left":2,"expiresInMinutes":150,"weekResetsInMinutes":90,
+                        "effect":"Refills weekly usage","early":"There's still weekly usage left","done":"Weekly usage reset"}],
+            "blocked":["Session reset · unavailable"]
+        }}}""")
+
+        val resets = UsageFixture.read(file, account("studio"), now).resets!!
+
+        assertEquals(
+            ResetOffer("sample-0", "weekly reset", 2, now.plusSeconds(9000), "Refills weekly usage",
+                now.plusSeconds(5400), "There's still weekly usage left", "Weekly usage reset"),
+            resets.offers.single(),
+        )
+        assertEquals(listOf("Session reset · unavailable"), resets.blocked)
+    }
 }

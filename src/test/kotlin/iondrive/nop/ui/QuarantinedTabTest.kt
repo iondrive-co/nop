@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.awt.EventQueue
 import java.io.File
 import java.nio.file.Path
 
@@ -101,37 +102,53 @@ class QuarantinedTabTest {
         val file = dir.resolve("blob.txt").toFile().apply { writeText("x".repeat(1_000_000)) }
         val tab = Tab.FileView(file)
         val entry = Quarantine.Entry(tab.recoveryKey, 0, "boom")
-        val scene = ImageComposeScene(1400, 900, Density(2f)) {
-            IntUiTheme(isDark = false) { QuarantinedTabView(tab, entry) }
+        val scene = onEdt {
+            ImageComposeScene(1400, 900, Density(2f)) {
+                IntUiTheme(isDark = false) { QuarantinedTabView(tab, entry) }
+            }
         }
         try {
             var time = 0L
-            repeat(20) { time += 16_000_000; scene.render(time); Thread.sleep(20) }
+            repeat(20) { time += 16_000_000; val at = time; onEdt { scene.render(at) }; Thread.sleep(20) }
         } finally {
-            scene.close()
+            onEdt { scene.close() }
         }
     }
 
     private fun render(tab: Tab, window: Long, check: () -> Unit) {
         val tabsState = TabsState().apply { open(tab) }
-        val scene = ImageComposeScene(1200, 800, Density(1f)) {
-            IntUiTheme(isDark = false) {
-                CompositionLocalProvider(LocalWindowId provides window) {
-                    TabbedViewerPanel(
-                        tabsState = tabsState,
-                        repo = null,
-                        editStore = FileEditStore(),
-                        localHistory = LocalHistory(dir.resolve("history")),
-                    )
+        val scene = onEdt {
+            ImageComposeScene(1200, 800, Density(1f)) {
+                IntUiTheme(isDark = false) {
+                    CompositionLocalProvider(LocalWindowId provides window) {
+                        TabbedViewerPanel(
+                            tabsState = tabsState,
+                            repo = null,
+                            editStore = FileEditStore(),
+                            localHistory = LocalHistory(dir.resolve("history")),
+                        )
+                    }
                 }
             }
         }
         try {
-            var time = 0L
-            repeat(10) { time += 16_000_000; scene.render(time) }
+            onEdt {
+                var time = 0L
+                repeat(10) { time += 16_000_000; scene.render(time) }
+            }
             check()
         } finally {
-            scene.close()
+            onEdt { scene.close() }
         }
+    }
+
+    /**
+     * Runs a scene call on the AWT thread, where Compose's global snapshot manager runs: a scene
+     * driven from another thread takes their two locks in the opposite order and can deadlock.
+     */
+    private fun <T> onEdt(block: () -> T): T {
+        var result: Result<T>? = null
+        EventQueue.invokeAndWait { result = runCatching(block) }
+        return result!!.getOrThrow()
     }
 }

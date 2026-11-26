@@ -46,8 +46,12 @@ import iondrive.nop.agent.EventLog
 import iondrive.nop.agent.Login
 import iondrive.nop.agent.NativeSessions
 import iondrive.nop.agent.PastSession
+import iondrive.nop.agent.ProjectSyncStore
 import iondrive.nop.agent.Provider
+import iondrive.nop.agent.SyncLookup
+import iondrive.nop.agent.SyncRole
 import iondrive.nop.agent.Usage
+import iondrive.nop.agent.UsageFixture
 import iondrive.nop.agent.UsageReading
 import iondrive.nop.agent.handoverTarget
 import iondrive.nop.agent.resumesAfterReset
@@ -97,6 +101,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.component.Text
 import java.awt.CardLayout
@@ -952,6 +957,17 @@ fun App(
     val agentSessions = remember(projectPath, rootPath) {
         AgentSessionStore.of(root = rootPath, project = projectPath)
     }
+    // Whether this machine holds the project's agent tabs, when they are kept on a remote machine as
+    // well. Looked up off the UI thread, since the first look reads the repository's origin; null
+    // until then, and a lookup holding null when the project is not synced at all. Until this
+    // machine holds the project nothing here may restore, save, open or move a tab: another machine
+    // may be running them, and its tabs are the ones that count.
+    // Looked up again when the remote is changed in the settings, which replaces every project's sync.
+    val syncLookup by produceState(ProjectSyncStore.peek(rootPath), rootPath, projectPath, ProjectSyncStore.revision) {
+        value = SyncLookup(withContext(Dispatchers.IO) { ProjectSyncStore.of(rootPath, projectPath) })
+    }
+    val sync = syncLookup?.sync
+    val agentOwner = syncLookup != null && (sync == null || sync.view.role == SyncRole.Owner)
     val otherProjects = remember(allOpenProjects, rootPath) {
         allOpenProjects
             .map { it.toAbsolutePath().normalize() }
@@ -964,17 +980,28 @@ fun App(
     fun sendAgentToProject(sessionId: String, targetProject: Path) {
         val targetNorm = targetProject.toAbsolutePath().normalize()
         val targetRoot = GitRepo.discover(targetNorm)?.rootDir ?: targetNorm
-        val moved = AgentSessionStore.sendSession(
-            sessionId = sessionId,
-            fromRoot = rootPath,
-            toProject = targetNorm,
-            toRoot = targetRoot,
-        )
-        if (moved != null) {
-            TerminalStore.of(root = targetRoot, project = targetNorm) {
-                TerminalStore.Terminals.forProject(targetRoot)
-            }.sessionTab = ToolTab.Agent
-            onRevealProject(targetNorm)
+        scope.launch {
+            // The project sent to may be synced and not yet looked at here, so its tabs may be
+            // another machine's: found out first, waiting a little for the remote to say, and the
+            // send is turned down (see AgentSessionStore.sendSession) unless this machine holds it.
+            val target = withContext(Dispatchers.IO) { ProjectSyncStore.of(targetRoot, targetNorm) }
+            if (target != null) {
+                withTimeoutOrNull(20_000) { snapshotFlow { target.view.role }.first { it != SyncRole.Starting } }
+            }
+            val moved = AgentSessionStore.sendSession(
+                sessionId = sessionId,
+                fromRoot = rootPath,
+                toProject = targetNorm,
+                toRoot = targetRoot,
+            )
+            if (moved != null) {
+                TerminalStore.of(root = targetRoot, project = targetNorm) {
+                    TerminalStore.Terminals.forProject(targetRoot)
+                }.sessionTab = ToolTab.Agent
+                onRevealProject(targetNorm)
+            } else if (!ProjectSyncStore.owning(rootPath) || !ProjectSyncStore.owning(targetRoot)) {
+                Log.warn("not sending agent $sessionId to $targetNorm: another machine holds the agents of one of the two projects")
+            }
         }
     }
     val snipBaseline = remember(projectPath) { snipTrigger }
@@ -1069,8 +1096,11 @@ fun App(
     // was about to read. Waits for the accounts for the same reason — a row names the account whose
     // CLI to run, an empty list is "not read yet" as much as "none configured", and saving over the
     // file before they arrive would cost the user every tab in it.
-    LaunchedEffect(rootPath, agentSessions, agentAccounts) {
-        if (agentAccounts.isEmpty()) return@LaunchedEffect
+    //
+    // Not until this machine holds the project, when it is synced: before that the file may be about
+    // to be replaced by the tabs another machine sent, and a restore would run them here as well.
+    LaunchedEffect(rootPath, agentSessions, agentAccounts, agentOwner) {
+        if (agentAccounts.isEmpty() || !agentOwner) return@LaunchedEffect
         val saved = withContext(Dispatchers.IO) { Settings.loadOpenAgents(rootPath) }
         // Guarded inside the store's collection, which outlives this composition: coming back to the
         // project must not restore a second copy of every tab. See AgentSessions.restore.
@@ -1081,7 +1111,11 @@ fun App(
         snapshotFlow { agentSessions.sessions.mapNotNull { it.asOpenAgent() } }
             .distinctUntilChanged()
             .collectLatest { rows ->
-                withContext(Dispatchers.IO) { Settings.saveOpenAgents(rootPath, rows) }
+                // Asked again at each write: a machine that has just been taken over stops its tabs,
+                // and the empty strip that leaves is not this project's tabs.
+                withContext(Dispatchers.IO) {
+                    if (ProjectSyncStore.owning(rootPath)) Settings.saveOpenAgents(rootPath, rows)
+                }
             }
     }
     // How much room the usage strip at the bottom of the window is taking. Terminals are
@@ -1165,12 +1199,22 @@ fun App(
             delay(if (stale) USAGE_RETRY_INTERVAL_MS else USAGE_POLL_INTERVAL_MS)
         }
     }
-    LaunchedEffect(showAccounts) {
+    LaunchedEffect(showAccounts, agentAccounts.map { Triple(it.name, it.provider, it.home) }) {
         if (!showAccounts) return@LaunchedEffect
         for (account in agentAccounts) {
             Usage.invalidate(account)
             val reading = withContext(Dispatchers.IO) { runCatching { Usage.read(account) }.getOrNull() }
             if (reading != null) agentUsage[account.name] = reading
+        }
+        if (UsageFixture.file != null) return@LaunchedEffect
+        // Codex keeps its reset credits where only its CLI can read them, so they are asked for when
+        // someone is looking at the accounts rather than on every poll, each CLI start on its own so
+        // a slow one holds up nothing else.
+        for (account in agentAccounts.filter { it.provider == Provider.OpenAI }) {
+            launch {
+                val resets = withContext(Dispatchers.IO) { runCatching { Usage.refreshCodexResets(account) }.getOrNull() }
+                agentUsage[account.name]?.let { agentUsage[account.name] = it.copy(resets = resets) }
+            }
         }
     }
     // The other half of believing a quota wall: the provider's own number for what is left. Read
@@ -2043,7 +2087,9 @@ fun App(
                                 // where an earlier session is resumed from. Choosing in it is what
                                 // turns it into the session's tab — see AgentSessions.open.
                                 onShowPicker = {
-                                    agentSessions.showPicker()
+                                    // In a project another machine holds the pane is that
+                                    // machine's tabs, read-only: nothing to pick from here.
+                                    if (agentOwner) agentSessions.showPicker()
                                     showSession(ToolTab.Agent)
                                 },
                                 onSelectAgent = { id ->
@@ -2096,96 +2142,121 @@ fun App(
                                 },
                                 terminal = { TerminalTabPanel(terminals, terminalCards) },
                                 agent = {
-                                    AgentPanel(
-                                        state = agentSessions,
-                                        accounts = agentAccounts,
-                                        readings = agentUsage,
-                                        // Minus the ones the strip is still running — since agent
-                                        // tabs come back at the next start, a restored session is
-                                        // both a tab and a past session, and clicking it here would
-                                        // resume the same conversation a second time beside the
-                                        // first.
-                                        //
-                                        // Only while it is running, though. A tab whose run has
-                                        // ended holds nothing but the post-exit choices, and it is
-                                        // the one case where hiding the row would hide the work: a
-                                        // session that handed over and then stopped is listed by nop
-                                        // under the conversation it ended in, so hiding that row
-                                        // would leave the picker showing only the conversation the
-                                        // handover walked away from — on the account that had
-                                        // just run out.
-                                        sessions = pastAgentSessions.filterNot { past ->
-                                            agentSessions.sessions.any {
-                                                it.sessionId == past.sessionId && !it.ended
-                                            }
-                                        },
-                                        // The same path every launch below is given, so the picker
-                                        // cannot name one directory and start the CLI in another.
-                                        projectDir = rootPath,
-                                        cards = terminalCards,
-                                        modelsFor = { account ->
-                                            agentModels[account.name] ?: account.provider.fallbackModels
-                                        },
-                                        onUpdateAccount = { changed ->
-                                            agentConfig?.let { current ->
-                                                val next = current.copy(
-                                                    accounts = current.accounts.map { if (it.name == changed.name) changed else it },
+                                    val role = sync?.view?.role
+                                    when {
+                                        // Not yet known whether the project is synced: drawing the
+                                        // picker now could start a tab another machine holds.
+                                        syncLookup == null -> Box(Modifier.fillMaxSize())
+                                        sync != null && role == SyncRole.Viewer -> SyncViewerPanel(sync)
+                                        sync != null && role == SyncRole.Starting &&
+                                            agentSessions.sessions.isEmpty() -> SyncStartingPanel(sync)
+                                        else -> Column(Modifier.fillMaxSize()) {
+                                            if (sync != null) SyncStatusLine(sync, starting = role == SyncRole.Starting)
+                                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                                AgentPanel(
+                                                    state = agentSessions,
+                                                    accounts = agentAccounts,
+                                                    readings = agentUsage,
+                                                    // Minus the ones the strip is still running — since agent
+                                                    // tabs come back at the next start, a restored session is
+                                                    // both a tab and a past session, and clicking it here would
+                                                    // resume the same conversation a second time beside the
+                                                    // first.
+                                                    //
+                                                    // Only while it is running, though. A tab whose run has
+                                                    // ended holds nothing but the post-exit choices, and it is
+                                                    // the one case where hiding the row would hide the work: a
+                                                    // session that handed over and then stopped is listed by nop
+                                                    // under the conversation it ended in, so hiding that row
+                                                    // would leave the picker showing only the conversation the
+                                                    // handover walked away from — on the account that had
+                                                    // just run out.
+                                                    sessions = pastAgentSessions.filterNot { past ->
+                                                        agentSessions.sessions.any {
+                                                            it.sessionId == past.sessionId && !it.ended
+                                                        }
+                                                    },
+                                                    // The same path every launch below is given, so the picker
+                                                    // cannot name one directory and start the CLI in another.
+                                                    projectDir = rootPath,
+                                                    cards = terminalCards,
+                                                    modelsFor = { account ->
+                                                        agentModels[account.name] ?: account.provider.fallbackModels
+                                                    },
+                                                    onUpdateAccount = { changed ->
+                                                        agentConfig?.let { current ->
+                                                            val next = current.copy(
+                                                                accounts = current.accounts.map { if (it.name == changed.name) changed else it },
+                                                            )
+                                                            agentConfig = next
+                                                            scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
+                                                        }
+                                                    },
+                                                    onRemoveAccount = { removed ->
+                                                        agentConfig?.let { current ->
+                                                            val next = current.withoutAccount(removed.name)
+                                                            agentConfig = next
+                                                            scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
+                                                        }
+                                                    },
+                                                    onLaunch = launch@{ account ->
+                                                        // Until the remote has said this machine holds
+                                                        // the project, a new tab could be one more
+                                                        // agent beside another machine's.
+                                                        if (!agentOwner) {
+                                                            Log.warn("not starting an agent in $rootPath: not known to hold its agents yet")
+                                                            return@launch
+                                                        }
+                                                        // HEAD now is what the Diff tab's "session" base means
+                                                        // for this tab from here on — see AgentSession.
+                                                        agentSessions.open(
+                                                            rootPath.toFile(),
+                                                            account,
+                                                            baselineSha = repo?.headSha(),
+                                                        )
+                                                        showSession(ToolTab.Agent)
+                                                    },
+                                                    onReopen = reopen@{ past ->
+                                                        if (!agentOwner) {
+                                                            Log.warn("not reopening ${past.title} in $rootPath: not known to hold its agents yet")
+                                                            return@reopen
+                                                        }
+                                                        // Native resume, not a replay of a summary: the vendor
+                                                        // still has the real session, and landing back in it is
+                                                        // strictly better than landing in a description of it.
+                                                        //
+                                                        // A row that named a store rather than an account is
+                                                        // resumed against that store — see PastSession.home
+                                                        // and accountIn, which is also what decides whether
+                                                        // the row was clickable in the first place.
+                                                        val account = past.accountIn(agentAccounts)
+                                                        if (account != null) {
+                                                            agentSessions.reopen(
+                                                                past = past,
+                                                                dir = rootPath.toFile(),
+                                                                account = account,
+                                                                // Where the resumed work starts from nop's side.
+                                                                // The conversation is older than this tab; the
+                                                                // changes the user is about to watch are not.
+                                                                baselineSha = repo?.headSha(),
+                                                            )
+                                                            showSession(ToolTab.Agent)
+                                                        } else {
+                                                            // Unreachable through the picker, which draws such a
+                                                            // row as unclickable. Logged rather than dropped
+                                                            // because a press that does nothing at all is the
+                                                            // one failure the user cannot report anything about.
+                                                            Log.warn(
+                                                                "nothing to reopen for ${past.title}: " +
+                                                                    "account=${past.lastAccount} home=${past.home}",
+                                                            )
+                                                        }
+                                                    },
+                                                    onSettings = { showAccounts = true },
                                                 )
-                                                agentConfig = next
-                                                scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
                                             }
-                                        },
-                                        onRemoveAccount = { removed ->
-                                            agentConfig?.let { current ->
-                                                val next = current.withoutAccount(removed.name)
-                                                agentConfig = next
-                                                scope.launch { withContext(Dispatchers.IO) { Accounts.save(next) } }
-                                            }
-                                        },
-                                        onLaunch = { account ->
-                                            // HEAD now is what the Diff tab's "session" base means
-                                            // for this tab from here on — see AgentSession.
-                                            agentSessions.open(
-                                                rootPath.toFile(),
-                                                account,
-                                                baselineSha = repo?.headSha(),
-                                            )
-                                            showSession(ToolTab.Agent)
-                                        },
-                                        onReopen = { past ->
-                                            // Native resume, not a replay of a summary: the vendor
-                                            // still has the real session, and landing back in it is
-                                            // strictly better than landing in a description of it.
-                                            //
-                                            // A row that named a store rather than an account is
-                                            // resumed against that store — see PastSession.home
-                                            // and accountIn, which is also what decides whether
-                                            // the row was clickable in the first place.
-                                            val account = past.accountIn(agentAccounts)
-                                            if (account != null) {
-                                                agentSessions.reopen(
-                                                    past = past,
-                                                    dir = rootPath.toFile(),
-                                                    account = account,
-                                                    // Where the resumed work starts from nop's side.
-                                                    // The conversation is older than this tab; the
-                                                    // changes the user is about to watch are not.
-                                                    baselineSha = repo?.headSha(),
-                                                )
-                                                showSession(ToolTab.Agent)
-                                            } else {
-                                                // Unreachable through the picker, which draws such a
-                                                // row as unclickable. Logged rather than dropped
-                                                // because a press that does nothing at all is the
-                                                // one failure the user cannot report anything about.
-                                                Log.warn(
-                                                    "nothing to reopen for ${past.title}: " +
-                                                        "account=${past.lastAccount} home=${past.home}",
-                                                )
-                                            }
-                                        },
-                                        onSettings = { showAccounts = true },
-                                    )
+                                        }
+                                    }
                                 },
                                 diff = {
                                     DiffPanel(
@@ -2443,6 +2514,7 @@ fun App(
                 config = config,
                 project = projectPath.toFile(),
                 readings = agentUsage,
+                onReading = { account, reading -> agentUsage[account.name] = reading },
                 modelsFor = { account ->
                     agentModels[account.name] ?: account.provider.fallbackModels
                 },

@@ -106,6 +106,8 @@ object AgentSessionStore {
         val fromKey = norm(fromRoot)
         val toKey = norm(toRoot)
         if (fromKey == toKey) return null
+        // Not into or out of a project another machine holds: its tabs are that machine's to change.
+        if (!ProjectSyncStore.owning(fromKey) || !ProjectSyncStore.owning(toKey)) return null
 
         val fromEntry = byRoot[fromKey] ?: return null
         val session = fromEntry.sessions.detach(sessionId) ?: return null

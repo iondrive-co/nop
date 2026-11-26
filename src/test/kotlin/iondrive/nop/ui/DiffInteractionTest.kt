@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.awt.EventQueue
 import java.io.File
 
 class DiffInteractionTest {
@@ -104,16 +105,18 @@ class DiffInteractionTest {
         val selection = Color.Magenta
         val width = 1200
         val height = 500
-        val scene = ImageComposeScene(width, height, Density(1f)) {
-            IntUiTheme(isDark = false) {
-                CompositionLocalProvider(LocalTextSelectionColors provides TextSelectionColors(selection, selection)) {
-                    DiffView(repo, Tab.Diff(FileChange("Sample.kt", ChangeKind.MODIFIED), dir), FileEditStore())
+        val scene = onEdt {
+            ImageComposeScene(width, height, Density(1f)) {
+                IntUiTheme(isDark = false) {
+                    CompositionLocalProvider(LocalTextSelectionColors provides TextSelectionColors(selection, selection)) {
+                        DiffView(repo, Tab.Diff(FileChange("Sample.kt", ChangeKind.MODIFIED), dir), FileEditStore())
+                    }
                 }
             }
         }
         try {
             var time = 0L
-            fun frame(): Image { time += 16_000_000; return scene.render(time) }
+            fun frame(): Image { time += 16_000_000; val at = time; return onEdt { scene.render(at) } }
 
             // The diff loads off the UI thread; wait until the changed words are on screen.
             var before = 0
@@ -132,24 +135,34 @@ class DiffInteractionTest {
             val to = Offset(width * 0.45f, height - 10f)
             val down = PointerButtons(isPrimaryPressed = true)
             fun step() { frame(); Thread.sleep(20) }
-            scene.sendPointerEvent(PointerEventType.Move, from)
+            onEdt { scene.sendPointerEvent(PointerEventType.Move, from) }
             step()
-            scene.sendPointerEvent(PointerEventType.Press, from, buttons = down, button = PointerButton.Primary)
+            onEdt { scene.sendPointerEvent(PointerEventType.Press, from, buttons = down, button = PointerButton.Primary) }
             step()
             for (i in 1..10) {
-                scene.sendPointerEvent(PointerEventType.Move, from + (to - from) * (i / 10f), buttons = down)
+                onEdt { scene.sendPointerEvent(PointerEventType.Move, from + (to - from) * (i / 10f), buttons = down) }
                 step()
             }
-            scene.sendPointerEvent(PointerEventType.Release, to, buttons = PointerButtons(), button = PointerButton.Primary)
+            onEdt { scene.sendPointerEvent(PointerEventType.Release, to, buttons = PointerButtons(), button = PointerButton.Primary) }
             step()
             val after = frame()
 
             assertTrue(after.count(selection.toArgb()) > 0, "the drag selected text")
             assertEquals(0, after.count(tint), "no changed word is left showing its tint over the selection")
         } finally {
-            scene.close()
+            onEdt { scene.close() }
             repo.close()
         }
+    }
+
+    /**
+     * Runs a scene call on the AWT thread, where Compose's global snapshot manager runs: a scene
+     * driven from another thread takes their two locks in the opposite order and can deadlock.
+     */
+    private fun <T> onEdt(block: () -> T): T {
+        var result: Result<T>? = null
+        EventQueue.invokeAndWait { result = runCatching(block) }
+        return result!!.getOrThrow()
     }
 
     private fun Image.count(argb: Int): Int {

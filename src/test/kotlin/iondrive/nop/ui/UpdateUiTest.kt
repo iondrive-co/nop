@@ -10,6 +10,7 @@ import iondrive.nop.update.Version
 import org.jetbrains.jewel.intui.standalone.theme.IntUiTheme
 import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.Image
+import java.awt.EventQueue
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -34,7 +35,11 @@ class UpdateUiTest {
         return n
     }
 
-    private fun render(): Image {
+    /**
+     * On the AWT thread, where Compose's global snapshot manager runs: a scene driven from another
+     * thread takes their two locks in the opposite order and can deadlock.
+     */
+    private fun render(): Image = onEdt {
         val scene = ImageComposeScene(400, 40, Density(1f)) {
             IntUiTheme(isDark = false) {
                 Row {
@@ -43,13 +48,19 @@ class UpdateUiTest {
                 }
             }
         }
-        return try {
+        try {
             var image = scene.render(0)
             repeat(5) { i -> image = scene.render((i + 1) * 16_000_000L) }
             image
         } finally {
             scene.close()
         }
+    }
+
+    private fun <T> onEdt(block: () -> T): T {
+        var result: Result<T>? = null
+        EventQueue.invokeAndWait { result = runCatching(block) }
+        return result!!.getOrThrow()
     }
 
     @Test

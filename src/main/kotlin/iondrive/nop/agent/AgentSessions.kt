@@ -366,5 +366,8 @@ class AgentSessions {
         _sessions.clear()
         selectedId = null
         pickerTabVisible = true
+        // A project whose tabs were stopped because another machine took it over gets them back
+        // from [restore] when this machine takes it over again.
+        restored = false
     }
 }

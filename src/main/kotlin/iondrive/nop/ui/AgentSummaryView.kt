@@ -58,7 +58,13 @@ import java.time.format.DateTimeFormatter
 
 /** A read-only snapshot; only opening it or pressing Refresh reads the conversation again. */
 @Composable
-internal fun AgentSummaryView(state: ConversationSummaryState, log: Path, onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null) {
+internal fun AgentSummaryView(
+    state: ConversationSummaryState,
+    log: Path,
+    onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null,
+    /** What follows the snapshot's time: how to get back to a view the user can type in. */
+    hint: String = "Turn Summary off to type or answer questions",
+) {
     LaunchedEffect(state, state.revision) {
         if (state.snapshot == null && state.error == null) {
             val result = withContext(Dispatchers.IO) { runCatching { ConversationSummary.read(log) } }
@@ -87,7 +93,7 @@ internal fun AgentSummaryView(state: ConversationSummaryState, log: Path, onBran
                 when {
                     state.error != null -> "Conversation snapshot"
                     at == null -> "Reading conversation…"
-                    else -> "Snapshot at $at · Turn Summary off to type or answer questions"
+                    else -> "Snapshot at $at · $hint"
                 },
                 color = AgentMuted,
                 modifier = Modifier.weight(1f),

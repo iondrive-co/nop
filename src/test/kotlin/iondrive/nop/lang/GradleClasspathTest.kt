@@ -30,6 +30,9 @@ class GradleClasspathTest {
 
     private fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
 
+    /** Real Gradle runs can take minutes on a loaded machine; the production 3-minute limit is tested with fixtures. */
+    private val realGradleTimeout = java.util.concurrent.TimeUnit.MINUTES.toMillis(20)
+
     private fun artifact(root: Path, group: String, name: String, type: String, source: String, dependencies: String = "") {
         val sourceFile = write(root, "artifacts/$name/src/${type.replace('.', '/')}.java", source)
         val classes = Files.createDirectories(root.resolve("artifacts/$name/classes"))
@@ -99,7 +102,7 @@ class GradleClasspathTest {
             "package example.app; class Verify { example.model.Widget widget; }").toFile()
         val files = listOf("build.gradle", "settings.gradle", "app/build.gradle", "model/build.gradle", "unrelated/build.gradle")
         val cache = root.resolve("import-cache")
-        val importer = GradleClasspath(root.toFile(), cache)
+        val importer = GradleClasspath(root.toFile(), cache, realGradleTimeout)
         val inputFingerprint = importer.inputFingerprint(files)
         val model = assertNotNull(importer.load(files))
         assertEquals(inputFingerprint, importer.inputFingerprint(files))
@@ -133,7 +136,7 @@ class GradleClasspathTest {
         assertEquals(1, calls())
         assertEquals(model, importer.load(files + "app/code/New.java"))
         assertEquals(inputFingerprint, importer.inputFingerprint(files + "app/code/New.java"))
-        assertEquals(model, GradleClasspath(root.toFile(), cache).load(files))
+        assertEquals(model, GradleClasspath(root.toFile(), cache, realGradleTimeout).load(files))
         assertEquals(1, calls(), "Source edits and a restart reuse the cached model")
         assertNotNull(importer.load(files, refresh = 1))
         assertEquals(2, calls(), "F5 forces another dependency resolution")
@@ -198,7 +201,7 @@ class GradleClasspathTest {
         """.trimIndent())
         val file = write(root, "code/Example.java",
             "import example.annotations.MaybeNull; class Example { @MaybeNull String value; }").toFile()
-        val model = assertNotNull(GradleClasspath(root.toFile(), root.resolve("cache"))
+        val model = assertNotNull(GradleClasspath(root.toFile(), root.resolve("cache"), realGradleTimeout)
             .load(listOf("build.gradle.kts", "settings.gradle.kts")))
         assertEquals("main", model.sourceSet(file)?.name)
         val result = JavaAnalysis.analyze(file.readText(), file, root.toFile(), gradle = model)

@@ -498,7 +498,7 @@ internal fun usageLine(reading: UsageReading?): String {
 internal data class LimitLine(val label: String, val window: UsageWindow?, val detail: String)
 
 /**
- * Every limit [reading] knows, in the order [LimitsList] shows them: the session and weekly windows
+ * Every limit [reading] knows, in the order [LimitsTable] shows them: the session and weekly windows
  * nop governs the account by, then the provider's others. A reading with no windows is one line
  * saying why.
  */
@@ -517,15 +517,28 @@ internal fun limitLines(reading: UsageReading?, now: Instant = Instant.now()): L
 }
 
 /**
- * The chip's tooltip: every limit of the account, a column each for name, bar, percent and reset so
- * the rows line up, then what the grey line means and how old a stale reading is.
+ * The chip's tooltip: the account's name, every limit it has (see [LimitsTable]), then how old a
+ * stale reading is.
  */
 @Composable
 private fun LimitsList(account: Account, reading: UsageReading?) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(account.model?.let { "${account.name}  ($it)" } ?: account.name, fontWeight = FontWeight.Bold)
+        LimitsTable(reading)
+        reading?.let(::staleLine)?.let { Text(it, color = AgentMuted) }
+    }
+}
+
+/**
+ * Every limit of [reading], a column each for name, bar, percent and reset so the rows line up, then
+ * what the grey line on the session bar means. [hover] gives each bar its own tooltip, for where
+ * nothing around the table already explains it.
+ */
+@Composable
+internal fun LimitsTable(reading: UsageReading?, hover: Boolean = false) {
     val lines = limitLines(reading)
     val pace = reading?.weeklyPace()
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(account.model?.let { "${account.name}  ($it)" } ?: account.name, fontWeight = FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(ROW_GAP)) { lines.forEach { Text(it.label) } }
             if (lines.any { it.window != null }) {
@@ -533,7 +546,12 @@ private fun LimitsList(account: Account, reading: UsageReading?) {
                     lines.forEach { line ->
                         Box(Modifier.height(textLineHeight()), contentAlignment = Alignment.Center) {
                             val session = line.window != null && line.window === reading?.session
-                            UsageBar(line.label, line.window, if (session) pace else null, hover = false)
+                            UsageBar(
+                                line.label, line.window,
+                                weeklyPace = if (session) pace else null,
+                                paceSource = if (session) reading?.paceSource else null,
+                                hover = hover,
+                            )
                         }
                     }
                 }
@@ -546,7 +564,6 @@ private fun LimitsList(account: Account, reading: UsageReading?) {
             }
         }
         if (reading?.session != null) paceNote(pace, reading.paceSource)?.let { Text("Session: $it", color = AgentMuted) }
-        reading?.let(::staleLine)?.let { Text(it, color = AgentMuted) }
     }
 }
 

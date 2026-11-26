@@ -42,6 +42,8 @@ import iondrive.nop.agent.Accounts
 import iondrive.nop.agent.AddressGuard
 import iondrive.nop.agent.Activity
 import iondrive.nop.agent.AgentSessionStore
+import iondrive.nop.agent.ProjectSyncStore
+import kotlin.time.Duration.Companion.seconds
 import iondrive.nop.agent.Backup
 import iondrive.nop.agent.CliUpdates
 import iondrive.nop.git.ProjectGitPoller
@@ -625,6 +627,7 @@ fun main(args: Array<String>) {
                 .distinctUntilChanged()
                 .collect { projects ->
                     AgentSessionStore.retain(projects)
+                    ProjectSyncStore.retain(projects)
                     TerminalStore.retain(projects)
                     SlackWindows.retain(projects)
                     SlackBrowsers.retain(projects)
@@ -762,6 +765,9 @@ fun main(args: Array<String>) {
     // Either way this launch ended rather than died — unless it is restarting to recover a window,
     // which the next launch has to know about to not do the same again.
     if (!restartingToRecover) LaunchJournal.stopped()
+    // What a synced project's holder last changed goes to the remote before the process ends. A
+    // restart is given less time: the next nop sends it anyway, and every terminal is waiting.
+    ProjectSyncStore.disposeAll(if (RestartInPlace.pending != null) 5.seconds else 20.seconds)
     // Ended here rather than left to see its input close: a restart replaces this process without
     // closing what it holds, and the worker would wait on a pipe nothing writes to again.
     iondrive.nop.worker.ProjectWorker.stop()

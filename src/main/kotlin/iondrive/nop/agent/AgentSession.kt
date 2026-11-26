@@ -700,6 +700,10 @@ class AgentSession(
             quotaWatcher.reset()
             return
         }
+        if (now.isBefore(wait.resumeAt)) {
+            scheduleResume(current, wait, now)
+            return
+        }
         if (hasRunOut(current.account) == true) {
             val next = spentUntil(current.account)?.takeIf { it.isAfter(now) }
             Log.info(
@@ -851,7 +855,7 @@ class AgentSession(
         // everything up to the end, at the path the user's prompt already names. If something else
         // took that name meanwhile, the summary goes to the next free one and the prompt follows it.
         val at = draft?.path?.takeIf { Handoff.isAvailable(it) } ?: Handoff.nextPath(sessionId)
-        val written = Handoff.write(sessionId, log.events(), target.provider, at)
+        val written = Handoff.write(log, at)
         val seed = draft?.prompt
             ?.replace(draft.path.toAbsolutePath().toString(), written.path.toAbsolutePath().toString())
             ?.takeIf { it.isNotBlank() }
@@ -929,6 +933,7 @@ class AgentSession(
             current.transcriptPath,
             hit.matched,
             since = waitedOutAt?.let { maxOf(it, current.startedAt) } ?: current.startedAt,
+            now = now,
         )
         // After a wait for a reset, the screen is no evidence of its own. Claude Code carries on by
         // itself once the window resets, its redraw can put the old wall back in front of the
@@ -983,6 +988,10 @@ class AgentSession(
             }
         }
 
+        val accountReset = spentUntil(current.account)?.takeIf { it.isAfter(now) }
+        val wallReset = (hit.resetsIn?.let(now::plus) ?: hit.resetsAt)?.takeUnless { it.isBefore(now) }
+        val resetAt = listOfNotNull(accountReset, wallReset).maxOrNull()
+
         // A wall that is about to lift is waited out, not acted on. Handing over costs the work its
         // conversation — the next account starts from a summary — and ending the run costs the user a
         // restart, both to save a few minutes; Claude Code carries on by itself once the window
@@ -992,8 +1001,9 @@ class AgentSession(
         // Only for a CLI that does carry on, though. Waiting on one that has already given up is
         // not patience, it is a tab left sitting at a dead prompt with nobody coming back to it —
         // see [Provider.waitsOutItsOwnWall], which is what `agy` taught this.
-        val untilReset = spentUntil(current.account)
-            ?.takeIf { current.account.provider.waitsOutItsOwnWall }
+        val waitToResume = resumesAfterReset(current.account)
+        val untilReset = resetAt
+            ?.takeIf { !waitToResume && accountReset != null && current.account.provider.waitsOutItsOwnWall }
             ?.let { Duration.between(now, it) }
         if (untilReset != null && untilReset <= WAIT_FOR_RESET) {
             Log.info(
@@ -1007,16 +1017,9 @@ class AgentSession(
             return
         }
 
-        // Asked to stay put: the CLI is left at its wall with its conversation whole, and told to
-        // carry on once the window has reset. Ahead of the short wait above being needed, since this
-        // covers it — a CLI that resumes by itself is noticed and not typed at.
-        if (resumesAfterReset(current.account)) {
-            // The wall's own clock time ahead of the account's reading: the reading can be missing
-            // or stale, and then a wait with no reset to go by would check, and type into the CLI,
-            // every few minutes while the CLI itself sits waiting for the time it printed.
-            val resetAt = hit.resetsIn?.let { now.plus(it) }
-                ?: hit.resetsAt?.let { maxOf(it, now) }
-                ?: spentUntil(current.account)?.takeIf { it.isAfter(now) }
+        // Let each known spent window reset before sending anything. The usage reading can lag
+        // the CLI's refusal, and a second spent window can outlast the one the CLI names.
+        if (waitToResume) {
             Log.info(
                 "agent quota wall on ${current.account.name} ($why); waiting " +
                     (resetAt?.let { "for its reset at $it" } ?: "${RESUME_RECHECK.toMinutes()} min, as nothing says when it resets") +
@@ -1477,7 +1480,7 @@ class AgentSession(
                 model = account.model,
                 reasoning = account.reasoning,
                 nativeSessionId = command.nativeSessionId,
-                argv = command.argv,
+                argv = McpServers.redactArgv(command.argv),
                 seededFromHandoff = seededFromHandoff,
                 at = startedAt,
             ),
@@ -1575,7 +1578,7 @@ class AgentSession(
                         nativeSessionId = newRun.nativeSessionId,
                         transcriptPath = path.toString(),
                         transcriptOffset = offset,
-                        argv = command.argv,
+                        argv = McpServers.redactArgv(command.argv),
                         seededFromHandoff = seededFromHandoff,
                         at = System.currentTimeMillis(),
                     ),

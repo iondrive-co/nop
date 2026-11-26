@@ -6,7 +6,10 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.BufferedWriter
+import java.io.FilterInputStream
+import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
@@ -294,6 +297,10 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
     /** Everything written so far, in order. Unreadable lines are skipped rather than fatal. */
     fun events(): List<AgentEvent> = read(file)
 
+    internal fun <T> readEvents(consume: (Sequence<AgentEvent>) -> T): T = readEvents(file, consume = consume)
+
+    internal fun runStarts(): List<AgentEvent.RunStarted> = runStarts(file)
+
     /** A fallback for a restored tab whose CLI supplies no session title. */
     fun firstPromptTitle(): String? = runCatching {
         Files.newBufferedReader(file).use { reader ->
@@ -325,13 +332,56 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             EventLog(sessionsDir().resolve("$sessionId.jsonl"))
 
         /** Reads a log written earlier, without opening it for writing. */
-        fun read(file: Path): List<AgentEvent> = runCatching {
-            Files.readAllLines(file).mapNotNull { line ->
-                line.takeIf { it.isNotBlank() }?.let {
-                    runCatching { JSON.decodeFromString(AgentEvent.serializer(), it) }.getOrNull()
+        fun read(file: Path): List<AgentEvent> = try {
+            readEvents(file) { it.toList() }
+        } catch (_: IOException) {
+            emptyList()
+        }
+
+        /** Reads a fixed prefix of the log. The sequence is valid only inside [consume]. */
+        internal fun <T> readEvents(
+            file: Path,
+            record: String? = null,
+            consume: (Sequence<AgentEvent>) -> T,
+        ): T {
+            val input = try {
+                Files.newInputStream(file)
+            } catch (_: NoSuchFileException) {
+                return consume(emptySequence())
+            }
+            input.use {
+                // An active writer must not extend the snapshot indefinitely.
+                val bounded = object : FilterInputStream(input) {
+                    var remaining = Files.size(file)
+                    override fun read(): Int {
+                        if (remaining <= 0) return -1
+                        return super.read().also { if (it >= 0) remaining-- }
+                    }
+
+                    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+                        if (remaining <= 0) return -1
+                        return input.read(bytes, offset, minOf(length.toLong(), remaining).toInt())
+                            .also { if (it > 0) remaining -= it }
+                    }
+                }
+                val tag = record?.let { "\"$it\"" }
+                return bounded.bufferedReader().useLines { lines ->
+                    consume(lines.filter { tag == null || tag in it }.mapNotNull { line ->
+                        try {
+                            JSON.decodeFromString(AgentEvent.serializer(), line)
+                        } catch (_: IllegalArgumentException) {
+                            null
+                        }
+                    })
                 }
             }
-        }.getOrDefault(emptyList())
+        }
+
+        private fun runStarts(file: Path): List<AgentEvent.RunStarted> = try {
+            readEvents(file, "run_started") { it.filterIsInstance<AgentEvent.RunStarted>().toList() }
+        } catch (_: IOException) {
+            emptyList()
+        }
 
         /**
          * The sessions this project has had, most recently active first.
@@ -410,15 +460,9 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
             return session
         }
 
-        /**
-         * The last run in a session, for reopening it natively. Reads the whole file — which is
-         * fine, because it happens once, when the user clicks the session, rather than once per
-         * session every time the picker is drawn.
-         */
+        /** The last run in a session, for reopening it natively. */
         fun lastRun(sessionId: String): AgentEvent.RunStarted? =
-            read(sessionsDir().resolve("$sessionId.jsonl"))
-                .filterIsInstance<AgentEvent.RunStarted>()
-                .lastOrNull()
+            runStarts(sessionsDir().resolve("$sessionId.jsonl")).lastOrNull()
 
         private fun summarise(file: Path, sessionId: String, modifiedAt: Long): PastSession? {
             var started: AgentEvent.SessionStarted? = null
@@ -628,17 +672,22 @@ class EventLog private constructor(val file: Path) : AutoCloseable {
          * Everything else about which conversation a run was in is something a tailer worked out by
          * looking at files, which is exactly the part that can be wrong.
          */
-        private fun askedFor(run: AgentEvent.RunStarted): String? {
-            // Each CLI names the same thing differently: Codex takes a subcommand, Claude a flag,
-            // agy a flag of its own. Matched per provider rather than by looking for any of them,
-            // because a bare word is also what a seed prompt is.
-            val flags = when (run.provider) {
-                Provider.OpenAI.id -> setOf("resume")
-                Provider.Antigravity.id -> setOf("--conversation")
-                else -> setOf("--resume", "--session-id")
-            }
+        internal fun askedFor(run: AgentEvent.RunStarted): String? {
+            val flags = resumeFlags(run.provider)
             val at = run.argv.indexOfFirst { it in flags }
             return if (at >= 0) run.argv.getOrNull(at + 1)?.takeIf { it.isNotBlank() } else null
+        }
+
+        /**
+         * The words [provider]'s CLI takes the conversation to open after. Each CLI names the same
+         * thing differently: Codex takes a subcommand, Claude a flag, agy a flag of its own. Matched
+         * per provider rather than by looking for any of them, because a bare word is also what a
+         * seed prompt is.
+         */
+        internal fun resumeFlags(provider: String): Set<String> = when (provider) {
+            Provider.OpenAI.id -> setOf("resume")
+            Provider.Antigravity.id -> setOf("--conversation")
+            else -> setOf("--resume", "--session-id")
         }
 
         /**

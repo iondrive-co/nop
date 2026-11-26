@@ -37,7 +37,7 @@ object ConversationBranch {
     private val json = Json { ignoreUnknownKeys = true }
 
     fun points(source: AgentSession, accounts: List<Account>): List<ConversationBranchPoint> {
-        val runs = source.log.events().filterIsInstance<AgentEvent.RunStarted>()
+        val runs = source.log.runStarts()
             .filter { it.transcriptPath != null && it.nativeSessionId != null }
             .distinctBy { it.provider to it.nativeSessionId }
         val candidates = runs.flatMap { run ->

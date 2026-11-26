@@ -91,9 +91,7 @@ fun AgentPanel(
                 session = selected,
                 accounts = accounts,
                 readings = readings,
-                // Read from the log as it actually stands, so the warning describes this run rather
-                // than an assumption about the provider.
-                fromScreenOnly = Handoff.fromScreenOnly(selected.log.events()),
+                fromScreenOnly = remember(selected, selected.endedAt) { Handoff.fromScreenOnly(selected.log) },
                 modelsFor = modelsFor,
                 onUpdateAccount = onUpdateAccount,
                 onReopen = {

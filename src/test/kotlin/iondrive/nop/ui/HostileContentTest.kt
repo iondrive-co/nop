@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.DynamicContainer
 import org.junit.jupiter.api.DynamicTest
 import org.junit.jupiter.api.TestFactory
+import java.awt.EventQueue
 import java.io.File
 import java.nio.file.Files
 import java.time.Duration
@@ -128,18 +129,24 @@ class HostileContentTest {
     /**
      * Renders [setup]'s tab for long enough that whatever it loads off the UI thread has arrived and
      * been laid out. Any throw from composition, measure, layout or draw comes out of render().
+     *
+     * Every scene call runs on the AWT thread, where Compose's global snapshot manager also runs: a
+     * scene driven from another thread takes the snapshot observer's lock and the scene dispatcher's
+     * in the opposite order to it, and the two can deadlock.
      */
     private fun renderUntilSettled(setup: Setup, label: String) {
         val tabsState = TabsState().apply { open(setup.tab) }
-        val scene = ImageComposeScene(1400, 900, Density(2f)) {
-            IntUiTheme(isDark = false) {
-                TabbedViewerPanel(
-                    tabsState = tabsState,
-                    repo = setup.repo,
-                    editStore = FileEditStore(),
-                    localHistory = setup.history,
-                    wrapLines = setup.wrap,
-                )
+        val scene = onEdt {
+            ImageComposeScene(1400, 900, Density(2f)) {
+                IntUiTheme(isDark = false) {
+                    TabbedViewerPanel(
+                        tabsState = tabsState,
+                        repo = setup.repo,
+                        editStore = FileEditStore(),
+                        localHistory = setup.history,
+                        wrapLines = setup.wrap,
+                    )
+                }
             }
         }
         try {
@@ -149,14 +156,21 @@ class HostileContentTest {
             while (System.currentTimeMillis() < until) {
                 time += 16_000_000
                 val started = System.nanoTime()
-                scene.render(time).close()
+                val at = time
+                onEdt { scene.render(at).close() }
                 slowest = maxOf(slowest, (System.nanoTime() - started) / 1_000_000)
                 Thread.sleep(20)
             }
             println("slowest frame ${slowest}ms: $label")
         } finally {
-            scene.close()
+            onEdt { scene.close() }
         }
+    }
+
+    private fun <T> onEdt(block: () -> T): T {
+        var result: Result<T>? = null
+        EventQueue.invokeAndWait { result = runCatching(block) }
+        return result!!.getOrThrow()
     }
 
     private companion object {

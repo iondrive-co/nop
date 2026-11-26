@@ -14,6 +14,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.time.Instant
 
 /**
  * The collection behind the agent tabs, and the naming that makes a strip of them readable.
@@ -578,6 +579,47 @@ class AgentSessionsTest {
         assertEquals(true, session.resumeWait?.resetKnown)
         assertEquals("claude-alpha", session.account.name)
         assertFalse(session.ended)
+    }
+
+    @Test
+    fun `a fresh weekly refusal waits for the next clock time despite a stale usage reading`(@TempDir tmp: Path) {
+        val claude = account("claude-alpha").copy(resumeAfterReset = true)
+        val state = sessions()
+        state.resumesAfterReset = { true }
+        var usageChecks = 0
+        state.hasRunOut = { usageChecks++; false }
+        val session = state.open(tmp.toFile(), claude)
+        val now = Instant.parse("2026-07-07T17:00:00Z")
+        val line = "You've hit your weekly limit · resets 9am (UTC)"
+        session.run.startedAt = now.minusSeconds(60)
+        session.run.transcriptPath = Files.writeString(
+            tmp.resolve("session.jsonl"),
+            """{"type":"assistant","isApiErrorMessage":true,"timestamp":"$now","message":{"content":[{"type":"text","text":"$line"}]}}""",
+        )
+
+        session.onQuotaWall(QuotaHit("weekly limit", line, resetsAt = QuotaWatcher.resetsAtFrom(line, now)), now)
+        val reset = Instant.parse("2026-07-08T09:00:00Z")
+        assertEquals(reset, session.resumeWait?.resumeAt)
+
+        session.resumeIfDue(now.plusSeconds(60))
+        assertEquals(1, usageChecks, "the resume timer must wait for the reset even when the usage reading says there is room")
+        assertEquals(reset, session.resumeWait?.resumeAt)
+    }
+
+    @Test
+    fun `wait to resume honors a later reset from a spent usage window`(@TempDir tmp: Path) {
+        val state = sessions()
+        state.resumesAfterReset = { true }
+        state.hasRunOut = { true }
+        val now = Instant.parse("2026-07-07T17:00:00Z")
+        val accountReset = now.plus(Duration.ofHours(3))
+        state.spentUntil = { accountReset }
+        val session = state.open(tmp.toFile(), account("claude-alpha"))
+        val line = "You've hit your session limit · resets 5:05pm (UTC)"
+
+        session.onQuotaWall(QuotaHit("session limit", line, resetsAt = QuotaWatcher.resetsAtFrom(line, now)), now)
+
+        assertEquals(accountReset, session.resumeWait?.resumeAt)
     }
 
     /** A wall reported for a run that is already over is news about nothing. */
@@ -1337,6 +1379,27 @@ class AgentSessionsTest {
         assertEquals(draft.path, written.path)
         assertTrue(java.nio.file.Files.exists(written.path))
         assertEquals(edited, session.run.command.argv.last())
+    }
+
+    @Test
+    fun `a handover streams long conversations into the history while keeping the brief small`(@TempDir tmp: Path) {
+        val session = sessions().open(tmp.toFile(), account("claude-larch"))
+        session.log.append(AgentEvent.UserMessage("Repair the settings parser", 1))
+        val early = "Initial findings about the configuration format"
+        val largeBody = "Parsed settings and recorded the relevant fields.\n".repeat(4_000)
+        session.log.append(AgentEvent.AssistantMessage(listOf(Block.Text(early + "\n" + largeBody)), at = 2))
+        session.log.append(AgentEvent.ToolStarted("check", "Bash", mapOf("command" to "make test"), 3))
+        session.log.append(AgentEvent.ToolFinished("check", exitCode = 0, at = 4))
+        session.log.append(AgentEvent.AssistantMessage(listOf(Block.Text("Next, verify the defaults.")), at = 5))
+
+        val written = session.handOver(account("claude-fern"))
+        val history = written.path.resolveSibling(written.path.fileName.toString().removeSuffix(".md") + "-history.md")
+        assertTrue(written.text.length <= Handoff.BRIEF_LIMIT)
+        assertTrue("Next, verify the defaults." in written.text)
+        assertFalse(early in written.text)
+        assertTrue("`make test` — succeeded" in written.text)
+        assertTrue(early + "\n" + largeBody in Files.readString(history))
+        assertTrue(written.path.toString() in session.run.command.argv.last())
     }
 
     @Test

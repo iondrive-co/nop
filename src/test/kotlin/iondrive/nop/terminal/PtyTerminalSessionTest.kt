@@ -231,8 +231,9 @@ class PtyTerminalSessionTest {
         }
     }
 
+    /** Returns as soon as [condition] holds; the long limit only matters on a heavily loaded machine. */
     private fun awaitTrue(what: String, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
+        val deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos()
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(condition(), what)
     }

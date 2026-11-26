@@ -632,6 +632,9 @@ class GitRepo private constructor(
      */
     fun headSha(): String? = repository.resolve("HEAD")?.name
 
+    /** The URL the `origin` remote fetches from, as the config has it, or null when there is no such remote. */
+    fun originUrl(): String? = repository.config.getString("remote", "origin", "url")?.takeIf { it.isNotBlank() }
+
     /**
      * Discards local changes to a single file, restoring it to its last committed state — the
      * per-file counterpart to a rollback:

@@ -77,9 +77,13 @@ class SuggestionsTest {
     @Test
     fun `suggesting against the whole dictionary stays fast enough for a menu`() {
         // The pathological case: a word with no near neighbours, so the fallback scan runs in full.
-        val started = System.nanoTime()
+        // Measured in this thread's CPU time, so a loaded machine's run queue doesn't count against it.
+        suggestionsFor("zqxjvwkbfp") // loads the dictionary, which the menu never waits for
+        val threads = java.lang.management.ManagementFactory.getThreadMXBean()
+        val clock = { if (threads.isCurrentThreadCpuTimeSupported) threads.currentThreadCpuTime else System.nanoTime() }
+        val started = clock()
         repeat(5) { suggestionsFor("zqxjvwkbfp") }
-        val perCall = (System.nanoTime() - started) / 5 / 1_000_000
+        val perCall = (clock() - started) / 5 / 1_000_000
         assertTrue(perCall < 250, "suggestion lookup took ${perCall}ms per call")
     }
 

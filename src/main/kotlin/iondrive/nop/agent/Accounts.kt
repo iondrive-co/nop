@@ -119,6 +119,8 @@ data class AgentConfig(
     val accounts: List<Account> = emptyList(),
     /** The folder agent sessions are backed up to, or null when nothing is. See [Backup]. */
     val backupDir: String? = null,
+    /** The machine each project's agent tabs are kept in step through, or null when none is. See [ProjectSync]. */
+    val sync: SyncRemote? = null,
 ) {
     /**
      * This config without the account called [name], and without anybody's nomination of it. A
@@ -133,6 +135,25 @@ data class AgentConfig(
             .filterNot { it.name == name }
             .map { if (it.handoverTo == name) it.copy(handoverTo = null, handoverModel = null) else it },
     )
+}
+
+/**
+ * A machine reached over ssh that holds each project's agent tabs, so another machine can show them
+ * and take them over. [target] is what ssh is given — `user@host`, or a name from the ssh config —
+ * and [identity] the key file it signs in with when the config does not say. [base] is the folder
+ * under that user's home everything is kept in. [ssh] is the program run in ssh's place, for a
+ * wrapper; null runs `ssh`.
+ */
+@Serializable
+data class SyncRemote(
+    val target: String,
+    val identity: String? = null,
+    val base: String = DEFAULT_BASE,
+    val ssh: String? = null,
+) {
+    companion object {
+        const val DEFAULT_BASE = "nop-sync"
+    }
 }
 
 /**

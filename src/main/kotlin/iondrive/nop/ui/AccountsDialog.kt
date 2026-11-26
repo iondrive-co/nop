@@ -1,12 +1,14 @@
 package iondrive.nop.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -18,13 +20,18 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -32,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,6 +49,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
@@ -57,7 +66,16 @@ import iondrive.nop.agent.Login
 import iondrive.nop.agent.LocalModel
 import iondrive.nop.agent.NetworkShare
 import iondrive.nop.agent.Provider
+import iondrive.nop.agent.ProjectSync
+import iondrive.nop.agent.SyncFailure
+import iondrive.nop.agent.SyncLink
+import iondrive.nop.agent.SyncRemote
+import iondrive.nop.agent.ResetOffer
+import iondrive.nop.agent.ResetOutcome
 import iondrive.nop.agent.UsageReading
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
 import org.jetbrains.jewel.ui.Orientation
 import org.jetbrains.jewel.ui.component.CheckboxRow
@@ -70,6 +88,7 @@ import org.jetbrains.jewel.ui.component.TextField
 import java.io.File
 import java.nio.file.Path
 import javax.swing.JFileChooser
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * nop's only settings window: the vendor accounts, what each one runs as, how to sign one in or
@@ -93,6 +112,8 @@ fun AccountsDialog(
     onClose: () -> Unit,
     /** The project the dialog was opened from, whose tab-messaging switch it shows. */
     project: File? = null,
+    /** A reading taken after a reset was used, for the caller's map that [readings] comes from. */
+    onReading: (Account, UsageReading) -> Unit = { _, _ -> },
 ) {
     DialogFrame(title = "Agent accounts", onClose = onClose, size = DpSize(640.dp, 710.dp)) {
         var draft by remember(config) { mutableStateOf(config) }
@@ -108,92 +129,83 @@ fun AccountsDialog(
 
         Text("Agent accounts", fontWeight = FontWeight.SemiBold)
 
-        Column(
-            // Takes the slack in the window rather than capping at a height of its own. The pickers
-            // on each row open a menu *inside* this window now that it is a window, and a list with
-            // room under it is the difference between a menu that drops and one that has to be
-            // shoved back up over the row that opened it.
-            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            draft.accounts.forEach { account ->
-                key(account.name) {
-                    AccountEditor(
-                        account = account,
-                        reading = readings[account.name],
-                        models = modelsFor(account),
-                        others = draft.accounts.map { it.name }.filterNot { it == account.name },
-                        handoverModels = draft.accounts.firstOrNull { it.name == account.handoverTo }
-                            ?.let(modelsFor).orEmpty(),
-                        handoverIsLocal = draft.accounts.any {
-                            it.name == account.handoverTo && it.provider == Provider.Local
-                        },
-                        onChange = { changed ->
-                            update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) changed else it }))
-                        },
-                        onLogIn = { onLogIn(account) },
-                        onLogOut = {
-                            onLogOut(account)
-                            // Bounce the draft so the row's "signed in" line re-reads the file.
-                            update(draft.copy())
-                        },
-                        offersMove = AccountHomes.offersMove(account),
-                        note = moveNote?.takeIf { it.first == account.name }?.second,
-                        onMoveHome = {
-                            val existed = java.nio.file.Files.exists(account.homePath)
-                            moveNote = runCatching { AccountHomes.moveIntoNop(account) }.fold(
-                                onSuccess = { moved ->
-                                    update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) moved else it }))
-                                    account.name to if (existed) {
-                                        "Moved. The old folder now links to it, for anything still running from there."
-                                    } else {
-                                        "Its folder was gone, so it has a fresh one there: sign it in again."
-                                    }
-                                },
-                                onFailure = { account.name to "Could not move it: ${it.message}" },
-                            )
-                        },
-                        onRemove = { update(draft.withoutAccount(account.name)) },
-                    )
+        val scroll = rememberScrollState()
+        Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.weight(1f).fillMaxHeight().verticalScroll(scroll),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                draft.accounts.forEach { account ->
+                    key(account.name, account.provider, account.home) {
+                        AccountEditor(
+                            account = account,
+                            reading = readings[account.name],
+                            models = modelsFor(account),
+                            others = draft.accounts.map { it.name }.filterNot { it == account.name },
+                            handoverModels = draft.accounts.firstOrNull { it.name == account.handoverTo }
+                                ?.let(modelsFor).orEmpty(),
+                            handoverIsLocal = draft.accounts.any {
+                                it.name == account.handoverTo && it.provider == Provider.Local
+                            },
+                            onChange = { changed ->
+                                update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) changed else it }))
+                            },
+                            onLogIn = { onLogIn(account) },
+                            onLogOut = {
+                                onLogOut(account)
+                                // Bounce the draft so the row's "signed in" line re-reads the file.
+                                update(draft.copy())
+                            },
+                            offersMove = AccountHomes.offersMove(account),
+                            note = moveNote?.takeIf { it.first == account.name }?.second,
+                            onMoveHome = {
+                                val existed = java.nio.file.Files.exists(account.homePath)
+                                moveNote = runCatching { AccountHomes.moveIntoNop(account) }.fold(
+                                    onSuccess = { moved ->
+                                        update(draft.copy(accounts = draft.accounts.map { if (it.name == account.name) moved else it }))
+                                        account.name to if (existed) {
+                                            "Moved. The old folder now links to it, for anything still running from there."
+                                        } else {
+                                            "Its folder was gone, so it has a fresh one there: sign it in again."
+                                        }
+                                    },
+                                    onFailure = { account.name to "Could not move it: ${it.message}" },
+                                )
+                            },
+                            onRemove = { update(draft.withoutAccount(account.name)) },
+                            onUseReset = { offer -> useReset(account, offer, onReading) },
+                        )
+                        Divider(orientation = Orientation.Horizontal)
+                    }
+                }
+                if (draft.accounts.isEmpty()) {
+                    Text("Nothing configured yet. Add an account, then sign it in.", color = AgentMuted)
+                }
+                Panel(modifier = Modifier.padding(vertical = 4.dp), padding = 12.dp) {
+                    BackupSection(config = draft, onChange = { update(it) })
                     Divider(orientation = Orientation.Horizontal)
+                    SyncSection(config = draft, onChange = { update(it) })
+                    project?.let {
+                        Divider(orientation = Orientation.Horizontal)
+                        TabMessagesSection(it)
+                    }
                 }
             }
-            if (draft.accounts.isEmpty()) {
-                Text("Nothing configured yet. Add an account, then sign it in.", color = AgentMuted)
-            }
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scroll),
+                style = NopScrollbarStyle,
+                modifier = Modifier.fillMaxHeight(),
+            )
         }
 
-        // Account panel actions at the bottom of the accounts list
         Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedButton(onClick = { adding = true }) { Text("Add account") }
             OutlinedButton(onClick = { showingUsage = true }) { Text("Show usage") }
-        }
-
-        // Clearly delineated bottom panel for session backup and project tab messaging
-        val panelBorder = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
-        val panelBackground = if (JewelTheme.isDark) Color(0xFF26282E) else Color(0xFFF2F4F7)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(panelBackground)
-                .border(1.dp, panelBorder, RoundedCornerShape(8.dp))
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            BackupSection(config = draft, onChange = { update(it) })
-            project?.let {
-                Divider(orientation = Orientation.Horizontal)
-                TabMessagesSection(it)
-            }
-        }
-
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
+            Spacer(Modifier.weight(1f))
             DefaultButton(onClick = onClose) { Text("Done") }
         }
 
@@ -252,6 +264,8 @@ private fun AccountEditor(
     note: String?,
     onMoveHome: () -> Unit,
     onRemove: () -> Unit,
+    /** Spends one of the account's usage-limit resets and says what happened. See [ResetsPanel]. */
+    onUseReset: suspend (ResetOffer) -> ResetOutcome,
 ) {
     // Whether the account can actually be used, which is not the same as whether its credential
     // file exists: a Claude token sits in that file long after it has died, and an account that
@@ -290,6 +304,36 @@ private fun AccountEditor(
             }
         }
         note?.let { Text(it, color = AgentMuted) }
+        // Whether there are limits to draw, which then say for themselves what is used; the line
+        // beside the links is left to say how old they are, or why there are none.
+        val windows = signedIn && reading != null && reading.unavailable == null &&
+            (reading.session != null || reading.weekly != null || reading.others.isNotEmpty())
+        Row(
+            modifier = Modifier.padding(top = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                when {
+                    !signedIn -> reading?.unavailable ?: "not signed in"
+                    windows -> reading?.let(::staleLine) ?: "signed in"
+                    else -> signedInLine(reading)
+                },
+                color = if (signedIn) AgentMuted else ChangeColors.REMOVED,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Link(if (signedIn) "Sign in again" else "Sign in", onClick = onLogIn)
+            if (signedIn) Link("Sign out", onClick = onLogOut)
+            Link("Remove", onClick = onRemove)
+        }
+        // What the provider's own usage page shows, and the resets it offers, under the account
+        // they belong to rather than behind a sign-in in a browser.
+        if (windows || (signedIn && reading?.resets != null)) {
+            Panel(modifier = Modifier.padding(top = 6.dp), padding = 10.dp) {
+                if (windows) LimitsTable(reading, hover = true)
+                ResetsPanel(reading?.resets.takeIf { signedIn }, onUse = onUseReset)
+            }
+        }
         Row(
             modifier = Modifier.padding(top = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -343,23 +387,6 @@ private fun AccountEditor(
                     onSelect = { onChange(account.copy(handoverModel = it.takeIf { v -> v != HANDOVER_OWN_MODEL })) },
                 )
             }
-        }
-        Row(
-            modifier = Modifier.padding(top = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (signedIn && reading != null && (reading.session != null || reading.weekly != null)) {
-                UsageBar("session", reading.session, reading.weeklyPace(), reading.paceSource)
-                UsageBar("week", reading.weekly)
-            }
-            Text(
-                if (signedIn) signedInLine(reading) else reading?.unavailable ?: "not signed in",
-                color = if (signedIn) AgentMuted else ChangeColors.REMOVED,
-            )
-            Link(if (signedIn) "Sign in again" else "Sign in", onClick = onLogIn)
-            if (signedIn) Link("Sign out", onClick = onLogOut)
-            Link("Remove", onClick = onRemove)
         }
     }
 }
@@ -492,6 +519,142 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
 }
 
 /**
+ * The machine each project's agent tabs are kept on over ssh, so that another machine with the same
+ * project can show them and take them over. See [ProjectSync] for what is sent and when.
+ */
+@Composable
+private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
+    val remote = config.sync
+    var editing by remember { mutableStateOf(false) }
+    var refused by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var checked by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+    val scope = rememberCoroutineScope()
+    val target = rememberTextFieldState(remote?.target.orEmpty())
+    val identity = rememberTextFieldState(remote?.identity.orEmpty())
+    val base = rememberTextFieldState(remote?.base ?: SyncRemote.DEFAULT_BASE)
+
+    fun typed() = SyncRemote(
+        target = target.text.toString().trim(),
+        identity = identity.text.toString().trim().ifEmpty { null },
+        base = base.text.toString().trim().trimEnd('/').ifEmpty { SyncRemote.DEFAULT_BASE },
+        ssh = remote?.ssh,
+    )
+
+    fun save() {
+        val next = typed()
+        refused = SyncLink.problem(next)
+        if (refused == null) {
+            editing = false
+            checked = null
+            onChange(config.copy(sync = next))
+        }
+    }
+
+    // Reaching the remote is a network call that can take its full timeout, so it never runs on
+    // this thread; rsync is looked for here too, since the remote's answer only covers its own side.
+    fun check(candidate: SyncRemote) {
+        refused = SyncLink.problem(candidate)
+        if (refused != null) return
+        checking = true
+        checked = null
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val local = SyncLink.run(listOf("rsync", "--version"), null, 10.seconds)
+                    if (local.exit != 0) throw SyncFailure("rsync does not run on this machine (exit ${local.exit})")
+                    SyncLink(candidate, null).ping()
+                }
+            }
+            checking = false
+            checked = outcome.fold(
+                onSuccess = { true to "Reached ${candidate.target}: it has what the sync needs." },
+                onFailure = { false to (it.message ?: it.toString()).replaceFirstChar(Char::uppercaseChar) },
+            )
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Agent tab sync", fontWeight = FontWeight.SemiBold)
+        Text(
+            remote?.let { "${it.target}, in ~/${it.base}" } ?: "Not set up: each machine keeps its own agent tabs.",
+            color = AgentMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (!editing) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Link(if (remote == null) "Set up" else "Change", onClick = {
+                    target.replaceWith(remote?.target.orEmpty())
+                    identity.replaceWith(remote?.identity.orEmpty())
+                    base.replaceWith(remote?.base ?: SyncRemote.DEFAULT_BASE)
+                    refused = null
+                    checked = null
+                    editing = true
+                })
+                if (remote != null) {
+                    Link("Check", enabled = !checking, onClick = { check(remote) })
+                    Link("Stop syncing", onClick = {
+                        checked = null
+                        onChange(config.copy(sync = null))
+                    })
+                }
+            }
+        } else {
+            Text(
+                "Each project's agent tabs and their conversations are kept there, so another machine with the " +
+                    "same project can show them and take them over. The code, and every sign-in, stay on each machine.",
+                color = AgentMuted,
+            )
+            SyncField("Remote", target, "user@host, or a host from the ssh config", ::save)
+            SyncField("Key file", identity, "Optional: the ssh config's key when empty", ::save)
+            SyncField("Folder", base, "Under the remote user's home", ::save)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Link("Save", onClick = ::save)
+                Link("Check", enabled = !checking, onClick = { check(typed()) })
+                Link("Cancel", onClick = {
+                    editing = false
+                    refused = null
+                    checked = null
+                })
+            }
+            Text(
+                "nop never accepts a host key for you, whatever the ssh config says: connect once with ssh from a " +
+                    "terminal first. The remote needs flock and rsync, and a key with a passphrase needs to be in an ssh agent.",
+                color = AgentMuted,
+            )
+        }
+        refused?.let { Text(it, color = ChangeColors.REMOVED) }
+        when {
+            checking -> Text("Checking…", color = AgentMuted)
+            else -> checked?.let { (ok, said) -> Text(said, color = if (ok) AgentMuted else ChangeColors.REMOVED) }
+        }
+        if (remote != null || editing) {
+            Text(
+                "A change applies to open projects at once, and nothing more is sent to the remote it replaces. " +
+                    "Where another machine already holds an open project there, the tabs running here stop and its tabs are shown.",
+                color = AgentMuted,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SyncField(label: String, state: TextFieldState, hint: String, onDone: () -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.width(72.dp))
+        TextField(
+            state = state,
+            modifier = Modifier.weight(1f),
+            placeholder = { Text(hint) },
+            onKeyboardAction = { onDone() },
+        )
+    }
+}
+
+private fun TextFieldState.replaceWith(value: String) = edit { replace(0, length, value) }
+
+/**
  * Whether [project]'s agent tabs may message each other without the user delivering each message.
  * Per project, since what makes it safe is that sender and recipient share one: see
  * [AgentMessages.setAutoDeliver].
@@ -528,6 +691,27 @@ private fun chooseBackupFolder(current: String?): Path? {
     return chooser.selectedFile?.toPath()?.toAbsolutePath()?.normalize()
 }
 
+/** A rounded, shaded box that sets a group of rows apart from the list around it. */
+@Composable
+private fun Panel(
+    modifier: Modifier = Modifier,
+    padding: Dp,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val border = if (JewelTheme.isDark) Color(0xFF393B40) else Color(0xFFD3D5DB)
+    val background = if (JewelTheme.isDark) Color(0xFF26282E) else Color(0xFFF2F4F7)
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(background)
+            .border(1.dp, border, RoundedCornerShape(8.dp))
+            .padding(padding),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        content = content,
+    )
+}
+
 /** An account's quota, or a status while the first reading is still on its way. */
 private fun signedInLine(reading: UsageReading?): String =
     if (reading == null) "signed in · checking usage…" else usageLine(reading)
@@ -542,7 +726,7 @@ private fun signedInLine(reading: UsageReading?): String =
  * theme resources being present.
  */
 @Composable
-private fun ChoicePicker(
+internal fun ChoicePicker(
     label: String,
     options: List<String>,
     selected: String,

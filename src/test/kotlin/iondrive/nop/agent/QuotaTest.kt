@@ -496,10 +496,10 @@ class QuotaTest {
     }
 
     @Test
-    fun `a reset time just gone is the wall that just lifted, not tomorrow's`() {
+    fun `a fresh wall with an earlier clock time resets the following day`() {
         val now = Instant.parse("2026-06-15T18:30:00Z")
         val line = "You've hit your session limit · resets 6:10pm"
-        assertEquals(Instant.parse("2026-06-15T18:10:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
+        assertEquals(Instant.parse("2026-06-16T18:10:00Z"), QuotaWatcher.resetsAtFrom(line, now, ZoneOffset.UTC))
     }
 
     @Test
