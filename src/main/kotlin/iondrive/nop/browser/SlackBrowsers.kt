@@ -115,6 +115,7 @@ object SlackBrowsers {
     @Volatile private var app: CefApp? = null
     @Volatile private var stopping = false
     @Volatile private var runtimeStarted = false
+    @Volatile private var hasCreatedBrowser = false
 
     /** Chromium is left running until process exit or replacement, after flushing cookies. */
     @Volatile
@@ -291,6 +292,12 @@ object SlackBrowsers {
         if (leavingRuntime) return
         leavingRuntime = true
         stopping = true
+        // JCEF can initialise without creating a native page. In that case the cookie store
+        // has no page writes to flush, and Chromium may never call the completion callback.
+        if (!hasCreatedBrowser) {
+            cookiesWritten.countDown()
+            return
+        }
         runCatching {
             check(app != null && CefApp.getState() == CefApp.CefAppState.INITIALIZED) { "not running" }
             check(CefCookieManager.getGlobalManager().flushStore { cookiesWritten.countDown() }) { "flush refused" }
@@ -298,6 +305,10 @@ object SlackBrowsers {
             if (runtimeStarted) Log.info("Chromium's cookies were not written before exit: ${it.message}")
             cookiesWritten.countDown()
         }
+    }
+
+    internal fun noteBrowserCreated() {
+        hasCreatedBrowser = true
     }
 
     @Synchronized
@@ -484,6 +495,10 @@ class SlackBrowser internal constructor(private val project: Path, private val i
             }
         })
         client.addLifeSpanHandler(object : CefLifeSpanHandlerAdapter() {
+            override fun onAfterCreated(browser: CefBrowser) {
+                SlackBrowsers.noteBrowserCreated()
+            }
+
             override fun onBeforePopup(browser: CefBrowser, frame: CefFrame, targetUrl: String, targetFrameName: String): Boolean {
                 if (handleDesktopLink(targetUrl)) return true
                 if (saveFileLink(browser, targetUrl)) return true

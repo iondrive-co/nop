@@ -68,7 +68,7 @@ class SlackFloatingContentTest {
 
         fun settle() = repeat(8) {
             time += 16_000_000
-            onEdt { scene.render(time) }
+            onEdt { scene.render(time).close() }
             Thread.sleep(5)
         }
 
@@ -293,7 +293,7 @@ class SlackFloatingContentTest {
         try {
             fun settle() = repeat(8) {
                 time += 16_000_000
-                onEdt { scene.render(time) }
+                onEdt { scene.render(time).close() }
                 Thread.sleep(5)
             }
             fun findTextBounds(label: String): Rect? = onEdt {

@@ -112,6 +112,8 @@ fun AccountsDialog(
     onClose: () -> Unit,
     /** The project the dialog was opened from, whose tab-messaging switch it shows. */
     project: File? = null,
+    /** The root of [project]'s repository, which is what is chosen for syncing; [project] when it is not one. */
+    syncRoot: File? = project,
     /** A reading taken after a reset was used, for the caller's map that [readings] comes from. */
     onReading: (Account, UsageReading) -> Unit = { _, _ -> },
 ) {
@@ -184,7 +186,7 @@ fun AccountsDialog(
                 Panel(modifier = Modifier.padding(vertical = 4.dp), padding = 12.dp) {
                     BackupSection(config = draft, onChange = { update(it) })
                     Divider(orientation = Orientation.Horizontal)
-                    SyncSection(config = draft, onChange = { update(it) })
+                    SyncSection(config = draft, root = syncRoot, onChange = { update(it) })
                     project?.let {
                         Divider(orientation = Orientation.Horizontal)
                         TabMessagesSection(it)
@@ -519,11 +521,12 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
 }
 
 /**
- * The machine each project's agent tabs are kept on over ssh, so that another machine with the same
- * project can show them and take them over. See [ProjectSync] for what is sent and when.
+ * The machine the chosen projects' agent tabs are kept on over ssh, so that another machine with the
+ * same project can show them and take them over, and whether [root] — the repository the dialog was
+ * opened from — is one of them. See [ProjectSync] for what is sent and when.
  */
 @Composable
-private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
+private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig) -> Unit) {
     val remote = config.sync
     var editing by remember { mutableStateOf(false) }
     var refused by remember { mutableStateOf<String?>(null) }
@@ -533,12 +536,15 @@ private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
     val target = rememberTextFieldState(remote?.target.orEmpty())
     val identity = rememberTextFieldState(remote?.identity.orEmpty())
     val base = rememberTextFieldState(remote?.base ?: SyncRemote.DEFAULT_BASE)
+    val rate = rememberTextFieldState((remote?.rateLimit ?: SyncRemote.DEFAULT_RATE_LIMIT).toString())
 
     fun typed() = SyncRemote(
         target = target.text.toString().trim(),
         identity = identity.text.toString().trim().ifEmpty { null },
         base = base.text.toString().trim().trimEnd('/').ifEmpty { SyncRemote.DEFAULT_BASE },
         ssh = remote?.ssh,
+        // Anything but a whole number is -1, which SyncLink.problem refuses with the reason.
+        rateLimit = rate.text.toString().trim().ifEmpty { SyncRemote.DEFAULT_RATE_LIMIT.toString() }.toIntOrNull() ?: -1,
     )
 
     fun save() {
@@ -577,7 +583,8 @@ private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Agent tab sync", fontWeight = FontWeight.SemiBold)
         Text(
-            remote?.let { "${it.target}, in ~/${it.base}" } ?: "Not set up: each machine keeps its own agent tabs.",
+            remote?.let { "${it.target}, in ~/${it.base}, ${speed(it.rateLimit)}" }
+                ?: "Not set up: each machine keeps its own agent tabs.",
             color = AgentMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -588,6 +595,7 @@ private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
                     target.replaceWith(remote?.target.orEmpty())
                     identity.replaceWith(remote?.identity.orEmpty())
                     base.replaceWith(remote?.base ?: SyncRemote.DEFAULT_BASE)
+                    rate.replaceWith((remote?.rateLimit ?: SyncRemote.DEFAULT_RATE_LIMIT).toString())
                     refused = null
                     checked = null
                     editing = true
@@ -602,13 +610,14 @@ private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
             }
         } else {
             Text(
-                "Each project's agent tabs and their conversations are kept there, so another machine with the " +
+                "The chosen projects' agent tabs and their conversations are kept there, so another machine with the " +
                     "same project can show them and take them over. The code, and every sign-in, stay on each machine.",
                 color = AgentMuted,
             )
             SyncField("Remote", target, "user@host, or a host from the ssh config", ::save)
             SyncField("Key file", identity, "Optional: the ssh config's key when empty", ::save)
             SyncField("Folder", base, "Under the remote user's home", ::save)
+            SyncField("Speed cap", rate, "KB a second each way; 0 for no cap", ::save)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Link("Save", onClick = ::save)
                 Link("Check", enabled = !checking, onClick = { check(typed()) })
@@ -621,6 +630,24 @@ private fun SyncSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) {
             Text(
                 "nop never accepts a host key for you, whatever the ssh config says: connect once with ssh from a " +
                     "terminal first. The remote needs flock and rsync, and a key with a passphrase needs to be in an ssh agent.",
+                color = AgentMuted,
+            )
+        }
+        if (remote != null && !editing) {
+            root?.let {
+                CheckboxRow(
+                    text = "Sync ${it.name}'s agent tabs",
+                    checked = config.syncs(it.toPath()),
+                    onCheckedChange = { on -> onChange(config.withSynced(it.toPath(), on)) },
+                )
+            }
+            Text(
+                if (config.syncProjects.isEmpty()) {
+                    "No project syncs yet. Each machine chooses its own, from each project's settings."
+                } else {
+                    "Syncing from this machine: " + config.syncProjects.joinToString(", ") { File(it).name } +
+                        ". Each machine chooses its own, from each project's settings."
+                },
                 color = AgentMuted,
             )
         }
@@ -653,6 +680,9 @@ private fun SyncField(label: String, state: TextFieldState, hint: String, onDone
 }
 
 private fun TextFieldState.replaceWith(value: String) = edit { replace(0, length, value) }
+
+/** How the summary line puts [rateLimit], a speed cap in KB a second. */
+private fun speed(rateLimit: Int): String = if (rateLimit > 0) "up to $rateLimit KB/s" else "no speed cap"
 
 /**
  * Whether [project]'s agent tabs may message each other without the user delivering each message.

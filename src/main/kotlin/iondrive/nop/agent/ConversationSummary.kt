@@ -9,10 +9,18 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /** A fixed reading copy of the conversation, retaining only what its participants said. */
-data class ConversationSummary(val messages: List<Message>, val capturedAt: Long) {
+data class ConversationSummary(
+    val messages: List<Message>,
+    val capturedAt: Long,
+    val runStarts: List<Int> = listOf(0),
+) {
     data class Message(val speaker: String, val text: String, val assistant: Boolean, val at: Long)
 
-    fun plainText(): String = messages.joinToString("\n\n") { "${it.speaker}:\n${it.text}" }
+    fun messagesForRun(index: Int): List<Message> =
+        messages.subList(runStarts[index], runStarts.getOrElse(index + 1) { messages.size })
+
+    fun plainText(runIndex: Int? = null): String =
+        (runIndex?.let(::messagesForRun) ?: messages).joinToString("\n\n") { "${it.speaker}:\n${it.text}" }
 
     companion object {
         private val json = Json { ignoreUnknownKeys = true }
@@ -65,13 +73,26 @@ data class ConversationSummary(val messages: List<Message>, val capturedAt: Long
             capturedAt: Long = System.currentTimeMillis(),
         ): ConversationSummary {
             val messages = mutableListOf<Message>()
-            var account: String? = null
+            val runStarts = mutableListOf(0)
+            var run: AgentEvent.RunStarted? = null
+            var launchedAt: Long? = null
             var awaitingHandoffSeed = false
             for (event in events) {
                 when (event) {
                     is AgentEvent.RunStarted -> {
-                        account = event.account
-                        awaitingHandoffSeed = event.seededFromHandoff
+                        val previous = run
+                        val launched = event.transcriptPath == null && event.at != launchedAt
+                        // Locating the first transcript updates a run. A subsequent transcript
+                        // change can start a new conversation inside the same CLI process.
+                        val changedTranscript = previous?.transcriptPath != null && event.transcriptPath != null &&
+                            (previous.transcriptPath != event.transcriptPath || previous.nativeSessionId != event.nativeSessionId)
+                        val changedAccount = previous != null &&
+                            (previous.provider != event.provider || previous.account != event.account)
+                        val startsRun = launched || changedTranscript || changedAccount
+                        if (startsRun && messages.size > runStarts.last()) runStarts += messages.size
+                        if (previous == null || startsRun) awaitingHandoffSeed = event.seededFromHandoff
+                        if (event.transcriptPath == null) launchedAt = event.at
+                        run = event
                     }
                     is AgentEvent.UserMessage -> {
                         val text = event.text.trim()
@@ -93,13 +114,15 @@ data class ConversationSummary(val messages: List<Message>, val capturedAt: Long
                         val text = event.blocks.filterIsInstance<Block.Text>()
                             .map { it.text }.filter { it.isNotBlank() }.joinToString("\n\n")
                         if (text.isNotBlank()) {
-                            messages += Message(account?.let { "Agent · $it" } ?: "Agent", text, true, event.at)
+                            messages += Message(run?.let { "Agent · ${it.account}" } ?: "Agent", text, true, event.at)
                         }
                     }
                     else -> Unit
                 }
             }
-            return ConversationSummary(messages.toList(), capturedAt)
+            // A run can be opened before it has any prose to show.
+            if (runStarts.size > 1 && runStarts.last() == messages.size) runStarts.removeLast()
+            return ConversationSummary(messages.toList(), capturedAt, runStarts.toList())
         }
     }
 }
@@ -112,8 +135,18 @@ class ConversationSummaryState {
         private set
     var snapshot: ConversationSummary? by mutableStateOf(null)
     var error: String? by mutableStateOf(null)
+    private var runsBack by mutableStateOf(0)
+    val runIndex: Int get() = (snapshot?.runStarts?.lastIndex ?: 0) - runsBack
     var scrollIndex = 0
     var scrollOffset = 0
+
+    fun showRun(index: Int) {
+        val current = snapshot ?: return
+        if (index !in current.runStarts.indices || index == runIndex) return
+        scrollIndex = current.messagesForRun(index).lastIndex.coerceAtLeast(0)
+        scrollOffset = 0
+        runsBack = current.runStarts.lastIndex - index
+    }
 
     fun toggle() {
         shown = !shown
@@ -127,6 +160,7 @@ class ConversationSummaryState {
     fun refresh() {
         snapshot = null
         error = null
+        runsBack = 0
         scrollIndex = 0
         scrollOffset = 0
         revision++

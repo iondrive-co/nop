@@ -76,9 +76,16 @@ class AgentSummaryViewTest {
             scene.semanticsOwners.flatMap { all(it.unmergedRootSemanticsNode) }
         }
 
-        fun refresh() {
-            val node = nodes().single { it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == "Refresh" } == true }
-            click(node.boundsInRoot.center)
+        fun refresh() = clickText("Refresh")
+
+        private fun textNode(text: String) = nodes().single {
+            it.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true
+        }
+
+        fun clickText(text: String) = click(textNode(text).boundsInRoot.center)
+
+        fun disabled(text: String) = generateSequence(textNode(text)) { it.parent }.any {
+            it.config.contains(SemanticsProperties.Disabled)
         }
 
         fun clickScrollbar() = click(Offset(896f, 500f))
@@ -164,21 +171,70 @@ class AgentSummaryViewTest {
     }
 
     @Test
-    fun `right clicking a summary reply offers branching with the clicked conversation position`() {
+    fun `summary opens on the latest run and reads earlier runs one at a time`() {
+        val log = dir.resolve("runs.jsonl")
+        val start = AgentEvent.RunStarted(provider = "anthropic", account = "claude-alpha", at = 1)
+        append(log, start)
+        append(log, AgentEvent.UserMessage("Describe the orchard.", 2))
+        append(log, start.copy(at = 3))
+        append(log, AgentEvent.AssistantMessage(listOf(Block.Text("The pond is quiet.")), at = 4))
+        append(log, start.copy(at = 5))
+        append(log, AgentEvent.UserMessage("Describe the greenhouse.", 6))
+
+        Reader(log).use { reader ->
+            reader.settle()
+            assertTrue(reader.shows("Describe the greenhouse."))
+            assertFalse(reader.shows("The pond is quiet."))
+            assertFalse(reader.shows("Describe the orchard."))
+            assertTrue(reader.disabled("Next run"))
+
+            reader.clickText("Previous run")
+            assertTrue(reader.shows("The pond is quiet."))
+            assertFalse(reader.shows("Describe the greenhouse."))
+            assertFalse(reader.shows("Describe the orchard."))
+            reader.clickText("Previous run")
+            assertTrue(reader.shows("Describe the orchard."))
+            assertFalse(reader.shows("The pond is quiet."))
+            assertTrue(reader.disabled("Previous run"))
+            reader.visible = false
+            reader.settle()
+            reader.visible = true
+            reader.settle()
+            assertTrue(reader.shows("Describe the orchard."))
+
+            append(log, start.copy(at = 7))
+            append(log, AgentEvent.UserMessage("Describe the hillside.", 8))
+            reader.clickText("Next run")
+            assertTrue(reader.shows("The pond is quiet."))
+            reader.clickText("Next run")
+            assertTrue(reader.shows("Describe the greenhouse."))
+            assertTrue(reader.disabled("Next run"))
+            reader.clickText("Previous run")
+            reader.refresh()
+            assertTrue(reader.shows("Describe the hillside."))
+            assertTrue(reader.disabled("Next run"))
+        }
+    }
+
+    @Test
+    fun `right clicking an earlier run offers branching with the clicked conversation position`() {
         val state = ConversationSummaryState().apply {
             snapshot = ConversationSummary(listOf(
-                ConversationSummary.Message("You", "Describe the orchard.", false, 1),
-                ConversationSummary.Message("Agent", "The orchard has an eastern path.", true, 2),
-                ConversationSummary.Message("You", "Describe the greenhouse.", false, 3),
-            ), 1)
+                ConversationSummary.Message("You", "Describe the pond.", false, 1),
+                ConversationSummary.Message("You", "Describe the orchard.", false, 2),
+                ConversationSummary.Message("Agent", "The orchard has an eastern path.", true, 3),
+                ConversationSummary.Message("You", "Describe the greenhouse.", false, 4),
+            ), 5, runStarts = listOf(0, 1, 3))
         }
         var captured: iondrive.nop.agent.ConversationClick? = null
         Reader(dir.resolve("unused.jsonl"), state, onBranch = { captured = it }).use { reader ->
             reader.settle()
+            reader.clickText("Previous run")
             reader.branchAt("The orchard has an eastern path.")
         }
-        assertNotNull(captured)
-        assertTrue(captured!!.lines[captured!!.row].contains("orchard"), captured.toString())
+        val click = assertNotNull(captured)
+        assertEquals(3L, click.messageAt)
+        assertEquals("The orchard has an eastern path.", click.lines[click.row])
     }
 
     @Test

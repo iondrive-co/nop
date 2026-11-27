@@ -119,9 +119,31 @@ data class AgentConfig(
     val accounts: List<Account> = emptyList(),
     /** The folder agent sessions are backed up to, or null when nothing is. See [Backup]. */
     val backupDir: String? = null,
-    /** The machine each project's agent tabs are kept in step through, or null when none is. See [ProjectSync]. */
+    /** The machine the chosen projects' agent tabs are kept in step through, or null when none is. See [ProjectSync]. */
     val sync: SyncRemote? = null,
+    /**
+     * The repository roots on this machine whose agent tabs go to [sync]; every other project keeps
+     * its tabs here. Chosen one by one, since a busy project sends a lot. Each machine chooses for
+     * itself, as the paths are its own.
+     */
+    val syncProjects: List<String> = emptyList(),
 ) {
+    /** Whether the repository at [root] is one of the [syncProjects]. */
+    fun syncs(root: Path): Boolean {
+        val want = normalRoot(root)
+        return syncProjects.any { runCatching { normalRoot(Path.of(it)) == want }.getOrDefault(false) }
+    }
+
+    /** This config with the repository at [root] synced or not, as [on] says. */
+    fun withSynced(root: Path, on: Boolean): AgentConfig {
+        val want = normalRoot(root)
+        val others = syncProjects.filterNot { runCatching { normalRoot(Path.of(it)) == want }.getOrDefault(false) }
+        return copy(syncProjects = if (on) others + want.toString() else others)
+    }
+
+    /** The remote [root]'s tabs go to: [sync] when it is one of the [syncProjects], otherwise none. */
+    fun syncFor(root: Path): SyncRemote? = sync?.takeIf { syncs(root) }
+
     /**
      * This config without the account called [name], and without anybody's nomination of it. A
      * nomination left pointing at a removed account is a handover that silently does not happen at
@@ -137,12 +159,18 @@ data class AgentConfig(
     )
 }
 
+private fun normalRoot(path: Path): Path = path.toAbsolutePath().normalize()
+
 /**
  * A machine reached over ssh that holds each project's agent tabs, so another machine can show them
  * and take them over. [target] is what ssh is given — `user@host`, or a name from the ssh config —
  * and [identity] the key file it signs in with when the config does not say. [base] is the folder
  * under that user's home everything is kept in. [ssh] is the program run in ssh's place, for a
  * wrapper; null runs `ssh`.
+ *
+ * [rateLimit] caps each copy, in KiB a second of what goes over the wire after compression, so a
+ * project's first copy cannot fill the machine's uplink; 0 leaves it uncapped. rsync passes it to
+ * the remote's side as well, so it holds in both directions.
  */
 @Serializable
 data class SyncRemote(
@@ -150,9 +178,11 @@ data class SyncRemote(
     val identity: String? = null,
     val base: String = DEFAULT_BASE,
     val ssh: String? = null,
+    val rateLimit: Int = DEFAULT_RATE_LIMIT,
 ) {
     companion object {
         const val DEFAULT_BASE = "nop-sync"
+        const val DEFAULT_RATE_LIMIT = 500
     }
 }
 

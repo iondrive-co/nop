@@ -48,9 +48,35 @@ class ConversationSummaryTest {
         val summary = ConversationSummary.fromEvents(events, 10)
         assertEquals(listOf("You", "Agent · claude-alpha", "Agent · codex-bravo"), summary.messages.map { it.speaker })
         assertEquals(listOf("Please check the parser.", "I will check.", "The parser works."), summary.messages.map { it.text })
+        assertEquals(listOf("Please check the parser.", "I will check."), summary.messagesForRun(0).map { it.text })
+        assertEquals("Agent · codex-bravo:\nThe parser works.", summary.plainText(runIndex = 1))
         assertEquals(10L, summary.capturedAt)
         assertFalse(summary.plainText().contains("Internal reasoning"))
         assertFalse(summary.plainText().contains("Tool output"))
+    }
+
+    @Test
+    fun `locating or reattaching to a transcript preserves its run and switching transcripts starts another`() {
+        val start = AgentEvent.RunStarted(provider = "anthropic", account = "claude-alpha", at = 2)
+        val located = start.copy(nativeSessionId = "orchard", transcriptPath = "orchard.jsonl", at = 4)
+        val summary = ConversationSummary.fromEvents(sequenceOf(
+            AgentEvent.UserMessage("An older note.", 1),
+            start,
+            AgentEvent.UserMessage("Describe the orchard.", 3),
+            located,
+            AgentEvent.AssistantMessage(listOf(Block.Text("There is an apple tree.")), at = 5),
+            start.copy(nativeSessionId = "orchard"),
+            located.copy(at = 6),
+            AgentEvent.AssistantMessage(listOf(Block.Text("It is flowering.")), at = 7),
+            located.copy(nativeSessionId = "pond", transcriptPath = "pond.jsonl", at = 8),
+            AgentEvent.UserMessage("Describe the pond.", 9),
+            start.copy(at = 10),
+        ))
+        assertEquals(listOf(
+            listOf("An older note."),
+            listOf("Describe the orchard.", "There is an apple tree.", "It is flowering."),
+            listOf("Describe the pond."),
+        ), summary.runStarts.indices.map { index -> summary.messagesForRun(index).map { it.text } })
     }
 
     @Test

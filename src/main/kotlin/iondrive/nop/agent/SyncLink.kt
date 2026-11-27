@@ -214,9 +214,12 @@ internal class SyncLink(private val remote: SyncRemote, private val controlDir: 
         val shell = (listOf(ssh) + sshOptions()).joinToString(" ") { "'$it'" }
         val excludes = (Backup.CREDENTIALS + Backup.TRANSIENT_PATTERNS).map { "--exclude=$it" }
         // Folders, files, their modes and times, and nothing else: no link is made or followed, and
-        // no device or owner is taken from the other side.
-        val argv = listOf("rsync", "-rpt", "--no-links", "--delete", "--chmod=go=", "--timeout=60", "-e", shell,
-            "--rsync-path=flock -w 60 ${projectDir(key)}/lock rsync") + excludes + paths
+        // no device or owner is taken from the other side. Compressed, since conversations are text
+        // and shrink several times over, and capped at the remote's rate, which rsync hands to the
+        // far side too, so that a pull is held to it as well as a push.
+        val argv = listOf("rsync", "-rptz", "--no-links", "--delete", "--chmod=go=", "--timeout=60") +
+            listOfNotNull(remote.rateLimit.takeIf { it > 0 }?.let { "--bwlimit=$it" }) +
+            listOf("-e", shell, "--rsync-path=flock -w 60 ${projectDir(key)}/lock rsync") + excludes + paths
         val ran = run(argv, null, timeout)
         // 24: files vanished while the list was being made, which is a log rotated or a tab closed
         // mid-copy; the next copy picks up where it is then.
@@ -244,7 +247,10 @@ internal class SyncLink(private val remote: SyncRemote, private val controlDir: 
 
     companion object {
         private val CALL_TIMEOUT = 60.seconds
-        val COPY_TIMEOUT = 15.minutes
+        // Long enough for a busy project's first copy at the rate cap. A copy that stalls is ended
+        // well before by rsync's own --timeout, and one ended keeps every file it finished, so the
+        // next copy carries on from there.
+        val COPY_TIMEOUT = 60.minutes
 
         private val HEX = Regex("[0-9a-f]{1,64}")
         private val TARGET = Regex("[A-Za-z0-9._@:\\[\\]-]+")
@@ -261,6 +267,7 @@ internal class SyncLink(private val remote: SyncRemote, private val controlDir: 
             remote.identity != null && remote.identity.isNotBlank() && !Files.isRegularFile(Path.of(expand(remote.identity))) ->
                 "There is no key file at ${remote.identity}"
             remote.ssh != null && '\'' in remote.ssh -> "The ssh program's path cannot contain a quote"
+            remote.rateLimit < 0 -> "The speed cap is a whole number of KB a second, or 0 for none"
             else -> null
         }
 

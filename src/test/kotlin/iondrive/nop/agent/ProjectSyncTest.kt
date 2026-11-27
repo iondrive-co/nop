@@ -194,6 +194,37 @@ class ProjectSyncTest {
     }
 
     @Test
+    fun `a copy is compressed and kept to the speed cap both ways, unless the cap is off`(@TempDir tmp: Path) {
+        needTools()
+        val inner = fakeRemote(tmp)
+        val seen = tmp.resolve("seen")
+        val script = tmp.resolve("noting-ssh")
+        Files.writeString(script, "#!/bin/sh\necho \"${'$'}*\" >> '$seen'\nexec '${inner.ssh}' \"${'$'}@\"\n")
+        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwx------"))
+        val out = tmp.resolve("out")
+        write(out.resolve("agents"), "tabs\n")
+
+        fun copies(rateLimit: Int): List<String> {
+            Files.deleteIfExists(seen)
+            val link = SyncLink(inner.copy(ssh = script.toString(), rateLimit = rateLimit), null)
+            link.claim(key, 0, seatA, "alpha-box", "/home/dev/shop", "abc123", false)
+            link.push(key, seatA, out)
+            link.pull(key, seatA, tmp.resolve("in"))
+            return Files.readAllLines(seen).filter { "rsync --server" in it }
+        }
+
+        val capped = copies(250)
+        assertEquals(2, capped.size, "$capped")
+        assertTrue(capped.any { "--sender" in it }, "$capped")
+        capped.forEach {
+            assertTrue("--bwlimit=250" in it, it)
+            assertTrue(Regex("""--server (--sender )?-[A-Za-z]*z[A-Za-z]*\.""").containsMatchIn(it), it)
+        }
+        copies(0).forEach { assertFalse("--bwlimit" in it, it) }
+        assertEquals("tabs\n", Files.readString(tmp.resolve("in/agents")))
+    }
+
+    @Test
     fun `ssh is told to refuse a host it does not know, whatever its config says`(@TempDir tmp: Path) {
         val seen = tmp.resolve("seen")
         val script = tmp.resolve("noting-ssh")
@@ -232,6 +263,8 @@ class ProjectSyncTest {
         val identity = write(tmp.resolve("id_test"), "key\n")
         assertNull(SyncLink.problem(SyncRemote(target = "dev@remote", identity = identity.toString())))
         assertNull(SyncLink.problem(SyncRemote(target = "dev@10.0.0.7", base = "sync/nop")))
+        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote", rateLimit = -1)))
+        assertNull(SyncLink.problem(SyncRemote(target = "dev@remote", rateLimit = 0)))
     }
 
     // ---- identity --------------------------------------------------------------------------------

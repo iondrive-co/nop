@@ -1172,25 +1172,12 @@ fun ProjectTreePanel(
     }
 }
 
-/**
- * Hands the target off to the OS:
- * - Regular files: through java.awt.Desktop, which on Linux means xdg-open and honours the
- *   user's per-MIME defaults (image viewer for PNGs, editor for source files, etc).
- * - Directories on Linux: through the freedesktop FileManager1 DBus interface, which talks
- *   to whichever file manager the desktop has registered (Thunar, Nautilus, Dolphin, …).
- *   We deliberately skip xdg-open here because users can accidentally set inode/directory to
- *   a non-file-manager (the canonical accident: "Open with → some app, always") and then every
- *   folder click in the system tries to launch a music player. FileManager1 ignores that
- *   mapping. macOS/Windows fall back to Desktop.open, which already does the right thing.
- *
- * Done on a daemon thread so the UI doesn't stall while the JVM forks dbus-send / xdg-open
- * (which on a heap-heavy Compose process can take several seconds to copy the page table).
- * Best-effort — failures are swallowed since there's nothing useful to surface from a
- * header icon.
- */
+/** Opens the target with the desktop's default app without blocking the UI. */
 fun openInSystem(target: File) {
     Thread {
         if (target.isDirectory && System.getProperty("os.name").lowercase().contains("linux")) {
+            // GIO honours the inode/directory association, including workspace-specific launchers.
+            if (runDesktopCommand("gio", "open", target.absolutePath)) return@Thread
             if (openDirectoryViaFileManager1(target)) return@Thread
         }
         runCatching { java.awt.Desktop.getDesktop().open(target) }
@@ -1198,18 +1185,22 @@ fun openInSystem(target: File) {
 }
 
 private fun openDirectoryViaFileManager1(dir: File): Boolean {
-    val uri = dir.toURI().toString()
-    val cmd = listOf(
-        "dbus-send", "--session", "--dest=org.freedesktop.FileManager1", "--type=method_call",
+    // dbus-send splits array arguments at commas. Wait for the method reply to catch errors.
+    val uri = dir.toURI().toASCIIString().replace(",", "%2C")
+    return runDesktopCommand(
+        "dbus-send", "--session", "--dest=org.freedesktop.FileManager1", "--print-reply=literal",
+        "--reply-timeout=3000",
         "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowFolders",
         "array:string:$uri", "string:",
     )
-    return runCatching {
-        // dbus-send exits 0 when the call dispatched successfully, including when DBus
-        // auto-starts Thunar/Nautilus/etc. to handle it.
-        ProcessBuilder(cmd).redirectErrorStream(true).start().waitFor() == 0
-    }.getOrDefault(false)
 }
+
+private fun runDesktopCommand(vararg command: String): Boolean = runCatching {
+    ProcessBuilder(*command)
+        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+        .redirectError(ProcessBuilder.Redirect.DISCARD)
+        .start().waitFor() == 0
+}.getOrDefault(false)
 
 // A filled manila folder with a tab on the left, drawn in the 16-unit space the other header icons
 // use. Sits between the expand chevron and the directory name in the project tree.

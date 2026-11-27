@@ -72,7 +72,7 @@ class ProjectTreeRefreshTest {
         fun renderFor(milliseconds: Long) {
             val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(milliseconds)
             do {
-                onEdt { scene.render(System.nanoTime()) }
+                onEdt { scene.render(System.nanoTime()).close() }
                 Thread.sleep(25)
             } while (System.nanoTime() < until)
         }
@@ -119,7 +119,7 @@ class ProjectTreeRefreshTest {
             var names: Set<String>
             do {
                 names = onEdt {
-                    scene.render(System.nanoTime())
+                    scene.render(System.nanoTime()).close()
                     scene.semanticsOwners.flatMap { texts(it.unmergedRootSemanticsNode) }.toSet()
                 }
                 if (present.all { it in names } && absent.none { it in names }) return

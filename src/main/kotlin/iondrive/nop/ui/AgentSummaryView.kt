@@ -43,11 +43,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.onSizeChanged
+import iondrive.nop.agent.ConversationClick
 import iondrive.nop.agent.ConversationSummary
 import iondrive.nop.agent.ConversationSummaryState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jetbrains.jewel.foundation.theme.JewelTheme
+import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.Text
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
@@ -61,7 +63,7 @@ import java.time.format.DateTimeFormatter
 internal fun AgentSummaryView(
     state: ConversationSummaryState,
     log: Path,
-    onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)? = null,
+    onBranchHere: ((ConversationClick) -> Unit)? = null,
     /** What follows the snapshot's time: how to get back to a view the user can type in. */
     hint: String = "Turn Summary off to type or answer questions",
 ) {
@@ -69,7 +71,7 @@ internal fun AgentSummaryView(
         if (state.snapshot == null && state.error == null) {
             val result = withContext(Dispatchers.IO) { runCatching { ConversationSummary.read(log) } }
             result.onSuccess {
-                state.scrollIndex = it.messages.lastIndex.coerceAtLeast(0)
+                state.scrollIndex = it.messagesForRun(it.runStarts.lastIndex).lastIndex.coerceAtLeast(0)
                 state.snapshot = it
             }.onFailure {
                 state.error = "Could not read this conversation. Return to the live view or try Refresh."
@@ -81,6 +83,7 @@ internal fun AgentSummaryView(
             .padding(bottom = LocalTerminalBottomInset.current),
     ) {
         val snapshot = state.snapshot
+        val runIndex = state.runIndex
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -99,8 +102,12 @@ internal fun AgentSummaryView(
                 modifier = Modifier.weight(1f),
             )
             if (snapshot != null) {
+                if (snapshot.runStarts.size > 1) {
+                    Link("Previous run", onClick = { state.showRun(runIndex - 1) }, enabled = runIndex > 0)
+                    Link("Next run", onClick = { state.showRun(runIndex + 1) }, enabled = runIndex < snapshot.runStarts.lastIndex)
+                }
                 Text("Copy", color = AgentMuted, modifier = Modifier.clickable {
-                    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(snapshot.plainText()), null)
+                    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(snapshot.plainText(runIndex)), null)
                 })
             }
             Text("Refresh", color = AgentMuted, modifier = Modifier.clickable { state.refresh() })
@@ -111,14 +118,20 @@ internal fun AgentSummaryView(
             snapshot.messages.isEmpty() -> Box(Modifier.fillMaxSize().padding(16.dp)) {
                 Text("No recorded messages yet. Refresh after the agent has written its reply.", color = AgentMuted)
             }
-            else -> key(state.revision) { SummaryMessages(snapshot, state, onBranchHere) }
+            else -> key(state, state.revision, runIndex) { SummaryMessages(snapshot, runIndex, state, onBranchHere) }
         }
     }
 }
 
 @Composable
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
-private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSummaryState, onBranchHere: ((iondrive.nop.agent.ConversationClick) -> Unit)?) {
+private fun SummaryMessages(
+    snapshot: ConversationSummary,
+    runIndex: Int,
+    state: ConversationSummaryState,
+    onBranchHere: ((ConversationClick) -> Unit)?,
+) {
+    val messages = remember(snapshot, runIndex) { snapshot.messagesForRun(runIndex) }
     val isDark = JewelTheme.isDark
     val userAccent = if (isDark) Color(0xFF98B7DF) else Color(0xFF4B6E9E)
     val incomingAccent = if (isDark) Color(0xFFC0A5D8) else Color(0xFF7C6199)
@@ -127,7 +140,7 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
     val revision = state.revision
     DisposableEffect(scroll) {
         onDispose {
-            if (state.revision == revision) {
+            if (state.revision == revision && state.runIndex == runIndex) {
                 state.scrollIndex = scroll.firstVisibleItemIndex
                 state.scrollOffset = scroll.firstVisibleItemScrollOffset
             }
@@ -141,19 +154,19 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
         val charactersPerLine = with(density) {
             ((maxWidth - 64.dp).toPx() / (14.sp.toPx() * 0.6f)).toInt().coerceAtLeast(1)
         }
-        val ranges = remember(snapshot) { snapshot.messages.indices.map { it..it } }
-        val estimates = remember(snapshot, charactersPerLine, lineHeight, spacing, chromeHeight) {
-            DoubleArray(snapshot.messages.size) { index ->
-                val message = snapshot.messages[index]
+        val ranges = remember(messages) { messages.indices.map { it..it } }
+        val estimates = remember(messages, charactersPerLine, lineHeight, spacing, chromeHeight) {
+            DoubleArray(messages.size) { index ->
+                val message = messages[index]
                 val lines = message.text.lineSequence().sumOf { (it.length - 1).coerceAtLeast(0) / charactersPerLine + 1 }
-                ((lines + 1) * lineHeight + chromeHeight + if (index < snapshot.messages.lastIndex) spacing else 0).toDouble()
+                ((lines + 1) * lineHeight + chromeHeight + if (index < messages.lastIndex) spacing else 0).toDouble()
             }
         }
         val scrollbar = remember(scroll, ranges, estimates) { DiffScrollbarAdapter(scroll, ranges, lineHeight, estimates) }
         LaunchedEffect(scrollbar) {
             snapshotFlow {
                 scroll.layoutInfo.visibleItemsInfo.map {
-                    it.index to it.size + if (it.index < snapshot.messages.lastIndex) spacing else 0
+                    it.index to it.size + if (it.index < messages.lastIndex) spacing else 0
                 }
             }.collect { scrollbar.updateMeasurements(it) }
         }
@@ -164,7 +177,7 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
                 contentPadding = PaddingValues(start = 16.dp, end = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
-                itemsIndexed(snapshot.messages) { index, message ->
+                itemsIndexed(messages) { index, message ->
                     var clickFraction = 0f
                     var messageHeight = 1
                     val accent = when {
@@ -180,9 +193,10 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
                                 } + ""
                             }
                             val lines = rows.flatten()
-                            val before = rows.take(index).sumOf { it.size }
-                            val row = before + (clickFraction * rows[index].lastIndex).toInt()
-                            onBranchHere(iondrive.nop.agent.ConversationClick(lines, row, snapshot.capturedAt, message.at))
+                            val messageIndex = snapshot.runStarts[runIndex] + index
+                            val before = rows.take(messageIndex).sumOf { it.size }
+                            val row = before + (clickFraction * rows[messageIndex].lastIndex).toInt()
+                            onBranchHere(ConversationClick(lines, row, snapshot.capturedAt, message.at))
                         })
                     }) {
                         Column(
@@ -222,7 +236,7 @@ private fun SummaryMessages(snapshot: ConversationSummary, state: ConversationSu
             val edge = if (isDark) null else Color(0xFFB29959)
             val inset = 1.dp.toPx()
             val markerSize = size.width - 2 * inset
-            for (mark in summaryUserMessageMarks(snapshot.messages, scrollbar.metrics, size.height, scrollbar.viewportSize, markerSize)) {
+            for (mark in summaryUserMessageMarks(messages, scrollbar.metrics, size.height, scrollbar.viewportSize, markerSize)) {
                 val at = Offset(inset, mark.top)
                 val markSize = Size(markerSize, mark.height)
                 drawRect(fill, at, markSize)

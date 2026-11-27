@@ -2513,6 +2513,7 @@ fun App(
             AccountsDialog(
                 config = config,
                 project = projectPath.toFile(),
+                syncRoot = rootPath.toFile(),
                 readings = agentUsage,
                 onReading = { account, reading -> agentUsage[account.name] = reading },
                 modelsFor = { account ->

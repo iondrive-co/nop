@@ -94,8 +94,8 @@ object CefShutdownSmoke {
         when (name) {
             "quit-page-never-shown" -> {
                 SlackBrowsers.connect(project, "about:blank")
-                browserOf(project)
-                Thread.sleep(1_000)
+                check(browserOf(project).identifier <= 0) { "the hidden page was created in Chromium" }
+                return quit(requireCompletion = true)
             }
             "quit-page-shown" -> showPage(project)
             "quit-after-its-window-closed" -> {
@@ -126,7 +126,7 @@ object CefShutdownSmoke {
                 SlackBrowsers.connect(other, "about:blank")
                 val browser = browserOf(other)
                 // Keep the creation queued on the Swing thread when the windows close.
-                return quit {
+                return quit(requireCompletion = true) {
                     frameHolding(browser.uiComponent)
                     browser.createImmediately()
                 }
@@ -148,13 +148,16 @@ object CefShutdownSmoke {
     }
 
     /** What nop's windows closing does at a quit: they go first, and Chromium after them. */
-    private fun quit(beforeClosing: () -> Unit = {}) {
+    private fun quit(requireCompletion: Boolean = false, beforeClosing: () -> Unit = {}) {
         SwingUtilities.invokeAndWait {
             beforeClosing()
             java.awt.Window.getWindows().forEach { it.dispose() }
             SlackBrowsers.disposeAll()
         }
-        check(SlackBrowsers.awaitShutdown()) { "Chromium did not finish preparing for quit" }
+        val finished = SlackBrowsers.awaitShutdown()
+        // The app can quit after its bounded wait. Require completion when no page was created,
+        // or when the next process must find a cookie written by this case.
+        check(!requireCompletion || finished) { "Chromium did not finish preparing for quit" }
         val expected = if (OS.isLinux()) CefApp.CefAppState.INITIALIZED else CefApp.CefAppState.TERMINATED
         check(CefApp.getState() == expected) { "Chromium is ${CefApp.getState()}, expected $expected" }
         // Give queued Swing work time to run before ending the JVM.

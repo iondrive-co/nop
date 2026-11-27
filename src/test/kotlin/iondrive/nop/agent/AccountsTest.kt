@@ -296,6 +296,54 @@ class AccountsTest {
         )
     }
 
+    @Test
+    fun `a config from before sync was chosen per project syncs nothing and caps at the default rate`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        Files.createDirectories(Accounts.configFile.parent)
+        Files.writeString(Accounts.configFile, """{"accounts": [], "sync": {"target": "dev@sync.example"}}""")
+
+        val loaded = Accounts.load()
+
+        assertEquals(SyncRemote.DEFAULT_RATE_LIMIT, loaded.sync?.rateLimit)
+        assertTrue(loaded.syncProjects.isEmpty())
+        assertNull(loaded.syncFor(tmp.resolve("shop")))
+    }
+
+    @Test
+    fun `only the chosen repositories sync, whichever way their paths are written`(@TempDir tmp: Path) {
+        val remote = SyncRemote(target = "dev@sync.example")
+        val shop = tmp.resolve("work/shop")
+        val config = AgentConfig(sync = remote).withSynced(shop, true)
+
+        assertEquals(remote, config.syncFor(tmp.resolve("work/./other/../shop")))
+        assertNull(config.syncFor(tmp.resolve("work/blog")))
+        assertNull(config.copy(sync = null).syncFor(shop), "no remote, nothing syncs")
+    }
+
+    @Test
+    fun `choosing a repository twice lists it once, and unchoosing it drops it`(@TempDir tmp: Path) {
+        val shop = tmp.resolve("work/shop")
+        val blog = tmp.resolve("work/blog")
+        val both = AgentConfig().withSynced(shop, true).withSynced(blog, true).withSynced(tmp.resolve("work/shop/"), true)
+
+        assertEquals(listOf(blog.toString(), shop.toString()), both.syncProjects)
+        assertEquals(listOf(blog.toString()), both.withSynced(shop, false).syncProjects)
+        assertFalse(both.withSynced(shop, false).syncs(shop))
+    }
+
+    @Test
+    fun `the chosen repositories and the rate cap round-trip through the config file`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val shop = tmp.resolve("work/shop")
+        val config = AgentConfig(sync = SyncRemote(target = "dev@sync.example", rateLimit = 0)).withSynced(shop, true)
+
+        Accounts.save(config)
+        val loaded = Accounts.load()
+
+        assertEquals(0, loaded.sync?.rateLimit)
+        assertTrue(loaded.syncs(shop))
+    }
+
     /** Runs [body] with `user.home` pointed at [home], so discovery looks inside a temp directory. */
     private fun <T> withHome(home: Path, body: () -> T): T {
         val original = System.getProperty("user.home")

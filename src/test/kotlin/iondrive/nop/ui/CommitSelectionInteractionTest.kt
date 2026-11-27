@@ -58,14 +58,16 @@ class CommitSelectionInteractionTest {
 
         fun settle() = repeat(10) {
             time += 16_000_000
-            onEdt { scene.render(time) }
+            onEdt { scene.render(time).close() }
             Thread.sleep(5)
         }
 
         fun highlightedRows(): Set<Int> = onEdt {
             time += 16_000_000
-            Bitmap.makeFromImage(scene.render(time)).use { bitmap ->
-                paths.indices.filter { bitmap.getColor(350, it * 40 + 5) == 0xFFCEE0FD.toInt() }.toSet()
+            scene.render(time).use { image ->
+                Bitmap.makeFromImage(image).use { bitmap ->
+                    paths.indices.filter { bitmap.getColor(350, it * 40 + 5) == 0xFFCEE0FD.toInt() }.toSet()
+                }
             }
         }
 

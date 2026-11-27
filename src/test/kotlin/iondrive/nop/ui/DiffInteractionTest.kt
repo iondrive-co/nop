@@ -123,18 +123,18 @@ class DiffInteractionTest {
             val deadline = System.currentTimeMillis() + 15_000
             while (before == 0 && System.currentTimeMillis() < deadline) {
                 Thread.sleep(20)
-                before = frame().count(tint)
+                before = frame().use { it.count(tint) }
             }
             assertTrue(before > 0, "the changed words are tinted before anything is selected")
             // Then let the list settle: its first frames are still sizing it.
-            repeat(30) { frame(); Thread.sleep(20) }
+            repeat(30) { frame().close(); Thread.sleep(20) }
 
             // Drag from the first line down the left half, past the changed line, with real gaps
             // between the events: the pointer input reads their timing.
             val from = Offset(120f, 40f)
             val to = Offset(width * 0.45f, height - 10f)
             val down = PointerButtons(isPrimaryPressed = true)
-            fun step() { frame(); Thread.sleep(20) }
+            fun step() { frame().close(); Thread.sleep(20) }
             onEdt { scene.sendPointerEvent(PointerEventType.Move, from) }
             step()
             onEdt { scene.sendPointerEvent(PointerEventType.Press, from, buttons = down, button = PointerButton.Primary) }
@@ -145,10 +145,10 @@ class DiffInteractionTest {
             }
             onEdt { scene.sendPointerEvent(PointerEventType.Release, to, buttons = PointerButtons(), button = PointerButton.Primary) }
             step()
-            val after = frame()
-
-            assertTrue(after.count(selection.toArgb()) > 0, "the drag selected text")
-            assertEquals(0, after.count(tint), "no changed word is left showing its tint over the selection")
+            frame().use { after ->
+                assertTrue(after.count(selection.toArgb()) > 0, "the drag selected text")
+                assertEquals(0, after.count(tint), "no changed word is left showing its tint over the selection")
+            }
         } finally {
             onEdt { scene.close() }
             repo.close()
@@ -165,10 +165,9 @@ class DiffInteractionTest {
         return result!!.getOrThrow()
     }
 
-    private fun Image.count(argb: Int): Int {
-        val bitmap = Bitmap.makeFromImage(this)
+    private fun Image.count(argb: Int): Int = Bitmap.makeFromImage(this).use { bitmap ->
         var n = 0
         for (y in 0 until height) for (x in 0 until width) if (bitmap.getColor(x, y) == argb) n++
-        return n
+        n
     }
 }

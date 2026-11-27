@@ -174,6 +174,9 @@ internal class ProjectSync(
                 }
             }
         }
+        // A copy the loop started can still be running, and a first one can take most of an hour:
+        // it ends here rather than outliving the sync. The files it finished stay on the remote.
+        link.close()
         scope.cancel()
     }
 
@@ -513,13 +516,13 @@ internal object ProjectSyncStore {
 
     init {
         // Off the caller's thread: a save can come from the UI, and setting a sync up reads the repository.
-        Accounts.addChangeListener { config -> thread(isDaemon = true, name = "nop-sync-remote") { reconfigure(config.sync) } }
+        Accounts.addChangeListener { config -> thread(isDaemon = true, name = "nop-sync-remote") { reconfigure(config) } }
     }
 
     /**
      * The sync for the repository at [root], made and started the first time a project in it asks,
-     * or null when the project is not synced: there is no remote set, or the project has no origin
-     * to tell its clones by. Reads files; call it off the UI thread.
+     * or null when the project is not synced: there is no remote set, the user has not chosen this
+     * repository for it, or it has no origin to tell its clones by. Reads files; call it off the UI thread.
      */
     @Synchronized
     fun of(root: Path, project: Path): ProjectSync? {
@@ -528,7 +531,9 @@ internal object ProjectSyncStore {
             it.projects.add(norm(project))
             return it.sync
         }
-        val remote = Accounts.load().sync
+        val config = Accounts.load()
+        val remote = config.syncFor(key)
+        if (config.sync != null && remote == null) Log.info("sync: $key is not chosen for syncing, so its agents stay on this machine")
         val made = runCatching { make(key, remote) }.onFailure { Log.error("sync: could not set up $key", it) }.getOrNull()
         byRoot[key] = Entry(made, remote, mutableSetOf(norm(project)))
         made?.start()
@@ -544,21 +549,24 @@ internal object ProjectSyncStore {
     fun owning(root: Path): Boolean = byRoot[norm(root)]?.sync?.owning ?: true
 
     /**
-     * The user has set, changed or turned off the remote: every open project stops with the one it
-     * had, at once and without a last copy to it, and starts with [remote] when there is one. A
-     * project that was only viewing another machine's tabs goes back to its own.
+     * The user has set, changed or turned off the remote, or chosen which repositories use it: each
+     * open project whose remote that changes stops with the one it had, at once and without a last
+     * copy to it, and starts with the new one when there is one. A project that was only viewing
+     * another machine's tabs goes back to its own. The rest carry on as they were.
      */
     @Synchronized
-    fun reconfigure(remote: SyncRemote?) {
-        val stale = byRoot.filterValues { it.remote != remote }
+    fun reconfigure(config: AgentConfig) {
+        val stale = byRoot.mapValues { (root, entry) -> entry to config.syncFor(root) }
+            .filterValues { (entry, remote) -> entry.remote != remote }
         if (stale.isEmpty()) return
-        for ((root, entry) in stale) {
+        for ((root, change) in stale) {
+            val (entry, remote) = change
             entry.sync?.abandon()
             val made = runCatching { make(root, remote) }.onFailure { Log.error("sync: could not set up $root", it) }.getOrNull()
             byRoot[root] = Entry(made, remote, entry.projects)
             made?.start()
+            Log.info("sync: $root now ${remote?.let { "syncs with ${it.target}" } ?: "keeps its agent tabs on this machine"}")
         }
-        Log.info("sync: the remote is now ${remote?.target ?: "off"}; ${stale.size} open project(s) follow it")
         SwingUtilities.invokeLater { revision++ }
     }
 
