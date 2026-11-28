@@ -3,72 +3,99 @@ package iondrive.nop.agent
 import iondrive.nop.Settings
 import iondrive.nop.agent.transcript.ClaudeTailer
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
-import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
 
 /**
- * Keeping a project's agent tabs on a remote: the lease that says which machine holds the project,
- * the copies each machine sends, and one machine taking the project from another.
+ * Keeping a project's agent tabs in an S3-compatible store: the lease that says which machine holds
+ * the project, the copies each machine sends, and one machine taking the project from another.
  *
- * The remote is a folder under a temporary directory, reached through a stand-in for ssh that runs
- * the command it is given there, so the real `sh`, `flock` and `rsync` do the work.
+ * The store is [FakeS3], an in-memory stand-in served on 127.0.0.1, so the real HTTP requests,
+ * conditional writes, sealing and chunking all run.
  */
 class ProjectSyncTest {
 
     private val seatA = "a1a1a1a1a1a1a1a1"
     private val seatB = "b2b2b2b2b2b2b2b2"
     private val key = SyncIdentity.projectKey("git@example.com:team/shop.git")
+    private val syncKey = SyncCrypto.generate()
+    private val crypto = SyncCrypto.parse(syncKey)!!
 
-    private fun onPath(name: String): Boolean =
-        System.getenv("PATH").orEmpty().split(':').any { it.isNotEmpty() && Files.isExecutable(Path.of(it, name)) }
+    private fun remote(store: FakeS3, sync: String = syncKey) = SyncRemote(
+        endpoint = store.endpoint, bucket = FakeS3.BUCKET, accessKey = ACCESS_KEY, secretKey = SECRET_KEY,
+        syncKey = sync, rateLimit = 0,
+    )
 
-    private fun needTools() {
-        assumeTrue(onPath("rsync") && onPath("flock"), "rsync and flock are needed")
+    private fun machine(seat: String) = "projects/$key/machines/$seat"
+
+    /** The plain bytes of the object at [rel] below the folder, or null when there is none. */
+    private fun open(store: FakeS3, rel: String, limit: Int): ByteArray? =
+        store.body("nop-sync/$rel")?.let { SyncCrypto.unpack(crypto.open(it, rel), limit) }
+
+    /** The list of files [seat] last sent, or null when it sent none. */
+    private fun manifest(store: FakeS3, seat: String): JsonObject? =
+        open(store, "${machine(seat)}/manifest", 64 shl 20)
+            ?.let { Json.parseToJsonElement(it.toString(Charsets.UTF_8)).jsonObject }
+
+    /** What [seat] sent as [path], put back together from its chunks, or null when it sent no such file. */
+    private fun sent(store: FakeS3, seat: String, path: String): String? {
+        val files = manifest(store, seat)?.get("files")?.jsonArray ?: return null
+        val entry = files.map { it.jsonObject }.firstOrNull { it["path"]?.jsonPrimitive?.content == path } ?: return null
+        val out = ByteArrayOutputStream()
+        for (chunk in entry["chunks"]!!.jsonArray) {
+            val rel = "${machine(seat)}/blobs/${chunk.jsonPrimitive.content}"
+            out.write(open(store, rel, SyncLink.CHUNK) ?: throw AssertionError("$rel is missing"))
+        }
+        return out.toString(Charsets.UTF_8)
     }
 
-    /** A remote whose home is `tmp/remote`, reached by a script that stands in for ssh. */
-    private fun fakeRemote(tmp: Path): SyncRemote {
-        val home = Files.createDirectories(tmp.resolve("remote"))
-        val script = tmp.resolve("fake-ssh")
-        Files.writeString(
-            script,
-            """
-            #!/bin/sh
-            while [ ${'$'}# -gt 0 ]; do
-              case "${'$'}1" in
-                -o|-i|-p|-l) shift 2 ;;
-                --) shift; break ;;
-                -*) shift ;;
-                *) break ;;
-              esac
-            done
-            shift
-            cd '$home' || exit 255
-            exec sh -c "${'$'}*"
-            """.trimIndent() + "\n",
-        )
-        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwx------"))
-        return SyncRemote(target = "dev@remote", ssh = script.toString())
+    /** The chunks the store holds for [seat]. */
+    private fun blobs(store: FakeS3, seat: String): Set<String> =
+        store.keys().filter { it.startsWith("nop-sync/${machine(seat)}/blobs/") }.mapTo(HashSet()) { it.substringAfterLast('/') }
+
+    /** The chunks [seat]'s list names. */
+    private fun named(store: FakeS3, seat: String): Set<String> =
+        manifest(store, seat)!!["files"]!!.jsonArray.flatMapTo(HashSet()) { file ->
+            file.jsonObject["chunks"]!!.jsonArray.map { it.jsonPrimitive.content }
+        }
+
+    /** Puts [manifest] in the store as [seat]'s list, sealed as [with] would. */
+    private fun forge(store: FakeS3, seat: String, manifest: String, with: SyncCrypto = crypto) {
+        val rel = "${machine(seat)}/manifest"
+        store.replace("nop-sync/$rel", with.seal(SyncCrypto.pack(manifest.toByteArray()), rel))
     }
 
-    private fun remoteCopy(tmp: Path, seat: String): Path =
-        tmp.resolve("remote/${SyncRemote.DEFAULT_BASE}/projects/$key/machines/$seat")
+    /** The regular files under [dir], by their path below it. */
+    private fun files(dir: Path): List<String> =
+        if (!Files.isDirectory(dir)) emptyList()
+        else Files.walk(dir).use { paths ->
+            paths.filter { Files.isRegularFile(it, LinkOption.NOFOLLOW_LINKS) }.map { dir.relativize(it).joinToString("/") }.sorted().toList()
+        }
 
     private fun write(file: Path, text: String): Path {
         Files.createDirectories(file.parent)
@@ -85,186 +112,328 @@ class ProjectSyncTest {
         throw AssertionError("timed out waiting for $what")
     }
 
-    // ---- the remote ------------------------------------------------------------------------------
+    // ---- the store -------------------------------------------------------------------------------
 
     @Test
-    fun `a ping reaches the remote`(@TempDir tmp: Path) {
-        needTools()
-        val reply = SyncLink(fakeRemote(tmp), null).ping()
-        assertTrue(reply.ok)
-        assertNotNull(reply.now)
+    fun `a store that keeps its promises answers a ping with its clock`() {
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { link ->
+                val reply = link.ping()
+                assertTrue(reply.ok)
+                assertTrue(abs(reply.now!! - Instant.now().epochSecond) < 5, "the store's clock is ${reply.now}")
+            }
+            assertEquals(listOf("nop-sync/key-check"), store.keys())
+            assertTrue(store.authorizations.isNotEmpty())
+            assertTrue(store.authorizations.all { it.startsWith("AWS4-HMAC-SHA256 Credential=$ACCESS_KEY/") && "/auto/s3/aws4_request" in it })
+            assertTrue(store.authorizations.none { SECRET_KEY in it })
+        }
     }
 
     @Test
-    fun `the first claim takes the project and a stale one is lost`(@TempDir tmp: Path) {
-        needTools()
-        val link = SyncLink(fakeRemote(tmp), null)
-        assertNull(link.read(key).lease)
+    fun `a lease is claimed once per generation and kept only by its holder`() {
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { link ->
+                assertNull(link.read(key).lease)
 
-        val first = link.claim(key, 0, seatA, "alpha-box", "/home/dev/shop", "abc123", false)
-        assertTrue(first.ok)
-        assertEquals(1L, first.lease?.gen)
-        assertEquals(seatA, first.lease?.seat)
-        assertEquals("alpha-box", first.lease?.host)
-        assertEquals("abc123", first.lease?.head)
+                val first = link.claim(key, 0, seatA, "alpha-box", "/work/shop", "abc123", false)
+                assertTrue(first.ok)
+                assertEquals(1L, first.lease?.gen)
+                assertEquals(seatA, first.lease?.seat)
+                assertEquals("alpha-box", first.lease?.host)
+                assertEquals("abc123", first.lease?.head)
+                assertFalse(first.pushed)
 
-        val stale = link.claim(key, 0, seatB, "bravo-box", "/home/dev/shop", "abc123", false)
-        assertEquals("lost", stale.result)
-        assertEquals(seatA, stale.lease?.seat)
+                val stale = link.claim(key, 0, seatB, "bravo-box", "/home/b/shop", "abc123", false)
+                assertEquals("lost", stale.result)
+                assertEquals(seatA, stale.lease?.seat)
 
-        val taken = link.claim(key, 1, seatB, "bravo-box", "/home/dev/shop", "def456", true)
-        assertTrue(taken.ok)
-        assertEquals(2L, taken.lease?.gen)
-        assertEquals(seatB, taken.lease?.seat)
-        assertEquals(true, taken.lease?.dirty)
+                val second = link.claim(key, 1, seatB, "bravo-box", "/home/b/shop", "fedcba9", true)
+                assertTrue(second.ok)
+                assertEquals(2L, second.lease?.gen)
+                assertEquals(seatB, second.lease?.seat)
+                assertTrue(second.lease!!.dirty)
+
+                assertEquals("lost", link.beat(key, 2, seatA, "abc123", false).result)
+                assertEquals("lost", link.beat(key, 1, seatB, "abc123", false).result)
+                val beat = link.beat(key, 2, seatB, "0a1b2c3", false)
+                assertTrue(beat.ok)
+                assertEquals("0a1b2c3", beat.lease?.head)
+                assertFalse(beat.lease!!.dirty)
+
+                val read = link.read(key).lease!!
+                assertEquals(2L, read.gen)
+                assertEquals(seatB, read.seat)
+                assertEquals("/home/b/shop", read.root)
+                assertEquals("0a1b2c3", read.head)
+                assertTrue(abs(read.at - Instant.now().epochSecond) < 5, "the lease was written at ${read.at}")
+            }
+            assertNull(store.keys().firstOrNull { it.startsWith("nop-sync/probe/") })
+        }
     }
 
     @Test
-    fun `a check-in holds only for the holder at its generation`(@TempDir tmp: Path) {
-        needTools()
-        val link = SyncLink(fakeRemote(tmp), null)
-        link.claim(key, 0, seatA, "alpha-box", "/home/dev/shop", "abc123", false)
-
-        assertEquals("lost", link.beat(key, 1, seatB, "abc123", false).result)
-        assertEquals("lost", link.beat(key, 2, seatA, "abc123", false).result)
-
-        val beat = link.beat(key, 1, seatA, "def456", true)
-        assertTrue(beat.ok)
-        assertEquals(1L, beat.lease?.gen)
-        assertEquals("def456", beat.lease?.head)
-        assertEquals(true, beat.lease?.dirty)
-        assertEquals("alpha-box", beat.lease?.host)
+    fun `of two machines claiming at once only one gets the lease`() {
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { a ->
+                SyncLink(remote(store)).use { b ->
+                    a.ping()
+                    b.ping()
+                    val start = CountDownLatch(1)
+                    val results = ConcurrentHashMap<String, SyncReply>()
+                    val threads = listOf(seatA to a, seatB to b).map { (seat, link) ->
+                        Thread {
+                            start.await()
+                            results[seat] = link.claim(key, 0, seat, "box-$seat", "/work/shop", "abc123", false)
+                        }.also { it.start() }
+                    }
+                    start.countDown()
+                    threads.forEach { it.join(10_000) }
+                    assertEquals(2, results.size)
+                    assertEquals(1, results.values.count { it.ok })
+                    assertEquals(1, results.values.count { it.result == "lost" })
+                    val winner = results.entries.single { it.value.ok }.key
+                    assertEquals(winner, a.read(key).lease?.seat)
+                    assertEquals(1L, b.read(key).lease?.gen)
+                }
+            }
+        }
     }
 
     @Test
-    fun `a read says when the holder has sent its tabs`(@TempDir tmp: Path) {
-        needTools()
-        val link = SyncLink(fakeRemote(tmp), null)
-        link.claim(key, 0, seatA, "alpha-box", "/home/dev/shop", "abc123", false)
-        assertFalse(link.read(key).pushed)
+    fun `tabs sent from one machine arrive whole on another, without credentials or live files`(@TempDir tmp: Path) {
+        val from = tmp.resolve("from")
+        write(from.resolve("open-agents.json"), "{\"tabs\":[\"s1\"]}\n")
+        write(from.resolve("logs/s1.jsonl"), "{\"type\":\"session_started\"}\n")
+        val big = ByteArray(SyncLink.CHUNK * 2 + 123) { (it * 31 % 251).toByte() }
+        Files.createDirectories(from.resolve("native/s1/claude"))
+        Files.write(from.resolve("native/s1/claude/c1.jsonl"), big)
+        write(from.resolve("native/s1/claude/.credentials.json"), "{\"token\":\"not-a-real-token\"}")
+        write(from.resolve("native/s1/codex/auth.json"), "{\"token\":\"not-a-real-token\"}")
+        write(from.resolve("native/s1/codex/history.db-wal"), "wal")
+        Files.createSymbolicLink(from.resolve("native/s1/link"), from.resolve("logs/s1.jsonl"))
 
-        val out = tmp.resolve("out")
-        write(out.resolve("agents"), "tabs\n")
-        link.push(key, seatA, out)
-        assertTrue(link.read(key).pushed)
+        val elsewhere = write(tmp.resolve("elsewhere/keep.txt"), "not nop's")
+        val into = tmp.resolve("into")
+        write(into.resolve("left-over"), "old")
+        write(into.resolve("logs/old.jsonl"), "old")
+        Files.createDirectories(into.resolve("stale/dir"))
+        Files.createSymbolicLink(into.resolve("native"), elsewhere.parent)
+
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { link ->
+                link.claim(key, 0, seatA, "alpha-box", "/work/shop", "abc123", false)
+                assertFalse(link.read(key).pushed)
+                link.push(key, seatA, from)
+                assertTrue(link.read(key).pushed)
+
+                assertEquals("{\"type\":\"session_started\"}\n", sent(store, seatA, "logs/s1.jsonl"))
+                for (left in listOf(
+                    "native/s1/claude/.credentials.json", "native/s1/codex/auth.json", "native/s1/codex/history.db-wal", "native/s1/link",
+                )) {
+                    assertNull(sent(store, seatA, left), left)
+                }
+                for (stored in store.keys()) {
+                    val text = String(store.body(stored)!!, Charsets.ISO_8859_1)
+                    assertFalse("session_started" in text || "\"tabs\"" in text || "not-a-real-token" in text, "$stored is not sealed")
+                }
+
+                link.pull(key, seatA, into)
+
+                assertEquals(
+                    listOf("logs/s1.jsonl", "native/s1/claude/c1.jsonl", "open-agents.json"),
+                    files(into),
+                )
+                assertArrayEquals(big, Files.readAllBytes(into.resolve("native/s1/claude/c1.jsonl")))
+                assertEquals(
+                    Files.getLastModifiedTime(from.resolve("native/s1/claude/c1.jsonl")).toMillis(),
+                    Files.getLastModifiedTime(into.resolve("native/s1/claude/c1.jsonl")).toMillis(),
+                )
+                assertEquals(Files.readString(from.resolve("logs/s1.jsonl")), Files.readString(into.resolve("logs/s1.jsonl")))
+                assertFalse(Files.exists(into.resolve("stale"), LinkOption.NOFOLLOW_LINKS))
+                assertTrue(Files.isDirectory(into.resolve("native"), LinkOption.NOFOLLOW_LINKS))
+                assertEquals("not nop's", Files.readString(elsewhere))
+                assertEquals(
+                    setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(into.resolve("logs/s1.jsonl")),
+                )
+
+                store.requests.clear()
+                link.pull(key, seatA, into)
+                assertTrue(store.requests.none { "/blobs/" in it }, "a pull with nothing new fetched ${store.requests}")
+
+                Files.write(from.resolve("native/s1/claude/c1.jsonl"), big + "more".toByteArray())
+                link.push(key, seatA, from)
+                store.requests.clear()
+                link.pull(key, seatA, into)
+                assertEquals(1, store.requests.count { it.startsWith("GET ") && "/blobs/" in it }, "${store.requests}")
+                assertArrayEquals(big + "more".toByteArray(), Files.readAllBytes(into.resolve("native/s1/claude/c1.jsonl")))
+            }
+        }
     }
 
     @Test
-    fun `a copy carries plain files only, never a link or credentials`(@TempDir tmp: Path) {
-        needTools()
-        val link = SyncLink(fakeRemote(tmp), null)
-        link.claim(key, 0, seatA, "alpha-box", "/home/dev/shop", "abc123", false)
+    fun `a store that lists a key at a time still gets each file once`(@TempDir tmp: Path) {
+        val from = tmp.resolve("from")
+        for (i in 1..5) write(from.resolve("logs/s$i.jsonl"), "{\"n\":$i}\n")
+        FakeS3().use { store ->
+            store.pageSize = 1
+            SyncLink(remote(store)).use { link ->
+                link.push(key, seatA, from)
+                val first = blobs(store, seatA)
+                assertEquals(5, first.size)
 
-        val elsewhere = write(tmp.resolve("private/notes.txt"), "not a conversation\n")
-        val out = tmp.resolve("out")
-        write(out.resolve("agents"), "tabs\n")
-        write(out.resolve("logs/s1.jsonl"), "{\"type\":\"session_started\"}\n")
-        Files.createSymbolicLink(out.resolve("logs/s2.jsonl"), elsewhere)
-        Files.createSymbolicLink(out.resolve("handoffs"), elsewhere.parent)
-        write(out.resolve(".credentials.json"), "{\"secret\":1}\n")
-        write(out.resolve("native/s1/codex/auth.json"), "{\"secret\":2}\n")
-        write(out.resolve("native/s1/codex/history.db-wal"), "journal\n")
-        link.push(key, seatA, out)
+                store.requests.clear()
+                link.push(key, seatA, from)
+                assertTrue(store.requests.none { it.startsWith("PUT ") && "/blobs/" in it }, "${store.requests}")
+                assertEquals(first, blobs(store, seatA))
 
-        val there = remoteCopy(tmp, seatA)
-        assertTrue(Files.isRegularFile(there.resolve("logs/s1.jsonl"), LinkOption.NOFOLLOW_LINKS))
-        assertFalse(Files.exists(there.resolve("logs/s2.jsonl"), LinkOption.NOFOLLOW_LINKS))
-        assertFalse(Files.exists(there.resolve("handoffs"), LinkOption.NOFOLLOW_LINKS))
-        assertFalse(Files.exists(there.resolve(".credentials.json")))
-        assertFalse(Files.exists(there.resolve("native/s1/codex/auth.json")))
-        assertFalse(Files.exists(there.resolve("native/s1/codex/history.db-wal")))
-        val open = setOf(
-            PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_WRITE, PosixFilePermission.GROUP_EXECUTE,
-            PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_WRITE, PosixFilePermission.OTHERS_EXECUTE,
+                Files.writeString(from.resolve("logs/s1.jsonl"), "{\"n\":10}\n")
+                Files.delete(from.resolve("logs/s5.jsonl"))
+                link.push(key, seatA, from)
+                assertEquals(4, named(store, seatA).size)
+                assertEquals(named(store, seatA), blobs(store, seatA))
+                assertEquals("{\"n\":10}\n", sent(store, seatA, "logs/s1.jsonl"))
+                for (i in 2..4) assertEquals("{\"n\":$i}\n", sent(store, seatA, "logs/s$i.jsonl"))
+                assertNull(sent(store, seatA, "logs/s5.jsonl"))
+            }
+        }
+    }
+
+    @Test
+    fun `a copy changed in the store is refused`(@TempDir tmp: Path) {
+        val from = tmp.resolve("from")
+        write(from.resolve("logs/s1.jsonl"), "{\"type\":\"session_started\"}\n")
+        val into = tmp.resolve("into")
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { link ->
+                link.push(key, seatA, from)
+
+                val chunk = store.keys().first { "/blobs/" in it }
+                val body = store.body(chunk)!!.clone()
+                body[body.size - 1] = (body[body.size - 1] + 1).toByte()
+                store.replace(chunk, body)
+                val changed = assertThrows(SyncFailure::class.java) { link.pull(key, seatA, into) }
+                assertEquals(SyncCrypto.NOT_OURS, changed.message)
+                assertEquals(emptyList<String>(), files(into))
+
+                store.replace("nop-sync/${machine(seatB)}/manifest", store.body("nop-sync/${machine(seatA)}/manifest")!!)
+                assertThrows(SyncFailure::class.java) { link.pull(key, seatB, into) }
+
+                forge(store, seatB, "{\"version\":1,\"files\":[]}", SyncCrypto.parse(SyncCrypto.generate())!!)
+                assertThrows(SyncFailure::class.java) { link.pull(key, seatB, into) }
+
+                forge(store, seatB, "{\"version\":2,\"files\":[]}")
+                val newer = assertThrows(SyncFailure::class.java) { link.pull(key, seatB, into) }
+                assertTrue(newer.message!!.contains("newer nop"), newer.message)
+            }
+        }
+    }
+
+    @Test
+    fun `a list naming places outside the folder or files nop never sends is only partly followed`(@TempDir tmp: Path) {
+        val from = tmp.resolve("from")
+        write(from.resolve("logs/s1.jsonl"), "hello\n")
+        val into = tmp.resolve("work/into")
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { link ->
+                link.push(key, seatA, from)
+                val good = manifest(store, seatA)!!["files"]!!.jsonArray.single().jsonObject
+                val goodSize = good["size"]!!.jsonPrimitive.content
+                val mtime = good["mtime"]!!.jsonPrimitive.content
+                val goodChunks = good["chunks"].toString()
+                fun entry(path: String, size: String = goodSize, chunks: String = goodChunks) =
+                    "{\"path\":${JsonPrimitive(path)},\"size\":$size,\"mtime\":$mtime,\"chunks\":$chunks}"
+                val forged = listOf(
+                    entry("logs/s1.jsonl"),
+                    entry("../escape"),
+                    entry("/abs"),
+                    entry("logs/./s2.jsonl"),
+                    entry("native/s1/claude/.credentials.json"),
+                    entry("native/s1/codex/history.db-wal"),
+                    entry("logs/long.jsonl", size = (SyncLink.CHUNK + 1).toString()),
+                    entry("logs/bad-name.jsonl", chunks = "[\"zz\"]"),
+                )
+                forge(store, seatA, "{\"version\":1,\"files\":[${forged.joinToString(",")}]}")
+                link.pull(key, seatA, into)
+            }
+        }
+        assertEquals(listOf("logs/s1.jsonl"), files(into))
+        assertEquals("hello\n", Files.readString(into.resolve("logs/s1.jsonl")))
+        assertEquals(listOf("from/logs/s1.jsonl", "work/into/logs/s1.jsonl"), files(tmp))
+    }
+
+    @Test
+    fun `a machine with another sync key is told so`() {
+        FakeS3().use { store ->
+            SyncLink(remote(store)).use { link -> assertTrue(link.claim(key, 0, seatA, "alpha-box", "/work/shop", "abc123", false).ok) }
+            SyncLink(remote(store, SyncCrypto.generate())).use { other ->
+                val ping = assertThrows(SyncFailure::class.java) { other.ping() }
+                assertTrue(ping.message!!.contains("the sync key is not the one"), ping.message)
+                val claim = assertThrows(SyncFailure::class.java) { other.claim(key, 1, seatB, "bravo-box", "/home/b/shop", "abc123", false) }
+                assertTrue(claim.message!!.contains("the sync key is not the one"), claim.message)
+                val read = assertThrows(SyncFailure::class.java) { other.read(key) }
+                assertTrue(read.message!!.contains("sync key"), read.message)
+            }
+        }
+    }
+
+    @Test
+    fun `a store that ignores conditional writes is refused before anything is claimed`() {
+        FakeS3().use { store ->
+            store.conditional = false
+            SyncLink(remote(store)).use { link ->
+                val ping = assertThrows(SyncFailure::class.java) { link.ping() }
+                assertTrue(ping.message!!.contains("does not honour conditional writes"), ping.message)
+                assertThrows(SyncFailure::class.java) { link.claim(key, 0, seatA, "alpha-box", "/work/shop", "abc123", false) }
+            }
+            assertEquals(listOf("nop-sync/key-check"), store.keys())
+        }
+    }
+
+    @Test
+    fun `a missing bucket and a closed link are failures with words for the user`() {
+        FakeS3("other-bucket").use { store ->
+            SyncLink(remote(store)).use { link ->
+                val ping = assertThrows(SyncFailure::class.java) { link.ping() }
+                assertTrue(ping.message!!.contains("there is no bucket called ${FakeS3.BUCKET}"), ping.message)
+            }
+        }
+        FakeS3().use { store ->
+            val link = SyncLink(remote(store))
+            link.close()
+            assertThrows(SyncFailure::class.java) { link.ping() }
+        }
+    }
+
+    @Test
+    fun `a remote is checked before it is used`() {
+        val good = SyncRemote(
+            endpoint = "https://0123abcd.r2.cloudflarestorage.com", bucket = "shop-sync", accessKey = ACCESS_KEY,
+            secretKey = SECRET_KEY, syncKey = syncKey,
         )
-        assertTrue(Files.getPosixFilePermissions(there.resolve("agents")).none { it in open })
-
-        // A remote that has been tampered with: links where conversations are expected.
-        Files.createSymbolicLink(there.resolve("logs/s3.jsonl"), elsewhere)
-        Files.createSymbolicLink(there.resolve("native/s1/claude"), elsewhere.parent)
-        val into = tmp.resolve("in")
-        write(into.resolve("left-over"), "from another machine\n")
-        link.pull(key, seatA, into)
-        assertEquals("tabs\n", Files.readString(into.resolve("agents")))
-        assertEquals("{\"type\":\"session_started\"}\n", Files.readString(into.resolve("logs/s1.jsonl")))
-        assertFalse(Files.exists(into.resolve("logs/s3.jsonl"), LinkOption.NOFOLLOW_LINKS))
-        assertFalse(Files.exists(into.resolve("native/s1/claude"), LinkOption.NOFOLLOW_LINKS))
-        assertFalse(Files.exists(into.resolve(".credentials.json")))
-        assertFalse(Files.exists(into.resolve("left-over")))
-    }
-
-    @Test
-    fun `a copy is compressed and kept to the speed cap both ways, unless the cap is off`(@TempDir tmp: Path) {
-        needTools()
-        val inner = fakeRemote(tmp)
-        val seen = tmp.resolve("seen")
-        val script = tmp.resolve("noting-ssh")
-        Files.writeString(script, "#!/bin/sh\necho \"${'$'}*\" >> '$seen'\nexec '${inner.ssh}' \"${'$'}@\"\n")
-        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwx------"))
-        val out = tmp.resolve("out")
-        write(out.resolve("agents"), "tabs\n")
-
-        fun copies(rateLimit: Int): List<String> {
-            Files.deleteIfExists(seen)
-            val link = SyncLink(inner.copy(ssh = script.toString(), rateLimit = rateLimit), null)
-            link.claim(key, 0, seatA, "alpha-box", "/home/dev/shop", "abc123", false)
-            link.push(key, seatA, out)
-            link.pull(key, seatA, tmp.resolve("in"))
-            return Files.readAllLines(seen).filter { "rsync --server" in it }
-        }
-
-        val capped = copies(250)
-        assertEquals(2, capped.size, "$capped")
-        assertTrue(capped.any { "--sender" in it }, "$capped")
-        capped.forEach {
-            assertTrue("--bwlimit=250" in it, it)
-            assertTrue(Regex("""--server (--sender )?-[A-Za-z]*z[A-Za-z]*\.""").containsMatchIn(it), it)
-        }
-        copies(0).forEach { assertFalse("--bwlimit" in it, it) }
-        assertEquals("tabs\n", Files.readString(tmp.resolve("in/agents")))
-    }
-
-    @Test
-    fun `ssh is told to refuse a host it does not know, whatever its config says`(@TempDir tmp: Path) {
-        val seen = tmp.resolve("seen")
-        val script = tmp.resolve("noting-ssh")
-        Files.writeString(script, "#!/bin/sh\necho \"${'$'}@\" >> '$seen'\ncat > /dev/null\necho result=ok\n")
-        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwx------"))
-        assertTrue(SyncLink(SyncRemote(target = "dev@remote", ssh = script.toString()), null).ping().ok)
-        assertTrue("-o StrictHostKeyChecking=yes" in Files.readString(seen))
-    }
-
-    @Test
-    fun `a program that prints without end is cut off`() {
-        val ran = SyncLink.run(listOf("sh", "-c", "head -c 4000000 /dev/zero"), null, 20.seconds)
-        assertEquals(-2, ran.exit)
-        assertTrue(ran.out.length <= 256 * 1024)
-    }
-
-    @Test
-    fun `a closed link runs nothing more`(@TempDir tmp: Path) {
-        needTools()
-        val link = SyncLink(fakeRemote(tmp), null)
-        assertTrue(link.ping().ok)
-        link.close()
-        val refused = runCatching { link.ping() }.exceptionOrNull()
-        assertTrue(refused is SyncFailure, "$refused")
-    }
-
-    @Test
-    fun `a remote that cannot be used is refused before anything runs`(@TempDir tmp: Path) {
-        assertNotNull(SyncLink.problem(SyncRemote(target = " ")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "-oProxyCommand=x")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote box")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote", base = "/abs")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote", base = "a/../b")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote", ssh = "/usr/bin/s'sh")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote", identity = tmp.resolve("missing").toString())))
-        val identity = write(tmp.resolve("id_test"), "key\n")
-        assertNull(SyncLink.problem(SyncRemote(target = "dev@remote", identity = identity.toString())))
-        assertNull(SyncLink.problem(SyncRemote(target = "dev@10.0.0.7", base = "sync/nop")))
-        assertNotNull(SyncLink.problem(SyncRemote(target = "dev@remote", rateLimit = -1)))
-        assertNull(SyncLink.problem(SyncRemote(target = "dev@remote", rateLimit = 0)))
+        assertNull(SyncLink.problem(good))
+        val bad = listOf(
+            good.copy(endpoint = ""),
+            good.copy(endpoint = "ftp://store.example.com"),
+            good.copy(endpoint = "http://store.example.com"),
+            good.copy(endpoint = "https://user@store.example.com"),
+            good.copy(endpoint = "https://store.example.com?x=1"),
+            good.copy(endpoint = "https://store.example.com/shop-sync"),
+            good.copy(bucket = "A_B"),
+            good.copy(prefix = "a/../b"),
+            good.copy(region = "US East"),
+            good.copy(accessKey = ""),
+            good.copy(secretKey = "has space"),
+            good.copy(syncKey = "short"),
+            good.copy(rateLimit = -1),
+        )
+        for (remote in bad) assertNotNull(SyncLink.problem(remote), remote.toString())
+        assertNull(SyncLink.problem(good.copy(endpoint = "http://127.0.0.1:9000")))
+        assertNull(SyncLink.problem(good.copy(rateLimit = 0)))
+        assertNull(SyncLink.problem(good.copy(prefix = "")))
+        assertNull(SyncLink.problem(good.copy(prefix = "team/nop-sync")))
+        assertThrows(SyncFailure::class.java) { SyncLink(good.copy(bucket = "A_B")) }
+        assertFalse(SECRET_KEY in good.toString() || syncKey in good.toString() || ACCESS_KEY in good.toString())
     }
 
     // ---- identity --------------------------------------------------------------------------------
@@ -657,88 +826,94 @@ class ProjectSyncTest {
 
     @Test
     fun `a second machine views the first one's tabs until it takes them over`(@TempDir tmp: Path) {
-        needTools()
-        val remote = fakeRemote(tmp)
-        val a = Machine(tmp.resolve("a"))
-        val b = Machine(tmp.resolve("b"))
-        Settings.saveOpenAgents(a.root, listOf(tab("s1", native = "c1")))
-        write(a.log("s1"), "{\"type\":\"session_started\"}\n")
-        write(a.transcript("c1"), "{\"type\":\"user\"}\n")
+        FakeS3().use { store ->
+            val remote = remote(store)
+            val a = Machine(tmp.resolve("a"))
+            val b = Machine(tmp.resolve("b"))
+            Settings.saveOpenAgents(a.root, listOf(tab("s1", native = "c1")))
+            write(a.log("s1"), "{\"type\":\"session_started\"}\n")
+            write(a.transcript("c1"), "{\"type\":\"user\"}\n")
 
-        val stopsA = AtomicInteger()
-        val stopsB = AtomicInteger()
-        fun sync(m: Machine, seat: String, host: String, stops: AtomicInteger) = ProjectSync(
-            root = m.root, link = SyncLink(remote, null), key = key, seat = seat, host = host, files = m.files,
-            target = remote.target, head = { "abc123" }, dirty = { false }, stopSessions = { stops.incrementAndGet() },
-            post = { it() }, interval = 250.milliseconds,
-        )
-        val syncA = sync(a, seatA, "alpha-box", stopsA)
-        val syncB = sync(b, seatB, "bravo-box", stopsB)
-        try {
-            syncA.start()
-            waitFor("the first machine to send its tabs") {
-                Files.isRegularFile(remoteCopy(tmp, seatA).resolve("native/s1/claude/c1.jsonl"))
+            val stopsA = AtomicInteger()
+            val stopsB = AtomicInteger()
+            fun sync(m: Machine, seat: String, host: String, stops: AtomicInteger) = ProjectSync(
+                root = m.root, link = SyncLink(remote), key = key, seat = seat, host = host, files = m.files,
+                target = remote.target, head = { "abc123" }, dirty = { false }, stopSessions = { stops.incrementAndGet() },
+                post = { it() }, interval = 250.milliseconds,
+            )
+            val syncA = sync(a, seatA, "alpha-box", stopsA)
+            val syncB = sync(b, seatB, "bravo-box", stopsB)
+            try {
+                syncA.start()
+                waitFor("the first machine to send its tabs") {
+                    sent(store, seatA, "native/s1/claude/c1.jsonl") != null
+                }
+                assertTrue(syncA.owning)
+                assertEquals(SyncRole.Owner, syncA.view.role)
+                assertEquals(0, stopsA.get())
+
+                syncB.start()
+                waitFor("the second machine to show the first one's tabs") { syncB.view.rows.map { it.sessionId } == listOf("s1") }
+                assertFalse(syncB.owning)
+                assertEquals(SyncRole.Viewer, syncB.view.role)
+                assertEquals("alpha-box", syncB.view.lease?.host)
+                assertTrue(stopsB.get() >= 1)
+                assertEquals(Files.readString(a.log("s1")), Files.readString(b.files.viewedLog("s1")!!))
+                assertTrue(Settings.loadOpenAgents(b.root).isEmpty())
+
+                Files.writeString(a.log("s1"), "{\"type\":\"session_started\"}\n{\"type\":\"user_message\"}\n")
+                waitFor("the newer log to reach the second machine") {
+                    b.files.viewedLog("s1")?.let(Files::readString) == Files.readString(a.log("s1"))
+                }
+
+                runBlocking { syncB.takeOver().join() }
+                assertTrue(syncB.owning)
+                assertEquals(SyncRole.Owner, syncB.view.role)
+                assertNull(syncB.view.error)
+                assertEquals(seatB, syncB.view.lease?.seat)
+                assertEquals(listOf("s1"), Settings.loadOpenAgents(b.root).map { it.sessionId })
+                assertEquals(Files.readString(a.log("s1")), Files.readString(b.log("s1")))
+                assertEquals("{\"type\":\"user\"}\n", Files.readString(b.transcript("c1")))
+
+                waitFor("the first machine to learn it was taken over") { !syncA.owning && syncA.view.takenOverBy == "bravo-box" }
+                assertEquals(SyncRole.Viewer, syncA.view.role)
+                assertEquals(1, stopsA.get())
+                waitFor("the first machine to show the second one's tabs") { syncA.view.rows.map { it.sessionId } == listOf("s1") }
+                assertEquals(seatB, a.files.pulledSeat())
+                assertTrue(syncB.owning)
+            } finally {
+                syncA.finish(Instant.now().plusSeconds(10))
+                syncB.finish(Instant.now().plusSeconds(10))
             }
-            assertTrue(syncA.owning)
-            assertEquals(SyncRole.Owner, syncA.view.role)
-            assertEquals(0, stopsA.get())
-
-            syncB.start()
-            waitFor("the second machine to show the first one's tabs") { syncB.view.rows.map { it.sessionId } == listOf("s1") }
-            assertFalse(syncB.owning)
-            assertEquals(SyncRole.Viewer, syncB.view.role)
-            assertEquals("alpha-box", syncB.view.lease?.host)
-            assertTrue(stopsB.get() >= 1)
-            assertEquals(Files.readString(a.log("s1")), Files.readString(b.files.viewedLog("s1")!!))
-            assertTrue(Settings.loadOpenAgents(b.root).isEmpty())
-
-            Files.writeString(a.log("s1"), "{\"type\":\"session_started\"}\n{\"type\":\"user_message\"}\n")
-            waitFor("the newer log to reach the second machine") {
-                b.files.viewedLog("s1")?.let(Files::readString) == Files.readString(a.log("s1"))
-            }
-
-            runBlocking { syncB.takeOver().join() }
-            assertTrue(syncB.owning)
-            assertEquals(SyncRole.Owner, syncB.view.role)
-            assertNull(syncB.view.error)
-            assertEquals(seatB, syncB.view.lease?.seat)
-            assertEquals(listOf("s1"), Settings.loadOpenAgents(b.root).map { it.sessionId })
-            assertEquals(Files.readString(a.log("s1")), Files.readString(b.log("s1")))
-            assertEquals("{\"type\":\"user\"}\n", Files.readString(b.transcript("c1")))
-
-            waitFor("the first machine to learn it was taken over") { !syncA.owning && syncA.view.takenOverBy == "bravo-box" }
-            assertEquals(SyncRole.Viewer, syncA.view.role)
-            assertEquals(1, stopsA.get())
-            waitFor("the first machine to show the second one's tabs") { syncA.view.rows.map { it.sessionId } == listOf("s1") }
-            assertEquals(seatB, a.files.pulledSeat())
-            assertTrue(syncB.owning)
-        } finally {
-            syncA.finish(Instant.now().plusSeconds(10))
-            syncB.finish(Instant.now().plusSeconds(10))
         }
     }
 
     @Test
     fun `a sync that is abandoned sends nothing more`(@TempDir tmp: Path) {
-        needTools()
-        val remote = fakeRemote(tmp)
-        val a = Machine(tmp.resolve("a"))
-        Settings.saveOpenAgents(a.root, listOf(tab("s1", native = "c1")))
-        write(a.log("s1"), "{\"type\":\"session_started\"}\n")
-        val sync = ProjectSync(
-            root = a.root, link = SyncLink(remote, null), key = key, seat = seatA, host = "alpha-box", files = a.files,
-            target = remote.target, head = { "abc123" }, dirty = { false }, stopSessions = {},
-            post = { it() }, interval = 250.milliseconds,
-        )
-        val sent = remoteCopy(tmp, seatA).resolve("logs/s1.jsonl")
-        sync.start()
-        waitFor("the machine to send its tabs") { Files.isRegularFile(sent) }
-        val before = Files.readString(sent)
+        FakeS3().use { store ->
+            val remote = remote(store)
+            val a = Machine(tmp.resolve("a"))
+            Settings.saveOpenAgents(a.root, listOf(tab("s1", native = "c1")))
+            write(a.log("s1"), "{\"type\":\"session_started\"}\n")
+            val sync = ProjectSync(
+                root = a.root, link = SyncLink(remote), key = key, seat = seatA, host = "alpha-box", files = a.files,
+                target = remote.target, head = { "abc123" }, dirty = { false }, stopSessions = {},
+                post = { it() }, interval = 250.milliseconds,
+            )
+            sync.start()
+            waitFor("the machine to send its tabs") { sent(store, seatA, "logs/s1.jsonl") != null }
+            val before = sent(store, seatA, "logs/s1.jsonl")
 
-        sync.abandon()
-        Files.writeString(a.log("s1"), before + "{\"type\":\"user_message\"}\n")
-        Thread.sleep(1_000)
-        sync.finish(Instant.now().plusSeconds(5))
-        assertEquals(before, Files.readString(sent))
+            sync.abandon()
+            Files.writeString(a.log("s1"), before + "{\"type\":\"user_message\"}\n")
+            Thread.sleep(1_000)
+            sync.finish(Instant.now().plusSeconds(5))
+            assertEquals(before, sent(store, seatA, "logs/s1.jsonl"))
+        }
+    }
+
+    private companion object {
+        const val ACCESS_KEY = "AKTESTKEY01"
+        const val SECRET_KEY = "secret-for-tests-only"
     }
 }

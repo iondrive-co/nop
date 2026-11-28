@@ -262,6 +262,8 @@ object SlackBrowsers {
             builder.build()
         }
         runtime.also {
+            // Chromium has just put its own SIGTERM, SIGHUP and SIGINT handlers in place of nop's.
+            iondrive.nop.recovery.EndSignals.reclaim()
             runtimeStarted = true
             if (stopping) {
                 if (!leavingRuntime) it.dispose()

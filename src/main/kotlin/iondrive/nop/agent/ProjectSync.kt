@@ -175,7 +175,8 @@ internal class ProjectSync(
             }
         }
         // A copy the loop started can still be running, and a first one can take most of an hour:
-        // it ends here rather than outliving the sync. The files it finished stay on the remote.
+        // it ends here rather than outliving the sync. The chunks it sent stay in the store and are
+        // not sent again.
         link.close()
         scope.cancel()
     }
@@ -607,17 +608,15 @@ internal object ProjectSyncStore {
             return null
         }
         val dataRoot = Accounts.dataRoot()
-        val controlDir = System.getenv("XDG_RUNTIME_DIR")?.takeIf { it.isNotBlank() }?.let { Path.of(it, "nop-ssh") }
-            ?: dataRoot.resolve("ssh")
         val head = { runCatching { GitRepo.discover(root)?.use { it.headSha() } }.getOrNull().orEmpty() }
         val dirty = DirtyCheck(root, head)
         return ProjectSync(
             root = root,
-            link = SyncLink(remote, controlDir),
+            link = SyncLink(remote),
             key = SyncIdentity.projectKey(origin, root, dataRoot),
             seat = SyncIdentity.seat(root, dataRoot),
             host = SyncIdentity.hostName(),
-            files = SyncFiles(root, dataRoot, remote = remote.target + "\n" + remote.base),
+            files = SyncFiles(root, dataRoot, remote = remote.endpoint + "\n" + remote.bucket + "\n" + remote.prefix),
             target = remote.target,
             head = head,
             dirty = dirty::get,

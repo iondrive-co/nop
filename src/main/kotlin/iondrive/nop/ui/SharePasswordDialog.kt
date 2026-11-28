@@ -28,7 +28,7 @@ import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
 
 /** A password field shows each character as a dot. */
-private val Masked = OutputTransformation { replace(0, length, "•".repeat(length)) }
+internal val Masked = OutputTransformation { replace(0, length, "•".repeat(length)) }
 
 /**
  * The backup share asking for a password: opened by itself over the window in front when a backup

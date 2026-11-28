@@ -119,7 +119,7 @@ data class AgentConfig(
     val accounts: List<Account> = emptyList(),
     /** The folder agent sessions are backed up to, or null when nothing is. See [Backup]. */
     val backupDir: String? = null,
-    /** The machine the chosen projects' agent tabs are kept in step through, or null when none is. See [ProjectSync]. */
+    /** The store the chosen projects' agent tabs are kept in step through, or null when none is. See [ProjectSync]. */
     val sync: SyncRemote? = null,
     /**
      * The repository roots on this machine whose agent tabs go to [sync]; every other project keeps
@@ -162,26 +162,48 @@ data class AgentConfig(
 private fun normalRoot(path: Path): Path = path.toAbsolutePath().normalize()
 
 /**
- * A machine reached over ssh that holds each project's agent tabs, so another machine can show them
- * and take them over. [target] is what ssh is given — `user@host`, or a name from the ssh config —
- * and [identity] the key file it signs in with when the config does not say. [base] is the folder
- * under that user's home everything is kept in. [ssh] is the program run in ssh's place, for a
- * wrapper; null runs `ssh`.
+ * The S3-compatible store (Cloudflare R2, MinIO, Backblaze B2, AWS S3) that holds each project's
+ * agent tabs, so another machine can show them and take them over. nop only calls out to it, so no
+ * machine has to accept a connection. See [SyncLink].
  *
- * [rateLimit] caps each copy, in KiB a second of what goes over the wire after compression, so a
- * project's first copy cannot fill the machine's uplink; 0 leaves it uncapped. rsync passes it to
- * the remote's side as well, so it holds in both directions.
+ * [endpoint] is the store's address (`https://<account>.r2.cloudflarestorage.com`), [bucket] the
+ * bucket, and [prefix] the folder in it everything is kept under. [accessKey] and [secretKey] are
+ * the key pair the store issued, best limited to that one bucket. [syncKey] seals everything nop
+ * puts there, so the store sees no conversation; every machine must have the same one.
+ *
+ * [rateLimit] caps what each copy sends or fetches, in KiB a second, so a project's first copy
+ * cannot fill the machine's uplink; 0 leaves it uncapped.
+ *
+ * [Accounts.save] keeps [secretKey] and [syncKey] in [Accounts.syncKeysFile], not in `agent.json`,
+ * so a backup carries neither.
+ *
+ * A config written by a nop that synced over ssh holds only an old `target`; it decodes with the
+ * store left blank, and [SyncLink.problem] asks for one.
  */
 @Serializable
 data class SyncRemote(
-    val target: String,
-    val identity: String? = null,
-    val base: String = DEFAULT_BASE,
-    val ssh: String? = null,
+    val endpoint: String = "",
+    val region: String = DEFAULT_REGION,
+    val bucket: String = "",
+    val prefix: String = DEFAULT_PREFIX,
+    val accessKey: String = "",
+    val secretKey: String = "",
+    val syncKey: String = "",
     val rateLimit: Int = DEFAULT_RATE_LIMIT,
 ) {
+    /** Where the tabs go, as the user is shown it: the bucket and the folder in it. */
+    val target: String
+        get() = prefix.trim('/').let { if (it.isEmpty()) bucket else "$bucket/$it" }
+
+    /** Leaves the keys out, so a log line or a failed test never shows them. */
+    override fun toString(): String =
+        "SyncRemote(endpoint=$endpoint, region=$region, bucket=$bucket, prefix=$prefix, " +
+            "accessKey=${if (accessKey.isEmpty()) "" else "…"}, secretKey=${if (secretKey.isEmpty()) "" else "…"}, " +
+            "syncKey=${if (syncKey.isEmpty()) "" else "…"}, rateLimit=$rateLimit)"
+
     companion object {
-        const val DEFAULT_BASE = "nop-sync"
+        const val DEFAULT_REGION = "auto"
+        const val DEFAULT_PREFIX = "nop-sync"
         const val DEFAULT_RATE_LIMIT = 500
     }
 }
@@ -241,26 +263,67 @@ object Accounts {
         val f = configFile
         if (!Files.isRegularFile(f)) return AgentConfig(accounts = discover())
         val text = runCatching { Files.readString(f) }.getOrNull() ?: return AgentConfig()
-        return runCatching { json.decodeFromString<AgentConfig>(text) }
+        val config = runCatching { json.decodeFromString<AgentConfig>(text) }
             .onFailure { Log.warn("agent.json is unreadable, ignoring it: $it") }
             .getOrDefault(AgentConfig())
+        val sync = config.sync ?: return config
+        val keys = readSyncKeys() ?: return config
+        return config.copy(
+            sync = sync.copy(
+                secretKey = keys.secretKey.ifEmpty { sync.secretKey },
+                syncKey = keys.syncKey.ifEmpty { sync.syncKey },
+            ),
+        )
+    }
+
+    /**
+     * Where [save] keeps the sync store's secret key and the sync key, apart from [configFile]:
+     * a backup copies `agent.json` to the backup folder, and keeps no key there, as it keeps no login.
+     */
+    val syncKeysFile: Path
+        get() = configFile.resolveSibling("sync-keys.json")
+
+    @Serializable
+    private data class SyncKeys(val secretKey: String = "", val syncKey: String = "")
+
+    private fun readSyncKeys(): SyncKeys? {
+        val f = syncKeysFile
+        if (!Files.isRegularFile(f)) return null
+        return runCatching { json.decodeFromString<SyncKeys>(Files.readString(f)) }
+            .onFailure { Log.warn("sync-keys.json is unreadable, ignoring it: $it") }
+            .getOrNull()
+    }
+
+    /** Writes [text] to [f] through an owner-only temp file and an atomic rename. */
+    private fun writePrivately(f: Path, text: String) {
+        // createTempFile is already owner-only on POSIX, and the move carries that across, so
+        // the file is never briefly world-readable under a name anything would look for.
+        val tmp = Files.createTempFile(f.parent, f.fileName.toString().substringBefore('.'), ".json")
+        Files.writeString(tmp, text)
+        Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        OwnerOnly.tighten(f)
     }
 
     /**
      * Writes through a temp file and an atomic rename. A half-written `agent.json` would cost the
      * user every account they had configured, and the window for it is a crash or a full disk —
      * both of which happen.
+     *
+     * The sync keys go to [syncKeysFile] first, so a crash between the two writes loses neither; it
+     * is removed once sync is turned off.
      */
     fun save(config: AgentConfig) {
         val f = configFile
         runCatching {
             Files.createDirectories(f.parent)
-            // createTempFile is already owner-only on POSIX, and the move carries that across, so
-            // the config is never briefly world-readable under a name anything would look for.
-            val tmp = Files.createTempFile(f.parent, "agent", ".json")
-            Files.writeString(tmp, json.encodeToString(config))
-            Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-            OwnerOnly.tighten(f)
+            val sync = config.sync
+            if (sync == null) {
+                Files.deleteIfExists(syncKeysFile)
+            } else if (sync.secretKey.isNotEmpty() || sync.syncKey.isNotEmpty()) {
+                writePrivately(syncKeysFile, json.encodeToString(SyncKeys(sync.secretKey, sync.syncKey)))
+            }
+            val stored = config.copy(sync = sync?.copy(secretKey = "", syncKey = ""))
+            writePrivately(f, json.encodeToString(stored))
         }.onSuccess {
             listeners.forEach { it(config) }
         }.onFailure { Log.warn("could not save agent.json: $it") }

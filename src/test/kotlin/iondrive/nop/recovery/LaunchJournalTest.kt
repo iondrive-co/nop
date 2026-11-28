@@ -51,9 +51,36 @@ class LaunchJournalTest {
     fun `a launch that got up, quit or restarted ended well`() {
         LaunchJournal.begin(100, dead)
         LaunchJournal.up(100)
+        LaunchJournal.stopped(100)
         assertEquals(LaunchJournal.Previous.CLEAN, LaunchJournal.begin(200, dead))
-        LaunchJournal.stopped(200)
-        assertEquals(LaunchJournal.Previous.CLEAN, LaunchJournal.begin(300, dead))
+        // A restart in place: the same process, which was up and is starting again.
+        LaunchJournal.up(200)
+        assertEquals(LaunchJournal.Previous.CLEAN, LaunchJournal.begin(200, dead))
+    }
+
+    @Test
+    fun `a launch that was up and is gone without a stop is reported`() {
+        LaunchJournal.begin(100, dead)
+        LaunchJournal.up(100)
+        assertEquals(LaunchJournal.Previous.DIED_UP, LaunchJournal.begin(200, dead))
+    }
+
+    @Test
+    fun `a launch that is up under another live pid has not died`() {
+        LaunchJournal.begin(100, dead)
+        LaunchJournal.up(100)
+        assertEquals(LaunchJournal.Previous.CLEAN, LaunchJournal.begin(200) { it == 100L })
+    }
+
+    @Test
+    fun `a launch that died after it was up has nothing held back`() {
+        WindowRecovery.showing(1, "file:/x")
+        WindowRecovery.flushShowing()
+        // A pid no process can have: the next launch checks for real whether it is still alive.
+        LaunchJournal.begin(Long.MAX_VALUE - 7, dead)
+        LaunchJournal.up(Long.MAX_VALUE - 7)
+        assertEquals(LaunchJournal.Previous.DIED_UP, recoverFromLastLaunch(pid = Long.MAX_VALUE - 1))
+        assertNull(Quarantine.entry("file:/x"))
     }
 
     @Test
@@ -103,6 +130,7 @@ class LaunchJournalTest {
         WindowRecovery.flushShowing()
         LaunchJournal.begin(100, dead)
         LaunchJournal.up(100)
+        LaunchJournal.stopped(100)
         assertEquals(LaunchJournal.Previous.CLEAN, recoverFromLastLaunch(pid = 200))
         assertNull(Quarantine.entry("file:/x"))
     }

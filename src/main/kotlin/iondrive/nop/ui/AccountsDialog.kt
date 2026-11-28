@@ -67,7 +67,7 @@ import iondrive.nop.agent.LocalModel
 import iondrive.nop.agent.NetworkShare
 import iondrive.nop.agent.Provider
 import iondrive.nop.agent.ProjectSync
-import iondrive.nop.agent.SyncFailure
+import iondrive.nop.agent.SyncCrypto
 import iondrive.nop.agent.SyncLink
 import iondrive.nop.agent.SyncRemote
 import iondrive.nop.agent.ResetOffer
@@ -85,10 +85,11 @@ import org.jetbrains.jewel.ui.component.Link
 import org.jetbrains.jewel.ui.component.OutlinedButton
 import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.TextField
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.nio.file.Path
 import javax.swing.JFileChooser
-import kotlin.time.Duration.Companion.seconds
 
 /**
  * nop's only settings window: the vendor accounts, what each one runs as, how to sign one in or
@@ -521,9 +522,10 @@ private fun BackupSection(config: AgentConfig, onChange: (AgentConfig) -> Unit) 
 }
 
 /**
- * The machine the chosen projects' agent tabs are kept on over ssh, so that another machine with the
- * same project can show them and take them over, and whether [root] — the repository the dialog was
- * opened from — is one of them. See [ProjectSync] for what is sent and when.
+ * The S3-compatible store the chosen projects' agent tabs are kept in, so that another machine with
+ * the same project can show them and take them over, and whether [root] — the repository the dialog
+ * was opened from — is one of them. Every machine reaches out to the store, so none of them has to
+ * take connections. See [ProjectSync] for what is sent and when.
  */
 @Composable
 private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig) -> Unit) {
@@ -533,19 +535,37 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
     var checking by remember { mutableStateOf(false) }
     var checked by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
     val scope = rememberCoroutineScope()
-    val target = rememberTextFieldState(remote?.target.orEmpty())
-    val identity = rememberTextFieldState(remote?.identity.orEmpty())
-    val base = rememberTextFieldState(remote?.base ?: SyncRemote.DEFAULT_BASE)
+    val endpoint = rememberTextFieldState(remote?.endpoint.orEmpty())
+    val region = rememberTextFieldState(remote?.region ?: SyncRemote.DEFAULT_REGION)
+    val bucket = rememberTextFieldState(remote?.bucket.orEmpty())
+    val prefix = rememberTextFieldState(remote?.prefix ?: SyncRemote.DEFAULT_PREFIX)
+    val accessKey = rememberTextFieldState(remote?.accessKey.orEmpty())
+    val secretKey = rememberTextFieldState(remote?.secretKey.orEmpty())
+    val syncKey = rememberTextFieldState(remote?.syncKey.orEmpty())
     val rate = rememberTextFieldState((remote?.rateLimit ?: SyncRemote.DEFAULT_RATE_LIMIT).toString())
 
     fun typed() = SyncRemote(
-        target = target.text.toString().trim(),
-        identity = identity.text.toString().trim().ifEmpty { null },
-        base = base.text.toString().trim().trimEnd('/').ifEmpty { SyncRemote.DEFAULT_BASE },
-        ssh = remote?.ssh,
+        endpoint = endpoint.text.toString().trim().trimEnd('/'),
+        region = region.text.toString().trim().ifEmpty { SyncRemote.DEFAULT_REGION },
+        bucket = bucket.text.toString().trim(),
+        prefix = prefix.text.toString().trim().trim('/'),
+        accessKey = accessKey.text.toString().trim(),
+        secretKey = secretKey.text.toString().trim(),
+        syncKey = syncKey.text.toString().trim(),
         // Anything but a whole number is -1, which SyncLink.problem refuses with the reason.
         rateLimit = rate.text.toString().trim().ifEmpty { SyncRemote.DEFAULT_RATE_LIMIT.toString() }.toIntOrNull() ?: -1,
     )
+
+    fun reset() {
+        endpoint.replaceWith(remote?.endpoint.orEmpty())
+        region.replaceWith(remote?.region ?: SyncRemote.DEFAULT_REGION)
+        bucket.replaceWith(remote?.bucket.orEmpty())
+        prefix.replaceWith(remote?.prefix ?: SyncRemote.DEFAULT_PREFIX)
+        accessKey.replaceWith(remote?.accessKey.orEmpty())
+        secretKey.replaceWith(remote?.secretKey.orEmpty())
+        syncKey.replaceWith(remote?.syncKey.orEmpty())
+        rate.replaceWith((remote?.rateLimit ?: SyncRemote.DEFAULT_RATE_LIMIT).toString())
+    }
 
     fun save() {
         val next = typed()
@@ -557,8 +577,8 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
         }
     }
 
-    // Reaching the remote is a network call that can take its full timeout, so it never runs on
-    // this thread; rsync is looked for here too, since the remote's answer only covers its own side.
+    // Reaching the store is a network call that can take its full timeout, so it never runs on
+    // this thread.
     fun check(candidate: SyncRemote) {
         refused = SyncLink.problem(candidate)
         if (refused != null) return
@@ -566,11 +586,7 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
         checked = null
         scope.launch {
             val outcome = withContext(Dispatchers.IO) {
-                runCatching {
-                    val local = SyncLink.run(listOf("rsync", "--version"), null, 10.seconds)
-                    if (local.exit != 0) throw SyncFailure("rsync does not run on this machine (exit ${local.exit})")
-                    SyncLink(candidate, null).ping()
-                }
+                runCatching { SyncLink(candidate).use { it.ping() } }
             }
             checking = false
             checked = outcome.fold(
@@ -583,7 +599,7 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Agent tab sync", fontWeight = FontWeight.SemiBold)
         Text(
-            remote?.let { "${it.target}, in ~/${it.base}, ${speed(it.rateLimit)}" }
+            remote?.let { "${it.target}, ${speed(it.rateLimit)}" }
                 ?: "Not set up: each machine keeps its own agent tabs.",
             color = AgentMuted,
             maxLines = 1,
@@ -592,10 +608,7 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
         if (!editing) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Link(if (remote == null) "Set up" else "Change", onClick = {
-                    target.replaceWith(remote?.target.orEmpty())
-                    identity.replaceWith(remote?.identity.orEmpty())
-                    base.replaceWith(remote?.base ?: SyncRemote.DEFAULT_BASE)
-                    rate.replaceWith((remote?.rateLimit ?: SyncRemote.DEFAULT_RATE_LIMIT).toString())
+                    reset()
                     refused = null
                     checked = null
                     editing = true
@@ -614,9 +627,21 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
                     "same project can show them and take them over. The code, and every sign-in, stay on each machine.",
                 color = AgentMuted,
             )
-            SyncField("Remote", target, "user@host, or a host from the ssh config", ::save)
-            SyncField("Key file", identity, "Optional: the ssh config's key when empty", ::save)
-            SyncField("Folder", base, "Under the remote user's home", ::save)
+            SyncField("Endpoint", endpoint, "https://<account>.r2.cloudflarestorage.com, or any S3 endpoint", ::save)
+            SyncField("Region", region, "auto for R2; the bucket's region elsewhere", ::save)
+            SyncField("Bucket", bucket, "A bucket only sync uses", ::save)
+            SyncField("Folder", prefix, "Inside the bucket", ::save)
+            SyncField("Access key", accessKey, "From a token that can read and write that bucket", ::save)
+            SyncField("Secret key", secretKey, "The token's secret", ::save, masked = true)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.weight(1f)) {
+                    SyncField("Sync key", syncKey, "The same on every machine", ::save, masked = true)
+                }
+                Link("Generate", enabled = syncKey.text.isBlank(), onClick = { syncKey.replaceWith(SyncCrypto.generate()) })
+                Link("Copy", enabled = syncKey.text.isNotBlank(), onClick = {
+                    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(syncKey.text.toString()), null)
+                })
+            }
             SyncField("Speed cap", rate, "KB a second each way; 0 for no cap", ::save)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Link("Save", onClick = ::save)
@@ -628,8 +653,10 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
                 })
             }
             Text(
-                "nop never accepts a host key for you, whatever the ssh config says: connect once with ssh from a " +
-                    "terminal first. The remote needs flock and rsync, and a key with a passphrase needs to be in an ssh agent.",
+                "Any store that speaks S3 and honours conditional writes will do: Cloudflare R2, MinIO, AWS S3. Give it a " +
+                    "bucket of its own and a token that reaches only that bucket. Generate the sync key on the first " +
+                    "machine and copy it to the others: everything is sealed with it before it leaves, so the store " +
+                    "never sees the tabs or their conversations.",
                 color = AgentMuted,
             )
         }
@@ -658,7 +685,7 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
         }
         if (remote != null || editing) {
             Text(
-                "A change applies to open projects at once, and nothing more is sent to the remote it replaces. " +
+                "A change applies to open projects at once, and nothing more is sent to the store it replaces. " +
                     "Where another machine already holds an open project there, the tabs running here stop and its tabs are shown.",
                 color = AgentMuted,
             )
@@ -667,14 +694,15 @@ private fun SyncSection(config: AgentConfig, root: File?, onChange: (AgentConfig
 }
 
 @Composable
-private fun SyncField(label: String, state: TextFieldState, hint: String, onDone: () -> Unit) {
+private fun SyncField(label: String, state: TextFieldState, hint: String, onDone: () -> Unit, masked: Boolean = false) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, modifier = Modifier.width(72.dp))
+        Text(label, modifier = Modifier.width(80.dp))
         TextField(
             state = state,
             modifier = Modifier.weight(1f),
             placeholder = { Text(hint) },
             onKeyboardAction = { onDone() },
+            outputTransformation = if (masked) Masked else null,
         )
     }
 }

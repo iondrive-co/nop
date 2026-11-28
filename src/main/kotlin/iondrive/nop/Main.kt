@@ -52,6 +52,7 @@ import iondrive.nop.ipc.Handover
 import iondrive.nop.ipc.Restart
 import iondrive.nop.ipc.SingleInstance
 import iondrive.nop.recovery.BrokenWindow
+import iondrive.nop.recovery.EndSignals
 import iondrive.nop.recovery.HeapRecovery
 import iondrive.nop.recovery.LaunchJournal
 import iondrive.nop.recovery.LocalWindowId
@@ -212,6 +213,10 @@ fun main(args: Array<String>) {
     // The other way the UI thread fails without a trace: not by throwing, but by stopping. Only the
     // nop that owns the windows has a UI thread worth watching.
     UiStallWatchdog.start()
+
+    // And the third: ended from outside by a signal, which the embedded browser's handlers would
+    // otherwise answer by taking the process down with nothing logged. See [EndSignals].
+    EndSignals.install()
 
     val startup = resolveStartup(argPaths.firstOrNull())
     if (startup.workspaces.isEmpty()) exitProcess(0)
@@ -572,7 +577,9 @@ fun main(args: Array<String>) {
             }
             // A full heap is no window's fault: no recovery is recorded, so nothing is held back at
             // the next start. Asked from whatever thread saw the heap run out; decided on this one.
-            HeapRecovery.restart = {
+            // The same restart answers a signal sent because the machine is short of memory, and
+            // any other signal quits as closing the last window does — see [EndSignals].
+            val restartKeepingWork: () -> Boolean = {
                 val decide = FutureTask {
                     if (Restart.launcher() == null || !Handover.supported || RestartInPlace.runsThatStop().isNotEmpty()) {
                         false
@@ -583,6 +590,14 @@ fun main(args: Array<String>) {
                 }
                 if (SwingUtilities.isEventDispatchThread()) decide.run() else SwingUtilities.invokeLater(decide)
                 runCatching { decide.get(HEAP_RESTART_WAIT_S, TimeUnit.SECONDS) }.getOrDefault(false)
+            }
+            HeapRecovery.restart = restartKeepingWork
+            EndSignals.restart = restartKeepingWork
+            EndSignals.quit = {
+                SwingUtilities.invokeLater {
+                    Settings.saveWorkspaces(workspaces.toList())
+                    exitApplication()
+                }
             }
         }
 

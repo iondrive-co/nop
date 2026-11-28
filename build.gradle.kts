@@ -258,7 +258,9 @@ compose.desktop {
             // chased by reading histograms and guessing at call sites, and the first two guesses
             // were wrong. Costs ~2 MB in the jlinked image.
             // Analyzed projects can use every Java SE API, including modules nop itself never loads.
-            modules("java.se", "java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr")
+            // jdk.unsupported is sun.misc.Signal: how nop takes SIGTERM itself rather than be ended by
+            // it without a trace — see EndSignals.
+            modules("java.se", "java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr", "jdk.unsupported")
             packageName = "nop"
             packageVersion = "1.9.8"
             description = "Desktop editor and change reviewer"

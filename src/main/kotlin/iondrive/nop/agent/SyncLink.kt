@@ -1,15 +1,28 @@
 package iondrive.nop.agent
 
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
+import iondrive.nop.Log
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.DirectoryNotEmptyException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.thread
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
+import java.nio.file.attribute.PosixFilePermissions
+import java.security.SecureRandom
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
-import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Duration.Companion.nanoseconds
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 /**
  * Who holds a project, as the remote keeps it: which machine ([seat], shown as [host] with its
@@ -77,325 +90,563 @@ internal data class SyncReply(val result: String, val lease: SyncLease?, val now
 internal class SyncFailure(message: String) : Exception(message)
 
 /**
- * The output of a program that was run to the end, or killed: at its time limit ([exit] -1), or for
- * printing more than it is given room for ([exit] -2).
+ * Sync's side of an S3-compatible store (Cloudflare R2, MinIO, Backblaze B2, AWS S3): the lease that
+ * says which machine holds each project, and the copies of its tabs. nop only ever calls out to the
+ * store, so no machine (a laptop on the road least of all) has to accept a connection.
+ *
+ * Everything is kept under [SyncRemote.prefix] in the bucket:
+ *
+ * - `projects/<key>/lease`, the project's [SyncLease];
+ * - `projects/<key>/machines/<seat>/manifest`, the files a machine last sent, each as the list of
+ *   its chunks, and `…/blobs/<name>`, the chunks themselves;
+ * - `key-check`, a known text sealed with the sync key, so a machine with another key is told so
+ *   before it writes anything.
+ *
+ * Every object is sealed by [SyncCrypto], bound to its own name, so the store sees neither the tabs
+ * nor the lease, and an object it changes or moves does not open.
+ *
+ * The lease is changed only by a conditional write naming the version just read, which the store
+ * turns down when another machine wrote in between: that is what keeps two claims from both
+ * landing, with no lock to hold. Its age is the store's own clock (the reply's `Date` against the
+ * lease's `Last-Modified`), so a machine whose clock is off still reads it right.
+ *
+ * Each machine sends into its own folder, so a holder never overwrites what a viewer is fetching.
+ * Files are cut into [CHUNK]-sized pieces named by their HMAC, and only pieces the store does not
+ * have yet are sent, so a log that grew costs its new tail, not the whole file. The manifest is
+ * written last, so a machine fetching it never sees a send that is half done; chunks no manifest
+ * names any more are removed after it. A fetch that loses a chunk to that cleanup starts again
+ * from the new manifest. Files a fetch places are never links (see [SyncFiles.dropPulledLinks]).
  */
-internal data class Ran(val exit: Int, val out: String, val err: String)
-
-/**
- * The remote that keeps each project's agent tabs, reached over ssh: a lease saying which machine
- * holds the project, and one folder per machine with that machine's copy of its tabs, logs and
- * conversations.
- *
- * Everything is under `<base>/projects/<key>/` in the remote user's home: `lease`, `lock`, and
- * `machines/<seat>/`. Every change to the lease is made by a short script run under `flock` on
- * `lock`, and so is every copy in or out, so a reader never sees a lease being written or a folder
- * half sent. The remote needs nothing but `sh`, `flock` and `rsync`.
- *
- * ssh is run in batch mode, so a key that needs a passphrase must be in an agent, and with strict
- * host key checking whatever the user's ssh config says, so the remote's host key must already be
- * known: nop never accepts a host key on the user's behalf. [controlDir] is where one shared
- * connection per remote is kept between calls; null opens a new one each time.
- *
- * Nothing the remote sends back is taken on trust: only plain files and folders are copied either
- * way, and an answer longer than any real one ends the call.
- */
-internal class SyncLink(private val remote: SyncRemote, private val controlDir: Path?) {
+internal class SyncLink(private val remote: SyncRemote) : AutoCloseable {
 
     init {
         problem(remote)?.let { throw SyncFailure(it) }
     }
 
-    private val ssh: String = remote.ssh?.takeIf { it.isNotBlank() } ?: "ssh"
+    private val crypto: SyncCrypto = SyncCrypto.parse(remote.syncKey)!!
+    private val prefix = remote.prefix.trim('/')
+    private val s3 = S3Client(
+        remote.endpoint, remote.region, remote.bucket, remote.accessKey, remote.secretKey, remote.rateLimit, remote.target,
+    )
+    private val random = SecureRandom()
 
     @Volatile
-    private var closed = false
-    private val running = java.util.concurrent.ConcurrentHashMap.newKeySet<Process>()
+    private var verified = false
 
-    /**
-     * Ends whatever this link is running and has every later call fail: for a remote the user has
-     * turned off or changed, which must be sent nothing more.
-     */
-    fun close() {
-        closed = true
-        running.forEach { it.destroyForcibly() }
+    /** Checks that the store can be reached, takes this machine's keys, and does what sync needs. */
+    fun ping(): SyncReply {
+        checkKey()
+        val date = probe()
+        verified = true
+        return SyncReply("ok", null, date, false)
     }
 
-    private fun run(argv: List<String>, stdin: String?, timeout: Duration): Ran {
-        if (closed) throw SyncFailure("syncing with ${remote.target} was stopped")
-        val ran = run(argv, stdin, timeout, onStart = {
-            running += it
-            if (closed) it.destroyForcibly()
-        }, onEnd = { running -= it })
-        if (closed) throw SyncFailure("syncing with ${remote.target} was stopped")
-        return ran
+    fun read(key: String): SyncReply {
+        ids(key)
+        val now = current(key)
+        val lease = now.lease
+        return SyncReply("ok", lease, now.date, lease != null && pushed(key, lease.seat))
     }
 
-    /** A check that the remote can be reached and has what the sync needs. */
-    fun ping(): SyncReply = call("ping", "0")
+    fun claim(key: String, expected: Long, seat: String, host: String, root: String, head: String, dirty: Boolean): SyncReply {
+        ids(key, seat)
+        ensure()
+        repeat(TRIES) {
+            val now = current(key)
+            val lease = now.lease
+            if ((lease?.gen ?: 0) != expected) return SyncReply("lost", lease, now.date, lease != null && pushed(key, lease.seat))
+            val next = SyncLease(expected + 1, seat, clean(host), clean(root), clean(head), dirty, 0)
+            val put = write(key, next, now) ?: return@repeat
+            return SyncReply("ok", next.copy(at = put.date ?: 0), put.date, pushed(key, seat))
+        }
+        return SyncReply("busy", null, null, false)
+    }
 
-    fun read(key: String): SyncReply = call("read", key)
-
-    /** Takes [key] for [seat], provided the lease is still at generation [expected] (0: none yet). */
-    fun claim(key: String, expected: Long, seat: String, host: String, root: String, head: String, dirty: Boolean): SyncReply =
-        call("claim", key, expected.toString(), seat, host, root, head, if (dirty) "1" else "0")
-
-    /** [seat] checking in on [key], which it holds at generation [gen]. */
-    fun beat(key: String, gen: Long, seat: String, head: String, dirty: Boolean): SyncReply =
-        call("beat", key, gen.toString(), seat, head, if (dirty) "1" else "0")
+    fun beat(key: String, gen: Long, seat: String, head: String, dirty: Boolean): SyncReply {
+        ids(key, seat)
+        repeat(TRIES) {
+            val now = current(key)
+            val lease = now.lease
+            if (lease == null || lease.gen != gen || lease.seat != seat) {
+                return SyncReply("lost", lease, now.date, lease != null && pushed(key, lease.seat))
+            }
+            val next = lease.copy(head = clean(head), dirty = dirty, at = 0)
+            val put = write(key, next, now) ?: return@repeat
+            return SyncReply("ok", next.copy(at = put.date ?: 0), put.date, pushed(key, seat))
+        }
+        return SyncReply("busy", null, null, false)
+    }
 
     /**
-     * Sends the plain files in the tree at [from] as [seat]'s copy of [key]. Only after a claim or a
-     * check-in has made the project's folders.
+     * Sends what [from] holds as [seat]'s copy of the project's tabs, leaving the store with those
+     * files and no others. Credentials and files that only make sense beside a live process are
+     * never sent.
      */
     fun push(key: String, seat: String, from: Path, timeout: Duration = COPY_TIMEOUT) {
-        require(HEX.matches(seat))
-        rsync(listOf("$from/", "${remote.target}:${projectDir(key)}/machines/$seat/"), key, timeout)
+        ids(key, seat)
+        if (!Files.isDirectory(from, LinkOption.NOFOLLOW_LINKS)) throw SyncFailure("there are no tabs to send in $from")
+        ensure()
+        val deadline = System.nanoTime() + timeout.inWholeNanoseconds
+        val base = machineRel(key, seat)
+        val blobs = "$base/blobs/"
+        try {
+            val old = try {
+                manifest("$base/manifest")
+            } catch (e: SyncFailure) {
+                Log.warn("sync: sending every file again, as the last list sent to ${remote.target} could not be read: ${e.message}")
+                null
+            }
+            val stored = s3.list(full(blobs)).mapNotNullTo(HashSet()) { it.key.substringAfterLast('/').takeIf(BLOB::matches) }
+            val before = old?.files?.associateBy { it.path }.orEmpty()
+            val entries = ArrayList<Entry>()
+            for ((rel, file) in sendable(from)) {
+                callTime(deadline, timeout)
+                val attrs = try {
+                    Files.readAttributes(file, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                } catch (_: NoSuchFileException) {
+                    continue
+                }
+                if (!attrs.isRegularFile) continue
+                val mtime = attrs.lastModifiedTime().toMillis()
+                val prior = before[rel]
+                if (prior != null && prior.size == attrs.size() && prior.mtime == mtime && prior.chunks.all { it in stored }) {
+                    entries += prior
+                    continue
+                }
+                entries += send(rel, file, mtime, blobs, stored, deadline, timeout) ?: continue
+            }
+            val manifest = json.encodeToString(Manifest.serializer(), Manifest(files = entries)).toByteArray()
+            val manifestRel = "$base/manifest"
+            s3.put(full(manifestRel), sealed(manifestRel, manifest), paced = true, timeout = callTime(deadline, timeout))
+
+            val named = entries.flatMapTo(HashSet()) { it.chunks }
+            for (name in stored) {
+                if (name in named) continue
+                if (System.nanoTime() > deadline) break
+                try {
+                    s3.delete(full(blobs + name))
+                } catch (e: SyncFailure) {
+                    Log.warn("sync: could not remove chunks ${remote.target} no longer needs: ${e.message}")
+                    break
+                }
+            }
+        } catch (e: IOException) {
+            throw SyncFailure("could not send the tabs in $from: ${e.message ?: e.toString()}")
+        }
     }
 
     /**
-     * Fetches [seat]'s copy of [key] into [into], which it replaces. What arrives is the remote's to
-     * choose; see [SyncFiles.dropPulledLinks] for what is done about that before any of it is read.
+     * Makes [into] hold [seat]'s copy of the project's tabs and nothing else. Files already there
+     * with the same size and time are kept, and so are the pieces of changed files that did not
+     * change. Each file is written beside its place and moved in once whole.
      */
     fun pull(key: String, seat: String, into: Path, timeout: Duration = COPY_TIMEOUT) {
-        require(HEX.matches(seat))
-        OwnerOnly.directory(into)
-        rsync(listOf("${remote.target}:${projectDir(key)}/machines/$seat/", "$into/"), key, timeout)
+        ids(key, seat)
+        val deadline = System.nanoTime() + timeout.inWholeNanoseconds
+        val base = machineRel(key, seat)
+        try {
+            OwnerOnly.directory(into)
+            repeat(TRIES) {
+                val manifest = manifest("$base/manifest", callTime(deadline, timeout))
+                    ?: throw SyncFailure("the other machine has not sent its tabs to ${remote.target} yet")
+                if (manifest.version != 1) {
+                    throw SyncFailure("the other machine sent its tabs with a newer nop; update nop on this machine")
+                }
+                try {
+                    mirror(manifest, "$base/blobs/", into, deadline, timeout)
+                    return
+                } catch (_: Gone) {
+                    // The holder sent again and removed a chunk the old list named: start from the new one.
+                }
+            }
+        } catch (e: IOException) {
+            throw SyncFailure("could not fetch the tabs into $into: ${e.message ?: e.toString()}")
+        }
+        throw SyncFailure("the other machine kept changing its tabs while they were fetched from ${remote.target}")
     }
 
-    private fun projectDir(key: String): String {
-        require(HEX.matches(key))
-        return "${remote.base.trimEnd('/')}/projects/$key"
+    override fun close() {
+        s3.close()
     }
 
-    private fun sshOptions(): List<String> {
-        val options = mutableListOf(
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", "ConnectTimeout=15",
-            "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=2",
-        )
-        controlPath()?.let { options += listOf("-o", "ControlMaster=auto", "-o", "ControlPath=$it", "-o", "ControlPersist=120") }
-        remote.identity?.takeIf { it.isNotBlank() }?.let { options += listOf("-i", expand(it), "-o", "IdentitiesOnly=yes") }
-        return options
+    // ---- the lease ---------------------------------------------------------------------------
+
+    private class Current(val lease: SyncLease?, val etag: String?, val date: Long?)
+
+    private fun current(key: String): Current {
+        val rel = leaseRel(key)
+        val reply = s3.get(full(rel), LEASE_LIMIT) ?: return Current(null, null, null)
+        val text = try {
+            opened(rel, reply.body, LEASE_LIMIT).toString(Charsets.UTF_8)
+        } catch (_: SyncFailure) {
+            throw SyncFailure("the project's lease on ${remote.target} was not sealed with this machine's sync key; every machine must use the same one")
+        }
+        val lease = SyncLease.parse(text) ?: throw SyncFailure("${remote.target} holds a project lease nop could not read")
+        return Current(lease.copy(at = reply.modified ?: 0), reply.etag, reply.date)
     }
 
-    /**
-     * Where the shared connection's socket goes, or null for none. ssh puts the socket at a hash of
-     * the connection under this folder, and a socket's path has a hard limit not much over a hundred
-     * bytes, so a folder too deep to fit is no shared connection rather than a failure.
-     */
-    private fun controlPath(): String? {
-        val dir = controlDir ?: return null
-        if (dir.toString().length + 1 + 40 + 20 > 104 || '\'' in dir.toString()) return null
-        return runCatching {
-            OwnerOnly.directory(dir)
-            OwnerOnly.tightenDirectory(dir)
-            "$dir/%C"
-        }.getOrNull()
+    /** Writes [next] only while the lease is still the one [seen]; null when another write came first. */
+    private fun write(key: String, next: SyncLease, seen: Current): S3Client.Reply? {
+        val rel = leaseRel(key)
+        val etag = if (seen.lease == null) null else seen.etag ?: throw SyncFailure("${remote.target} did not say which version of the lease it holds")
+        return s3.putIf(full(rel), sealed(rel, next.text().toByteArray()), etag)
     }
 
-    private fun call(command: String, key: String, vararg args: String): SyncReply {
-        val values = listOf(remote.base.trimEnd('/'), command, key) + args.map(::clean)
-        val remoteCommand = "sh -s -- " + values.joinToString(" ") { "'$it'" }
-        val ran = run(listOf(ssh) + sshOptions() + listOf(remote.target, remoteCommand), SCRIPT, CALL_TIMEOUT)
-        if (ran.exit != 0) throw SyncFailure(sshProblem(ran))
-        val fields = SyncLease.fields(ran.out)
-        return when (val result = fields["result"] ?: if (command == "read") "ok" else "unknown") {
-            "ok", "lost", "busy" -> SyncReply(result, SyncLease.parse(fields), fields["now"]?.toLongOrNull(), fields["pushed"] == "1")
-            "noflock" -> throw SyncFailure("${remote.target} has no flock, which the sync needs (it is in util-linux)")
-            "norsync" -> throw SyncFailure("${remote.target} has no rsync, which the sync needs")
-            else -> throw SyncFailure("${remote.target} gave an answer nop does not understand: ${ran.out.trim().take(200)}")
+    private fun pushed(key: String, seat: String): Boolean =
+        HEX.matches(seat) && s3.head(full("${machineRel(key, seat)}/manifest")) != null
+
+    // ---- checks ------------------------------------------------------------------------------
+
+    private fun ensure() {
+        if (verified) return
+        checkKey()
+        probe()
+        verified = true
+    }
+
+    /** Makes sure this machine's sync key is the one the store was first used with. */
+    private fun checkKey() {
+        val reply = s3.get(full(KEY_CHECK), CHECK_LIMIT)
+            ?: if (s3.putIf(full(KEY_CHECK), sealed(KEY_CHECK, MARKER.toByteArray()), null) != null) return
+            else s3.get(full(KEY_CHECK), CHECK_LIMIT)
+        val same = reply != null && runCatching { opened(KEY_CHECK, reply.body, CHECK_LIMIT).toString(Charsets.UTF_8) }.getOrNull() == MARKER
+        if (!same) {
+            throw SyncFailure("the sync key is not the one the other machines use with ${remote.target}; copy it from one of them")
         }
     }
 
-    private fun rsync(paths: List<String>, key: String, timeout: Duration) {
-        val shell = (listOf(ssh) + sshOptions()).joinToString(" ") { "'$it'" }
-        val excludes = (Backup.CREDENTIALS + Backup.TRANSIENT_PATTERNS).map { "--exclude=$it" }
-        // Folders, files, their modes and times, and nothing else: no link is made or followed, and
-        // no device or owner is taken from the other side. Compressed, since conversations are text
-        // and shrink several times over, and capped at the remote's rate, which rsync hands to the
-        // far side too, so that a pull is held to it as well as a push.
-        val argv = listOf("rsync", "-rptz", "--no-links", "--delete", "--chmod=go=", "--timeout=60") +
-            listOfNotNull(remote.rateLimit.takeIf { it > 0 }?.let { "--bwlimit=$it" }) +
-            listOf("-e", shell, "--rsync-path=flock -w 60 ${projectDir(key)}/lock rsync") + excludes + paths
-        val ran = run(argv, null, timeout)
-        // 24: files vanished while the list was being made, which is a log rotated or a tab closed
-        // mid-copy; the next copy picks up where it is then.
-        if (ran.exit == 0 || ran.exit == 24) return
-        if (ran.exit == -1) throw SyncFailure("copying agent tabs with ${remote.target} took longer than $timeout")
-        throw SyncFailure(sshProblem(ran))
+    /** Makes sure the store turns down a conditional write that should not land; returns its clock. */
+    private fun probe(): Long? {
+        val rel = "probe/" + SyncCrypto.hex(ByteArray(16).also { random.nextBytes(it) })
+        val body = sealed(rel, MARKER.toByteArray())
+        val refused = "${remote.target} does not honour conditional writes, which the sync needs"
+        try {
+            val first = s3.putIf(full(rel), body, null) ?: throw SyncFailure(refused)
+            val etag = first.etag ?: throw SyncFailure(refused)
+            if (s3.putIf(full(rel), body, null) != null) throw SyncFailure(refused)
+            if (s3.putIf(full(rel), body, "\"0123456789abcdef0123456789abcdef\"") != null) throw SyncFailure(refused)
+            return (s3.putIf(full(rel), body, etag) ?: throw SyncFailure(refused)).date ?: first.date
+        } finally {
+            runCatching { s3.delete(full(rel)) }
+        }
     }
 
-    /** What went wrong with an ssh or rsync run, for the user. */
-    private fun sshProblem(ran: Ran): String {
-        val err = ran.err.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
-        val said = err.lastOrNull().orEmpty()
+    // ---- sending -----------------------------------------------------------------------------
+
+    /** The files under [from] that are sent, by their path below it. */
+    private fun sendable(from: Path): List<Pair<String, Path>> {
+        val out = ArrayList<Pair<String, Path>>()
+        Files.walkFileTree(from, object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                val name = file.fileName.toString()
+                if (attrs.isRegularFile && !excluded(name)) out += from.relativize(file).joinToString("/") to file
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult = FileVisitResult.CONTINUE
+        })
+        return out.sortedBy { it.first }
+    }
+
+    /** Sends the chunks of [file] the store does not have; null when the file went away meanwhile. */
+    private fun send(
+        rel: String,
+        file: Path,
+        mtime: Long,
+        blobs: String,
+        stored: MutableSet<String>,
+        deadline: Long,
+        timeout: Duration,
+    ): Entry? {
+        val chunks = ArrayList<String>()
+        var size = 0L
+        val buffer = ByteArray(CHUNK)
+        try {
+            FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                while (true) {
+                    val n = fill(channel, buffer)
+                    if (n == 0) break
+                    size += n
+                    val name = crypto.name(buffer, 0, n)
+                    if (name !in stored) {
+                        val blobRel = blobs + name
+                        val sealed = crypto.seal(SyncCrypto.pack(buffer, 0, n), blobRel)
+                        s3.put(full(blobRel), sealed, paced = true, timeout = callTime(deadline, timeout))
+                        stored += name
+                    }
+                    chunks += name
+                    if (n < CHUNK) break
+                }
+            }
+        } catch (_: NoSuchFileException) {
+            return null
+        }
+        return Entry(rel, size, mtime, chunks)
+    }
+
+    // ---- fetching ----------------------------------------------------------------------------
+
+    private class Gone : Exception()
+
+    private fun mirror(manifest: Manifest, blobs: String, into: Path, deadline: Long, timeout: Duration) {
+        val wanted = wanted(manifest, into)
+        val dirs = wanted.keys.flatMapTo(HashSet()) { ancestors(it) }
+        clear(into, wanted.keys, dirs)
+        for (entry in wanted.values) {
+            callTime(deadline, timeout)
+            place(entry, blobs, into, deadline, timeout)
+        }
+    }
+
+    /** The entries of [manifest] that are safe to place under [into], by path. */
+    private fun wanted(manifest: Manifest, into: Path): Map<String, Entry> {
+        val out = LinkedHashMap<String, Entry>()
+        val root = into.toAbsolutePath().normalize()
+        for (entry in manifest.files) {
+            val bad = badEntry(entry, root)
+            if (bad != null) {
+                Log.warn("sync: left out ${entry.path.take(200)} from ${remote.target}: $bad")
+                continue
+            }
+            if (out.putIfAbsent(entry.path, entry) != null) Log.warn("sync: ${remote.target} listed ${entry.path.take(200)} twice")
+        }
+        val dirs = out.keys.flatMapTo(HashSet()) { ancestors(it) }
+        for (path in out.keys.filter { it in dirs }) {
+            Log.warn("sync: left out ${path.take(200)} from ${remote.target}: it is also a folder")
+            out.remove(path)
+        }
+        return out
+    }
+
+    private fun badEntry(entry: Entry, root: Path): String? {
+        val segments = entry.path.split('/')
         return when {
-            ran.exit == -1 -> "${remote.target} did not answer in time"
-            ran.exit == -2 -> "${remote.target} sent more than a sync answer holds, so it was cut off"
-            err.any { "Host key verification failed" in it } ->
-                "${remote.target}'s host key is not known yet: connect once with ssh ${remote.target} from a terminal to check and record it"
-            err.any { "REMOTE HOST IDENTIFICATION HAS CHANGED" in it } ->
-                "${remote.target}'s host key has changed since it was recorded; check why before syncing with it"
-            err.any { "Permission denied" in it } -> "${remote.target} refused the key: $said"
-            said.isNotEmpty() -> "could not sync with ${remote.target}: $said"
-            else -> "could not sync with ${remote.target} (exit ${ran.exit})"
+            entry.path.length > MAX_PATH -> "its name is too long"
+            segments.any { it.isEmpty() || it == "." || it == ".." || '\u0000' in it || '\\' in it } -> "its name is not a plain path"
+            excluded(segments.last()) -> "nop never places such a file"
+            !root.resolve(entry.path).normalize().startsWith(root) -> "it is outside the folder"
+            entry.size < 0 -> "its size is wrong"
+            entry.chunks.size.toLong() != (entry.size + CHUNK - 1) / CHUNK -> "its chunks do not match its size"
+            entry.chunks.any { !BLOB.matches(it) } -> "a chunk has a wrong name"
+            else -> null
         }
+    }
+
+    /** Removes from [into] everything that is not a wanted file or a folder one sits in. */
+    private fun clear(into: Path, files: Set<String>, dirs: Set<String>) {
+        Files.walkFileTree(into, object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                val rel = into.relativize(file).joinToString("/")
+                if (!attrs.isRegularFile || rel !in files) Files.deleteIfExists(file)
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFileFailed(file: Path, exc: IOException): FileVisitResult = FileVisitResult.CONTINUE
+
+            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+                if (dir == into) return FileVisitResult.CONTINUE
+                val rel = into.relativize(dir).joinToString("/")
+                if (rel !in dirs) {
+                    try {
+                        Files.deleteIfExists(dir)
+                    } catch (_: DirectoryNotEmptyException) {
+                    }
+                }
+                return FileVisitResult.CONTINUE
+            }
+        })
+    }
+
+    private fun place(entry: Entry, blobs: String, into: Path, deadline: Long, timeout: Duration) {
+        for (dir in ancestors(entry.path)) {
+            val at = into.resolve(dir)
+            if (Files.exists(at, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(at, LinkOption.NOFOLLOW_LINKS)) Files.delete(at)
+        }
+        val target = into.resolve(entry.path)
+        OwnerOnly.directory(target.parent)
+        val existing = runCatching {
+            Files.readAttributes(target, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        }.getOrNull()?.takeIf { it.isRegularFile }
+        if (existing != null && existing.size() == entry.size && existing.lastModifiedTime().toMillis() == entry.mtime) return
+        if (existing == null) Files.deleteIfExists(target)
+
+        val temp = target.resolveSibling(".nop-sync-" + SyncCrypto.hex(ByteArray(8).also { random.nextBytes(it) }) + ".part")
+        var moved = false
+        try {
+            create(temp).use { out ->
+                val local = existing?.let { runCatching { FileChannel.open(target, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS) }.getOrNull() }
+                local.use {
+                    val buffer = ByteArray(CHUNK)
+                    entry.chunks.forEachIndexed { i, name ->
+                        val offset = i.toLong() * CHUNK
+                        val length = minOf(CHUNK.toLong(), entry.size - offset).toInt()
+                        val plain = reuse(local, offset, length, name, buffer) ?: fetch(blobs + name, name, length, deadline, timeout)
+                        val bb = ByteBuffer.wrap(plain, 0, length)
+                        while (bb.hasRemaining()) out.write(bb)
+                    }
+                }
+            }
+            Files.setLastModifiedTime(temp, FileTime.fromMillis(entry.mtime))
+            OwnerOnly.tighten(temp)
+            try {
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+            }
+            moved = true
+        } finally {
+            if (!moved) runCatching { Files.deleteIfExists(temp) }
+        }
+    }
+
+    private fun create(file: Path): FileChannel {
+        val options = setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+        return try {
+            FileChannel.open(file, options, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+        } catch (_: UnsupportedOperationException) {
+            FileChannel.open(file, options)
+        }
+    }
+
+    /** The piece of the local file at [offset] when it is already the chunk [name], or null. */
+    private fun reuse(local: FileChannel?, offset: Long, length: Int, name: String, buffer: ByteArray): ByteArray? {
+        if (local == null) return null
+        val bb = ByteBuffer.wrap(buffer, 0, length)
+        while (bb.hasRemaining()) {
+            if (local.read(bb, offset + bb.position()) < 0) return null
+        }
+        return if (crypto.name(buffer, 0, length) == name) buffer else null
+    }
+
+    private fun fetch(rel: String, name: String, length: Int, deadline: Long, timeout: Duration): ByteArray {
+        val reply = s3.get(full(rel), CHUNK + SEAL_OVERHEAD, paced = true, timeout = callTime(deadline, timeout)) ?: throw Gone()
+        val plain = opened(rel, reply.body, CHUNK)
+        if (plain.size != length || crypto.name(plain) != name) throw SyncFailure(SyncCrypto.NOT_OURS)
+        return plain
+    }
+
+    // ---- objects -----------------------------------------------------------------------------
+
+    @Serializable
+    private data class Manifest(val version: Int = 1, val files: List<Entry> = emptyList())
+
+    @Serializable
+    private data class Entry(val path: String, val size: Long, val mtime: Long, val chunks: List<String>)
+
+    /** The manifest at [rel], or null when there is none. */
+    private fun manifest(rel: String, timeout: Duration = S3Client.CALL_TIMEOUT): Manifest? {
+        val reply = s3.get(full(rel), MANIFEST_SEALED_LIMIT, paced = true, timeout = timeout) ?: return null
+        val text = opened(rel, reply.body, MANIFEST_LIMIT).toString(Charsets.UTF_8)
+        return try {
+            json.decodeFromString(Manifest.serializer(), text)
+        } catch (_: IllegalArgumentException) {
+            throw SyncFailure("${remote.target} holds a list of tabs nop could not read")
+        }
+    }
+
+    private fun sealed(rel: String, plain: ByteArray): ByteArray = crypto.seal(SyncCrypto.pack(plain), rel)
+
+    private fun opened(rel: String, body: ByteArray, limit: Int): ByteArray = SyncCrypto.unpack(crypto.open(body, rel), limit)
+
+    private fun full(rel: String): String = if (prefix.isEmpty()) rel else "$prefix/$rel"
+
+    private fun leaseRel(key: String) = "projects/$key/lease"
+
+    private fun machineRel(key: String, seat: String) = "projects/$key/machines/$seat"
+
+    private fun ids(key: String, seat: String? = null) {
+        if (!HEX.matches(key)) throw SyncFailure("the project key $key is not one nop makes")
+        if (seat != null && !HEX.matches(seat)) throw SyncFailure("the machine id $seat is not one nop makes")
+    }
+
+    /** How long the next call may take: what is left of the copy's time, up to a call's own limit. */
+    private fun callTime(deadline: Long, timeout: Duration): Duration {
+        val left = deadline - System.nanoTime()
+        if (left <= 0) throw SyncFailure("copying agent tabs with ${remote.target} took longer than $timeout")
+        return minOf(S3Client.CALL_TIMEOUT, left.nanoseconds)
     }
 
     companion object {
-        private val CALL_TIMEOUT = 60.seconds
-        // Long enough for a busy project's first copy at the rate cap. A copy that stalls is ended
-        // well before by rsync's own --timeout, and one ended keeps every file it finished, so the
-        // next copy carries on from there.
+        /**
+         * The longest a send or fetch may take in all. A call that stalls ends on its own time limit
+         * well before; chunks already sent stay in the store and are not sent again.
+         */
         val COPY_TIMEOUT = 60.minutes
 
+        /** The size files are cut into. */
+        const val CHUNK = 1 shl 20
+
         private val HEX = Regex("[0-9a-f]{1,64}")
-        private val TARGET = Regex("[A-Za-z0-9._@:\\[\\]-]+")
-        private val BASE = Regex("[A-Za-z0-9._/-]+")
+        private val BLOB = Regex("[0-9a-f]{64}")
+        private val BUCKET = Regex("[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
+        private val SEGMENT = Regex("[A-Za-z0-9._-]+")
+        private val REGION = Regex("[a-z0-9-]{1,32}")
+        private const val TRIES = 3
+        private const val MAX_PATH = 4096
+        private const val SEAL_OVERHEAD = 64
+        private const val LEASE_LIMIT = 64 * 1024
+        private const val CHECK_LIMIT = 4096
+        private const val MANIFEST_SEALED_LIMIT = 32 * 1024 * 1024
+        private const val MANIFEST_LIMIT = 64 * 1024 * 1024
+        private const val KEY_CHECK = "key-check"
+        private const val MARKER = "nop sync key check 1"
+        private val LOCAL_HOSTS = setOf("localhost", "127.0.0.1", "[::1]", "::1")
+        private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-        /** Why [remote] cannot be used, for the settings dialog, or null when it can. */
-        fun problem(remote: SyncRemote): String? = when {
-            remote.target.isBlank() -> "No remote is set"
-            !TARGET.matches(remote.target) || remote.target.startsWith("-") ->
-                "The remote is user@host or a host name from the ssh config"
-            !BASE.matches(remote.base) || remote.base.startsWith("/") || remote.base.split('/').any { it == ".." } ->
-                "The remote folder is a path under the remote user's home, such as ${SyncRemote.DEFAULT_BASE}"
-            remote.identity != null && '\'' in remote.identity -> "The key file's path cannot contain a quote"
-            remote.identity != null && remote.identity.isNotBlank() && !Files.isRegularFile(Path.of(expand(remote.identity))) ->
-                "There is no key file at ${remote.identity}"
-            remote.ssh != null && '\'' in remote.ssh -> "The ssh program's path cannot contain a quote"
-            remote.rateLimit < 0 -> "The speed cap is a whole number of KB a second, or 0 for none"
-            else -> null
-        }
-
-        private fun expand(path: String): String =
-            if (path == "~" || path.startsWith("~/")) System.getProperty("user.home") + path.substring(1) else path
-
-        /** A value as it can go between single quotes and on one line of the lease. */
-        private fun clean(value: String): String =
-            value.filter { it != '\'' && it != '\n' && it != '\r' }.take(500)
-
-        /**
-         * Runs [argv] with [stdin], for at most [timeout], and returns what it printed.
-         *
-         * Both outputs are read on their own threads and joined for a short time only: ssh's shared
-         * connection lives on in the background with the first caller's output still open, so
-         * waiting for the end of it would wait for that connection to close. Each output is kept up
-         * to [OUTPUT_LIMIT]; a program that prints more is killed, since no answer here is that long
-         * and the other end decides how much it sends.
-         */
-        fun run(
-            argv: List<String>,
-            stdin: String?,
-            timeout: Duration,
-            onStart: (Process) -> Unit = {},
-            onEnd: (Process) -> Unit = {},
-        ): Ran {
-            val process = try {
-                ProcessBuilder(argv).start()
-            } catch (e: java.io.IOException) {
-                throw SyncFailure("could not run ${argv.first()}: ${e.message}")
-            }
-            onStart(process)
-            try {
-                val flooded = AtomicBoolean()
-                val out = ByteArrayOutputStream()
-                val err = ByteArrayOutputStream()
-                val readers = listOf(process.inputStream to out, process.errorStream to err).map { (stream, into) ->
-                    drain(stream, into) {
-                        flooded.set(true)
-                        process.destroyForcibly()
-                    }
-                }
-                runCatching { process.outputStream.use { if (stdin != null) it.write(stdin.toByteArray()) } }
-                val finished = process.waitFor(timeout.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-                if (!finished) {
-                    process.destroyForcibly()
-                    process.waitFor(5, TimeUnit.SECONDS)
-                }
-                readers.forEach { it.join(2_000) }
-                val exit = when {
-                    flooded.get() -> -2
-                    finished -> process.exitValue()
-                    else -> -1
-                }
-                return Ran(exit, out.text(), err.text())
-            } finally {
-                onEnd(process)
+        /** What is wrong with [remote] as somewhere to sync, in words for the user, or null when nothing is. */
+        fun problem(remote: SyncRemote): String? {
+            val endpoint = remote.endpoint.trim()
+            if (endpoint.isEmpty()) return "Give the store's S3 endpoint, such as https://<account>.r2.cloudflarestorage.com"
+            val uri = runCatching { java.net.URI(endpoint) }.getOrNull()
+                ?: return "The endpoint $endpoint is not a web address"
+            val host = uri.host
+            return when {
+                uri.scheme == null || host.isNullOrEmpty() -> "The endpoint $endpoint is not a web address"
+                uri.scheme != "https" && !(uri.scheme == "http" && host in LOCAL_HOSTS) ->
+                    "The endpoint must start with https:// (plain http is only for a store on this machine)"
+                uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null ->
+                    "The endpoint is the store's address alone, with no name, password, query or #"
+                !(uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") ->
+                    "The endpoint is the store's address alone; the bucket goes in its own field"
+                !BUCKET.matches(remote.bucket) -> "The bucket is 3 to 63 lower-case letters, digits, dots and dashes"
+                remote.prefix.trim('/').split('/').let { parts ->
+                    remote.prefix.trim('/').isNotEmpty() && parts.any { !SEGMENT.matches(it) || it == "." || it == ".." }
+                } -> "The folder in the bucket is made of letters, digits, dots, dashes and underscores, split by /"
+                !REGION.matches(remote.region) -> "The region is lower-case letters, digits and dashes, such as auto or us-east-1"
+                !credential(remote.accessKey) -> "Give the access key the store issued"
+                !credential(remote.secretKey) -> "Give the secret key the store issued with the access key"
+                SyncCrypto.parse(remote.syncKey) == null ->
+                    "Give the sync key: generate one on the first machine and copy it to the others"
+                remote.rateLimit < 0 -> "The speed cap is a whole number of KB a second, or 0 for none"
+                else -> null
             }
         }
 
-        /** Reads [stream] into [into] until it ends, or until it has given [OUTPUT_LIMIT] bytes, when [onFlood] is called. */
-        private fun drain(stream: InputStream, into: ByteArrayOutputStream, onFlood: () -> Unit): Thread =
-            thread(isDaemon = true, name = "nop-sync-output") {
-                runCatching {
-                    val buffer = ByteArray(8192)
-                    var kept = 0
-                    stream.use { input ->
-                        while (true) {
-                            val n = input.read(buffer)
-                            if (n < 0) break
-                            if (kept + n > OUTPUT_LIMIT) {
-                                onFlood()
-                                break
-                            }
-                            kept += n
-                            synchronized(into) { into.write(buffer, 0, n) }
-                        }
-                    }
-                }
-            }
+        private fun credential(value: String): Boolean =
+            value.isNotEmpty() && value.none { it.isWhitespace() || it.isISOControl() }
 
-        /** More than a lease, a tool's version or an rsync error ever is. */
-        private const val OUTPUT_LIMIT = 256 * 1024
+        private fun excluded(name: String): Boolean =
+            name in Backup.CREDENTIALS || Backup.transient(name) || name.startsWith(".nop-sync-")
 
-        private fun ByteArrayOutputStream.text(): String = synchronized(this) { toString(Charsets.UTF_8) }
+        /** The folders [path] sits in, outermost first: `a/b/c` gives `a` and `a/b`. */
+        private fun ancestors(path: String): List<String> {
+            val out = ArrayList<String>()
+            var i = path.indexOf('/')
+            while (i > 0) {
+                out += path.substring(0, i)
+                i = path.indexOf('/', i + 1)
+            }
+            return out
+        }
 
-        /**
-         * The remote side, fed to `sh -s` on stdin with its arguments on the command line: the base
-         * folder, the command, the project's key, then the command's own. Prints `name=value` lines.
-         */
-        val SCRIPT = """
-            set -eu
-            base=${'$'}1; cmd=${'$'}2; key=${'$'}3; shift 3
-            command -v flock >/dev/null 2>&1 || { echo result=noflock; exit 0; }
-            command -v rsync >/dev/null 2>&1 || { echo result=norsync; exit 0; }
-            if [ "${'$'}cmd" = ping ]; then echo result=ok; echo "now=${'$'}(date +%s)"; exit 0; fi
-            dir="${'$'}base/projects/${'$'}key"
-            mkdir -p "${'$'}dir/machines"
-            chmod 700 "${'$'}base" 2>/dev/null || true
-            exec 9>>"${'$'}dir/lock"
-            flock -w 20 9 || { echo result=busy; exit 0; }
-            lease="${'$'}dir/lease"
-            field() { if [ -f "${'$'}lease" ]; then sed -n "s/^${'$'}1=//p" "${'$'}lease" | head -n 1; fi; }
-            show() {
-              if [ -f "${'$'}lease" ]; then cat "${'$'}lease"; fi
-              s=${'$'}(field seat)
-              if [ -n "${'$'}s" ] && [ -d "${'$'}dir/machines/${'$'}s" ]; then echo pushed=1; fi
-              echo "now=${'$'}(date +%s)"
+        private fun clean(value: String): String = value.replace("\n", " ").replace("\r", " ").take(500)
+
+        private fun fill(channel: FileChannel, buffer: ByteArray): Int {
+            val bb = ByteBuffer.wrap(buffer)
+            while (bb.hasRemaining()) {
+                if (channel.read(bb) < 0) break
             }
-            write() {
-              tmp="${'$'}lease.tmp.${'$'}${'$'}"
-              printf 'gen=%s\nseat=%s\nhost=%s\nroot=%s\nhead=%s\ndirty=%s\nat=%s\n' "${'$'}@" "${'$'}(date +%s)" > "${'$'}tmp"
-              mv "${'$'}tmp" "${'$'}lease"
-            }
-            case "${'$'}cmd" in
-            read) show ;;
-            claim)
-              gen=${'$'}(field gen); gen=${'$'}{gen:-0}
-              if [ "${'$'}gen" = "${'$'}1" ]; then write ${'$'}(( gen + 1 )) "${'$'}2" "${'$'}3" "${'$'}4" "${'$'}5" "${'$'}6"; echo result=ok; else echo result=lost; fi
-              show ;;
-            beat)
-              gen=${'$'}(field gen); seat=${'$'}(field seat)
-              if [ "${'$'}gen" = "${'$'}1" ] && [ "${'$'}seat" = "${'$'}2" ]; then
-                write "${'$'}gen" "${'$'}seat" "${'$'}(field host)" "${'$'}(field root)" "${'$'}3" "${'$'}4"; echo result=ok
-              else echo result=lost; fi
-              show ;;
-            *) echo result=unknown ;;
-            esac
-        """.trimIndent() + "\n"
+            return bb.position()
+        }
     }
 }

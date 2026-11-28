@@ -4,6 +4,7 @@ import iondrive.nop.Settings
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -307,11 +308,13 @@ class AccountsTest {
         assertEquals(SyncRemote.DEFAULT_RATE_LIMIT, loaded.sync?.rateLimit)
         assertTrue(loaded.syncProjects.isEmpty())
         assertNull(loaded.syncFor(tmp.resolve("shop")))
+        assertEquals("", loaded.sync?.endpoint, "an ssh target is no store address")
+        assertNotNull(SyncLink.problem(loaded.sync!!), "the user is asked for a store before anything syncs")
     }
 
     @Test
     fun `only the chosen repositories sync, whichever way their paths are written`(@TempDir tmp: Path) {
-        val remote = SyncRemote(target = "dev@sync.example")
+        val remote = store()
         val shop = tmp.resolve("work/shop")
         val config = AgentConfig(sync = remote).withSynced(shop, true)
 
@@ -335,14 +338,70 @@ class AccountsTest {
     fun `the chosen repositories and the rate cap round-trip through the config file`(@TempDir tmp: Path) {
         Settings.configRoot = tmp
         val shop = tmp.resolve("work/shop")
-        val config = AgentConfig(sync = SyncRemote(target = "dev@sync.example", rateLimit = 0)).withSynced(shop, true)
+        val config = AgentConfig(sync = store().copy(rateLimit = 0)).withSynced(shop, true)
 
         Accounts.save(config)
         val loaded = Accounts.load()
 
         assertEquals(0, loaded.sync?.rateLimit)
         assertTrue(loaded.syncs(shop))
+        assertEquals(config.sync, loaded.sync)
     }
+
+    @Test
+    fun `the sync keys are kept out of the config file that backups copy`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val config = AgentConfig(sync = store())
+
+        Accounts.save(config)
+
+        val stored = Files.readString(Accounts.configFile)
+        assertFalse(stored.contains("def456"), "the store's secret key is not in agent.json")
+        assertFalse(stored.contains(config.sync!!.syncKey), "the sync key is not in agent.json")
+        assertTrue(stored.contains("abc123"), "the access key names the account, and is no secret")
+        val keys = Files.readString(Accounts.syncKeysFile)
+        assertTrue(keys.contains("def456") && keys.contains(config.sync.syncKey))
+        assertEquals(config, Accounts.load())
+    }
+
+    @Test
+    fun `turning sync off removes the keys`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        Accounts.save(AgentConfig(sync = store()))
+
+        Accounts.save(AgentConfig())
+
+        assertFalse(Files.exists(Accounts.syncKeysFile))
+        assertNull(Accounts.load().sync)
+    }
+
+    @Test
+    fun `keys written into agent json by hand still load, and move out on the next save`(@TempDir tmp: Path) {
+        Settings.configRoot = tmp
+        val key = SyncCrypto.generate()
+        Files.createDirectories(Accounts.configFile.parent)
+        Files.writeString(
+            Accounts.configFile,
+            """{"sync": {"endpoint": "https://store.example", "bucket": "shop-sync", "accessKey": "abc123",
+                "secretKey": "def456", "syncKey": "$key"}}""",
+        )
+
+        val loaded = Accounts.load()
+        assertEquals("def456", loaded.sync?.secretKey)
+        assertEquals(key, loaded.sync?.syncKey)
+
+        Accounts.save(loaded)
+        assertFalse(Files.readString(Accounts.configFile).contains("def456"))
+        assertEquals(loaded, Accounts.load())
+    }
+
+    private fun store() = SyncRemote(
+        endpoint = "https://store.example",
+        bucket = "shop-sync",
+        accessKey = "abc123",
+        secretKey = "def456",
+        syncKey = SyncCrypto.generate(),
+    )
 
     /** Runs [body] with `user.home` pointed at [home], so discovery looks inside a temp directory. */
     private fun <T> withHome(home: Path, body: () -> T): T {

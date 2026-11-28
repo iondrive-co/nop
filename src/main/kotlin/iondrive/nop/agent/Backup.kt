@@ -487,7 +487,4 @@ object Backup {
     internal fun transient(name: String): Boolean =
         name.startsWith(TEMP_PREFIX) || name.endsWith("-wal") || name.endsWith("-shm") ||
             name.endsWith("-journal") || name.endsWith(".lock")
-
-    /** [transient] as file-name patterns, for a copy made by a tool that takes patterns rather than a test. */
-    internal val TRANSIENT_PATTERNS = listOf("$TEMP_PREFIX*", "*-wal", "*-shm", "*-journal", "*.lock")
 }

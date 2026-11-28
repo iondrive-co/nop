@@ -43,6 +43,13 @@ object LaunchJournal {
 
         /** It restarted to recover from a window that would not stay up. */
         RECOVERING,
+
+        /**
+         * It was up, and its process is gone without having quit or restarted: killed, or crashed.
+         * Nothing is held back for it — a nop that had been up was not brought down by restoring a
+         * tab — but it is said in the log, because nothing else may have recorded it.
+         */
+        DIED_UP,
     }
 
     /** Where the journal lives: beside nop's other state, unless a test points it somewhere of its own. */
@@ -62,6 +69,8 @@ object LaunchJournal {
         return when (last?.first) {
             State.STARTING -> if (last.second != pid && alive(last.second)) Previous.CLEAN else Previous.DIED_STARTING
             State.RECOVERING -> Previous.RECOVERING
+            // Under this pid it is the nop a restart in place replaced; alive under another, not ended.
+            State.UP -> if (last.second != pid && !alive(last.second)) Previous.DIED_UP else Previous.CLEAN
             else -> Previous.CLEAN
         }
     }
@@ -94,6 +103,7 @@ object LaunchJournal {
  * At startup, before any window opens: loads what nop is holding back, records that this launch is
  * starting, and — if the last one died on its way up, or restarted to recover — holds back what it
  * had on screen as well, so a tab that kills nop at startup does it once and not on every launch.
+ * A last launch that died after it was up is only reported.
  */
 fun recoverFromLastLaunch(pid: Long = ProcessHandle.current().pid()): LaunchJournal.Previous {
     Quarantine.load()
@@ -107,6 +117,10 @@ fun recoverFromLastLaunch(pid: Long = ProcessHandle.current().pid()): LaunchJour
             WindowRecovery.restartedToRecover = true
             Quarantine.add(WindowRecovery.lastShowing(), "nop restarted to recover a failing window while this tab was on screen")
         }
+        LaunchJournal.Previous.DIED_UP -> Log.warn(
+            "the last nop ended without quitting or restarting: it was killed or it crashed. " +
+                "Its terminals hung up; agents resume from their transcripts",
+        )
         LaunchJournal.Previous.CLEAN -> {}
     }
     return previous
