@@ -37,11 +37,16 @@ import java.util.zip.ZipFile
  * A version directory carries markers: [STAMP] once every file in it matched the signed manifest and
  * its launcher answered [UpdateProbe], [TRIED] once a nop started it, then [HEALTHY] when that start
  * came up or [FAILED] when it did not.
+ *
+ * On macOS the image is an app bundle and so is each version: a home `nop.app` has versions
+ * `nop-1.2.6.app` beside it, each with its launcher at `Contents/MacOS/nop` ([launcherIn]).
  */
 class Updater(
     private val releasesUrl: URI = RELEASES,
     private val key: PublicKey = UpdateManifest.releaseKey,
     private val platform: String? = UpdateManifest.currentPlatform(),
+    /** Whether [install] tells LaunchServices about the bundle it replaced, as only a real install should. */
+    private val registerBundles: Boolean = true,
     private val http: HttpClient = HttpClient.newBuilder()
         .followRedirects(HttpClient.Redirect.NORMAL)
         .connectTimeout(Duration.ofSeconds(15))
@@ -60,7 +65,7 @@ class Updater(
         val healthy: Boolean,
         val failed: Boolean,
     ) {
-        val launcher: Path get() = dir.resolve("bin").resolve("nop")
+        val launcher: Path get() = launcherIn(dir)
     }
 
     /** Held while a version directory is created, swapped in or removed. */
@@ -93,18 +98,24 @@ class Updater(
             ?: throw UpdateException("no published release has a signed update for $platform")
     }
 
-    /** Where [version] goes beside [home]. */
-    fun imageDir(home: Path, version: Version): Path = home.resolveSibling("${home.fileName}-$version")
+    /** Where [version] goes beside [home]: `nop-1.2.6` beside `nop`, `nop-1.2.6.app` beside `nop.app`. */
+    fun imageDir(home: Path, version: Version): Path {
+        val (stem, suffix) = nameParts(home)
+        return home.resolveSibling("$stem-$version$suffix")
+    }
 
     /** The versions staged beside [home], oldest first. Only those whose every file was checked. */
     fun images(home: Path): List<Image> {
         val parent = home.toAbsolutePath().parent ?: return emptyList()
-        val prefix = "${home.fileName}-"
+        val (stem, suffix) = nameParts(home)
+        val prefix = "$stem-"
         val dirs = runCatching {
-            Files.list(parent).use { s -> s.filter { it.fileName.toString().startsWith(prefix) }.toList() }
+            Files.list(parent).use { s ->
+                s.filter { it.fileName.toString().let { n -> n.startsWith(prefix) && n.endsWith(suffix) } }.toList()
+            }
         }.getOrDefault(emptyList())
         return dirs.mapNotNull { dir ->
-            val version = Version.parse(dir.fileName.toString().removePrefix(prefix)) ?: return@mapNotNull null
+            val version = Version.parse(dir.fileName.toString().removePrefix(prefix).removeSuffix(suffix)) ?: return@mapNotNull null
             if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) return@mapNotNull null
             val stamp = runCatching { Files.newInputStream(dir.resolve(STAMP)).use { s -> Properties().apply { load(s) } } }
                 .getOrNull() ?: return@mapNotNull null
@@ -176,6 +187,60 @@ class Updater(
         }
     }
 
+    /**
+     * Copies [image], a version that has come up, over the macOS app bundle at [bundle] — the one the
+     * user installed and starts nop from — so that it starts the new version itself. The copy is made
+     * beside [bundle] (a clone on APFS, so it takes no time or space) and swapped in by one rename:
+     * [bundle] is the old version or the new, never missing or half written. Throws when macOS does
+     * not let nop change [bundle], having left it as it was.
+     */
+    fun install(image: Path, bundle: Path) = synchronized(lock) {
+        if (!Files.isDirectory(bundle, LinkOption.NOFOLLOW_LINKS)) throw UpdateException("$bundle is not there to replace")
+        val incoming = bundle.resolveSibling(".${bundle.fileName}.incoming")
+        deleteTree(incoming)
+        try {
+            // -c clones on APFS (macOS's cp; it copies where cloning cannot be done).
+            val clone = if (System.getProperty("os.name").orEmpty().startsWith("Mac")) listOf("-c") else emptyList()
+            run(
+                "copying ${image.fileName} to ${incoming.parent}",
+                *(listOf("cp", "-Rp") + clone + listOf(image.toString(), incoming.toString())).toTypedArray(),
+            )
+            swap(incoming, bundle)
+        } finally {
+            // The old version once the swap is done, or the copy if it was not.
+            deleteTree(incoming)
+        }
+        // So Finder and the Dock see the version that is there now. Only a cache: nothing depends on it.
+        if (registerBundles && Files.isExecutable(Path.of(LSREGISTER))) {
+            runCatching { run("registering $bundle", LSREGISTER, "-f", bundle.toString()) }
+        }
+    }
+
+    /** Exchanges [a] and [b], both directories: in one step where the filesystem can, else in three. */
+    private fun swap(a: Path, b: Path) {
+        if (iondrive.nop.terminal.Posix.swap(a.toString(), b.toString())) return
+        val old = b.resolveSibling(".${b.fileName}.old")
+        deleteTree(old)
+        Files.move(b, old, StandardCopyOption.ATOMIC_MOVE)
+        try {
+            Files.move(a, b, StandardCopyOption.ATOMIC_MOVE)
+        } catch (e: Exception) {
+            Files.move(old, b, StandardCopyOption.ATOMIC_MOVE)
+            throw e
+        }
+        Files.move(old, a, StandardCopyOption.ATOMIC_MOVE)
+    }
+
+    private fun run(doing: String, vararg command: String) {
+        val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().readText()
+        if (!process.waitFor(10, TimeUnit.MINUTES)) {
+            process.destroyForcibly()
+            throw UpdateException("$doing took over ten minutes")
+        }
+        if (process.exitValue() != 0) throw UpdateException("$doing failed: ${output.trim().lines().lastOrNull().orEmpty()}")
+    }
+
     /** Writes [marker] into [image], with [text] in it. */
     fun mark(image: Path, marker: String, text: String = "") {
         Files.writeString(image.resolve(marker), text)
@@ -218,9 +283,9 @@ class Updater(
      * A failed version's markers stay, since they are what stops it being tried again.
      */
     fun prune(home: Path, keep: Set<Path>) = synchronized(lock) {
-        val kept = keep.map { it.toAbsolutePath().normalize() }.toSet()
         for (image in images(home)) {
-            if (image.failed || image.dir.toAbsolutePath().normalize() in kept) continue
+            // By what the paths lead to, not how they are spelled: macOS's /var is /private/var.
+            if (image.failed || keep.any { same(it, image.dir) }) continue
             deleteTree(image.dir)
         }
     }
@@ -336,7 +401,7 @@ class Updater(
         }
     }
 
-    /** `tar`, which every Linux has, rather than a tar reader of nop's own. */
+    /** `tar`, which every Linux and macOS has, rather than a tar reader of nop's own. */
     private fun untar(archive: Path, into: Path) {
         val process = ProcessBuilder("tar", "-xzf", archive.toString(), "-C", into.toString(), "--no-same-owner")
             .redirectErrorStream(true)
@@ -395,7 +460,7 @@ class Updater(
      * build older than the flag says what it adopts in the stamp in its jar instead.
      */
     private fun probe(image: Path, version: Version): UpdateProbe.Answer =
-        when (val outcome = UpdateProbe.run(image.resolve("bin").resolve("nop"))) {
+        when (val outcome = UpdateProbe.run(launcherIn(image))) {
             is UpdateProbe.Outcome.Answered -> outcome.answer.also {
                 if (it.version != version) throw UpdateException("the update's build says it is ${it.version}, not $version")
             }
@@ -420,10 +485,11 @@ class Updater(
             }
         }
 
-    /** The handover in the stamp of the one `lib/app` jar that has one, whose version must be [version]. */
+    /** The handover in the stamp of the one app jar that has one, whose version must be [version]. */
     private fun jarHandover(image: Path, version: Version): Int {
+        val app = image.resolve(if (isBundle(image)) "Contents/app" else "lib/app")
         // By name, so which jars are opened does not depend on the filesystem's listing order.
-        val jars = Files.list(image.resolve("lib/app")).use { s -> s.filter { it.fileName.toString().endsWith(".jar") }.sorted().toList() }
+        val jars = Files.list(app).use { s -> s.filter { it.fileName.toString().endsWith(".jar") }.sorted().toList() }
         for (jar in jars) {
             val stamp = ZipFile(jar.toFile()).use { zip ->
                 zip.getEntry(BuildInfo.RESOURCE_PATH)?.let { e -> zip.getInputStream(e).use { s -> Properties().apply { load(s) } } }
@@ -489,6 +555,27 @@ class Updater(
 
         /** `<path>.<what>`, beside [path]. */
         fun sibling(path: Path, what: String): Path = path.resolveSibling("${path.fileName}.$what")
+
+        private fun same(a: Path, b: Path): Boolean =
+            runCatching { Files.isSameFile(a, b) }.getOrElse { a.toAbsolutePath().normalize() == b.toAbsolutePath().normalize() }
+
+        /** Whether [image] is a macOS app bundle, as its name says. */
+        fun isBundle(image: Path): Boolean = image.fileName?.toString()?.endsWith(APP) == true
+
+        /** The launcher in [image]: `bin/nop`, or `Contents/MacOS/nop` in an app bundle. */
+        fun launcherIn(image: Path): Path =
+            if (isBundle(image)) image.resolve("Contents").resolve("MacOS").resolve("nop") else image.resolve("bin").resolve("nop")
+
+        /** [home]'s name without and with its `.app`, if it has one: what a version's name goes between. */
+        private fun nameParts(home: Path): Pair<String, String> {
+            val name = home.fileName.toString()
+            return if (name.endsWith(APP) && name.length > APP.length) name.removeSuffix(APP) to APP else name to ""
+        }
+
+        private const val APP = ".app"
+
+        private const val LSREGISTER =
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
         /** [path] if it stays inside whatever it is resolved against: relative, with no `..`. */
         private fun safeName(path: String): String {

@@ -32,7 +32,10 @@ import org.jetbrains.jewel.ui.component.Text
 import org.jetbrains.jewel.ui.component.Tooltip
 
 /** What the updater is doing, in a sentence. */
-internal fun updateStatusLine(status: SelfUpdate.Status): String = when (status) {
+internal fun updateStatusLine(
+    status: SelfUpdate.Status,
+    handover: Boolean = iondrive.nop.ipc.Handover.supported,
+): String = when (status) {
     SelfUpdate.Status.Idle -> "Checks for updates a couple of minutes after nop starts, then every hour."
     is SelfUpdate.Status.Off -> "Not updated from releases: ${status.reason}."
     SelfUpdate.Status.Disabled -> "Automatic updates are off."
@@ -42,7 +45,9 @@ internal fun updateStatusLine(status: SelfUpdate.Status): String = when (status)
         val percent = if (status.total > 0) (status.done * 100 / status.total).toInt() else 0
         "Downloading ${status.version}… $percent%"
     }
-    is SelfUpdate.Status.Ready -> if (status.atRestart) {
+    is SelfUpdate.Status.Ready -> if (status.atRestart && !handover) {
+        "${status.version} is ready, and starts when nop restarts."
+    } else if (status.atRestart) {
         "${status.version} is ready, and starts when nop restarts. The agents and terminals keep running through it."
     } else {
         "${status.version} is ready. It cannot take over running terminals, so it starts the next time nop is started, " +
@@ -121,6 +126,7 @@ internal fun UpdateDialog(onRestart: (() -> Unit)?, onClose: () -> Unit) {
             Text("$version was installed and did not start, so this is the version before it. nop does not try $version again.", color = ChangeColors.MODIFIED)
         }
         Text(updateStatusLine(status))
+        SelfUpdate.installProblem?.let { problem -> Text("$problem.", color = ChangeColors.MODIFIED) }
         if (status is SelfUpdate.Status.Off && SelfUpdate.canSwitch) {
             Text(
                 "Or switch it to releases: nop then updates itself from those, and this build is kept as " +

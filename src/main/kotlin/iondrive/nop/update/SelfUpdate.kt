@@ -30,6 +30,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * is updated by rebuilding, and nop asks GitHub nothing on its behalf. A release installed somewhere
  * the user cannot write, such as a package's `/opt/nop`, gets its versions under
  * `~/.local/opt/nop` instead, and a start of the old one goes on to the newest of those.
+ *
+ * On macOS the install is an app bundle the user put somewhere, usually `/Applications/nop.app`. Its
+ * versions are bundles under `~/Library/Application Support/nop`, and a restart starts the new one
+ * from there as it does on Linux; there is no handover, so the terminals end as at any restart there.
+ * Once it has come up it is copied over the installed bundle ([Updater.install]), so the Dock and
+ * Finder start it from then on. Where macOS does not let nop change that bundle, a start of it goes
+ * on to the newest version under the user's home instead, as a package install's does on Linux.
  */
 object SelfUpdate {
 
@@ -68,6 +75,10 @@ object SelfUpdate {
     var rolledBack: Version? by mutableStateOf(null)
         private set
 
+    /** Why a version that came up could not be copied over the app bundle the user starts, on macOS. */
+    var installProblem: String? by mutableStateOf(null)
+        private set
+
     /** Whether the checks run (see [Settings.loadAutoUpdate]). Compose state. */
     var automatic: Boolean by mutableStateOf(true)
         private set
@@ -87,6 +98,11 @@ object SelfUpdate {
         val version: Version,
         /** A home of the user's own standing in for an install they cannot write to. */
         val system: Boolean,
+        /**
+         * On macOS, the app bundle the user installed and starts nop from, which a version that came
+         * up is copied over. Null elsewhere, and when it is not known.
+         */
+        val installed: Path? = null,
     )
 
     internal sealed interface Located {
@@ -110,9 +126,16 @@ object SelfUpdate {
      * The image is the launcher's real directory; its home is the link beside it that the image's
      * name says it is a version of (`nop-1.2.6` is a version of `nop`), else the image itself.
      */
-    internal fun locate(launcher: Path?, version: Version?, userHome: Path): Located {
+    internal fun locate(
+        launcher: Path?,
+        version: Version?,
+        userHome: Path,
+        platform: String? = UpdateManifest.currentPlatform(),
+    ): Located {
         val installation = Installation.of(launcher, version)
         if (installation !is Installation.Release) return Located.Nowhere((installation as Installation.NotUpdatable).reason)
+        platform ?: return Located.Nowhere("nop updates itself only on Linux and on Macs with Apple silicon; install new versions from the releases page")
+        if (UpdateManifest.isMac(platform)) return locateBundle(installation, userHome)
         val real = runCatching { installation.launcher.toRealPath() }.getOrElse { installation.launcher.toAbsolutePath().normalize() }
         val image = real.parent?.parent ?: return Located.Nowhere("nop's launcher is not in an app image")
         val parent = image.parent ?: return Located.Nowhere("nop's image has no directory to put versions beside")
@@ -126,6 +149,32 @@ object SelfUpdate {
             return Located.Nowhere("$home holds a build from a checkout, which a release must not replace")
         }
         return Located.At(Place(image, home, installation.version, system = !Files.isWritable(parent)))
+    }
+
+    /**
+     * Where a macOS install keeps its versions: under the user's Library, whatever bundle it runs
+     * from. A bundle outside there is the one the user installed; one of the versions there was
+     * started by such a bundle, which [rememberInstalled] noted.
+     */
+    private fun locateBundle(installation: Installation.Release, userHome: Path): Located {
+        val real = runCatching { installation.launcher.toRealPath() }.getOrElse { installation.launcher.toAbsolutePath().normalize() }
+        val bundle = real.parent?.takeIf { it.fileName?.toString() == "MacOS" }?.parent?.parent
+        if (bundle == null || !Updater.isBundle(bundle)) return Located.Nowhere("nop's launcher is not in an app bundle")
+        val home = userHome.resolve(MAC_HOME)
+        val installed = if (bundle.parent?.let { same(it, home.parent) } == true) installedBundle(home) else bundle
+        return Located.At(Place(bundle, home, installation.version, system = false, installed = installed))
+    }
+
+    /** The bundle [rememberInstalled] noted beside [home], if it is still a bundle. */
+    private fun installedBundle(home: Path): Path? = runCatching {
+        Path.of(Files.readString(Updater.sibling(home, INSTALLED)).trim())
+    }.getOrNull()?.takeIf { Updater.isBundle(it) && Files.isDirectory(it) }
+
+    /** Notes, beside the home, the bundle the user installed, for the versions it starts to copy themselves over. */
+    internal fun rememberInstalled(place: Place) = runCatching {
+        val bundle = place.installed?.takeIf { same(it, place.image) } ?: return@runCatching
+        Files.createDirectories(place.home.parent)
+        Files.writeString(Updater.sibling(place.home, INSTALLED), "$bundle\n")
     }
 
     /**
@@ -197,6 +246,7 @@ object SelfUpdate {
             }
             is Located.At -> at.place
         }
+        rememberInstalled(place)
         noteFailedStarts(place, updater)?.let { rolledBack = it }
         if (!automatic) {
             status = Status.Disabled
@@ -300,9 +350,9 @@ object SelfUpdate {
         image.launcher
     }.onFailure { Log.error("update: could not switch ${place.home} to ${image.version}", it) }.getOrNull()
 
-    internal fun restartTarget(place: Place, updater: Updater): Path? {
+    internal fun restartTarget(place: Place, updater: Updater, handover: Boolean = Handover.supported): Path? {
         val image = runCatching { candidate(place, updater) }.getOrNull() ?: return null
-        if (!carries(image)) {
+        if (!carries(image, handover)) {
             Log.info(
                 "update: ${image.version} starts at nop's next start, not this restart: its build adopts handover " +
                     "${image.adopts.sorted()}, and this nop writes ${Handover.VERSION}",
@@ -352,7 +402,24 @@ object SelfUpdate {
                 if (applications != null) DesktopEntry.write(place.home, applications) else DesktopEntry.write(place.home)
             }
             Log.info("update: ${own.version} came up; ${place.home} now starts it")
+            place.installed?.takeIf { !same(it, own.dir) }?.let { bundle -> installOver(own, bundle, updater) }
         }.onFailure { Log.error("update: could not finish installing ${place.version}", it) }
+    }
+
+    /** Copies [own] over the bundle the user starts, or says why it could not. */
+    private fun installOver(own: Updater.Image, bundle: Path, updater: Updater) {
+        runCatching { updater.install(own.dir, bundle) }
+            .onSuccess {
+                installProblem = null
+                Log.info("update: ${own.version} is copied over $bundle")
+            }
+            .onFailure { failure ->
+                val why = (failure as? UpdateException)?.message ?: failure.message ?: failure.toString()
+                installProblem = "nop could not replace $bundle with ${own.version} ($why), so starting it goes on to " +
+                    "${own.version} at ${own.dir} instead. To let nop replace it next time, allow nop under System Settings › " +
+                    "Privacy & Security › App Management"
+                Log.warn("update: could not copy ${own.version} over $bundle: $why")
+            }
     }
 
     /**
@@ -376,7 +443,12 @@ object SelfUpdate {
         return image.launcher
     }
 
-    private fun carries(image: Updater.Image): Boolean = Handover.VERSION in image.adopts
+    /**
+     * Whether a restart may start [image]: where restarts carry the terminals over, only a build that
+     * takes this one's handover. Elsewhere a restart ends them anyway, so any build may.
+     */
+    private fun carries(image: Updater.Image, handover: Boolean = Handover.supported): Boolean =
+        !handover || Handover.VERSION in image.adopts
 
     /**
      * A version that was started and never came up — a start that is not that version is the old one
@@ -424,6 +496,12 @@ object SelfUpdate {
 
     private fun same(a: Path, b: Path): Boolean =
         runCatching { Files.isSameFile(a, b) }.getOrElse { a.toAbsolutePath().normalize() == b.toAbsolutePath().normalize() }
+
+    /** The home of a macOS install's versions, under the user's home: a link to the newest that came up. */
+    internal const val MAC_HOME = "Library/Application Support/nop/nop.app"
+
+    /** Beside a macOS home: the path of the bundle the user installed. */
+    private const val INSTALLED = "installed"
 
     /** `nop-1.2.6`: a version of the home `nop`. */
     private val VERSIONED = Regex("""(.+)-(\d+\.\d+\.\d+)""")

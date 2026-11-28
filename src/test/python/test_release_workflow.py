@@ -59,7 +59,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         verify_step = publish.split('- name: Verify release artifacts\n', 1)[1].split('      - name:', 1)[0]
         script = dedent(verify_step.split('run: |\n', 1)[1])
         required = ('nop.deb', 'nop.msi', 'nop.dmg', 'nop-3.2.1-linux-x64.tar.gz',
-                    'update-linux-x64.json', 'update-linux-x64.json.sig')
+                    'update-linux-x64.json', 'update-linux-x64.json.sig',
+                    'nop-3.2.1-macos-arm64.tar.gz', 'update-macos-arm64.json', 'update-macos-arm64.json.sig')
         with TemporaryDirectory() as scratch:
             release = Path(scratch, 'release')
             release.mkdir()
@@ -96,7 +97,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         for expected in (
             'xvfb-run -a ./gradlew testCefPackaging testCefMemory testCefShutdown testSlackSidebar --no-daemon',
             './gradlew ${{ matrix.task }} --no-daemon',
-            'Self-update bundle (Linux)',
+            'Self-update bundle (Linux and macOS)',
             'task: packageDeb',
         ):
             self.assertIn(expected, self.jobs['build'])

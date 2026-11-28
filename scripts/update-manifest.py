@@ -14,6 +14,8 @@ With --previous, the files that differ from that release's manifest also go into
 tarball of just those under the same root, which the manifest names; a nop that has the rest takes
 it from its own install by hash and downloads only the delta.
 
+The delta is packed with GNU tar: $TAR names it where `tar` is another (gtar on macOS).
+
 The release workflow signs the manifest (update-<platform>.json.sig); the archive, the delta and every file are trusted
 through their hashes in it, never on their own.
 """
@@ -69,7 +71,7 @@ def delta(image, files, previous, out, mtime):
     root = os.path.basename(os.path.normpath(image))
     members = "".join(f"{root}/{p}\0" for p in changed)
     subprocess.run(
-        ["tar", "--sort=name", "--owner=0", "--group=0", "--numeric-owner", f"--mtime=@{mtime}",
+        [os.environ.get("TAR", "tar"), "--sort=name", "--owner=0", "--group=0", "--numeric-owner", f"--mtime=@{mtime}",
          "-C", os.path.dirname(os.path.normpath(image)) or ".", "--null", "-T", "-", "-czf", out],
         input=members.encode(), check=True,
     )

@@ -15,6 +15,8 @@ import java.nio.file.Path
  *
  * Linux only, and only 64-bit: `size_t` is mapped as a Kotlin `Long`. That is every machine nop's
  * handover runs on; anything else never gets as far as calling these (see [Handover][iondrive.nop.ipc.Handover]).
+ * The exception is [keepOnlyAcrossExec] and [exec], which a starting nop also uses on macOS to hand over
+ * to a newer version of itself, and [swap], which is macOS's own.
  */
 internal object Posix {
     private interface C : Library {
@@ -30,6 +32,7 @@ internal object Posix {
         fun sigprocmask(how: Int, set: Pointer, old: Pointer?): Int
         fun execve(path: String, argv: Array<String>, envp: Array<String>): Int
         fun getuid(): Int
+        fun renamex_np(from: String, to: String, flags: Int): Int
     }
 
     private val c: C by lazy { Native.load("c", C::class.java) }
@@ -47,7 +50,9 @@ internal object Posix {
     private const val F_SETFD = 2
     private const val FD_CLOEXEC = 1
     private const val CLOSE_RANGE_CLOEXEC = 4
-    private const val SIG_SETMASK = 2
+    private val MAC = System.getProperty("os.name").orEmpty().startsWith("Mac")
+    private val SIG_SETMASK = if (MAC) 3 else 2
+    private const val RENAME_SWAP = 0x2
     private const val POLLIN: Short = 0x001
     private const val POLLERR: Short = 0x008
     private const val POLLHUP: Short = 0x010
@@ -154,10 +159,12 @@ internal object Posix {
     fun keepOnlyAcrossExec(keep: Collection<Int>) {
         val ranged = runCatching { c.close_range(3, -1, CLOSE_RANGE_CLOEXEC) == 0 }.getOrDefault(false)
         if (!ranged) {
-            // A kernel or libc without close_range: mark them one at a time instead.
-            val open = runCatching {
-                Files.list(Path.of("/proc/self/fd")).use { s -> s.toList().mapNotNull { it.fileName.toString().toIntOrNull() } }
-            }.getOrDefault(emptyList())
+            // A kernel or libc without close_range, or macOS: mark them one at a time instead.
+            val open = listOf("/proc/self/fd", "/dev/fd").firstNotNullOfOrNull { dir ->
+                runCatching {
+                    Files.list(Path.of(dir)).use { s -> s.toList().mapNotNull { it.fileName.toString().toIntOrNull() } }
+                }.getOrNull()
+            }.orEmpty()
             for (fd in open) if (fd >= 3) c.fcntl(fd, F_SETFD, FD_CLOEXEC)
         }
         for (fd in keep) c.fcntl(fd, F_SETFD, 0)
@@ -177,6 +184,13 @@ internal object Posix {
         c.execve(path, argv.toTypedArray(), env.map { (k, v) -> "$k=$v" }.toTypedArray())
         return errno()
     }
+
+    /**
+     * Exchanges the directories [a] and [b] in one step (macOS's `renamex_np` with `RENAME_SWAP`), so
+     * each path always names one or the other. False where that is not available, changing nothing.
+     */
+    fun swap(a: String, b: String): Boolean =
+        MAC && runCatching { c.renamex_np(a, b, RENAME_SWAP) == 0 }.getOrDefault(false)
 
     /** The parent pid of [pid], from `/proc`, or null when it cannot be read. */
     fun parentOf(pid: Long): Long? = runCatching {

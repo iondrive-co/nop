@@ -105,14 +105,22 @@ data class UpdateManifest(
 
         /**
          * This machine's platform as release manifests name it, or null for one no release carries a
-         * self-update bundle for. Only Linux x64 does: the restart that installs an update hands
-         * the running terminals over, and that handover is Linux-only.
+         * self-update bundle for. Linux x64 and Apple silicon Macs do; the macOS release is an arm64
+         * build only, so an Intel Mac has none.
          */
-        fun currentPlatform(): String? {
-            val os = System.getProperty("os.name").orEmpty()
-            val arch = System.getProperty("os.arch").orEmpty()
-            return if (os.startsWith("Linux") && arch in setOf("amd64", "x86_64")) "linux-x64" else null
+        fun currentPlatform(
+            os: String = System.getProperty("os.name").orEmpty(),
+            arch: String = System.getProperty("os.arch").orEmpty(),
+        ): String? = when {
+            os.startsWith("Linux") && arch in setOf("amd64", "x86_64") -> "linux-x64"
+            os.startsWith("Mac") && arch in setOf("aarch64", "arm64") -> MACOS_ARM64
+            else -> null
         }
+
+        const val MACOS_ARM64 = "macos-arm64"
+
+        /** Whether [platform] lays its images out as macOS app bundles (`nop.app/Contents/MacOS/nop`). */
+        fun isMac(platform: String?): Boolean = platform?.startsWith("macos-") == true
     }
 }
 

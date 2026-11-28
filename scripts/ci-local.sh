@@ -104,7 +104,7 @@ release_cef='xvfb-run -a ./gradlew testCefPackaging testCefMemory testCefShutdow
 release_package='./gradlew ${{ matrix.task }} --no-daemon'
 grep -qxF "        run: $ci_test" "$ci_workflow" \
     || fail "$ci_workflow does not run '$ci_test': update scripts/ci-local.sh to match it"
-for command in "        run: $release_cef" "        run: $release_package" '      - name: Self-update bundle (Linux)' '            task: packageDeb'; do
+for command in "        run: $release_cef" "        run: $release_package" '      - name: Self-update bundle (Linux and macOS)' '            task: packageDeb'; do
     grep -qxF "$command" "$release_workflow" \
         || fail "$release_workflow does not have '$command': update scripts/ci-local.sh to match it"
 done
@@ -203,7 +203,7 @@ if has bundle; then
     python3 -I - "$release_workflow" >"$run/bundle.sh" <<'PY' || fail "could not read the Linux update step from $release_workflow"
 import sys, textwrap
 lines = open(sys.argv[1]).read().splitlines()
-start = lines.index("      - name: Self-update bundle (Linux)")
+start = lines.index("      - name: Self-update bundle (Linux and macOS)")
 end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("      - name: ")), len(lines))
 run = lines.index("        run: |", start + 1, end)
 body = []

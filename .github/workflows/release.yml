@@ -84,36 +84,56 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       # What nop's self-updater installs from (src/main/kotlin/iondrive/nop/update): the app image as a
-      # tarball; update-linux-x64.json listing every file in it by sha256; a delta tarball of only the
+      # tarball; update-<platform>.json listing every file in it by sha256; a delta tarball of only the
       # files that differ from the previous release's, which a nop on that release downloads instead;
-      # and update-linux-x64.json.sig, an Ed25519 signature over the manifest made with
+      # and update-<platform>.json.sig, an Ed25519 signature over the manifest made with
       # NOP_UPDATE_SIGNING_KEY (scripts/update-signing-key.sh). Tagged builds require the signature
-      # so existing installations can upgrade to the release.
-      - name: Self-update bundle (Linux)
-        if: runner.os == 'Linux'
+      # so existing installations can upgrade to the release. On macOS the image is nop.app, and the
+      # platform macos-arm64: the bundle carries an arm64 runtime and Chromium.
+      - name: Self-update bundle (Linux and macOS)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
         shell: bash
         env:
           SIGNING_KEY: ${{ secrets.NOP_UPDATE_SIGNING_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # scripts/ci-local.sh runs this step on Linux, outside a runner.
+          os="${RUNNER_OS:-Linux}"
           version="$(grep -E '^[[:space:]]*packageVersion[[:space:]]*=' build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
           if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
             echo "Tag $GITHUB_REF_NAME does not match packageVersion $version" >&2
             exit 1
           fi
           if [[ "$GITHUB_REF" == refs/tags/v* && -z "$SIGNING_KEY" ]]; then
-            echo "::error::NOP_UPDATE_SIGNING_KEY is required to publish a Linux update."
+            echo "::error::NOP_UPDATE_SIGNING_KEY is required to publish a $os update."
             exit 1
           fi
-          platform=linux-x64
+          if [[ "$os" == macOS ]]; then
+            if [[ "$(uname -m)" != arm64 ]]; then
+              echo "::error::The macOS update is built for arm64; this runner is $(uname -m)."
+              exit 1
+            fi
+            platform=macos-arm64
+            image=build/compose/binaries/main/app/nop.app
+            # GNU tar, for the same reproducible archive as on Linux and no macOS metadata in it, and
+            # OpenSSL 3, since the LibreSSL macOS has cannot sign with Ed25519.
+            command -v gtar >/dev/null || brew install gnu-tar
+            export TAR=gtar
+            openssl="$(brew --prefix openssl@3 2>/dev/null)/bin/openssl"
+            [[ -x "$openssl" ]] || { brew install openssl@3; openssl="$(brew --prefix openssl@3)/bin/openssl"; }
+          else
+            platform=linux-x64
+            image=build/compose/binaries/main/app/nop
+            export TAR=tar
+            openssl=openssl
+          fi
           ./gradlew createDistributable --no-daemon
-          image=build/compose/binaries/main/app/nop
           archive="release/nop-$version-$platform.tar.gz"
           mtime="$(git log -1 --format=%ct)"
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
+          "$TAR" --sort=name --owner=0 --group=0 --numeric-owner \
               --mtime="@$mtime" \
-              -C "$(dirname "$image")" -czf "$archive" nop
+              -C "$(dirname "$image")" -czf "$archive" "$(basename "$image")"
           manifest="release/update-$platform.json"
           previous="$RUNNER_TEMP/previous-update.json"
           python3 scripts/previous-update-manifest.py "$GITHUB_REPOSITORY" "v$version" "$platform" > "$previous"
@@ -127,9 +147,9 @@ jobs:
           if [[ -n "$SIGNING_KEY" ]]; then
             key="$RUNNER_TEMP/update-signing.key"
             (umask 077; printf '%s\n' "$SIGNING_KEY" > "$key")
-            openssl pkeyutl -sign -inkey "$key" -rawin -in "$manifest" -out "$manifest.sig"
-            openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-signing.pub"
-            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/update-signing.pub" -rawin \
+            "$openssl" pkeyutl -sign -inkey "$key" -rawin -in "$manifest" -out "$manifest.sig"
+            "$openssl" pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-signing.pub"
+            "$openssl" pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/update-signing.pub" -rawin \
                 -in "$manifest" -sigfile "$manifest.sig"
             rm -f "$key"
           else
@@ -170,7 +190,10 @@ jobs:
             'release/*.dmg' \
             'release/nop-*-linux-x64.tar.gz' \
             'release/update-linux-x64.json' \
-            'release/update-linux-x64.json.sig'; do
+            'release/update-linux-x64.json.sig' \
+            'release/nop-*-macos-arm64.tar.gz' \
+            'release/update-macos-arm64.json' \
+            'release/update-macos-arm64.json.sig'; do
             matches=( $pattern )
             if [[ ${#matches[@]} -eq 0 || ! -e "${matches[0]}" ]]; then
               echo "Missing required release artifact: $pattern" >&2

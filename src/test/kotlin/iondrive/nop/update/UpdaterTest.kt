@@ -22,6 +22,7 @@ import kotlin.io.path.exists
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -60,7 +61,15 @@ class UpdaterTest {
     @AfterTest
     fun stop() = server.stop(0)
 
-    private fun updater() = Updater(URI.create("$base/releases"), key.public, platform = "linux-x64")
+    /** The temporary directory as it really is: on macOS, /var is a link to /private/var. */
+    @BeforeTest
+    fun real() {
+        tmp = tmp.toRealPath()
+    }
+
+    // Not registering the test's bundles with the Mac's LaunchServices, which would list them as apps.
+    private fun updater(platform: String = "linux-x64") =
+        Updater(URI.create("$base/releases"), key.public, platform = platform, registerBundles = false)
 
     /** The releases the stand-in for GitHub lists, newest first, as JSON objects. */
     private val releases = mutableListOf<String>()
@@ -104,6 +113,18 @@ class UpdaterTest {
         return dir
     }
 
+    /** A macOS app bundle of [version], laid out as jpackage lays one out. */
+    private fun bundle(dir: Path, version: String, launcher: String = "answers"): Path {
+        dir.resolve("Contents/MacOS").createDirectories()
+        dir.resolve("Contents/MacOS/nop").writeText(launcherScript(version, setOf(Handover.VERSION), launcher))
+        Files.setPosixFilePermissions(dir.resolve("Contents/MacOS/nop"), PosixFilePermissions.fromString("rwxr-xr-x"))
+        dir.resolve("Contents/Info.plist").writeText("<plist>$version</plist>\n")
+        dir.resolve("Contents/app").createDirectories()
+        writeJar(dir.resolve("Contents/app/library.jar"), "library.txt", "a dependency")
+        writeJar(dir.resolve("Contents/app/nop-$version.jar"), BuildInfo.RESOURCE_PATH, "version=$version\nhandover=${Handover.VERSION}\n")
+        return dir
+    }
+
     private fun writeJar(path: Path, entry: String, text: String) {
         ZipOutputStream(Files.newOutputStream(path)).use { zip ->
             // The delta reuses this dependency by hash, even when the images are created at different times.
@@ -139,31 +160,34 @@ class UpdaterTest {
         adopts: Set<Int> = setOf(Handover.VERSION),
         launcher: String = "answers",
         signer: KeyPair = key,
-        manifestName: String = "update-linux-x64.json",
+        platform: String = "linux-x64",
+        manifestName: String = "update-$platform.json",
         deltaFiles: List<String>? = null,
         alter: (Path) -> Unit = {},
     ) {
         val root = tmp.resolve("release-$version")
-        val image = image(root.resolve("nop"), version, adopts, launcher)
+        val mac = UpdateManifest.isMac(platform)
+        val top = if (mac) "nop.app" else "nop"
+        val image = if (mac) bundle(root.resolve(top), version, launcher) else image(root.resolve(top), version, adopts, launcher)
         val files = Files.walk(image).use { s -> s.filter { Files.isRegularFile(it) }.sorted().toList() }.joinToString(",\n") { f ->
             val rel = image.relativize(f).joinToString("/")
             """{"path":"$rel","sha256":"${sha256(Files.readAllBytes(f))}","size":${Files.size(f)},"executable":${Files.isExecutable(f)}}"""
         }
         alter(image)
         val archive = root.resolve("nop-$version.tar.gz")
-        tar(root, archive, "nop")
+        tar(root, archive, top)
         val bytes = Files.readAllBytes(archive)
         val assets = linkedMapOf<String, ByteArray>()
         val delta = deltaFiles?.let { list ->
             val d = root.resolve("nop-$version-delta.tar.gz")
-            tar(root, d, *list.map { "nop/$it" }.toTypedArray())
+            tar(root, d, *list.map { "$top/$it" }.toTypedArray())
             val db = Files.readAllBytes(d)
             assets["nop-$version-delta.tar.gz"] = db
-            ""","delta":{"from":"9.9.8","name":"nop-$version-delta.tar.gz","sha256":"${sha256(db)}","size":${db.size},"root":"nop"}"""
+            ""","delta":{"from":"9.9.8","name":"nop-$version-delta.tar.gz","sha256":"${sha256(db)}","size":${db.size},"root":"$top"}"""
         }.orEmpty()
         val manifest = """
-            {"format":1,"version":"$version","platform":"linux-x64",
-             "archive":{"name":"nop-$version.tar.gz","sha256":"${sha256(bytes)}","size":${bytes.size},"root":"nop"},
+            {"format":1,"version":"$version","platform":"$platform",
+             "archive":{"name":"nop-$version.tar.gz","sha256":"${sha256(bytes)}","size":${bytes.size},"root":"$top"},
              "files":[$files]$delta}
         """.trimIndent().toByteArray()
         val signature = Signature.getInstance("Ed25519").run {
@@ -388,8 +412,18 @@ class UpdaterTest {
         updater.stage(home, updater.latest())
         val old = place(home, "1.0.0")
 
-        assertNull(SelfUpdate.restartTarget(old, updater))
+        assertNull(SelfUpdate.restartTarget(old, updater, handover = true))
         assertEquals(tmp.resolve("opt/nop-9.9.9/bin/nop"), SelfUpdate.redirectAtStart(old, updater, automatic = true))
+    }
+
+    @Test
+    fun `where a restart ends the terminals anyway, any update starts at a restart`() {
+        val home = install()
+        publish(adopts = setOf(Handover.VERSION + 1))
+        val updater = updater()
+        updater.stage(home, updater.latest())
+
+        assertEquals(tmp.resolve("opt/nop-9.9.9/bin/nop"), SelfUpdate.restartTarget(place(home, "1.0.0"), updater, handover = false))
     }
 
     @Test
@@ -455,7 +489,7 @@ class UpdaterTest {
             assertTrue(tmp.resolve("opt/nop.build").resolve(Installation.BUILT_FROM).exists(), "the build is kept")
 
             // The release that comes up is an ordinary release install from then on.
-            val release = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(staged.launcher, Version(9, 9, 9), tmp)).place
+            val release = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(staged.launcher, Version(9, 9, 9), tmp, LINUX)).place
             assertEquals(home, release.home)
             SelfUpdate.markHealthy(release, updater)
             assertTrue(updater.images(home).single().healthy)
@@ -476,16 +510,16 @@ class UpdaterTest {
     @Test
     fun `an install is located by its launcher`() {
         val legacy = install()
-        val located = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(legacy.resolve("bin/nop"), Version(1, 0, 0), tmp))
+        val located = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(legacy.resolve("bin/nop"), Version(1, 0, 0), tmp, LINUX))
         assertEquals(legacy, located.place.home)
 
         val versioned = image(tmp.resolve("opt/nop-2.0.0"), "2.0.0")
-        val next = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(versioned.resolve("bin/nop"), Version(2, 0, 0), tmp))
+        val next = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(versioned.resolve("bin/nop"), Version(2, 0, 0), tmp, LINUX))
         assertEquals(legacy, next.place.home)
         assertFalse(next.place.system)
 
         legacy.resolve(Installation.BUILT_FROM).writeText("/home/dev/nop\n")
-        assertIs<SelfUpdate.Located.Nowhere>(SelfUpdate.locate(versioned.resolve("bin/nop"), Version(2, 0, 0), tmp))
+        assertIs<SelfUpdate.Located.Nowhere>(SelfUpdate.locate(versioned.resolve("bin/nop"), Version(2, 0, 0), tmp, LINUX))
     }
 
     @Test
@@ -493,12 +527,115 @@ class UpdaterTest {
         val system = image(tmp.resolve("system/nop"), "1.0.0")
         Files.setPosixFilePermissions(system.parent, PosixFilePermissions.fromString("r-xr-xr-x"))
         try {
-            val located = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(system.resolve("bin/nop"), Version(1, 0, 0), tmp.resolve("user")))
+            val located = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(system.resolve("bin/nop"), Version(1, 0, 0), tmp.resolve("user"), LINUX))
             assertEquals(tmp.resolve("user/.local/opt/nop"), located.place.home)
             assertTrue(located.place.system)
         } finally {
             Files.setPosixFilePermissions(system.parent, PosixFilePermissions.fromString("rwxr-xr-x"))
         }
+    }
+
+    @Test
+    fun `the platform is Linux x64 or an Apple silicon Mac, and nothing else updates itself`() {
+        assertEquals("linux-x64", UpdateManifest.currentPlatform("Linux", "amd64"))
+        assertEquals(MAC, UpdateManifest.currentPlatform("Mac OS X", "aarch64"))
+        assertNull(UpdateManifest.currentPlatform("Mac OS X", "x86_64"), "the macOS release is arm64 only")
+        assertNull(UpdateManifest.currentPlatform("Windows 11", "amd64"))
+
+        val install = install()
+        val windows = assertIs<SelfUpdate.Located.Nowhere>(SelfUpdate.locate(install.resolve("bin/nop"), Version(1, 0, 0), tmp, null))
+        assertTrue("releases page" in windows.reason, windows.reason)
+    }
+
+    @Test
+    fun `a macOS install keeps its versions in the user's Library and is replaced by one that came up`() {
+        val installed = bundle(tmp.resolve("Applications/nop.app"), "1.0.0")
+        val user = tmp.resolve("user")
+        val old = assertIs<SelfUpdate.Located.At>(
+            SelfUpdate.locate(installed.resolve("Contents/MacOS/nop"), Version(1, 0, 0), user, MAC),
+        ).place
+        val home = user.resolve("Library/Application Support/nop/nop.app")
+        assertEquals(installed, old.image)
+        assertEquals(home, old.home)
+        assertEquals(installed, old.installed)
+        assertFalse(old.system)
+        SelfUpdate.rememberInstalled(old)
+
+        publish(platform = MAC)
+        val updater = updater(MAC)
+        val staged = updater.stage(home, updater.latest(), reuse = listOf(installed))
+        assertEquals(user.resolve("Library/Application Support/nop/nop-9.9.9.app"), staged.dir)
+        assertEquals(staged.dir.resolve("Contents/MacOS/nop"), staged.launcher)
+        assertEquals(listOf(staged.dir), updater.images(home).map { it.dir })
+
+        // A restart starts it from where it was staged, and the bundle in Applications is left alone.
+        assertEquals(staged.launcher, SelfUpdate.restartTarget(old, updater, handover = false))
+        assertTrue("launcher 1.0.0" in installed.resolve("Contents/MacOS/nop").readText())
+
+        // Started from there, it knows which bundle the user starts, and once it is up it replaces it.
+        val new = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(staged.launcher, Version(9, 9, 9), user, MAC)).place
+        assertEquals(installed, new.installed)
+        SelfUpdate.markHealthy(new, updater)
+
+        assertNull(SelfUpdate.installProblem)
+        assertTrue("launcher 9.9.9" in installed.resolve("Contents/MacOS/nop").readText(), "the installed bundle is 9.9.9")
+        assertEquals(
+            "a dependency",
+            ZipFile(installed.resolve("Contents/app/library.jar").toFile()).use { jar ->
+                jar.getInputStream(jar.getEntry("library.txt")).bufferedReader().use { it.readText() }
+            },
+        )
+        assertEquals(
+            listOf("nop.app"),
+            Files.list(installed.parent).use { s -> s.toList() }.map { it.fileName.toString() },
+            "nothing is left beside it",
+        )
+        assertTrue(Files.isExecutable(installed.resolve("Contents/MacOS/nop")))
+        // A start of the installed bundle is 9.9.9, with nothing newer to go on to.
+        val after = assertIs<SelfUpdate.Located.At>(
+            SelfUpdate.locate(installed.resolve("Contents/MacOS/nop"), Version(9, 9, 9), user, MAC),
+        ).place
+        assertNull(SelfUpdate.redirectAtStart(after, updater, automatic = true))
+    }
+
+    @Test
+    fun `a macOS bundle nop may not replace starts the version that came up instead`() {
+        val installed = bundle(tmp.resolve("Applications/nop.app"), "1.0.0")
+        val user = tmp.resolve("user")
+        val old = assertIs<SelfUpdate.Located.At>(
+            SelfUpdate.locate(installed.resolve("Contents/MacOS/nop"), Version(1, 0, 0), user, MAC),
+        ).place
+        SelfUpdate.rememberInstalled(old)
+        publish(platform = MAC)
+        val updater = updater(MAC)
+        val staged = updater.stage(old.home, updater.latest(), reuse = listOf(installed))
+        assertEquals(staged.launcher, SelfUpdate.restartTarget(old, updater, handover = false))
+
+        val applications = installed.parent
+        Files.setPosixFilePermissions(applications, PosixFilePermissions.fromString("r-xr-xr-x"))
+        try {
+            val new = assertIs<SelfUpdate.Located.At>(SelfUpdate.locate(staged.launcher, Version(9, 9, 9), user, MAC)).place
+            SelfUpdate.markHealthy(new, updater)
+
+            assertNotNull(SelfUpdate.installProblem)
+            assertTrue("launcher 1.0.0" in installed.resolve("Contents/MacOS/nop").readText(), "left as it was")
+            assertTrue(updater.images(old.home).single().healthy)
+            // The old bundle's next start goes on to 9.9.9 where it was staged.
+            assertEquals(staged.launcher, SelfUpdate.redirectAtStart(old, updater, automatic = true))
+        } finally {
+            Files.setPosixFilePermissions(applications, PosixFilePermissions.fromString("rwxr-xr-x"))
+        }
+    }
+
+    @Test
+    fun `on macOS two directories swap in one step, and elsewhere nothing moves`() {
+        val a = tmp.resolve("a").createDirectories().also { it.resolve("which").writeText("a") }
+        val b = tmp.resolve("b").createDirectories().also { it.resolve("which").writeText("b") }
+        val swapped = iondrive.nop.terminal.Posix.swap(a.toString(), b.toString())
+
+        assertEquals(System.getProperty("os.name").startsWith("Mac"), swapped)
+        assertEquals(if (swapped) "b" else "a", a.resolve("which").readText())
+        assertEquals(if (swapped) "a" else "b", b.resolve("which").readText())
     }
 
     @Test
@@ -532,5 +669,10 @@ class UpdaterTest {
     @Test
     fun `this build stamps the handover it adopts`() {
         assertEquals(Handover.VERSION, BuildInfo.handover)
+    }
+
+    private companion object {
+        const val LINUX = "linux-x64"
+        const val MAC = UpdateManifest.MACOS_ARM64
     }
 }
