@@ -262,7 +262,7 @@ compose.desktop {
             // it without a trace — see EndSignals.
             modules("java.se", "java.management", "java.compiler", "jdk.compiler", "java.net.http", "jdk.net", "jdk.jfr", "jdk.unsupported")
             packageName = "nop"
-            packageVersion = "1.9.8"
+            packageVersion = "1.9.9"
             description = "Desktop editor and change reviewer"
             vendor = "iondrive"
             copyright = "Copyright (c) 2026 iondrive. All rights reserved."
